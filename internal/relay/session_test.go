@@ -8,33 +8,29 @@ import (
 )
 
 type mockSessionRepo struct {
-	sessions []*store.Session
-	created  *store.Session
+	activeID string
+	setCalls []setActiveCall
 }
 
-func (m *mockSessionRepo) FindActive(_ context.Context, platform, channelID string) (*store.Session, error) {
-	for _, s := range m.sessions {
-		if s.Platform == platform && s.ChannelID == channelID && s.Active {
-			return s, nil
-		}
-	}
+type setActiveCall struct {
+	platform, channelID, sessionID string
+}
+
+func (m *mockSessionRepo) Active(_ context.Context, platform, channelID string) (string, error) {
+	return m.activeID, nil
+}
+
+func (m *mockSessionRepo) SetActive(_ context.Context, platform, channelID, sessionID string) error {
+	m.setCalls = append(m.setCalls, setActiveCall{platform, channelID, sessionID})
+	m.activeID = sessionID
+	return nil
+}
+
+func (m *mockSessionRepo) List(_ context.Context, platform, channelID string) ([]store.Session, error) {
 	return nil, nil
 }
 
-func (m *mockSessionRepo) Create(_ context.Context, s *store.Session) error {
-	m.created = s
-	m.sessions = append(m.sessions, s)
-	return nil
-}
-
-func (m *mockSessionRepo) Deactivate(_ context.Context, platform, channelID string) error {
-	for _, s := range m.sessions {
-		if s.Platform == platform && s.ChannelID == channelID {
-			s.Active = false
-		}
-	}
-	return nil
-}
+func (m *mockSessionRepo) Delete(_ context.Context, id int64) error { return nil }
 
 type mockClient struct {
 	sessionID string
@@ -51,11 +47,7 @@ func (m *mockClient) Events(_ context.Context, _ string) (<-chan Event, error) {
 }
 
 func TestResolveExisting(t *testing.T) {
-	repo := &mockSessionRepo{
-		sessions: []*store.Session{
-			{Platform: "telegram", ChannelID: "123", OpenCodeSessionID: "existing", Active: true},
-		},
-	}
+	repo := &mockSessionRepo{activeID: "existing"}
 	client := &mockClient{sessionID: "new-session"}
 	resolver := NewSessionResolver(repo, client)
 
@@ -66,8 +58,8 @@ func TestResolveExisting(t *testing.T) {
 	if id != "existing" {
 		t.Fatalf("got %q, want %q", id, "existing")
 	}
-	if repo.created != nil {
-		t.Fatal("should not create when session exists")
+	if len(repo.setCalls) != 0 {
+		t.Fatal("should not call SetActive when session exists")
 	}
 }
 
@@ -83,13 +75,11 @@ func TestResolveCreatesNew(t *testing.T) {
 	if id != "new-session" {
 		t.Fatalf("got %q, want %q", id, "new-session")
 	}
-	if repo.created == nil {
-		t.Fatal("expected session to be created")
+	if len(repo.setCalls) != 1 {
+		t.Fatalf("expected 1 SetActive call, got %d", len(repo.setCalls))
 	}
-	if repo.created.Platform != "telegram" || repo.created.ChannelID != "456" {
-		t.Fatalf("unexpected created session: %+v", repo.created)
-	}
-	if !repo.created.Active {
-		t.Fatal("new session should be active")
+	call := repo.setCalls[0]
+	if call.platform != "telegram" || call.channelID != "456" || call.sessionID != "new-session" {
+		t.Fatalf("unexpected SetActive call: %+v", call)
 	}
 }
