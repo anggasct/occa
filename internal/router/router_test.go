@@ -46,12 +46,51 @@ func (f *fakeRelayClient) Events(_ context.Context, _ string) (<-chan relay.Even
 	return nil, nil
 }
 
-type fakeStore struct{}
+type fakeOverrideRepo struct {
+	overrides map[string]*store.UserOverride
+}
 
-func (f *fakeStore) SessionRepo() store.SessionRepo   { return &fakeSessionRepo{} }
-func (f *fakeStore) ChannelRepo() store.ChannelRepo    { return nil }
-func (f *fakeStore) OverrideRepo() store.OverrideRepo  { return nil }
-func (f *fakeStore) Close() error                      { return nil }
+func newFakeOverrideRepo() *fakeOverrideRepo {
+	return &fakeOverrideRepo{overrides: make(map[string]*store.UserOverride)}
+}
+
+func (f *fakeOverrideRepo) key(channelID, userID string) string {
+	return channelID + ":" + userID
+}
+
+func (f *fakeOverrideRepo) Get(_ context.Context, channelID, userID string) (*store.UserOverride, error) {
+	return f.overrides[f.key(channelID, userID)], nil
+}
+
+func (f *fakeOverrideRepo) Upsert(_ context.Context, o *store.UserOverride) error {
+	f.overrides[f.key(o.ChannelID, o.UserID)] = o
+	return nil
+}
+
+func (f *fakeOverrideRepo) Delete(_ context.Context, channelID, userID string) error {
+	delete(f.overrides, f.key(channelID, userID))
+	return nil
+}
+
+func (f *fakeOverrideRepo) ListByChannel(_ context.Context, channelID string) ([]store.UserOverride, error) {
+	var result []store.UserOverride
+	for _, o := range f.overrides {
+		if o.ChannelID == channelID {
+			result = append(result, *o)
+		}
+	}
+	return result, nil
+}
+
+type fakeStore struct {
+	sessionRepo  *fakeSessionRepo
+	overrideRepo *fakeOverrideRepo
+}
+
+func (f *fakeStore) SessionRepo() store.SessionRepo  { return f.sessionRepo }
+func (f *fakeStore) ChannelRepo() store.ChannelRepo   { return nil }
+func (f *fakeStore) OverrideRepo() store.OverrideRepo { return f.overrideRepo }
+func (f *fakeStore) Close() error                     { return nil }
 
 type fakeSessionRepo struct {
 	activeID string
@@ -72,12 +111,26 @@ func (f *fakeSessionRepo) List(_ context.Context, platform, channelID string) ([
 }
 func (f *fakeSessionRepo) Delete(_ context.Context, id int64) error { return nil }
 
-func newTestRouter() (*Router, *fakeRelayClient, *fakeReplyCtx) {
+func newTestRouterWithAccess() (*Router, *fakeRelayClient, *fakeReplyCtx, *fakeOverrideRepo) {
 	client := &fakeRelayClient{sessionID: "sess-new"}
-	st := &fakeStore{}
+	overrideRepo := newFakeOverrideRepo()
+	st := &fakeStore{
+		sessionRepo:  &fakeSessionRepo{},
+		overrideRepo: overrideRepo,
+	}
 	resolver := relay.NewSessionResolver(st.SessionRepo(), client)
 	r := New(client, st, resolver)
 	reply := &fakeReplyCtx{}
+	return r, client, reply, overrideRepo
+}
+
+func newTestRouter() (*Router, *fakeRelayClient, *fakeReplyCtx) {
+	r, client, reply, overrideRepo := newTestRouterWithAccess()
+	overrideRepo.overrides["chat1:user1"] = &store.UserOverride{
+		ChannelID: "chat1",
+		UserID:    "user1",
+		Role:      "admin",
+	}
 	return r, client, reply
 }
 
@@ -86,6 +139,17 @@ func msg(text string, reply *fakeReplyCtx) channel.IncomingMessage {
 		Platform:  "telegram",
 		ChannelID: "chat1",
 		UserID:    "user1",
+		Text:      text,
+		IsMention: true,
+		ReplyCtx:  reply,
+	}
+}
+
+func msgFrom(userID, text string, reply *fakeReplyCtx) channel.IncomingMessage {
+	return channel.IncomingMessage{
+		Platform:  "telegram",
+		ChannelID: "chat1",
+		UserID:    userID,
 		Text:      text,
 		IsMention: true,
 		ReplyCtx:  reply,
@@ -178,5 +242,105 @@ func TestRouteSessionList(t *testing.T) {
 	}
 	if len(reply.sends) == 0 {
 		t.Fatal("expected session list response")
+	}
+}
+
+func TestAccessDeniedForUnknownUser(t *testing.T) {
+	r, client, reply, _ := newTestRouterWithAccess()
+	err := r.Route(context.Background(), msgFrom("stranger", "hello", reply))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if client.lastMsg != "" {
+		t.Fatal("message should not reach OpenCode for denied user")
+	}
+	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Access denied") {
+		t.Fatalf("expected access denied, got: %v", reply.sends)
+	}
+}
+
+func TestAccessAllowedAfterAllow(t *testing.T) {
+	r, client, reply, overrideRepo := newTestRouterWithAccess()
+	overrideRepo.overrides["chat1:user1"] = &store.UserOverride{ChannelID: "chat1", UserID: "user1", Role: "admin"}
+
+	err := r.Route(context.Background(), msg("/occa:allow user2", reply))
+	if err != nil {
+		t.Fatalf("Route allow: %v", err)
+	}
+
+	reply2 := &fakeReplyCtx{}
+	err = r.Route(context.Background(), msgFrom("user2", "hello", reply2))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if client.lastMsg != "hello" {
+		t.Fatalf("expected passthrough after allow, got %q", client.lastMsg)
+	}
+}
+
+func TestAccessDeniedAfterDeny(t *testing.T) {
+	r, client, reply, overrideRepo := newTestRouterWithAccess()
+	overrideRepo.overrides["chat1:user1"] = &store.UserOverride{ChannelID: "chat1", UserID: "user1", Role: "admin"}
+	overrideRepo.overrides["chat1:user2"] = &store.UserOverride{ChannelID: "chat1", UserID: "user2", Role: "allow"}
+
+	err := r.Route(context.Background(), msg("/occa:deny user2", reply))
+	if err != nil {
+		t.Fatalf("Route deny: %v", err)
+	}
+
+	reply2 := &fakeReplyCtx{}
+	err = r.Route(context.Background(), msgFrom("user2", "hello", reply2))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if client.lastMsg != "" {
+		t.Fatal("denied user should not reach OpenCode")
+	}
+}
+
+func TestNonAdminCannotAllow(t *testing.T) {
+	r, _, reply, overrideRepo := newTestRouterWithAccess()
+	overrideRepo.overrides["chat1:user1"] = &store.UserOverride{ChannelID: "chat1", UserID: "user1", Role: "allow"}
+
+	err := r.Route(context.Background(), msg("/occa:allow user2", reply))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Admin access required") {
+		t.Fatalf("expected admin required, got: %v", reply.sends)
+	}
+}
+
+func TestLastAdminCannotBeDenied(t *testing.T) {
+	r, _, reply, overrideRepo := newTestRouterWithAccess()
+	overrideRepo.overrides["chat1:user1"] = &store.UserOverride{ChannelID: "chat1", UserID: "user1", Role: "admin"}
+
+	err := r.Route(context.Background(), msg("/occa:deny user1", reply))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "last admin") {
+		t.Fatalf("expected last admin guard, got: %v", reply.sends)
+	}
+}
+
+func TestPerChannelScoping(t *testing.T) {
+	r, client, reply, overrideRepo := newTestRouterWithAccess()
+	overrideRepo.overrides["chat1:user1"] = &store.UserOverride{ChannelID: "chat1", UserID: "user1", Role: "allow"}
+
+	msgChat2 := channel.IncomingMessage{
+		Platform:  "telegram",
+		ChannelID: "chat2",
+		UserID:    "user1",
+		Text:      "hello",
+		IsMention: true,
+		ReplyCtx:  reply,
+	}
+	err := r.Route(context.Background(), msgChat2)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if client.lastMsg != "" {
+		t.Fatal("user allowed in chat1 should be denied in chat2")
 	}
 }
