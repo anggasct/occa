@@ -1,0 +1,181 @@
+package discord
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"strings"
+
+	"github.com/bwmarrin/discordgo"
+
+	"github.com/anggasct/occa/internal/channel"
+)
+
+type Adapter struct {
+	session *discordgo.Session
+	token   string
+	botID   string
+}
+
+func New(token string) *Adapter {
+	return &Adapter{token: token}
+}
+
+func (a *Adapter) Name() string { return "discord" }
+
+func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessage)) error {
+	s, err := discordgo.New("Bot " + a.token)
+	if err != nil {
+		return fmt.Errorf("discord: init: %w", err)
+	}
+	a.session = s
+	a.botID = s.State.User.ID
+
+	s.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsMessageContent | discordgo.IntentsDirectMessages
+
+	s.AddHandler(func(_ *discordgo.Session, m *discordgo.MessageCreate) {
+		if m.Author.ID == a.botID || m.Author.Bot {
+			return
+		}
+		msg := a.normalizeMessage(m.Message)
+		handler(msg)
+	})
+
+	s.AddHandler(func(sess *discordgo.Session, i *discordgo.InteractionCreate) {
+		if i.Type != discordgo.InteractionApplicationCommand {
+			return
+		}
+		data := i.ApplicationCommandData()
+		text := "/" + data.Name
+		for _, opt := range data.Options {
+			text += " " + fmt.Sprintf("%v", opt.Value)
+		}
+
+		msg := channel.IncomingMessage{
+			Platform:  "discord",
+			ChannelID: i.ChannelID,
+			UserID:    i.Member.User.ID,
+			Text:      strings.TrimSpace(text),
+			IsMention: true,
+			ReplyCtx:  &replyContext{session: sess, channelID: i.ChannelID, interaction: i.Interaction},
+		}
+		handler(msg)
+	})
+
+	if err := s.Open(); err != nil {
+		return fmt.Errorf("discord: open gateway: %w", err)
+	}
+
+	slog.Info("discord adapter started")
+
+	go func() {
+		<-ctx.Done()
+		s.Close()
+	}()
+
+	return nil
+}
+
+func (a *Adapter) Stop() error {
+	if a.session != nil {
+		return a.session.Close()
+	}
+	return nil
+}
+
+func (a *Adapter) normalizeMessage(m *discordgo.Message) channel.IncomingMessage {
+	isMention := false
+	if m.GuildID == "" {
+		isMention = true
+	} else {
+		for _, mention := range m.Mentions {
+			if mention.ID == a.botID {
+				isMention = true
+				break
+			}
+		}
+	}
+
+	return channel.IncomingMessage{
+		Platform:  "discord",
+		ChannelID: m.ChannelID,
+		UserID:    m.Author.ID,
+		Text:      m.Content,
+		IsMention: isMention,
+		ReplyCtx:  &replyContext{session: a.session, channelID: m.ChannelID},
+	}
+}
+
+type replyContext struct {
+	session     *discordgo.Session
+	channelID   string
+	interaction *discordgo.Interaction
+}
+
+func (rc *replyContext) SendTyping() error {
+	return rc.session.ChannelTyping(rc.channelID)
+}
+
+func (rc *replyContext) Send(text string) (channel.MessageRef, error) {
+	chunks := splitMessage(text, 2000)
+	var lastRef channel.MessageRef
+
+	for _, chunk := range chunks {
+		msg, err := rc.session.ChannelMessageSend(rc.channelID, chunk)
+		if err != nil {
+			return nil, fmt.Errorf("discord: send: %w", err)
+		}
+		lastRef = messageRef{id: msg.ID}
+	}
+	return lastRef, nil
+}
+
+func (rc *replyContext) Edit(ref channel.MessageRef, text string) error {
+	_, err := rc.session.ChannelMessageEdit(rc.channelID, ref.ID(), text)
+	return err
+}
+
+func splitMessage(text string, maxLen int) []string {
+	if len(text) <= maxLen {
+		return []string{text}
+	}
+
+	var chunks []string
+	remaining := text
+	for len(remaining) > 0 {
+		if len(remaining) <= maxLen {
+			chunks = append(chunks, remaining)
+			break
+		}
+
+		breakAt := findBreakPoint(remaining, maxLen)
+		chunks = append(chunks, remaining[:breakAt])
+		remaining = strings.TrimLeft(remaining[breakAt:], "\n")
+	}
+	return chunks
+}
+
+func findBreakPoint(text string, maxLen int) int {
+	if idx := strings.LastIndex(text[:maxLen], "\n\n"); idx > 0 {
+		return idx
+	}
+	if idx := strings.LastIndex(text[:maxLen], "\n"); idx > 0 {
+		return idx
+	}
+	if idx := strings.LastIndex(text[:maxLen], " "); idx > 0 {
+		return idx
+	}
+	return maxLen
+}
+
+type messageRef struct {
+	id string
+}
+
+func (m messageRef) ID() string { return m.id }
+
+var (
+	_ channel.Channel      = (*Adapter)(nil)
+	_ channel.ReplyContext = (*replyContext)(nil)
+	_ channel.MessageRef   = messageRef{}
+)
