@@ -1,0 +1,25 @@
+# Go
+/build/
+/dist/
+*.exe
+*.test
+*.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Env
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Worktree
+.worktree/
+
+# Hermes
+.hermes/
