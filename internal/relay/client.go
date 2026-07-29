@@ -72,7 +72,9 @@ func (c *HTTPClient) SendMessage(ctx context.Context, sessionID, text string) er
 		return err
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		return fmt.Errorf("relay: send message: drain body: %w", err)
+	}
 
 	if resp.StatusCode == http.StatusNotFound {
 		return ErrNotFound
@@ -90,7 +92,9 @@ func (c *HTTPClient) RunCommand(ctx context.Context, sessionID, command string) 
 		return err
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		return fmt.Errorf("relay: run command: drain body: %w", err)
+	}
 
 	if resp.StatusCode == http.StatusNotFound {
 		return ErrNotFound
@@ -157,13 +161,13 @@ func (c *HTTPClient) wrapTransportErr(err error) error {
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return fmt.Errorf("relay: %w: %v", ErrTimeout, err)
 	}
-	if isConnectionRefused(err) {
+	if isConnectionError(err) {
 		return fmt.Errorf("relay: %w: %v", ErrUnreachable, err)
 	}
 	return fmt.Errorf("relay: %w: %v", ErrUnreachable, err)
 }
 
-func isConnectionRefused(err error) bool {
+func isConnectionError(err error) bool {
 	var opErr *net.OpError
 	if errors.As(err, &opErr) {
 		return opErr.Op == "dial"

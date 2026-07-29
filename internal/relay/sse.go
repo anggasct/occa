@@ -35,7 +35,11 @@ func readSSE(ctx context.Context, r io.Reader, ch chan<- Event) {
 			eventType = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
 			hasFields = true
 		} else if strings.HasPrefix(line, "data:") {
-			data = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			chunk := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if data != "" {
+				data += "\n"
+			}
+			data += chunk
 			hasFields = true
 		}
 	}
