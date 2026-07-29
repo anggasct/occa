@@ -3,13 +3,13 @@ package store
 import "context"
 
 type Session struct {
-	ID                int64
-	ChannelID         string
-	Platform          string
-	OpenCodeSessionID string
-	Active            bool
-	CreatedAt         int64
-	UpdatedAt         int64
+	ID             int64
+	ChannelID      string
+	Platform       string
+	AgentSessionID string
+	Active         bool
+	CreatedAt      int64
+	UpdatedAt      int64
 }
 
 type Channel struct {

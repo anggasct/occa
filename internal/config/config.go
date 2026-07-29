@@ -6,17 +6,17 @@ import (
 )
 
 type Config struct {
-	OpenCodeAddr   string
-	TelegramToken  string
-	DiscordToken   string
-	AdminID        string
-	DBPath         string
-	LogFormat      string
+	AgentAddr     string
+	TelegramToken string
+	DiscordToken  string
+	AdminID       string
+	DBPath        string
+	LogFormat     string
 }
 
 func Load() (Config, error) {
 	cfg := Config{
-		OpenCodeAddr: envOrDefault("OCCA_OPENCODE_ADDR", "http://127.0.0.1:4096"),
+		AgentAddr:     envOrDefault("OCCA_AGENT_ADDR", "http://127.0.0.1:4096"),
 		TelegramToken: os.Getenv("OCCA_TELEGRAM_TOKEN"),
 		DiscordToken:  os.Getenv("OCCA_DISCORD_TOKEN"),
 		AdminID:       os.Getenv("OCCA_ADMIN_ID"),

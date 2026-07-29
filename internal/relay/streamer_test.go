@@ -11,10 +11,10 @@ import (
 )
 
 type fakeReplyContext struct {
-	mu      sync.Mutex
-	sends   []string
-	edits   []string
-	ref     channel.MessageRef
+	mu    sync.Mutex
+	sends []string
+	edits []string
+	ref   channel.MessageRef
 }
 
 type fakeRef struct{ id string }
@@ -149,7 +149,7 @@ func TestStreamerErrorEvent(t *testing.T) {
 	defer reply.mu.Unlock()
 	found := false
 	for _, s := range reply.sends {
-		if s == "⚠️ OpenCode error: something broke" {
+		if s == "⚠️ Agent error: something broke" {
 			found = true
 		}
 	}

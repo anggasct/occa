@@ -101,7 +101,7 @@ func (r *Router) handleCommand(ctx context.Context, msg channel.IncomingMessage)
 func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) error {
 	sessionID, err := r.resolver.Resolve(ctx, msg.Platform, msg.ChannelID)
 	if err != nil {
-		msg.ReplyCtx.Send("⚠️ OpenCode unreachable")
+		msg.ReplyCtx.Send("⚠️ Agent unreachable")
 		return nil
 	}
 
@@ -113,7 +113,7 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 		err = r.relay.SendMessage(ctx, sessionID, msg.Text)
 	}
 	if err != nil {
-		msg.ReplyCtx.Send("⚠️ OpenCode unreachable")
+		msg.ReplyCtx.Send("⚠️ Agent unreachable")
 	}
 	return nil
 }
@@ -155,18 +155,18 @@ func (r *Router) registerDefaults() {
 func (r *Router) helpText() string {
 	return "OCCA commands:\n" +
 		"• /occa:help — show this message\n" +
-		"• /occa:status — OpenCode health + session info\n" +
+		"• /occa:status — agent health + session info\n" +
 		"• /occa:session [list|new|switch <id>|delete <id>] — manage sessions\n" +
 		"• /occa:reset — clear current session and start fresh\n\n" +
-		"All other messages and /commands are forwarded to OpenCode."
+		"All other messages and /commands are forwarded to the agent."
 }
 
 func (r *Router) handleStatus(ctx context.Context, msg channel.IncomingMessage, _ string) (string, error) {
 	sessionID, err := r.resolver.Resolve(ctx, msg.Platform, msg.ChannelID)
 	if err != nil {
-		return "⚠️ OpenCode unreachable", nil
+		return "⚠️ Agent unreachable", nil
 	}
-	return fmt.Sprintf("✅ OpenCode connected\nSession: %s", sessionID), nil
+	return fmt.Sprintf("✅ Agent connected\nSession: %s", sessionID), nil
 }
 
 func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage, args string) (string, error) {
@@ -192,14 +192,14 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 			if s.Active {
 				marker = "→ "
 			}
-			sb.WriteString(fmt.Sprintf("%s%s (created %d)\n", marker, s.OpenCodeSessionID, s.CreatedAt))
+			sb.WriteString(fmt.Sprintf("%s%s (created %d)\n", marker, s.AgentSessionID, s.CreatedAt))
 		}
 		return strings.TrimRight(sb.String(), "\n"), nil
 
 	case "new":
 		sessionID, err := r.relay.CreateSession(ctx)
 		if err != nil {
-			return "⚠️ OpenCode unreachable", nil
+			return "⚠️ Agent unreachable", nil
 		}
 		if err := r.store.SessionRepo().SetActive(ctx, msg.Platform, msg.ChannelID, sessionID); err != nil {
 			return "", fmt.Errorf("session new: %w", err)
@@ -217,7 +217,7 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 		}
 		found := false
 		for _, s := range sessions {
-			if s.OpenCodeSessionID == target {
+			if s.AgentSessionID == target {
 				found = true
 				break
 			}
@@ -240,7 +240,7 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 			return "", fmt.Errorf("session delete: %w", err)
 		}
 		for _, s := range sessions {
-			if s.OpenCodeSessionID == target {
+			if s.AgentSessionID == target {
 				if err := r.store.SessionRepo().Delete(ctx, s.ID); err != nil {
 					return "", fmt.Errorf("session delete: %w", err)
 				}
@@ -257,7 +257,7 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 func (r *Router) handleReset(ctx context.Context, msg channel.IncomingMessage, _ string) (string, error) {
 	sessionID, err := r.relay.CreateSession(ctx)
 	if err != nil {
-		return "⚠️ OpenCode unreachable", nil
+		return "⚠️ Agent unreachable", nil
 	}
 	if err := r.store.SessionRepo().SetActive(ctx, msg.Platform, msg.ChannelID, sessionID); err != nil {
 		return "", fmt.Errorf("reset: %w", err)
