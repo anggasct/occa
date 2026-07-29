@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/anggasct/occa/internal/channel"
@@ -38,11 +37,9 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 	timer := time.NewTimer(intervals[0])
 	defer timer.Stop()
 
-	lastEvent := time.Now()
 	timeoutTimer := time.NewTimer(noEventTimeout)
 	defer timeoutTimer.Stop()
 
-	var mu sync.Mutex
 	dirty := false
 
 	for {
@@ -59,15 +56,12 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				return s.finalEdit(ref, buf.String(), lastRendered)
 			}
 
-			lastEvent = time.Now()
 			timeoutTimer.Reset(noEventTimeout)
 
 			switch ev.Type {
 			case "delta":
 				buf.WriteString(ev.Delta)
-				mu.Lock()
 				dirty = true
-				mu.Unlock()
 			case "done":
 				return s.finalEdit(ref, buf.String(), lastRendered)
 			case "error":
@@ -76,12 +70,8 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 			}
 
 		case <-timer.C:
-			mu.Lock()
-			shouldEdit := dirty
-			dirty = false
-			mu.Unlock()
-
-			if shouldEdit {
+			if dirty {
+				dirty = false
 				rendered := s.renderContent(buf.String())
 				if rendered != lastRendered {
 					var err error
@@ -103,8 +93,6 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 			}
 			timer.Reset(intervals[intervalIdx])
 		}
-
-		_ = lastEvent
 	}
 }
 
