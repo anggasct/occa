@@ -19,19 +19,30 @@ type Command struct {
 	Handler func(ctx context.Context, msg channel.IncomingMessage, args string) (string, error)
 }
 
-type Router struct {
-	commands map[string]Command
-	relay    relay.Client
-	store    store.Store
-	resolver *relay.SessionResolver
+// AgentInstance is a ready agent backend handle for a working directory.
+type AgentInstance interface {
+	Client() relay.Client
+	End()
 }
 
-func New(relayClient relay.Client, st store.Store, resolver *relay.SessionResolver) *Router {
+// InstanceProvider resolves an AgentInstance for a working directory.
+type InstanceProvider interface {
+	Instance(ctx context.Context, workdir string) (AgentInstance, error)
+}
+
+type Router struct {
+	commands       map[string]Command
+	instances      InstanceProvider
+	store          store.Store
+	defaultWorkdir string
+}
+
+func New(instances InstanceProvider, st store.Store, defaultWorkdir string) *Router {
 	r := &Router{
-		commands: make(map[string]Command),
-		relay:    relayClient,
-		store:    st,
-		resolver: resolver,
+		commands:       make(map[string]Command),
+		instances:      instances,
+		store:          st,
+		defaultWorkdir: defaultWorkdir,
 	}
 	r.registerDefaults()
 	return r
@@ -98,8 +109,22 @@ func (r *Router) handleCommand(ctx context.Context, msg channel.IncomingMessage)
 	return nil
 }
 
+// clientFor resolves the agent instance for a message's effective workdir.
+func (r *Router) clientFor(ctx context.Context, msg channel.IncomingMessage) (AgentInstance, error) {
+	workdir := r.effectiveWorkdir(ctx, msg.Platform, msg.ChannelID)
+	return r.instances.Instance(ctx, workdir)
+}
+
 func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) error {
-	sessionID, err := r.resolver.Resolve(ctx, msg.Platform, msg.ChannelID)
+	inst, err := r.clientFor(ctx, msg)
+	if err != nil {
+		msg.ReplyCtx.Send("⚠️ Agent unreachable")
+		return nil
+	}
+	defer inst.End()
+
+	resolver := relay.NewSessionResolver(r.store.SessionRepo(), inst.Client())
+	sessionID, err := resolver.Resolve(ctx, msg.Platform, msg.ChannelID)
 	if err != nil {
 		msg.ReplyCtx.Send("⚠️ Agent unreachable")
 		return nil
@@ -108,9 +133,9 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 	msg.ReplyCtx.SendTyping()
 
 	if strings.HasPrefix(msg.Text, "/") {
-		err = r.relay.RunCommand(ctx, sessionID, msg.Text)
+		err = inst.Client().RunCommand(ctx, sessionID, msg.Text)
 	} else {
-		err = r.relay.SendMessage(ctx, sessionID, msg.Text)
+		err = inst.Client().SendMessage(ctx, sessionID, msg.Text)
 	}
 	if err != nil {
 		msg.ReplyCtx.Send("⚠️ Agent unreachable")
@@ -135,6 +160,10 @@ func (r *Router) registerDefaults() {
 		Name:    "reset",
 		Handler: r.handleReset,
 	}
+	r.commands["dir"] = Command{
+		Name:    "dir",
+		Handler: r.handleDir,
+	}
 	r.commands["allow"] = Command{
 		Name:    "allow",
 		Admin:   true,
@@ -157,12 +186,20 @@ func (r *Router) helpText() string {
 		"• /occa:help — show this message\n" +
 		"• /occa:status — agent health + session info\n" +
 		"• /occa:session [list|new|switch <id>|delete <id>] — manage sessions\n" +
+		"• /occa:dir [path] — view or set this channel's working directory\n" +
 		"• /occa:reset — clear current session and start fresh\n\n" +
 		"All other messages and /commands are forwarded to the agent."
 }
 
 func (r *Router) handleStatus(ctx context.Context, msg channel.IncomingMessage, _ string) (string, error) {
-	sessionID, err := r.resolver.Resolve(ctx, msg.Platform, msg.ChannelID)
+	inst, err := r.clientFor(ctx, msg)
+	if err != nil {
+		return "⚠️ Agent unreachable", nil
+	}
+	defer inst.End()
+
+	resolver := relay.NewSessionResolver(r.store.SessionRepo(), inst.Client())
+	sessionID, err := resolver.Resolve(ctx, msg.Platform, msg.ChannelID)
 	if err != nil {
 		return "⚠️ Agent unreachable", nil
 	}
@@ -197,7 +234,12 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 		return strings.TrimRight(sb.String(), "\n"), nil
 
 	case "new":
-		sessionID, err := r.relay.CreateSession(ctx)
+		inst, err := r.clientFor(ctx, msg)
+		if err != nil {
+			return "⚠️ Agent unreachable", nil
+		}
+		defer inst.End()
+		sessionID, err := inst.Client().CreateSession(ctx)
 		if err != nil {
 			return "⚠️ Agent unreachable", nil
 		}
@@ -255,7 +297,13 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 }
 
 func (r *Router) handleReset(ctx context.Context, msg channel.IncomingMessage, _ string) (string, error) {
-	sessionID, err := r.relay.CreateSession(ctx)
+	inst, err := r.clientFor(ctx, msg)
+	if err != nil {
+		return "⚠️ Agent unreachable", nil
+	}
+	defer inst.End()
+
+	sessionID, err := inst.Client().CreateSession(ctx)
 	if err != nil {
 		return "⚠️ Agent unreachable", nil
 	}

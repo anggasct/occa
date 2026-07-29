@@ -17,6 +17,7 @@ type Channel struct {
 	Platform   string
 	Model      string
 	ListenMode string
+	Workdir    string
 	CreatedAt  int64
 	UpdatedAt  int64
 }
@@ -34,6 +35,7 @@ type UserOverride struct {
 type SessionRepo interface {
 	Active(ctx context.Context, platform, channelID string) (string, error)
 	SetActive(ctx context.Context, platform, channelID, sessionID string) error
+	Deactivate(ctx context.Context, platform, channelID string) error
 	List(ctx context.Context, platform, channelID string) ([]Session, error)
 	Delete(ctx context.Context, id int64) error
 }

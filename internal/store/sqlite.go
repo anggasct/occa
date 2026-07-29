@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS channel (
 	platform TEXT NOT NULL,
 	model TEXT,
 	listen_mode TEXT NOT NULL DEFAULT 'mention',
+	workdir TEXT,
 	created_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL,
 	PRIMARY KEY (channel_id, platform)

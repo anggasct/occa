@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log/slog"
 	"os"
@@ -12,14 +13,26 @@ import (
 	"github.com/anggasct/occa/internal/channel/discord"
 	"github.com/anggasct/occa/internal/channel/telegram"
 	"github.com/anggasct/occa/internal/config"
-	"github.com/anggasct/occa/internal/relay"
-	"github.com/anggasct/occa/internal/render"
+	"github.com/anggasct/occa/internal/process"
 	"github.com/anggasct/occa/internal/router"
 	"github.com/anggasct/occa/internal/store"
 )
 
+// managerProvider adapts *process.Manager (concrete Instance) to the
+// router.InstanceProvider interface (AgentInstance).
+type managerProvider struct{ m *process.Manager }
+
+func (p managerProvider) Instance(ctx context.Context, workdir string) (router.AgentInstance, error) {
+	return p.m.Instance(ctx, workdir)
+}
+
 func main() {
-	cfg, err := config.Load()
+	var configPath string
+	flag.StringVar(&configPath, "config", "", "path to config file (default ~/.occa/config.yaml)")
+	flag.StringVar(&configPath, "c", "", "path to config file (shorthand)")
+	flag.Parse()
+
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "occa: %v\n", err)
 		os.Exit(1)
@@ -27,40 +40,47 @@ func main() {
 
 	var handler slog.Handler
 	opts := &slog.HandlerOptions{Level: slog.LevelInfo}
-	if cfg.LogFormat == "json" {
+	if cfg.Logging.Format == "json" {
 		handler = slog.NewJSONHandler(os.Stderr, opts)
 	} else {
 		handler = slog.NewTextHandler(os.Stderr, opts)
 	}
 	slog.SetDefault(slog.New(handler))
 
-	db, err := store.Open(cfg.DBPath)
+	db, err := store.Open(cfg.Database.Path)
 	if err != nil {
 		slog.Error("failed to open store", "error", err)
 		os.Exit(1)
 	}
 	defer db.Close()
 
-	relayClient := relay.NewHTTPClient(cfg.AgentAddr)
-	resolver := relay.NewSessionResolver(db.SessionRepo(), relayClient)
-	renderer := render.New()
-	rt := router.New(relayClient, db, resolver)
+	manager, err := process.DefaultManager(cfg.Agent)
+	if err != nil {
+		slog.Error("failed to start process manager", "error", err)
+		os.Exit(1)
+	}
+	defer manager.Close()
+
+	rt := router.New(managerProvider{manager}, db, cfg.Agent.DefaultWorkdir)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Secrets are env-only (never in the config file).
+	telegramToken := os.Getenv("OCCA_TELEGRAM_TOKEN")
+	discordToken := os.Getenv("OCCA_DISCORD_TOKEN")
+	if telegramToken == "" && discordToken == "" {
+		slog.Error("at least one of OCCA_TELEGRAM_TOKEN or OCCA_DISCORD_TOKEN must be set")
+		os.Exit(1)
+	}
+
 	var channels []channel.Channel
-
-	if cfg.TelegramToken != "" {
-		tg := telegram.New(cfg.TelegramToken)
-		channels = append(channels, tg)
+	if telegramToken != "" {
+		channels = append(channels, telegram.New(telegramToken))
 	}
-	if cfg.DiscordToken != "" {
-		dc := discord.New(cfg.DiscordToken)
-		channels = append(channels, dc)
+	if discordToken != "" {
+		channels = append(channels, discord.New(discordToken))
 	}
-
-	_ = renderer
 
 	for _, ch := range channels {
 		go func(c channel.Channel) {
@@ -75,7 +95,7 @@ func main() {
 		}(ch)
 	}
 
-	slog.Info("occa started", "agent_addr", cfg.AgentAddr)
+	slog.Info("occa started", "default_workdir", cfg.Agent.DefaultWorkdir, "max_instances", cfg.Agent.MaxInstances)
 
 	<-ctx.Done()
 	slog.Info("shutting down")
