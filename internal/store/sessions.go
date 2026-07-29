@@ -50,7 +50,10 @@ func (r *sqliteSessionRepo) SetActive(ctx context.Context, platform, channelID, 
 		return fmt.Errorf("store: session set active: activate: %w", err)
 	}
 
-	rows, _ := res.RowsAffected()
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: session set active: rows affected: %w", err)
+	}
 	if rows == 0 {
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO session (channel_id, platform, opencode_session_id, active, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?)`,
