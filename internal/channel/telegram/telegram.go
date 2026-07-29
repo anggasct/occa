@@ -126,8 +126,18 @@ func (rc *replyContext) Edit(ref channel.MessageRef, text string) error {
 	msg.ParseMode = "HTML"
 	msg.DisableWebPagePreview = true
 
-	_, err := rc.bot.Send(msg)
-	return err
+	for {
+		_, err := rc.bot.Send(msg)
+		if err == nil {
+			return nil
+		}
+		retryAfter := extractRetryAfter(err)
+		if retryAfter <= 0 {
+			return err
+		}
+		slog.Warn("telegram: edit rate limited, retrying", "retry_after", retryAfter)
+		time.Sleep(time.Duration(retryAfter) * time.Second)
+	}
 }
 
 func (rc *replyContext) sendWithRetry(msg tgbotapi.MessageConfig) (tgbotapi.Message, error) {
