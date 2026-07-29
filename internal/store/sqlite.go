@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS session (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	channel_id TEXT NOT NULL,
 	platform TEXT NOT NULL,
-	opencode_session_id TEXT NOT NULL,
+	agent_session_id TEXT NOT NULL,
 	active INTEGER NOT NULL DEFAULT 1,
 	created_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL

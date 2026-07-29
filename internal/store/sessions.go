@@ -14,7 +14,7 @@ type sqliteSessionRepo struct {
 func (r *sqliteSessionRepo) Active(ctx context.Context, platform, channelID string) (string, error) {
 	var sessionID string
 	err := r.db.QueryRowContext(ctx,
-		`SELECT opencode_session_id FROM session WHERE platform = ? AND channel_id = ? AND active = 1`,
+		`SELECT agent_session_id FROM session WHERE platform = ? AND channel_id = ? AND active = 1`,
 		platform, channelID,
 	).Scan(&sessionID)
 	if err == sql.ErrNoRows {
@@ -43,7 +43,7 @@ func (r *sqliteSessionRepo) SetActive(ctx context.Context, platform, channelID, 
 	}
 
 	res, err := tx.ExecContext(ctx,
-		`UPDATE session SET active = 1, updated_at = ? WHERE platform = ? AND channel_id = ? AND opencode_session_id = ?`,
+		`UPDATE session SET active = 1, updated_at = ? WHERE platform = ? AND channel_id = ? AND agent_session_id = ?`,
 		now, platform, channelID, sessionID,
 	)
 	if err != nil {
@@ -56,7 +56,7 @@ func (r *sqliteSessionRepo) SetActive(ctx context.Context, platform, channelID, 
 	}
 	if rows == 0 {
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO session (channel_id, platform, opencode_session_id, active, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?)`,
+			`INSERT INTO session (channel_id, platform, agent_session_id, active, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?)`,
 			channelID, platform, sessionID, now, now,
 		); err != nil {
 			return fmt.Errorf("store: session set active: insert: %w", err)
@@ -68,7 +68,7 @@ func (r *sqliteSessionRepo) SetActive(ctx context.Context, platform, channelID, 
 
 func (r *sqliteSessionRepo) List(ctx context.Context, platform, channelID string) ([]Session, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, channel_id, platform, opencode_session_id, active, created_at, updated_at FROM session WHERE platform = ? AND channel_id = ? ORDER BY created_at DESC`,
+		`SELECT id, channel_id, platform, agent_session_id, active, created_at, updated_at FROM session WHERE platform = ? AND channel_id = ? ORDER BY created_at DESC`,
 		platform, channelID,
 	)
 	if err != nil {
@@ -80,7 +80,7 @@ func (r *sqliteSessionRepo) List(ctx context.Context, platform, channelID string
 	for rows.Next() {
 		var s Session
 		var active int
-		if err := rows.Scan(&s.ID, &s.ChannelID, &s.Platform, &s.OpenCodeSessionID, &active, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.ChannelID, &s.Platform, &s.AgentSessionID, &active, &s.CreatedAt, &s.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("store: session list: scan: %w", err)
 		}
 		s.Active = active == 1

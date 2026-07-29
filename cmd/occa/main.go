@@ -41,7 +41,7 @@ func main() {
 	}
 	defer db.Close()
 
-	relayClient := relay.NewHTTPClient(cfg.OpenCodeAddr)
+	relayClient := relay.NewHTTPClient(cfg.AgentAddr)
 	resolver := relay.NewSessionResolver(db.SessionRepo(), relayClient)
 	renderer := render.New()
 	rt := router.New(relayClient, db, resolver)
@@ -75,7 +75,7 @@ func main() {
 		}(ch)
 	}
 
-	slog.Info("occa started", "opencode_addr", cfg.OpenCodeAddr)
+	slog.Info("occa started", "agent_addr", cfg.AgentAddr)
 
 	<-ctx.Done()
 	slog.Info("shutting down")

@@ -13,9 +13,9 @@ import (
 )
 
 var (
-	ErrUnreachable = errors.New("opencode unreachable")
-	ErrNotFound    = errors.New("opencode resource not found")
-	ErrTimeout     = errors.New("opencode request timed out")
+	ErrUnreachable = errors.New("agent unreachable")
+	ErrNotFound    = errors.New("agent resource not found")
+	ErrTimeout     = errors.New("agent request timed out")
 )
 
 type Event struct {

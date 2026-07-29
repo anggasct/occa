@@ -87,7 +87,7 @@ type fakeStore struct {
 	overrideRepo *fakeOverrideRepo
 }
 
-func (f *fakeStore) SessionRepo() store.SessionRepo  { return f.sessionRepo }
+func (f *fakeStore) SessionRepo() store.SessionRepo   { return f.sessionRepo }
 func (f *fakeStore) ChannelRepo() store.ChannelRepo   { return nil }
 func (f *fakeStore) OverrideRepo() store.OverrideRepo { return f.overrideRepo }
 func (f *fakeStore) Close() error                     { return nil }
@@ -105,7 +105,7 @@ func (f *fakeSessionRepo) SetActive(_ context.Context, platform, channelID, sess
 }
 func (f *fakeSessionRepo) List(_ context.Context, platform, channelID string) ([]store.Session, error) {
 	if f.activeID != "" {
-		return []store.Session{{ID: 1, OpenCodeSessionID: f.activeID, Active: true}}, nil
+		return []store.Session{{ID: 1, AgentSessionID: f.activeID, Active: true}}, nil
 	}
 	return nil, nil
 }
@@ -215,7 +215,7 @@ func TestRouteStatus(t *testing.T) {
 	if len(reply.sends) == 0 {
 		t.Fatal("expected status response")
 	}
-	if !strings.Contains(reply.sends[0], "OpenCode") {
+	if !strings.Contains(reply.sends[0], "Agent") {
 		t.Fatalf("unexpected status: %q", reply.sends[0])
 	}
 }
@@ -252,7 +252,7 @@ func TestAccessDeniedForUnknownUser(t *testing.T) {
 		t.Fatalf("Route: %v", err)
 	}
 	if client.lastMsg != "" {
-		t.Fatal("message should not reach OpenCode for denied user")
+		t.Fatal("message should not reach the agent for denied user")
 	}
 	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Access denied") {
 		t.Fatalf("expected access denied, got: %v", reply.sends)
@@ -294,7 +294,7 @@ func TestAccessDeniedAfterDeny(t *testing.T) {
 		t.Fatalf("Route: %v", err)
 	}
 	if client.lastMsg != "" {
-		t.Fatal("denied user should not reach OpenCode")
+		t.Fatal("denied user should not reach the agent")
 	}
 }
 

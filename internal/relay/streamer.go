@@ -65,7 +65,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 			case "done":
 				return s.finalEdit(ref, buf.String(), lastRendered)
 			case "error":
-				s.reply.Send("⚠️ OpenCode error: " + ev.Delta)
+				s.reply.Send("⚠️ Agent error: " + ev.Delta)
 				return nil
 			}
 
