@@ -51,10 +51,23 @@ func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessag
 			text += " " + fmt.Sprintf("%v", opt.Value)
 		}
 
+		var userID string
+		if i.Member != nil {
+			userID = i.Member.User.ID
+		} else if i.User != nil {
+			userID = i.User.ID
+		}
+
+		if err := sess.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+		}); err != nil {
+			slog.Warn("discord: defer interaction failed", "error", err)
+		}
+
 		msg := channel.IncomingMessage{
 			Platform:  "discord",
 			ChannelID: i.ChannelID,
-			UserID:    i.Member.User.ID,
+			UserID:    userID,
 			Text:      strings.TrimSpace(text),
 			IsMention: true,
 			ReplyCtx:  &replyContext{session: sess, channelID: i.ChannelID, interaction: i.Interaction},
@@ -117,6 +130,18 @@ func (rc *replyContext) SendTyping() error {
 }
 
 func (rc *replyContext) Send(text string) (channel.MessageRef, error) {
+	if rc.interaction != nil {
+		content := text
+		msg, err := rc.session.InteractionResponseEdit(rc.interaction, &discordgo.WebhookEdit{
+			Content: &content,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("discord: interaction response edit: %w", err)
+		}
+		rc.interaction = nil
+		return messageRef{id: msg.ID}, nil
+	}
+
 	chunks := splitMessage(text, 2000)
 	var lastRef channel.MessageRef
 
