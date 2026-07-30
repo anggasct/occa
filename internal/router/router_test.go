@@ -681,3 +681,78 @@ func TestListenModeEnforcement(t *testing.T) {
 		})
 	}
 }
+
+func TestChannelViewDefault(t *testing.T) {
+	r, _, reply := newTestRouter()
+	err := r.Route(context.Background(), msg("/occa:channel", reply))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "mention") {
+		t.Fatalf("expected default listen mode 'mention', got: %v", reply.sends)
+	}
+}
+
+func TestChannelViewSet(t *testing.T) {
+	r, _, reply := newTestRouter()
+
+	err := r.Route(context.Background(), msg("/occa:channel all", reply))
+	if err != nil {
+		t.Fatalf("Route set: %v", err)
+	}
+	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "all") {
+		t.Fatalf("expected confirmation with 'all', got: %v", reply.sends)
+	}
+
+	reply2 := &fakeReplyCtx{}
+	err = r.Route(context.Background(), msg("/occa:channel", reply2))
+	if err != nil {
+		t.Fatalf("Route view: %v", err)
+	}
+	if len(reply2.sends) == 0 || !strings.Contains(reply2.sends[0], "all") {
+		t.Fatalf("expected stored mode 'all', got: %v", reply2.sends)
+	}
+}
+
+func TestChannelInvalidMode(t *testing.T) {
+	r, _, reply := newTestRouter()
+	err := r.Route(context.Background(), msg("/occa:channel banana", reply))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Usage") {
+		t.Fatalf("expected usage help for invalid mode, got: %v", reply.sends)
+	}
+}
+
+func TestChannelNonAdminDenied(t *testing.T) {
+	r, _, reply, overrideRepo := newTestRouterWithAccess()
+	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow"}
+
+	err := r.Route(context.Background(), msg("/occa:channel all", reply))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Admin access required") {
+		t.Fatalf("expected admin required, got: %v", reply.sends)
+	}
+}
+
+func TestChannelThreadIsolation(t *testing.T) {
+	r, _, _ := newTestRouter()
+	st := r.store.(*fakeStore)
+	st.overrideRepo.overrides["telegram:thread1:user1"] = &store.UserOverride{ChannelID: "thread1", Platform: "telegram", UserID: "user1", Role: "admin"}
+
+	reply := &fakeReplyCtx{}
+	if err := r.Route(context.Background(), msgIn("thread1", "/occa:channel thread", reply)); err != nil {
+		t.Fatalf("Route thread channel: %v", err)
+	}
+
+	threadCh := st.channelRepo.channels["telegram:thread1"]
+	if threadCh == nil || threadCh.ListenMode != "thread" {
+		t.Fatalf("thread listen_mode = %+v, want 'thread'", threadCh)
+	}
+	if parent := st.channelRepo.channels["telegram:chat1"]; parent != nil && parent.ListenMode == "thread" {
+		t.Fatalf("parent listen_mode should not be changed, got %q", parent.ListenMode)
+	}
+}
