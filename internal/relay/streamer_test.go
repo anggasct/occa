@@ -211,18 +211,18 @@ func TestStreamerMultiMessageOverflow(t *testing.T) {
 
 	msgs := reply.finalMessages()
 	if len(msgs) < 2 {
-		t.Fatalf("AC-01: expected multiple messages, got %d", len(msgs))
+		t.Fatalf("expected multiple messages, got %d", len(msgs))
 	}
 
 	for i, msg := range msgs {
 		if len(msg) > render.TelegramLimit {
-			t.Fatalf("AC-03: message %d exceeds limit: %d > %d", i, len(msg), render.TelegramLimit)
+			t.Fatalf("message %d exceeds limit: %d > %d", i, len(msg), render.TelegramLimit)
 		}
 	}
 
 	for i := 1; i < len(msgs); i++ {
 		if !strings.HasPrefix(msgs[i], continuationMarker) {
-			t.Fatalf("AC-02: message %d missing continuation marker, got prefix: %q", i, msgs[i][:min(40, len(msgs[i]))])
+			t.Fatalf("message %d missing continuation marker, got prefix: %q", i, msgs[i][:min(40, len(msgs[i]))])
 		}
 	}
 
@@ -236,10 +236,10 @@ func TestStreamerMultiMessageOverflow(t *testing.T) {
 	}
 	full := reconstructed.String()
 	if !strings.Contains(full, "paragraph-0") {
-		t.Fatalf("AC-01: reconstructed content missing first paragraph")
+		t.Fatalf("reconstructed content missing first paragraph")
 	}
 	if !strings.Contains(full, fmt.Sprintf("paragraph-%d", len(paras)-1)) {
-		t.Fatalf("AC-01: reconstructed content missing last paragraph")
+		t.Fatalf("reconstructed content missing last paragraph")
 	}
 }
 
@@ -260,13 +260,13 @@ func TestStreamerSingleMessageNoMarker(t *testing.T) {
 
 	msgs := reply.finalMessages()
 	if len(msgs) != 1 {
-		t.Fatalf("AC-05: expected exactly 1 message, got %d", len(msgs))
+		t.Fatalf("expected exactly 1 message, got %d", len(msgs))
 	}
 	if strings.Contains(msgs[0], continuationMarker) {
-		t.Fatalf("AC-05: single message should not have continuation marker")
+		t.Fatalf("single message should not have continuation marker")
 	}
 	if msgs[0] != "Short response" {
-		t.Fatalf("AC-05: expected 'Short response', got %q", msgs[0])
+		t.Fatalf("expected 'Short response', got %q", msgs[0])
 	}
 }
 
@@ -294,13 +294,13 @@ func TestStreamerOnlyLastChunkEdited(t *testing.T) {
 
 	msgs := reply.finalMessages()
 	if len(msgs) < 2 {
-		t.Skip("content did not overflow, cannot test AC-04")
+		t.Skip("content did not overflow, cannot test sealed-chunk no-edit")
 	}
 
 	for i := 1; i < len(msgs)-1; i++ {
 		refID := fmt.Sprintf("msg-%d", i)
 		if reply.editCountFor(refID) > 0 {
-			t.Fatalf("AC-04: sealed message %d was edited %d times", i, reply.editCountFor(refID))
+			t.Fatalf("sealed message %d was edited %d times", i, reply.editCountFor(refID))
 		}
 	}
 }
@@ -328,11 +328,11 @@ func TestStreamerFinalEditReconciles(t *testing.T) {
 
 	msgs := reply.finalMessages()
 	if len(msgs) < 2 {
-		t.Fatalf("AC-06: expected multiple messages for final content, got %d", len(msgs))
+		t.Fatalf("expected multiple messages for final content, got %d", len(msgs))
 	}
 
 	expectedChunks, _ := renderer.Render(longContent, render.Telegram)
 	if len(msgs) != len(expectedChunks) {
-		t.Fatalf("AC-06: final message count %d != expected chunk count %d", len(msgs), len(expectedChunks))
+		t.Fatalf("final message count %d != expected chunk count %d", len(msgs), len(expectedChunks))
 	}
 }
