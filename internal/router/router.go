@@ -230,6 +230,11 @@ func (r *Router) registerDefaults() {
 		Admin:   true,
 		Handler: r.handleAdmin,
 	}
+	r.commands["channel"] = Command{
+		Name:    "channel",
+		Admin:   true,
+		Handler: r.handleChannel,
+	}
 }
 
 func (r *Router) helpText() string {
@@ -238,6 +243,7 @@ func (r *Router) helpText() string {
 		"• /occa:status — agent health + session info\n" +
 		"• /occa:session [list|new|switch <id>|delete <id>] — manage sessions\n" +
 		"• /occa:dir [path] — view or set this channel's working directory\n" +
+		"• /occa:channel [mention|all|thread] — view or set listen mode\n" +
 		"• /occa:reset — clear current session and start fresh\n\n" +
 		"All other messages and /commands are forwarded to the agent."
 }
