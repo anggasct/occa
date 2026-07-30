@@ -61,7 +61,7 @@ func main() {
 	}
 	defer manager.Close()
 
-	rt := router.New(managerProvider{manager}, db, cfg.Agent.DefaultWorkdir)
+	rt := router.New(managerProvider{manager}, db, cfg.Agent.DefaultWorkdir, cfg.AdminID)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

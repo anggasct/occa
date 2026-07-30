@@ -14,6 +14,7 @@ import (
 // Config is OCCA's resolved runtime configuration. Secrets (bot tokens) are
 // deliberately not part of Config — they are read from the environment only.
 type Config struct {
+	AdminID  string
 	Agent    AgentConfig    `yaml:"agent"`
 	Database DatabaseConfig `yaml:"database"`
 	Logging  LoggingConfig  `yaml:"logging"`
@@ -106,7 +107,11 @@ func Load(configPath string) (Config, error) {
 	if err := applyEnv(&fc); err != nil {
 		return Config{}, err
 	}
-	return build(fc)
+	adminID := os.Getenv("OCCA_ADMIN_ID")
+	if adminID == "" {
+		return Config{}, fmt.Errorf("config: OCCA_ADMIN_ID must be set")
+	}
+	return build(fc, adminID)
 }
 
 func defaultFileConfig() fileConfig {
@@ -160,7 +165,7 @@ func applyEnv(fc *fileConfig) error {
 	return nil
 }
 
-func build(fc fileConfig) (Config, error) {
+func build(fc fileConfig, adminID string) (Config, error) {
 	idle, err := time.ParseDuration(fc.Agent.IdleTimeout)
 	if err != nil {
 		return Config{}, fmt.Errorf("config: agent.idle_timeout: %w", err)
@@ -182,6 +187,7 @@ func build(fc fileConfig) (Config, error) {
 	}
 
 	return Config{
+		AdminID: adminID,
 		Agent: AgentConfig{
 			Binary:         fc.Agent.Binary,
 			PortRange:      fc.Agent.PortRange,

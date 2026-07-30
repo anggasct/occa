@@ -17,11 +17,15 @@ func writeConfig(t *testing.T, dir, content string) string {
 }
 
 func TestLoadDefaultsFromEmptyFile(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
 	path := writeConfig(t, t.TempDir(), "")
 
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AdminID != "admin123" {
+		t.Errorf("AdminID = %q, want admin123", cfg.AdminID)
 	}
 	if cfg.Agent.Binary != "opencode" {
 		t.Errorf("Binary = %q, want opencode", cfg.Agent.Binary)
@@ -40,7 +44,16 @@ func TestLoadDefaultsFromEmptyFile(t *testing.T) {
 	}
 }
 
+func TestLoadMissingAdminID(t *testing.T) {
+	path := writeConfig(t, t.TempDir(), "")
+	t.Setenv("OCCA_ADMIN_ID", "")
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error when OCCA_ADMIN_ID is missing")
+	}
+}
+
 func TestLoadParsesYAML(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
 	path := writeConfig(t, t.TempDir(), `
 agent:
   binary: /usr/bin/opencode
@@ -82,6 +95,7 @@ logging:
 }
 
 func TestLoadEnvOverridesYAML(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
 	path := writeConfig(t, t.TempDir(), "agent:\n  binary: from-file\n")
 
 	t.Setenv("OCCA_AGENT_BINARY", "from-env")
@@ -100,6 +114,7 @@ func TestLoadEnvOverridesYAML(t *testing.T) {
 }
 
 func TestLoadExplicitMissingErrors(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
 	_, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
 	if err == nil {
 		t.Fatal("expected error for missing explicit config path")
@@ -107,6 +122,7 @@ func TestLoadExplicitMissingErrors(t *testing.T) {
 }
 
 func TestLoadCorruptYAMLErrors(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
 	path := writeConfig(t, t.TempDir(), "agent: [unclosed")
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected parse error for corrupt YAML")
@@ -114,6 +130,7 @@ func TestLoadCorruptYAMLErrors(t *testing.T) {
 }
 
 func TestLoadInvalidDurationErrors(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
 	path := writeConfig(t, t.TempDir(), "agent:\n  idle_timeout: notaduration\n")
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected error for invalid idle_timeout")
@@ -121,6 +138,7 @@ func TestLoadInvalidDurationErrors(t *testing.T) {
 }
 
 func TestLoadInvalidLogFormatErrors(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
 	path := writeConfig(t, t.TempDir(), "logging:\n  format: xml\n")
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected error for invalid logging.format")
@@ -128,6 +146,7 @@ func TestLoadInvalidLogFormatErrors(t *testing.T) {
 }
 
 func TestBootstrapCreatesDefault(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
 	// Nested path verifies MkdirAll creates parent directories.
 	path := filepath.Join(t.TempDir(), "sub", "config.yaml")
 	if err := bootstrap(path); err != nil {

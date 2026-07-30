@@ -178,7 +178,7 @@ func newTestRouterWithAccess() (*Router, *fakeRelayClient, *fakeReplyCtx, *fakeO
 		overrideRepo: overrideRepo,
 	}
 	provider := &fakeInstanceProvider{client: client}
-	r := New(provider, st, "/default-workdir")
+	r := New(provider, st, "/default-workdir", "")
 	reply := &fakeReplyCtx{}
 	return r, client, reply, overrideRepo
 }
@@ -529,5 +529,84 @@ func TestPerPlatformScoping(t *testing.T) {
 	}
 	if client.lastMsg != "" {
 		t.Fatal("user allowed on telegram:chat1 should be denied on discord:chat1 despite same channel_id")
+	}
+}
+
+func TestBootstrapAdminFirstMessage(t *testing.T) {
+	client := &fakeRelayClient{sessionID: "sess-new"}
+	overrideRepo := newFakeOverrideRepo()
+	st := &fakeStore{
+		sessionRepo:  &fakeSessionRepo{},
+		channelRepo:  newFakeChannelRepo(),
+		overrideRepo: overrideRepo,
+	}
+	provider := &fakeInstanceProvider{client: client}
+	r := New(provider, st, "/default-workdir", "admin123")
+	reply := &fakeReplyCtx{}
+
+	err := r.Route(context.Background(), msgFrom("admin123", "hello admin", reply))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if client.lastMsg != "hello admin" {
+		t.Fatalf("expected passthrough for bootstrap admin, got %q", client.lastMsg)
+	}
+
+	o, err := overrideRepo.Get(context.Background(), "telegram", "chat1", "admin123")
+	if err != nil {
+		t.Fatalf("Get override: %v", err)
+	}
+	if o == nil || o.Role != "admin" {
+		t.Fatalf("expected lazy upsert of admin role row, got %+v", o)
+	}
+}
+
+func TestBootstrapAdminCanRunCommandsImmediately(t *testing.T) {
+	client := &fakeRelayClient{sessionID: "sess-new"}
+	overrideRepo := newFakeOverrideRepo()
+	st := &fakeStore{
+		sessionRepo:  &fakeSessionRepo{},
+		channelRepo:  newFakeChannelRepo(),
+		overrideRepo: overrideRepo,
+	}
+	provider := &fakeInstanceProvider{client: client}
+	r := New(provider, st, "/default-workdir", "admin123")
+	reply := &fakeReplyCtx{}
+
+	err := r.Route(context.Background(), msgFrom("admin123", "/occa:allow user2", reply))
+	if err != nil {
+		t.Fatalf("Route command: %v", err)
+	}
+	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Allowed user: user2") {
+		t.Fatalf("expected allow confirmation, got %v", reply.sends)
+	}
+
+	o, err := overrideRepo.Get(context.Background(), "telegram", "chat1", "admin123")
+	if err != nil || o == nil || o.Role != "admin" {
+		t.Fatalf("expected admin row created for bootstrap admin, got %+v", o)
+	}
+}
+
+func TestBootstrapAdminDoesNotWeakenDenyForOthers(t *testing.T) {
+	client := &fakeRelayClient{sessionID: "sess-new"}
+	overrideRepo := newFakeOverrideRepo()
+	st := &fakeStore{
+		sessionRepo:  &fakeSessionRepo{},
+		channelRepo:  newFakeChannelRepo(),
+		overrideRepo: overrideRepo,
+	}
+	provider := &fakeInstanceProvider{client: client}
+	r := New(provider, st, "/default-workdir", "admin123")
+	reply := &fakeReplyCtx{}
+
+	err := r.Route(context.Background(), msgFrom("stranger", "hello", reply))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if client.lastMsg != "" {
+		t.Fatal("stranger should be denied")
+	}
+	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Access denied") {
+		t.Fatalf("expected access denied, got %v", reply.sends)
 	}
 }
