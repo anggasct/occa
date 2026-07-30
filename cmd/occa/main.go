@@ -8,12 +8,14 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/channel/discord"
 	"github.com/anggasct/occa/internal/channel/telegram"
 	"github.com/anggasct/occa/internal/config"
 	"github.com/anggasct/occa/internal/process"
+	"github.com/anggasct/occa/internal/relay"
 	"github.com/anggasct/occa/internal/router"
 	"github.com/anggasct/occa/internal/store"
 )
@@ -66,6 +68,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	discoverAgent(ctx, manager, cfg.Agent.DefaultWorkdir)
+
 	// Secrets are env-only (never in the config file).
 	telegramToken := os.Getenv("OCCA_TELEGRAM_TOKEN")
 	discordToken := os.Getenv("OCCA_DISCORD_TOKEN")
@@ -101,5 +105,28 @@ func main() {
 	slog.Info("shutting down")
 	for _, ch := range channels {
 		ch.Stop()
+	}
+}
+
+func discoverAgent(ctx context.Context, manager *process.Manager, workdir string) {
+	discoverCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	inst, err := manager.Instance(discoverCtx, workdir)
+	if err != nil {
+		slog.Warn("agent unreachable at startup — will retry per message", "error", err)
+		return
+	}
+	defer inst.End()
+
+	doc, err := relay.Discover(discoverCtx, inst.Addr())
+	if err != nil {
+		slog.Warn("agent discovery failed — will retry per message", "error", err)
+		return
+	}
+
+	slog.Info("agent connected", "version", doc.Info.Version)
+	if missing := doc.MissingEndpoints(); len(missing) > 0 {
+		slog.Warn("agent missing expected endpoints", "endpoints", missing)
 	}
 }
