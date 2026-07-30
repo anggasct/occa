@@ -107,6 +107,12 @@ func (a *Adapter) downloadAttachments(msg *tgbotapi.Message) []channel.Attachmen
 		}
 	}
 
+	if msg.Voice != nil {
+		if att := a.downloadFile(msg.Voice.FileID, "voice.ogg", "audio/ogg"); att != nil {
+			attachments = append(attachments, *att)
+		}
+	}
+
 	if msg.Document != nil {
 		mime := msg.Document.MimeType
 		if mime == "" {
