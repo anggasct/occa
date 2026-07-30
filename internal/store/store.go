@@ -25,6 +25,7 @@ type Channel struct {
 type UserOverride struct {
 	ID        int64
 	ChannelID string
+	Platform  string
 	UserID    string
 	Role      string
 	Model     string
@@ -45,11 +46,15 @@ type ChannelRepo interface {
 	Upsert(ctx context.Context, ch *Channel) error
 }
 
+// OverrideRepo splits writes by field (UpsertRole, UpsertModel) rather than a single
+// full-row Upsert: role is admin-managed, model is self-service, and a combined write
+// would let one caller silently clobber the other's field.
 type OverrideRepo interface {
-	Get(ctx context.Context, channelID, userID string) (*UserOverride, error)
-	Upsert(ctx context.Context, o *UserOverride) error
-	Delete(ctx context.Context, channelID, userID string) error
-	ListByChannel(ctx context.Context, channelID string) ([]UserOverride, error)
+	Get(ctx context.Context, platform, channelID, userID string) (*UserOverride, error)
+	UpsertRole(ctx context.Context, platform, channelID, userID, role string) error
+	UpsertModel(ctx context.Context, platform, channelID, userID, model string) error
+	Delete(ctx context.Context, platform, channelID, userID string) error
+	ListByChannel(ctx context.Context, platform, channelID string) ([]UserOverride, error)
 }
 
 type Store interface {

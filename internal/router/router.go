@@ -61,7 +61,7 @@ func (r *Router) Route(ctx context.Context, msg channel.IncomingMessage) error {
 }
 
 func (r *Router) authorize(ctx context.Context, msg channel.IncomingMessage) error {
-	o, err := r.store.OverrideRepo().Get(ctx, msg.ChannelID, msg.UserID)
+	o, err := r.store.OverrideRepo().Get(ctx, msg.Platform, msg.ChannelID, msg.UserID)
 	if err != nil {
 		return fmt.Errorf("authorize: %w", err)
 	}
@@ -72,7 +72,7 @@ func (r *Router) authorize(ctx context.Context, msg channel.IncomingMessage) err
 }
 
 func (r *Router) isAdmin(ctx context.Context, msg channel.IncomingMessage) bool {
-	o, err := r.store.OverrideRepo().Get(ctx, msg.ChannelID, msg.UserID)
+	o, err := r.store.OverrideRepo().Get(ctx, msg.Platform, msg.ChannelID, msg.UserID)
 	if err != nil || o == nil {
 		return false
 	}
@@ -318,11 +318,7 @@ func (r *Router) handleAllow(ctx context.Context, msg channel.IncomingMessage, a
 	if userID == "" {
 		return "Usage: /occa:allow <user_id>", nil
 	}
-	err := r.store.OverrideRepo().Upsert(ctx, &store.UserOverride{
-		ChannelID: msg.ChannelID,
-		UserID:    userID,
-		Role:      "allow",
-	})
+	err := r.store.OverrideRepo().UpsertRole(ctx, msg.Platform, msg.ChannelID, userID, "allow")
 	if err != nil {
 		return "", fmt.Errorf("allow: %w", err)
 	}
@@ -335,12 +331,12 @@ func (r *Router) handleDeny(ctx context.Context, msg channel.IncomingMessage, ar
 		return "Usage: /occa:deny <user_id>", nil
 	}
 
-	o, err := r.store.OverrideRepo().Get(ctx, msg.ChannelID, userID)
+	o, err := r.store.OverrideRepo().Get(ctx, msg.Platform, msg.ChannelID, userID)
 	if err != nil {
 		return "", fmt.Errorf("deny: %w", err)
 	}
 	if o != nil && o.Role == "admin" {
-		admins, err := r.countAdmins(ctx, msg.ChannelID)
+		admins, err := r.countAdmins(ctx, msg.Platform, msg.ChannelID)
 		if err != nil {
 			return "", fmt.Errorf("deny: %w", err)
 		}
@@ -349,11 +345,7 @@ func (r *Router) handleDeny(ctx context.Context, msg channel.IncomingMessage, ar
 		}
 	}
 
-	err = r.store.OverrideRepo().Upsert(ctx, &store.UserOverride{
-		ChannelID: msg.ChannelID,
-		UserID:    userID,
-		Role:      "deny",
-	})
+	err = r.store.OverrideRepo().UpsertRole(ctx, msg.Platform, msg.ChannelID, userID, "deny")
 	if err != nil {
 		return "", fmt.Errorf("deny: %w", err)
 	}
@@ -365,19 +357,15 @@ func (r *Router) handleAdmin(ctx context.Context, msg channel.IncomingMessage, a
 	if userID == "" {
 		return "Usage: /occa:admin <user_id>", nil
 	}
-	err := r.store.OverrideRepo().Upsert(ctx, &store.UserOverride{
-		ChannelID: msg.ChannelID,
-		UserID:    userID,
-		Role:      "admin",
-	})
+	err := r.store.OverrideRepo().UpsertRole(ctx, msg.Platform, msg.ChannelID, userID, "admin")
 	if err != nil {
 		return "", fmt.Errorf("admin: %w", err)
 	}
 	return fmt.Sprintf("✅ Granted admin: %s", userID), nil
 }
 
-func (r *Router) countAdmins(ctx context.Context, channelID string) (int, error) {
-	overrides, err := r.store.OverrideRepo().ListByChannel(ctx, channelID)
+func (r *Router) countAdmins(ctx context.Context, platform, channelID string) (int, error) {
+	overrides, err := r.store.OverrideRepo().ListByChannel(ctx, platform, channelID)
 	if err != nil {
 		return 0, err
 	}
