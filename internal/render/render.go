@@ -16,8 +16,14 @@ const (
 	Discord
 )
 
+const (
+	TelegramLimit = 4096
+	DiscordLimit  = 2000
+)
+
 type Renderer interface {
 	Render(markdown string, p Platform) ([]string, error)
+	RenderWithLimit(markdown string, p Platform, limit int) ([]string, error)
 }
 
 type GoldmarkRenderer struct {
@@ -31,6 +37,14 @@ func New() *GoldmarkRenderer {
 }
 
 func (r *GoldmarkRenderer) Render(markdown string, p Platform) ([]string, error) {
+	limit := TelegramLimit
+	if p == Discord {
+		limit = DiscordLimit
+	}
+	return r.RenderWithLimit(markdown, p, limit)
+}
+
+func (r *GoldmarkRenderer) RenderWithLimit(markdown string, p Platform, limit int) ([]string, error) {
 	source := []byte(markdown)
 	reader := text.NewReader(source)
 	doc := r.md.Parser().Parse(reader)
@@ -41,11 +55,6 @@ func (r *GoldmarkRenderer) Render(markdown string, p Platform) ([]string, error)
 		output = renderTelegramHTML(doc, source)
 	case Discord:
 		output = renderDiscord(doc, source)
-	}
-
-	limit := 4096
-	if p == Discord {
-		limit = 2000
 	}
 
 	return splitRendered(output, limit), nil

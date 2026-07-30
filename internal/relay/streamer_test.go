@@ -2,6 +2,8 @@ package relay
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -11,15 +13,19 @@ import (
 )
 
 type fakeReplyContext struct {
-	mu    sync.Mutex
-	sends []string
-	edits []string
-	ref   channel.MessageRef
+	mu       sync.Mutex
+	sends    []string
+	edits    map[string][]string
+	refCount int
 }
 
 type fakeRef struct{ id string }
 
 func (f fakeRef) ID() string { return f.id }
+
+func newFakeReplyContext() *fakeReplyContext {
+	return &fakeReplyContext{edits: make(map[string][]string)}
+}
 
 func (f *fakeReplyContext) SendTyping() error { return nil }
 
@@ -27,22 +33,25 @@ func (f *fakeReplyContext) Send(text string) (channel.MessageRef, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sends = append(f.sends, text)
-	f.ref = fakeRef{id: "msg-1"}
-	return f.ref, nil
+	f.refCount++
+	return fakeRef{id: fmt.Sprintf("msg-%d", f.refCount)}, nil
 }
 
 func (f *fakeReplyContext) Edit(ref channel.MessageRef, text string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.edits = append(f.edits, text)
+	f.edits[ref.ID()] = append(f.edits[ref.ID()], text)
 	return nil
 }
 
 func (f *fakeReplyContext) lastOutput() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.edits) > 0 {
-		return f.edits[len(f.edits)-1]
+	for id := f.refCount; id >= 1; id-- {
+		key := fmt.Sprintf("msg-%d", id)
+		if e := f.edits[key]; len(e) > 0 {
+			return e[len(e)-1]
+		}
 	}
 	if len(f.sends) > 0 {
 		return f.sends[len(f.sends)-1]
@@ -50,8 +59,29 @@ func (f *fakeReplyContext) lastOutput() string {
 	return ""
 }
 
+func (f *fakeReplyContext) finalMessages() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var result []string
+	for i := 1; i <= f.refCount; i++ {
+		key := fmt.Sprintf("msg-%d", i)
+		if e := f.edits[key]; len(e) > 0 {
+			result = append(result, e[len(e)-1])
+		} else if i <= len(f.sends) {
+			result = append(result, f.sends[i-1])
+		}
+	}
+	return result
+}
+
+func (f *fakeReplyContext) editCountFor(refID string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.edits[refID])
+}
+
 func TestStreamerFinalEdit(t *testing.T) {
-	reply := &fakeReplyContext{}
+	reply := newFakeReplyContext()
 	renderer := render.New()
 	s := NewStreamer(reply, renderer, render.Telegram)
 
@@ -74,7 +104,7 @@ func TestStreamerFinalEdit(t *testing.T) {
 }
 
 func TestStreamerUnchangedBufferSkipsEdit(t *testing.T) {
-	reply := &fakeReplyContext{}
+	reply := newFakeReplyContext()
 	renderer := render.New()
 	s := NewStreamer(reply, renderer, render.Telegram)
 
@@ -89,7 +119,7 @@ func TestStreamerUnchangedBufferSkipsEdit(t *testing.T) {
 	}
 
 	reply.mu.Lock()
-	totalEdits := len(reply.edits)
+	totalEdits := len(reply.edits["msg-1"])
 	reply.mu.Unlock()
 
 	if totalEdits > 1 {
@@ -98,7 +128,7 @@ func TestStreamerUnchangedBufferSkipsEdit(t *testing.T) {
 }
 
 func TestStreamerChannelClosed(t *testing.T) {
-	reply := &fakeReplyContext{}
+	reply := newFakeReplyContext()
 	renderer := render.New()
 	s := NewStreamer(reply, renderer, render.Telegram)
 
@@ -112,7 +142,7 @@ func TestStreamerChannelClosed(t *testing.T) {
 }
 
 func TestStreamerContextCancel(t *testing.T) {
-	reply := &fakeReplyContext{}
+	reply := newFakeReplyContext()
 	renderer := render.New()
 	s := NewStreamer(reply, renderer, render.Telegram)
 
@@ -131,7 +161,7 @@ func TestStreamerContextCancel(t *testing.T) {
 }
 
 func TestStreamerErrorEvent(t *testing.T) {
-	reply := &fakeReplyContext{}
+	reply := newFakeReplyContext()
 	renderer := render.New()
 	s := NewStreamer(reply, renderer, render.Telegram)
 
@@ -155,5 +185,154 @@ func TestStreamerErrorEvent(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected error message in sends, got: %v", reply.sends)
+	}
+}
+
+func TestStreamerMultiMessageOverflow(t *testing.T) {
+	reply := newFakeReplyContext()
+	renderer := render.New()
+	s := NewStreamer(reply, renderer, render.Telegram)
+
+	paras := make([]string, 60)
+	for i := range paras {
+		paras[i] = fmt.Sprintf("paragraph-%d %s", i, strings.Repeat("word ", 30))
+	}
+	longContent := strings.Join(paras, "\n\n")
+
+	events := make(chan Event, 10)
+	events <- Event{Type: "delta", Delta: longContent}
+	events <- Event{Type: "done"}
+	close(events)
+
+	err := s.Run(context.Background(), events)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	msgs := reply.finalMessages()
+	if len(msgs) < 2 {
+		t.Fatalf("AC-01: expected multiple messages, got %d", len(msgs))
+	}
+
+	for i, msg := range msgs {
+		if len(msg) > render.TelegramLimit {
+			t.Fatalf("AC-03: message %d exceeds limit: %d > %d", i, len(msg), render.TelegramLimit)
+		}
+	}
+
+	for i := 1; i < len(msgs); i++ {
+		if !strings.HasPrefix(msgs[i], continuationMarker) {
+			t.Fatalf("AC-02: message %d missing continuation marker, got prefix: %q", i, msgs[i][:min(40, len(msgs[i]))])
+		}
+	}
+
+	var reconstructed strings.Builder
+	for i, msg := range msgs {
+		if i > 0 {
+			reconstructed.WriteString(strings.TrimPrefix(msg, continuationMarker))
+		} else {
+			reconstructed.WriteString(msg)
+		}
+	}
+	full := reconstructed.String()
+	if !strings.Contains(full, "paragraph-0") {
+		t.Fatalf("AC-01: reconstructed content missing first paragraph")
+	}
+	if !strings.Contains(full, fmt.Sprintf("paragraph-%d", len(paras)-1)) {
+		t.Fatalf("AC-01: reconstructed content missing last paragraph")
+	}
+}
+
+func TestStreamerSingleMessageNoMarker(t *testing.T) {
+	reply := newFakeReplyContext()
+	renderer := render.New()
+	s := NewStreamer(reply, renderer, render.Telegram)
+
+	events := make(chan Event, 10)
+	events <- Event{Type: "delta", Delta: "Short response"}
+	events <- Event{Type: "done"}
+	close(events)
+
+	err := s.Run(context.Background(), events)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	msgs := reply.finalMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("AC-05: expected exactly 1 message, got %d", len(msgs))
+	}
+	if strings.Contains(msgs[0], continuationMarker) {
+		t.Fatalf("AC-05: single message should not have continuation marker")
+	}
+	if msgs[0] != "Short response" {
+		t.Fatalf("AC-05: expected 'Short response', got %q", msgs[0])
+	}
+}
+
+func TestStreamerOnlyLastChunkEdited(t *testing.T) {
+	reply := newFakeReplyContext()
+	renderer := render.New()
+	s := NewStreamer(reply, renderer, render.Telegram)
+
+	paras := make([]string, 60)
+	for i := range paras {
+		paras[i] = strings.Repeat("word ", 30)
+	}
+	longContent := strings.Join(paras, "\n\n")
+
+	events := make(chan Event, 10)
+	events <- Event{Type: "delta", Delta: longContent[:len(longContent)/2]}
+	events <- Event{Type: "delta", Delta: longContent[len(longContent)/2:]}
+	events <- Event{Type: "done"}
+	close(events)
+
+	err := s.Run(context.Background(), events)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	msgs := reply.finalMessages()
+	if len(msgs) < 2 {
+		t.Skip("content did not overflow, cannot test AC-04")
+	}
+
+	for i := 1; i < len(msgs)-1; i++ {
+		refID := fmt.Sprintf("msg-%d", i)
+		if reply.editCountFor(refID) > 0 {
+			t.Fatalf("AC-04: sealed message %d was edited %d times", i, reply.editCountFor(refID))
+		}
+	}
+}
+
+func TestStreamerFinalEditReconciles(t *testing.T) {
+	reply := newFakeReplyContext()
+	renderer := render.New()
+	s := NewStreamer(reply, renderer, render.Telegram)
+
+	paras := make([]string, 60)
+	for i := range paras {
+		paras[i] = strings.Repeat("word ", 30)
+	}
+	longContent := strings.Join(paras, "\n\n")
+
+	events := make(chan Event, 10)
+	events <- Event{Type: "delta", Delta: longContent}
+	events <- Event{Type: "done"}
+	close(events)
+
+	err := s.Run(context.Background(), events)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	msgs := reply.finalMessages()
+	if len(msgs) < 2 {
+		t.Fatalf("AC-06: expected multiple messages for final content, got %d", len(msgs))
+	}
+
+	expectedChunks, _ := renderer.Render(longContent, render.Telegram)
+	if len(msgs) != len(expectedChunks) {
+		t.Fatalf("AC-06: final message count %d != expected chunk count %d", len(msgs), len(expectedChunks))
 	}
 }

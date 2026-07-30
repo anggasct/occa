@@ -12,6 +12,11 @@ import (
 
 const noEventTimeout = 10 * time.Minute
 
+const (
+	continuationReserve = 64
+	continuationMarker  = "↪️ *(continued)*\n\n"
+)
+
 type Streamer struct {
 	reply    channel.ReplyContext
 	renderer render.Renderer
@@ -28,8 +33,8 @@ func NewStreamer(reply channel.ReplyContext, renderer render.Renderer, platform 
 
 func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 	var buf strings.Builder
-	var lastRendered string
-	var ref channel.MessageRef
+	var refs []channel.MessageRef
+	var lastChunks []string
 
 	intervals := []time.Duration{500 * time.Millisecond, 1 * time.Second, 2 * time.Second, 3 * time.Second}
 	intervalIdx := 0
@@ -53,7 +58,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 
 		case ev, ok := <-events:
 			if !ok {
-				return s.finalEdit(ref, buf.String(), lastRendered)
+				return s.finalSync(&refs, &lastChunks, buf.String())
 			}
 
 			timeoutTimer.Reset(noEventTimeout)
@@ -63,7 +68,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				buf.WriteString(ev.Delta)
 				dirty = true
 			case "done":
-				return s.finalEdit(ref, buf.String(), lastRendered)
+				return s.finalSync(&refs, &lastChunks, buf.String())
 			case "error":
 				s.reply.Send("⚠️ Agent error: " + ev.Delta)
 				return nil
@@ -72,20 +77,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 		case <-timer.C:
 			if dirty {
 				dirty = false
-				rendered := s.renderContent(buf.String())
-				if rendered != lastRendered {
-					var err error
-					if ref == nil {
-						ref, err = s.reply.Send(rendered)
-					} else {
-						err = s.reply.Edit(ref, rendered)
-					}
-					if err != nil {
-						slog.Warn("streaming: edit failed", "error", err)
-					} else {
-						lastRendered = rendered
-					}
-				}
+				s.syncMessages(&refs, &lastChunks, buf.String())
 			}
 
 			if intervalIdx < len(intervals)-1 {
@@ -96,22 +88,80 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 	}
 }
 
-func (s *Streamer) finalEdit(ref channel.MessageRef, raw, lastRendered string) error {
-	rendered := s.renderContent(raw)
-	if rendered == lastRendered {
-		return nil
+func (s *Streamer) renderChunks(raw string) []string {
+	limit := render.TelegramLimit
+	if s.platform == render.Discord {
+		limit = render.DiscordLimit
 	}
-	if ref == nil {
-		_, err := s.reply.Send(rendered)
-		return err
-	}
-	return s.reply.Edit(ref, rendered)
-}
 
-func (s *Streamer) renderContent(raw string) string {
 	chunks, err := s.renderer.Render(raw, s.platform)
 	if err != nil || len(chunks) == 0 {
-		return raw
+		return []string{raw}
 	}
-	return chunks[0]
+
+	if len(chunks) == 1 {
+		return chunks
+	}
+
+	chunks, err = s.renderer.RenderWithLimit(raw, s.platform, limit-continuationReserve)
+	if err != nil || len(chunks) == 0 {
+		return []string{raw}
+	}
+
+	for i := 1; i < len(chunks); i++ {
+		chunks[i] = continuationMarker + chunks[i]
+	}
+	return chunks
+}
+
+func (s *Streamer) syncMessages(refs *[]channel.MessageRef, lastChunks *[]string, raw string) {
+	chunks := s.renderChunks(raw)
+
+	if len(chunks) > 1 {
+		slog.Debug("streaming: multi-message response", "chunks", len(chunks))
+	}
+
+	for i, chunk := range chunks {
+		if i < len(*refs) {
+			if i == len(chunks)-1 {
+				if i >= len(*lastChunks) || (*lastChunks)[i] != chunk {
+					if err := s.reply.Edit((*refs)[i], chunk); err != nil {
+						slog.Warn("streaming: edit failed", "error", err, "chunk", i)
+					}
+				}
+			}
+		} else {
+			ref, err := s.reply.Send(chunk)
+			if err != nil {
+				slog.Warn("streaming: send failed", "error", err, "chunk", i)
+				break
+			}
+			*refs = append(*refs, ref)
+		}
+	}
+
+	*lastChunks = chunks
+}
+
+func (s *Streamer) finalSync(refs *[]channel.MessageRef, lastChunks *[]string, raw string) error {
+	chunks := s.renderChunks(raw)
+
+	for i, chunk := range chunks {
+		if i < len(*refs) {
+			if i >= len(*lastChunks) || (*lastChunks)[i] != chunk {
+				if err := s.reply.Edit((*refs)[i], chunk); err != nil {
+					return err
+				}
+			}
+		} else {
+			ref, err := s.reply.Send(chunk)
+			if err != nil {
+				return err
+			}
+			*refs = append(*refs, ref)
+		}
+	}
+
+	*lastChunks = chunks
+	return nil
 }
