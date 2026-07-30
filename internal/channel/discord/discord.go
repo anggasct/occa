@@ -115,8 +115,26 @@ func (a *Adapter) normalizeMessage(m *discordgo.Message) channel.IncomingMessage
 		UserID:    m.Author.ID,
 		Text:      m.Content,
 		IsMention: isMention,
+		IsThread:  a.isThreadChannel(m.ChannelID),
 		ReplyCtx:  &replyContext{session: a.session, channelID: m.ChannelID},
 	}
+}
+
+func (a *Adapter) isThreadChannel(channelID string) bool {
+	ch, err := a.session.State.Channel(channelID)
+	if err != nil {
+		ch, err = a.session.Channel(channelID)
+		if err != nil {
+			return false
+		}
+	}
+	switch ch.Type {
+	case discordgo.ChannelTypeGuildPublicThread,
+		discordgo.ChannelTypeGuildPrivateThread,
+		discordgo.ChannelTypeGuildNewsThread:
+		return true
+	}
+	return false
 }
 
 type replyContext struct {

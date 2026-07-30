@@ -60,7 +60,28 @@ func (r *Router) Route(ctx context.Context, msg channel.IncomingMessage) error {
 		msg.ReplyCtx.Send("⚠️ Access denied. Ask an admin to /occa:allow you.")
 		return nil
 	}
+
+	if !r.listenModeAllows(ctx, msg) {
+		return nil
+	}
+
 	return r.passthrough(ctx, msg)
+}
+
+func (r *Router) listenModeAllows(ctx context.Context, msg channel.IncomingMessage) bool {
+	ch, err := r.store.ChannelRepo().Get(ctx, msg.Platform, msg.ChannelID)
+	if err != nil || ch == nil {
+		return msg.IsMention
+	}
+
+	switch ch.ListenMode {
+	case "all":
+		return true
+	case "thread":
+		return msg.IsThread || msg.IsMention
+	default:
+		return msg.IsMention
+	}
 }
 
 func (r *Router) ensureAdminBootstrap(ctx context.Context, msg channel.IncomingMessage) {
