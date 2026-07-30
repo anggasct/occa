@@ -128,9 +128,6 @@ func (a *Adapter) normalizeMessage(m *discordgo.Message) channel.IncomingMessage
 func (a *Adapter) downloadAttachments(m *discordgo.Message) []channel.Attachment {
 	var attachments []channel.Attachment
 	for _, da := range m.Attachments {
-		if da.Size > maxDownloadSize {
-			continue
-		}
 		resp, err := http.Get(da.URL)
 		if err != nil {
 			slog.Warn("discord: download attachment failed", "filename", da.Filename, "error", err)
@@ -138,8 +135,8 @@ func (a *Adapter) downloadAttachments(m *discordgo.Message) []channel.Attachment
 		}
 		data, err := io.ReadAll(io.LimitReader(resp.Body, maxDownloadSize+1))
 		resp.Body.Close()
-		if err != nil || len(data) > maxDownloadSize {
-			slog.Warn("discord: attachment too large or read failed", "filename", da.Filename)
+		if err != nil {
+			slog.Warn("discord: read attachment failed", "filename", da.Filename, "error", err)
 			continue
 		}
 		mime := da.ContentType

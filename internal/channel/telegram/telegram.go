@@ -102,18 +102,12 @@ func (a *Adapter) downloadAttachments(msg *tgbotapi.Message) []channel.Attachmen
 
 	if len(msg.Photo) > 0 {
 		photo := msg.Photo[len(msg.Photo)-1]
-		if photo.FileSize > 0 && photo.FileSize > maxDownloadSize {
-			return nil
-		}
 		if att := a.downloadFile(photo.FileID, "photo.jpg", "image/jpeg"); att != nil {
 			attachments = append(attachments, *att)
 		}
 	}
 
 	if msg.Document != nil {
-		if msg.Document.FileSize > 0 && msg.Document.FileSize > maxDownloadSize {
-			return attachments
-		}
 		mime := msg.Document.MimeType
 		if mime == "" {
 			mime = "application/octet-stream"
@@ -150,10 +144,6 @@ func (a *Adapter) downloadFile(fileID, filename, mimeType string) *channel.Attac
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxDownloadSize+1))
 	if err != nil {
 		slog.Warn("telegram: read file failed", "file_id", fileID, "error", err)
-		return nil
-	}
-	if len(data) > maxDownloadSize {
-		slog.Warn("telegram: file too large, skipping", "file_id", fileID, "size", len(data))
 		return nil
 	}
 
