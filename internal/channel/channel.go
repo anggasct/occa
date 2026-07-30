@@ -8,20 +8,28 @@ type Attachment struct {
 	Data     []byte
 }
 
+type Button struct {
+	Label string
+	Value string
+}
+
 type IncomingMessage struct {
-	Platform    string
-	ChannelID   string
-	UserID      string
-	Text        string
-	IsMention   bool
-	IsThread    bool
-	Attachments []Attachment
-	ReplyCtx    ReplyContext
+	Platform     string
+	ChannelID    string
+	UserID       string
+	Text         string
+	IsMention    bool
+	IsThread     bool
+	IsCallback   bool
+	CallbackData string
+	Attachments  []Attachment
+	ReplyCtx     ReplyContext
 }
 
 type ReplyContext interface {
 	SendTyping() error
 	Send(text string) (MessageRef, error)
+	SendWithButtons(text string, buttons []Button) (MessageRef, error)
 	Edit(ref MessageRef, text string) error
 }
 

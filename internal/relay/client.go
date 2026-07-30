@@ -31,9 +31,25 @@ type Attachment struct {
 }
 
 type Event struct {
-	Type  string
-	Delta string
+	Type       string
+	Delta      string
+	Permission *PermissionRequest
 }
+
+type PermissionRequest struct {
+	ID         string
+	SessionID  string
+	Permission string
+	Tool       string
+}
+
+type PermissionReply string
+
+const (
+	PermissionOnce   PermissionReply = "once"
+	PermissionAlways PermissionReply = "always"
+	PermissionReject PermissionReply = "reject"
+)
 
 type Client interface {
 	CreateSession(ctx context.Context) (string, error)
@@ -119,6 +135,26 @@ func (c *HTTPClient) RunCommand(ctx context.Context, sessionID, command string) 
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusAccepted {
 		return fmt.Errorf("relay: run command: unexpected status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (c *HTTPClient) ReplyPermission(ctx context.Context, requestID string, reply PermissionReply) error {
+	payload := map[string]string{"reply": string(reply)}
+	resp, err := c.post(ctx, "/permission/"+requestID+"/reply", payload)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		return fmt.Errorf("relay: reply permission: drain body: %w", err)
+	}
+
+	if resp.StatusCode == http.StatusNotFound {
+		return ErrNotFound
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusAccepted {
+		return fmt.Errorf("relay: reply permission: unexpected status %d", resp.StatusCode)
 	}
 	return nil
 }

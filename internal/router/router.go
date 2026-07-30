@@ -52,6 +52,10 @@ func New(instances InstanceProvider, st store.Store, defaultWorkdir string, admi
 }
 
 func (r *Router) Route(ctx context.Context, msg channel.IncomingMessage) error {
+	if msg.IsCallback {
+		return r.handleCallback(ctx, msg)
+	}
+
 	if strings.HasPrefix(msg.Text, "/occa:") {
 		return r.handleCommand(ctx, msg)
 	}

@@ -45,6 +45,11 @@ func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessag
 	}()
 
 	for update := range updates {
+		if update.CallbackQuery != nil {
+			msg := a.normalizeCallback(update)
+			handler(msg)
+			continue
+		}
 		if update.Message == nil {
 			continue
 		}
@@ -94,6 +99,25 @@ func (a *Adapter) normalize(update tgbotapi.Update) channel.IncomingMessage {
 		IsMention:   isMention,
 		Attachments: a.downloadAttachments(msg),
 		ReplyCtx:    &replyContext{bot: a.bot, chatID: msg.Chat.ID},
+	}
+}
+
+func (a *Adapter) normalizeCallback(update tgbotapi.Update) channel.IncomingMessage {
+	cb := update.CallbackQuery
+	chatID := fmt.Sprintf("%d", cb.Message.Chat.ID)
+	userID := fmt.Sprintf("%d", cb.From.ID)
+
+	callback := tgbotapi.NewCallback(cb.ID, "")
+	a.bot.Request(callback)
+
+	return channel.IncomingMessage{
+		Platform:     "telegram",
+		ChannelID:    chatID,
+		UserID:       userID,
+		IsCallback:   true,
+		CallbackData: cb.Data,
+		IsMention:    true,
+		ReplyCtx:     &replyContext{bot: a.bot, chatID: cb.Message.Chat.ID},
 	}
 }
 
@@ -186,6 +210,25 @@ func (rc *replyContext) Send(text string) (channel.MessageRef, error) {
 		lastRef = messageRef{id: fmt.Sprintf("%d", sent.MessageID)}
 	}
 	return lastRef, nil
+}
+
+func (rc *replyContext) SendWithButtons(text string, buttons []channel.Button) (channel.MessageRef, error) {
+	msg := tgbotapi.NewMessage(rc.chatID, text)
+	msg.ParseMode = "HTML"
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for _, b := range buttons {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(b.Label, b.Value),
+		))
+	}
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(rows...)
+
+	sent, err := rc.sendWithRetry(msg)
+	if err != nil {
+		return nil, fmt.Errorf("telegram: send with buttons: %w", err)
+	}
+	return messageRef{id: fmt.Sprintf("%d", sent.MessageID)}, nil
 }
 
 func (rc *replyContext) Edit(ref channel.MessageRef, text string) error {
