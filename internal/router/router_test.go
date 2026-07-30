@@ -610,3 +610,74 @@ func TestBootstrapAdminDoesNotWeakenDenyForOthers(t *testing.T) {
 		t.Fatalf("expected access denied, got %v", reply.sends)
 	}
 }
+
+func TestListenModeEnforcement(t *testing.T) {
+	tests := []struct {
+		name       string
+		listenMode string
+		isMention  bool
+		isThread   bool
+		isCommand  bool
+		wantFwd    bool
+	}{
+		{"mention mode, no mention", "mention", false, false, false, false},
+		{"mention mode, with mention", "mention", true, false, false, true},
+		{"all mode, no mention", "all", false, false, false, true},
+		{"all mode, with mention", "all", true, false, false, true},
+		{"thread mode, in thread", "thread", false, true, false, true},
+		{"thread mode, not thread no mention", "thread", false, false, false, false},
+		{"thread mode, not thread with mention", "thread", true, false, false, true},
+		{"no channel row defaults to mention, no mention", "", false, false, false, false},
+		{"no channel row defaults to mention, with mention", "", true, false, false, true},
+		{"command bypasses listen mode", "mention", false, false, true, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, client, reply, overrideRepo := newTestRouterWithAccess()
+			overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{
+				ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+			}
+
+			if tt.listenMode != "" {
+				st := r.store.(*fakeStore)
+				st.channelRepo.channels["telegram:chat1"] = &store.Channel{
+					ChannelID:  "chat1",
+					Platform:   "telegram",
+					ListenMode: tt.listenMode,
+				}
+			}
+
+			text := "hello"
+			if tt.isCommand {
+				text = "/occa:help"
+			}
+
+			m := channel.IncomingMessage{
+				Platform:  "telegram",
+				ChannelID: "chat1",
+				UserID:    "user1",
+				Text:      text,
+				IsMention: tt.isMention,
+				IsThread:  tt.isThread,
+				ReplyCtx:  reply,
+			}
+
+			if err := r.Route(context.Background(), m); err != nil {
+				t.Fatalf("Route: %v", err)
+			}
+
+			if tt.isCommand {
+				if len(reply.sends) == 0 {
+					t.Fatal("expected command response")
+				}
+				return
+			}
+
+			gotFwd := client.lastMsg != ""
+			if gotFwd != tt.wantFwd {
+				t.Fatalf("forwarded = %v, want %v", gotFwd, tt.wantFwd)
+			}
+		})
+	}
+}

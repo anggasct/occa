@@ -8,6 +8,7 @@ type IncomingMessage struct {
 	UserID    string
 	Text      string
 	IsMention bool
+	IsThread  bool
 	ReplyCtx  ReplyContext
 }
 
