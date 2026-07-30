@@ -173,6 +173,44 @@ func TestChannelUpsert(t *testing.T) {
 	}
 }
 
+func TestChannelWorkdir(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+
+	// No workdir set → reads back empty.
+	if err := s.ChannelRepo().Upsert(ctx, &Channel{
+		ChannelID:  "chat1",
+		Platform:   "telegram",
+		ListenMode: "mention",
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	ch, err := s.ChannelRepo().Get(ctx, "telegram", "chat1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if ch.Workdir != "" {
+		t.Fatalf("expected empty workdir, got %q", ch.Workdir)
+	}
+
+	// Set workdir → round-trips.
+	if err := s.ChannelRepo().Upsert(ctx, &Channel{
+		ChannelID:  "chat1",
+		Platform:   "telegram",
+		ListenMode: "mention",
+		Workdir:    "/repo/api",
+	}); err != nil {
+		t.Fatalf("Upsert workdir: %v", err)
+	}
+	ch, err = s.ChannelRepo().Get(ctx, "telegram", "chat1")
+	if err != nil {
+		t.Fatalf("Get after workdir: %v", err)
+	}
+	if ch.Workdir != "/repo/api" {
+		t.Fatalf("workdir = %q, want /repo/api", ch.Workdir)
+	}
+}
+
 func TestOverrideCRUD(t *testing.T) {
 	s := tempStore(t)
 	ctx := context.Background()

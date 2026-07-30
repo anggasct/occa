@@ -66,6 +66,17 @@ func (r *sqliteSessionRepo) SetActive(ctx context.Context, platform, channelID, 
 	return tx.Commit()
 }
 
+func (r *sqliteSessionRepo) Deactivate(ctx context.Context, platform, channelID string) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE session SET active = 0, updated_at = ? WHERE platform = ? AND channel_id = ? AND active = 1`,
+		time.Now().Unix(), platform, channelID,
+	)
+	if err != nil {
+		return fmt.Errorf("store: session deactivate: %w", err)
+	}
+	return nil
+}
+
 func (r *sqliteSessionRepo) List(ctx context.Context, platform, channelID string) ([]Session, error) {
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT id, channel_id, platform, agent_session_id, active, created_at, updated_at FROM session WHERE platform = ? AND channel_id = ? ORDER BY created_at DESC`,

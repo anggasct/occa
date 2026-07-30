@@ -26,6 +26,11 @@ func (m *mockSessionRepo) SetActive(_ context.Context, platform, channelID, sess
 	return nil
 }
 
+func (m *mockSessionRepo) Deactivate(_ context.Context, platform, channelID string) error {
+	m.activeID = ""
+	return nil
+}
+
 func (m *mockSessionRepo) List(_ context.Context, platform, channelID string) ([]store.Session, error) {
 	return nil, nil
 }
