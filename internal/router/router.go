@@ -162,6 +162,7 @@ func (r *Router) registerDefaults() {
 	}
 	r.commands["dir"] = Command{
 		Name:    "dir",
+		Admin:   true,
 		Handler: r.handleDir,
 	}
 	r.commands["allow"] = Command{

@@ -416,6 +416,19 @@ func TestPerChannelScoping(t *testing.T) {
 	}
 }
 
+func TestNonAdminCannotSetDir(t *testing.T) {
+	r, _, reply, overrideRepo := newTestRouterWithAccess()
+	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow"}
+
+	err := r.Route(context.Background(), msg("/occa:dir "+t.TempDir(), reply))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Admin access required") {
+		t.Fatalf("expected admin required, got: %v", reply.sends)
+	}
+}
+
 func TestDirSetAndView(t *testing.T) {
 	r, _, reply := newTestRouter()
 	dir := t.TempDir()
@@ -464,6 +477,10 @@ func TestDirThreadIsolation(t *testing.T) {
 	r, _, _ := newTestRouter()
 	st := r.store.(*fakeStore)
 	dir := t.TempDir()
+
+	// Access control has no thread-inherits-parent fallback — an admin needs their own
+	// override row scoped to the thread's own channel_id.
+	st.overrideRepo.overrides["telegram:thread1:user1"] = &store.UserOverride{ChannelID: "thread1", Platform: "telegram", UserID: "user1", Role: "admin"}
 
 	reply := &fakeReplyCtx{}
 	if err := r.Route(context.Background(), msgIn("thread1", "/occa:dir "+dir, reply)); err != nil {
