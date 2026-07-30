@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/anggasct/occa/internal/channel"
@@ -35,14 +36,16 @@ type Router struct {
 	instances      InstanceProvider
 	store          store.Store
 	defaultWorkdir string
+	adminID        string
 }
 
-func New(instances InstanceProvider, st store.Store, defaultWorkdir string) *Router {
+func New(instances InstanceProvider, st store.Store, defaultWorkdir string, adminID string) *Router {
 	r := &Router{
 		commands:       make(map[string]Command),
 		instances:      instances,
 		store:          st,
 		defaultWorkdir: defaultWorkdir,
+		adminID:        adminID,
 	}
 	r.registerDefaults()
 	return r
@@ -60,7 +63,29 @@ func (r *Router) Route(ctx context.Context, msg channel.IncomingMessage) error {
 	return r.passthrough(ctx, msg)
 }
 
+func (r *Router) ensureAdminBootstrap(ctx context.Context, msg channel.IncomingMessage) {
+	if r.adminID == "" || msg.UserID != r.adminID {
+		return
+	}
+	o, err := r.store.OverrideRepo().Get(ctx, msg.Platform, msg.ChannelID, msg.UserID)
+	if err != nil {
+		slog.Error("failed to check override for admin bootstrap", "error", err)
+		return
+	}
+	if o == nil || o.Role != "admin" {
+		if err := r.store.OverrideRepo().UpsertRole(ctx, msg.Platform, msg.ChannelID, msg.UserID, "admin"); err != nil {
+			slog.Error("failed to bootstrap admin role", "error", err)
+			return
+		}
+		slog.Info("bootstrapped admin role for channel", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID)
+	}
+}
+
 func (r *Router) authorize(ctx context.Context, msg channel.IncomingMessage) error {
+	if r.adminID != "" && msg.UserID == r.adminID {
+		r.ensureAdminBootstrap(ctx, msg)
+		return nil
+	}
 	o, err := r.store.OverrideRepo().Get(ctx, msg.Platform, msg.ChannelID, msg.UserID)
 	if err != nil {
 		return fmt.Errorf("authorize: %w", err)
@@ -72,6 +97,10 @@ func (r *Router) authorize(ctx context.Context, msg channel.IncomingMessage) err
 }
 
 func (r *Router) isAdmin(ctx context.Context, msg channel.IncomingMessage) bool {
+	if r.adminID != "" && msg.UserID == r.adminID {
+		r.ensureAdminBootstrap(ctx, msg)
+		return true
+	}
 	o, err := r.store.OverrideRepo().Get(ctx, msg.Platform, msg.ChannelID, msg.UserID)
 	if err != nil || o == nil {
 		return false
