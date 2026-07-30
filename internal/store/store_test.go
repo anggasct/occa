@@ -177,7 +177,7 @@ func TestOverrideCRUD(t *testing.T) {
 	s := tempStore(t)
 	ctx := context.Background()
 
-	o, err := s.OverrideRepo().Get(ctx, "chat1", "user1")
+	o, err := s.OverrideRepo().Get(ctx, "telegram", "chat1", "user1")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -185,17 +185,14 @@ func TestOverrideCRUD(t *testing.T) {
 		t.Fatal("expected nil for missing override")
 	}
 
-	err = s.OverrideRepo().Upsert(ctx, &UserOverride{
-		ChannelID: "chat1",
-		UserID:    "user1",
-		Role:      "allow",
-		Model:     "gpt-4",
-	})
-	if err != nil {
-		t.Fatalf("Upsert: %v", err)
+	if err := s.OverrideRepo().UpsertRole(ctx, "telegram", "chat1", "user1", "allow"); err != nil {
+		t.Fatalf("UpsertRole: %v", err)
+	}
+	if err := s.OverrideRepo().UpsertModel(ctx, "telegram", "chat1", "user1", "gpt-4"); err != nil {
+		t.Fatalf("UpsertModel: %v", err)
 	}
 
-	o, err = s.OverrideRepo().Get(ctx, "chat1", "user1")
+	o, err = s.OverrideRepo().Get(ctx, "telegram", "chat1", "user1")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -203,24 +200,22 @@ func TestOverrideCRUD(t *testing.T) {
 		t.Fatalf("unexpected override: %+v", o)
 	}
 
-	err = s.OverrideRepo().Upsert(ctx, &UserOverride{
-		ChannelID: "chat1",
-		UserID:    "user1",
-		Role:      "admin",
-	})
-	if err != nil {
-		t.Fatalf("Upsert update: %v", err)
+	if err := s.OverrideRepo().UpsertRole(ctx, "telegram", "chat1", "user1", "admin"); err != nil {
+		t.Fatalf("UpsertRole update: %v", err)
 	}
 
-	o, err = s.OverrideRepo().Get(ctx, "chat1", "user1")
+	o, err = s.OverrideRepo().Get(ctx, "telegram", "chat1", "user1")
 	if err != nil {
 		t.Fatalf("Get after update: %v", err)
 	}
 	if o.Role != "admin" {
 		t.Fatalf("expected admin, got %q", o.Role)
 	}
+	if o.Model != "gpt-4" {
+		t.Fatalf("expected model untouched by UpsertRole, got %q", o.Model)
+	}
 
-	list, err := s.OverrideRepo().ListByChannel(ctx, "chat1")
+	list, err := s.OverrideRepo().ListByChannel(ctx, "telegram", "chat1")
 	if err != nil {
 		t.Fatalf("ListByChannel: %v", err)
 	}
@@ -228,15 +223,69 @@ func TestOverrideCRUD(t *testing.T) {
 		t.Fatalf("expected 1 override, got %d", len(list))
 	}
 
-	if err := s.OverrideRepo().Delete(ctx, "chat1", "user1"); err != nil {
+	if err := s.OverrideRepo().Delete(ctx, "telegram", "chat1", "user1"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 
-	o, err = s.OverrideRepo().Get(ctx, "chat1", "user1")
+	o, err = s.OverrideRepo().Get(ctx, "telegram", "chat1", "user1")
 	if err != nil {
 		t.Fatalf("Get after delete: %v", err)
 	}
 	if o != nil {
 		t.Fatal("expected nil after delete")
+	}
+}
+
+func TestOverrideUpsertDoesNotClobberOtherField(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+
+	if err := s.OverrideRepo().UpsertModel(ctx, "telegram", "chat1", "user1", "gpt-4"); err != nil {
+		t.Fatalf("UpsertModel: %v", err)
+	}
+	if err := s.OverrideRepo().UpsertRole(ctx, "telegram", "chat1", "user1", "admin"); err != nil {
+		t.Fatalf("UpsertRole: %v", err)
+	}
+
+	o, err := s.OverrideRepo().Get(ctx, "telegram", "chat1", "user1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if o.Role != "admin" || o.Model != "gpt-4" {
+		t.Fatalf("expected role/model to coexist without clobbering, got: %+v", o)
+	}
+}
+
+func TestOverrideUpsertModelDefaultsRoleToDeny(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+
+	if err := s.OverrideRepo().UpsertModel(ctx, "telegram", "chat1", "user1", "gpt-4"); err != nil {
+		t.Fatalf("UpsertModel: %v", err)
+	}
+
+	o, err := s.OverrideRepo().Get(ctx, "telegram", "chat1", "user1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if o.Role != "deny" {
+		t.Fatalf("expected a model-only write to default role to deny, got %q", o.Role)
+	}
+}
+
+func TestOverridePlatformScoping(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+
+	if err := s.OverrideRepo().UpsertRole(ctx, "telegram", "same-id", "user1", "admin"); err != nil {
+		t.Fatalf("UpsertRole telegram: %v", err)
+	}
+
+	o, err := s.OverrideRepo().Get(ctx, "discord", "same-id", "user1")
+	if err != nil {
+		t.Fatalf("Get discord: %v", err)
+	}
+	if o != nil {
+		t.Fatalf("expected no cross-platform leak, got: %+v", o)
 	}
 }
