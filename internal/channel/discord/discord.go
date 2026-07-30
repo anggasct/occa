@@ -3,13 +3,17 @@ package discord
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 
 	"github.com/bwmarrin/discordgo"
 
 	"github.com/anggasct/occa/internal/channel"
 )
+
+const maxDownloadSize = 10 * 1024 * 1024
 
 type Adapter struct {
 	session *discordgo.Session
@@ -110,14 +114,45 @@ func (a *Adapter) normalizeMessage(m *discordgo.Message) channel.IncomingMessage
 	}
 
 	return channel.IncomingMessage{
-		Platform:  "discord",
-		ChannelID: m.ChannelID,
-		UserID:    m.Author.ID,
-		Text:      m.Content,
-		IsMention: isMention,
-		IsThread:  a.isThreadChannel(m.ChannelID),
-		ReplyCtx:  &replyContext{session: a.session, channelID: m.ChannelID},
+		Platform:    "discord",
+		ChannelID:   m.ChannelID,
+		UserID:      m.Author.ID,
+		Text:        m.Content,
+		IsMention:   isMention,
+		IsThread:    a.isThreadChannel(m.ChannelID),
+		Attachments: a.downloadAttachments(m),
+		ReplyCtx:    &replyContext{session: a.session, channelID: m.ChannelID},
 	}
+}
+
+func (a *Adapter) downloadAttachments(m *discordgo.Message) []channel.Attachment {
+	var attachments []channel.Attachment
+	for _, da := range m.Attachments {
+		if da.Size > maxDownloadSize {
+			continue
+		}
+		resp, err := http.Get(da.URL)
+		if err != nil {
+			slog.Warn("discord: download attachment failed", "filename", da.Filename, "error", err)
+			continue
+		}
+		data, err := io.ReadAll(io.LimitReader(resp.Body, maxDownloadSize+1))
+		resp.Body.Close()
+		if err != nil || len(data) > maxDownloadSize {
+			slog.Warn("discord: attachment too large or read failed", "filename", da.Filename)
+			continue
+		}
+		mime := da.ContentType
+		if mime == "" {
+			mime = "application/octet-stream"
+		}
+		attachments = append(attachments, channel.Attachment{
+			Filename: da.Filename,
+			MimeType: mime,
+			Data:     data,
+		})
+	}
+	return attachments
 }
 
 func (a *Adapter) isThreadChannel(channelID string) bool {

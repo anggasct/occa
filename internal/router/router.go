@@ -185,10 +185,18 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 	if strings.HasPrefix(msg.Text, "/") {
 		err = inst.Client().RunCommand(ctx, sessionID, msg.Text)
 	} else {
-		err = inst.Client().SendMessage(ctx, sessionID, msg.Text)
+		attachments := make([]relay.Attachment, len(msg.Attachments))
+		for i, a := range msg.Attachments {
+			attachments[i] = relay.Attachment{Filename: a.Filename, MimeType: a.MimeType, Data: a.Data}
+		}
+		err = inst.Client().SendMessage(ctx, sessionID, msg.Text, attachments)
 	}
 	if err != nil {
-		msg.ReplyCtx.Send("⚠️ Agent unreachable")
+		if errors.Is(err, relay.ErrAttachmentTooLarge) {
+			msg.ReplyCtx.Send("⚠️ " + err.Error())
+		} else {
+			msg.ReplyCtx.Send("⚠️ Agent unreachable")
+		}
 	}
 	return nil
 }

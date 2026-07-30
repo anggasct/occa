@@ -3,7 +3,9 @@ package telegram
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
@@ -79,14 +81,86 @@ func (a *Adapter) normalize(update tgbotapi.Update) channel.IncomingMessage {
 		isMention = true
 	}
 
-	return channel.IncomingMessage{
-		Platform:  "telegram",
-		ChannelID: chatID,
-		UserID:    userID,
-		Text:      msg.Text,
-		IsMention: isMention,
-		ReplyCtx:  &replyContext{bot: a.bot, chatID: msg.Chat.ID},
+	text := msg.Text
+	if text == "" && msg.Caption != "" {
+		text = msg.Caption
 	}
+
+	return channel.IncomingMessage{
+		Platform:    "telegram",
+		ChannelID:   chatID,
+		UserID:      userID,
+		Text:        text,
+		IsMention:   isMention,
+		Attachments: a.downloadAttachments(msg),
+		ReplyCtx:    &replyContext{bot: a.bot, chatID: msg.Chat.ID},
+	}
+}
+
+func (a *Adapter) downloadAttachments(msg *tgbotapi.Message) []channel.Attachment {
+	var attachments []channel.Attachment
+
+	if len(msg.Photo) > 0 {
+		photo := msg.Photo[len(msg.Photo)-1]
+		if photo.FileSize > 0 && photo.FileSize > maxDownloadSize {
+			return nil
+		}
+		if att := a.downloadFile(photo.FileID, "photo.jpg", "image/jpeg"); att != nil {
+			attachments = append(attachments, *att)
+		}
+	}
+
+	if msg.Document != nil {
+		if msg.Document.FileSize > 0 && msg.Document.FileSize > maxDownloadSize {
+			return attachments
+		}
+		mime := msg.Document.MimeType
+		if mime == "" {
+			mime = "application/octet-stream"
+		}
+		if att := a.downloadFile(msg.Document.FileID, msg.Document.FileName, mime); att != nil {
+			attachments = append(attachments, *att)
+		}
+	}
+
+	return attachments
+}
+
+const maxDownloadSize = 10 * 1024 * 1024
+
+func (a *Adapter) downloadFile(fileID, filename, mimeType string) *channel.Attachment {
+	file, err := a.bot.GetFile(tgbotapi.FileConfig{FileID: fileID})
+	if err != nil {
+		slog.Warn("telegram: get file failed", "file_id", fileID, "error", err)
+		return nil
+	}
+
+	url, err := a.bot.GetFileDirectURL(file.FileID)
+	if err != nil {
+		slog.Warn("telegram: get file url failed", "file_id", fileID, "error", err)
+		return nil
+	}
+	resp, err := http.Get(url)
+	if err != nil {
+		slog.Warn("telegram: download file failed", "file_id", fileID, "error", err)
+		return nil
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxDownloadSize+1))
+	if err != nil {
+		slog.Warn("telegram: read file failed", "file_id", fileID, "error", err)
+		return nil
+	}
+	if len(data) > maxDownloadSize {
+		slog.Warn("telegram: file too large, skipping", "file_id", fileID, "size", len(data))
+		return nil
+	}
+
+	if filename == "" {
+		filename = fileID
+	}
+	return &channel.Attachment{Filename: filename, MimeType: mimeType, Data: data}
 }
 
 type replyContext struct {

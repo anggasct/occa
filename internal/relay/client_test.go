@@ -39,7 +39,7 @@ func TestSendMessage(t *testing.T) {
 	defer srv.Close()
 
 	c := NewHTTPClient(srv.URL)
-	err := c.SendMessage(context.Background(), "s1", "hello")
+	err := c.SendMessage(context.Background(), "s1", "hello", nil)
 	if err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestNotFound(t *testing.T) {
 	defer srv.Close()
 
 	c := NewHTTPClient(srv.URL)
-	err := c.SendMessage(context.Background(), "bad", "hello")
+	err := c.SendMessage(context.Background(), "bad", "hello", nil)
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got: %v", err)
 	}

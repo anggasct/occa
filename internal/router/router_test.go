@@ -36,7 +36,7 @@ type fakeRelayClient struct {
 func (f *fakeRelayClient) CreateSession(_ context.Context) (string, error) {
 	return f.sessionID, nil
 }
-func (f *fakeRelayClient) SendMessage(_ context.Context, _, text string) error {
+func (f *fakeRelayClient) SendMessage(_ context.Context, _, text string, _ []relay.Attachment) error {
 	f.lastMsg = text
 	return nil
 }
