@@ -62,12 +62,13 @@ CREATE TABLE IF NOT EXISTS channel (
 CREATE TABLE IF NOT EXISTS user_override (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	channel_id TEXT NOT NULL,
+	platform TEXT NOT NULL,
 	user_id TEXT NOT NULL,
 	role TEXT NOT NULL,
 	model TEXT,
 	created_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL,
-	UNIQUE (channel_id, user_id)
+	UNIQUE (platform, channel_id, user_id)
 );
 `
 	if _, err := s.db.Exec(ddl); err != nil {
