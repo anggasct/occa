@@ -3,20 +3,32 @@ package relay
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 var (
-	ErrUnreachable = errors.New("agent unreachable")
-	ErrNotFound    = errors.New("agent resource not found")
-	ErrTimeout     = errors.New("agent request timed out")
+	ErrUnreachable       = errors.New("agent unreachable")
+	ErrNotFound          = errors.New("agent resource not found")
+	ErrTimeout           = errors.New("agent request timed out")
+	ErrAttachmentTooLarge = errors.New("attachment exceeds size limit")
 )
+
+const maxAttachmentSize = 10 * 1024 * 1024
+
+type Attachment struct {
+	Filename string
+	MimeType string
+	Data     []byte
+}
 
 type Event struct {
 	Type  string
@@ -25,7 +37,7 @@ type Event struct {
 
 type Client interface {
 	CreateSession(ctx context.Context) (string, error)
-	SendMessage(ctx context.Context, sessionID, text string) error
+	SendMessage(ctx context.Context, sessionID, text string, attachments []Attachment) error
 	RunCommand(ctx context.Context, sessionID, command string) error
 	Events(ctx context.Context, sessionID string) (<-chan Event, error)
 }
@@ -65,8 +77,14 @@ func (c *HTTPClient) CreateSession(ctx context.Context) (string, error) {
 	return body.ID, nil
 }
 
-func (c *HTTPClient) SendMessage(ctx context.Context, sessionID, text string) error {
-	payload := map[string]string{"content": text}
+func (c *HTTPClient) SendMessage(ctx context.Context, sessionID, text string, attachments []Attachment) error {
+	for _, a := range attachments {
+		if len(a.Data) > maxAttachmentSize {
+			return fmt.Errorf("relay: %w: %s (%d bytes)", ErrAttachmentTooLarge, a.Filename, len(a.Data))
+		}
+	}
+
+	payload := buildMessagePayload(text, attachments)
 	resp, err := c.post(ctx, "/session/"+sessionID+"/message", payload)
 	if err != nil {
 		return err
@@ -173,4 +191,50 @@ func isConnectionError(err error) bool {
 		return opErr.Op == "dial"
 	}
 	return errors.Is(err, net.ErrClosed)
+}
+
+type textPart struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type filePart struct {
+	Type     string `json:"type"`
+	Filename string `json:"filename"`
+	MimeType string `json:"mime_type"`
+	Data     string `json:"data"`
+}
+
+func buildMessagePayload(text string, attachments []Attachment) map[string]any {
+	if len(attachments) == 0 {
+		return map[string]any{"content": text}
+	}
+
+	var parts []any
+	if text != "" {
+		parts = append(parts, textPart{Type: "text", Text: text})
+	}
+	for _, a := range attachments {
+		if isTextLike(a.MimeType, a.Data) {
+			content := fmt.Sprintf("<attached_file name=%q>\n%s\n</attached_file>", a.Filename, string(a.Data))
+			parts = append(parts, textPart{Type: "text", Text: content})
+		} else {
+			dataURL := fmt.Sprintf("data:%s;base64,%s", a.MimeType, base64.StdEncoding.EncodeToString(a.Data))
+			parts = append(parts, filePart{Type: "file", Filename: a.Filename, MimeType: a.MimeType, Data: dataURL})
+		}
+	}
+	return map[string]any{"parts": parts}
+}
+
+var textMimeAllowlist = map[string]bool{
+	"application/json": true,
+	"application/xml":  true,
+	"application/x-yaml": true,
+}
+
+func isTextLike(mime string, data []byte) bool {
+	if strings.HasPrefix(mime, "text/") || textMimeAllowlist[mime] {
+		return utf8.Valid(data)
+	}
+	return false
 }
