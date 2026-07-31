@@ -1,8 +1,10 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -196,5 +198,93 @@ func TestExpandHome(t *testing.T) {
 	}
 	if got != "/abs/path" {
 		t.Errorf("expandHome(/abs/path) = %q, want /abs/path", got)
+	}
+}
+
+func TestWebhookLoopbackValidation(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
+	tests := []struct {
+		bind    string
+		wantErr bool
+	}{
+		{"127.0.0.1:8787", false},
+		{"localhost:8787", false},
+		{"[::1]:8787", false},
+		{"127.0.0.1", true},
+		{"0.0.0.0:8787", true},
+		{"192.168.1.1:8787", true},
+		{"example.com:8787", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.bind, func(t *testing.T) {
+			yaml := fmt.Sprintf("webhooks:\n  bind: %q\n  endpoints:\n    - name: test\n      path: /test\n      secret: s\n      platform: telegram\n      channel_id: c1\n      prompt: p\n", tt.bind)
+			path := writeConfig(t, t.TempDir(), yaml)
+			_, err := Load(path)
+			if tt.wantErr && err == nil {
+				t.Fatal("expected invalid bind to fail validation")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestWebhookNoEndpointsSkipsValidation(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
+	path := writeConfig(t, t.TempDir(), "")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Webhooks.Endpoints) != 0 {
+		t.Fatalf("expected no webhook endpoints, got %d", len(cfg.Webhooks.Endpoints))
+	}
+}
+
+func TestWebhookEmptySecretValidation(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
+	path := writeConfig(t, t.TempDir(), `webhooks:
+  endpoints:
+    - name: test
+      path: /test
+      platform: telegram
+      channel_id: c1
+      prompt: p
+`)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected empty webhook secret to fail validation")
+	}
+	if !strings.Contains(err.Error(), "webhooks.endpoints[0].secret") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestWebhookDuplicatePathValidation(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
+	path := writeConfig(t, t.TempDir(), `webhooks:
+  endpoints:
+    - name: first
+      path: /same
+      secret: first-secret
+      platform: telegram
+      channel_id: c1
+      prompt: p
+    - name: second
+      path: /same
+      secret: second-secret
+      platform: telegram
+      channel_id: c2
+      prompt: p
+`)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected duplicate webhook path to fail validation")
+	}
+	if !strings.Contains(err.Error(), "webhooks.endpoints[1].path") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
