@@ -20,7 +20,7 @@ func TestSendMessageWithImageAttachment(t *testing.T) {
 
 	c := NewHTTPClient(srv.URL)
 	att := []Attachment{{Filename: "screenshot.png", MimeType: "image/png", Data: []byte{0x89, 0x50, 0x4E, 0x47}}}
-	err := c.SendMessage(context.Background(), "s1", "look at this", att)
+	err := c.SendMessage(context.Background(), "s1", "look at this", nil, att)
 	if err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestSendMessageWithTextAttachmentInlined(t *testing.T) {
 
 	c := NewHTTPClient(srv.URL)
 	att := []Attachment{{Filename: "app.log", MimeType: "text/plain", Data: []byte("line1\nline2\nline3")}}
-	err := c.SendMessage(context.Background(), "s1", "check this log", att)
+	err := c.SendMessage(context.Background(), "s1", "check this log", nil, att)
 	if err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestSendMessageInvalidUTF8FallsBackToFilePart(t *testing.T) {
 	c := NewHTTPClient(srv.URL)
 	invalidUTF8 := []byte{0xFF, 0xFE, 0x00, 0x01}
 	att := []Attachment{{Filename: "data.txt", MimeType: "text/plain", Data: invalidUTF8}}
-	err := c.SendMessage(context.Background(), "s1", "", att)
+	err := c.SendMessage(context.Background(), "s1", "", nil, att)
 	if err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestSendMessageAttachmentTooLarge(t *testing.T) {
 	c := NewHTTPClient("http://127.0.0.1:1")
 	bigData := make([]byte, maxAttachmentSize+1)
 	att := []Attachment{{Filename: "huge.bin", MimeType: "application/octet-stream", Data: bigData}}
-	err := c.SendMessage(context.Background(), "s1", "hello", att)
+	err := c.SendMessage(context.Background(), "s1", "hello", nil, att)
 	if !errors.Is(err, ErrAttachmentTooLarge) {
 		t.Fatalf("expected ErrAttachmentTooLarge, got: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestSendMessageNoAttachmentsUsesContentField(t *testing.T) {
 	defer srv.Close()
 
 	c := NewHTTPClient(srv.URL)
-	err := c.SendMessage(context.Background(), "s1", "plain message", nil)
+	err := c.SendMessage(context.Background(), "s1", "plain message", nil, nil)
 	if err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestSendMessageMultipleAttachments(t *testing.T) {
 		{Filename: "img.png", MimeType: "image/png", Data: []byte{0x89}},
 		{Filename: "config.json", MimeType: "application/json", Data: []byte(`{"key":"val"}`)},
 	}
-	err := c.SendMessage(context.Background(), "s1", "multi", atts)
+	err := c.SendMessage(context.Background(), "s1", "multi", nil, atts)
 	if err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}

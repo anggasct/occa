@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -39,9 +40,59 @@ func TestSendMessage(t *testing.T) {
 	defer srv.Close()
 
 	c := NewHTTPClient(srv.URL)
-	err := c.SendMessage(context.Background(), "s1", "hello", nil)
+	err := c.SendMessage(context.Background(), "s1", "hello", nil, nil)
 	if err != nil {
 		t.Fatalf("SendMessage: %v", err)
+	}
+}
+
+func TestSendMessageWithModel(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := NewHTTPClient(srv.URL)
+	err := c.SendMessage(context.Background(), "s1", "hello", &ModelRef{ProviderID: "openai", ID: "gpt-4o"}, nil)
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+
+	model, ok := gotBody["model"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected model object, got: %v", gotBody["model"])
+	}
+	if model["providerID"] != "openai" || model["modelID"] != "gpt-4o" {
+		t.Fatalf("unexpected model: %v", model)
+	}
+}
+
+func TestProviders(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/provider" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"all":[{"id":"openai","models":{"gpt-4o":{"id":"gpt-4o"}}}]}`))
+	}))
+	defer srv.Close()
+
+	providers, err := NewHTTPClient(srv.URL).Providers(context.Background())
+	if err != nil {
+		t.Fatalf("Providers: %v", err)
+	}
+	if !providers.HasProvider("openai") {
+		t.Fatal("expected openai provider")
+	}
+	if !providers.HasModel(ModelRef{ProviderID: "openai", ID: "gpt-4o"}) {
+		t.Fatal("expected openai/gpt-4o model")
+	}
+	if providers.HasModel(ModelRef{ProviderID: "openai", ID: "missing"}) {
+		t.Fatal("did not expect missing model")
 	}
 }
 
@@ -79,7 +130,7 @@ func TestNotFound(t *testing.T) {
 	defer srv.Close()
 
 	c := NewHTTPClient(srv.URL)
-	err := c.SendMessage(context.Background(), "bad", "hello", nil)
+	err := c.SendMessage(context.Background(), "bad", "hello", nil, nil)
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got: %v", err)
 	}

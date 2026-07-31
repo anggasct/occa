@@ -16,9 +16,9 @@ import (
 )
 
 var (
-	ErrUnreachable       = errors.New("agent unreachable")
-	ErrNotFound          = errors.New("agent resource not found")
-	ErrTimeout           = errors.New("agent request timed out")
+	ErrUnreachable        = errors.New("agent unreachable")
+	ErrNotFound           = errors.New("agent resource not found")
+	ErrTimeout            = errors.New("agent request timed out")
 	ErrAttachmentTooLarge = errors.New("attachment exceeds size limit")
 )
 
@@ -28,6 +28,39 @@ type Attachment struct {
 	Filename string
 	MimeType string
 	Data     []byte
+}
+
+type ModelRef struct {
+	ProviderID string `json:"providerID"`
+	ID         string `json:"modelID"`
+}
+
+type Provider struct {
+	ID     string                     `json:"id"`
+	Models map[string]json.RawMessage `json:"models"`
+}
+
+type Providers struct {
+	All []Provider `json:"all"`
+}
+
+func (p Providers) HasProvider(id string) bool {
+	for _, provider := range p.All {
+		if provider.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func (p Providers) HasModel(ref ModelRef) bool {
+	for _, provider := range p.All {
+		if provider.ID == ref.ProviderID {
+			_, ok := provider.Models[ref.ID]
+			return ok
+		}
+	}
+	return false
 }
 
 type Event struct {
@@ -53,7 +86,8 @@ const (
 
 type Client interface {
 	CreateSession(ctx context.Context) (string, error)
-	SendMessage(ctx context.Context, sessionID, text string, attachments []Attachment) error
+	SendMessage(ctx context.Context, sessionID, text string, model *ModelRef, attachments []Attachment) error
+	Providers(ctx context.Context) (Providers, error)
 	RunCommand(ctx context.Context, sessionID, command string) error
 	Events(ctx context.Context, sessionID string) (<-chan Event, error)
 }
@@ -93,14 +127,14 @@ func (c *HTTPClient) CreateSession(ctx context.Context) (string, error) {
 	return body.ID, nil
 }
 
-func (c *HTTPClient) SendMessage(ctx context.Context, sessionID, text string, attachments []Attachment) error {
+func (c *HTTPClient) SendMessage(ctx context.Context, sessionID, text string, model *ModelRef, attachments []Attachment) error {
 	for _, a := range attachments {
 		if len(a.Data) > maxAttachmentSize {
 			return fmt.Errorf("relay: %w: %s (%d bytes)", ErrAttachmentTooLarge, a.Filename, len(a.Data))
 		}
 	}
 
-	payload := buildMessagePayload(text, attachments)
+	payload := buildMessagePayload(text, model, attachments)
 	resp, err := c.post(ctx, "/session/"+sessionID+"/message", payload)
 	if err != nil {
 		return err
@@ -117,6 +151,27 @@ func (c *HTTPClient) SendMessage(ctx context.Context, sessionID, text string, at
 		return fmt.Errorf("relay: send message: unexpected status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+func (c *HTTPClient) Providers(ctx context.Context) (Providers, error) {
+	resp, err := c.get(ctx, "/provider")
+	if err != nil {
+		return Providers{}, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return Providers{}, ErrNotFound
+	}
+	if resp.StatusCode != http.StatusOK {
+		return Providers{}, fmt.Errorf("relay: providers: unexpected status %d", resp.StatusCode)
+	}
+
+	var providers Providers
+	if err := json.NewDecoder(resp.Body).Decode(&providers); err != nil {
+		return Providers{}, fmt.Errorf("relay: providers: decode response: %w", err)
+	}
+	return providers, nil
 }
 
 func (c *HTTPClient) RunCommand(ctx context.Context, sessionID, command string) error {
@@ -206,6 +261,19 @@ func (c *HTTPClient) Events(ctx context.Context, sessionID string) (<-chan Event
 	return ch, nil
 }
 
+func (c *HTTPClient) get(ctx context.Context, path string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("relay: build request: %w", err)
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, c.wrapTransportErr(err)
+	}
+	return resp, nil
+}
+
 func (c *HTTPClient) post(ctx context.Context, path string, payload any) (*http.Response, error) {
 	var body io.Reader
 	if payload != nil {
@@ -262,11 +330,16 @@ type filePart struct {
 	Data     string `json:"data"`
 }
 
-func buildMessagePayload(text string, attachments []Attachment) map[string]any {
+func buildMessagePayload(text string, model *ModelRef, attachments []Attachment) map[string]any {
 	tools := map[string]bool{"schedule_task": true}
+	payload := map[string]any{"tools": tools}
+	if model != nil {
+		payload["model"] = model
+	}
 
 	if len(attachments) == 0 {
-		return map[string]any{"content": text, "tools": tools}
+		payload["content"] = text
+		return payload
 	}
 
 	var parts []any
@@ -282,12 +355,13 @@ func buildMessagePayload(text string, attachments []Attachment) map[string]any {
 			parts = append(parts, filePart{Type: "file", Filename: a.Filename, MimeType: a.MimeType, Data: dataURL})
 		}
 	}
-	return map[string]any{"parts": parts, "tools": tools}
+	payload["parts"] = parts
+	return payload
 }
 
 var textMimeAllowlist = map[string]bool{
-	"application/json": true,
-	"application/xml":  true,
+	"application/json":   true,
+	"application/xml":    true,
 	"application/x-yaml": true,
 }
 

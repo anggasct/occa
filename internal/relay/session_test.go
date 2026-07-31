@@ -45,8 +45,11 @@ func (m *mockClient) CreateSession(_ context.Context) (string, error) {
 	return m.sessionID, nil
 }
 
-func (m *mockClient) SendMessage(_ context.Context, _, _ string, _ []Attachment) error { return nil }
-func (m *mockClient) RunCommand(_ context.Context, _, _ string) error  { return nil }
+func (m *mockClient) SendMessage(_ context.Context, _, _ string, _ *ModelRef, _ []Attachment) error {
+	return nil
+}
+func (m *mockClient) Providers(_ context.Context) (Providers, error)  { return Providers{}, nil }
+func (m *mockClient) RunCommand(_ context.Context, _, _ string) error { return nil }
 func (m *mockClient) Events(_ context.Context, _ string) (<-chan Event, error) {
 	return nil, nil
 }

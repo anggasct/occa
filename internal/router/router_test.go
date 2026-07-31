@@ -36,18 +36,29 @@ type fakeRelayClient struct {
 	lastMsg   string
 	rawMsg    string
 	lastCmd   string
+	providers relay.Providers
+	lastModel *relay.ModelRef
 }
 
 func (f *fakeRelayClient) CreateSession(_ context.Context) (string, error) {
 	return f.sessionID, nil
 }
-func (f *fakeRelayClient) SendMessage(_ context.Context, _, text string, _ []relay.Attachment) error {
+func (f *fakeRelayClient) SendMessage(_ context.Context, _, text string, model *relay.ModelRef, _ []relay.Attachment) error {
 	f.rawMsg = text
+	if model != nil {
+		copy := *model
+		f.lastModel = &copy
+	} else {
+		f.lastModel = nil
+	}
 	if idx := strings.Index(text, "\n\n—\nOCCA"); idx >= 0 {
 		text = text[:idx]
 	}
 	f.lastMsg = text
 	return nil
+}
+func (f *fakeRelayClient) Providers(_ context.Context) (relay.Providers, error) {
+	return f.providers, nil
 }
 func (f *fakeRelayClient) RunCommand(_ context.Context, _, cmd string) error {
 	f.lastCmd = cmd
@@ -145,9 +156,11 @@ func (f *fakeStore) Close() error                     { return nil }
 type fakeScheduleRepo struct{}
 
 func (f *fakeScheduleRepo) Create(_ context.Context, s *store.Schedule) (int64, error) { return 1, nil }
-func (f *fakeScheduleRepo) Delete(_ context.Context, _, _ string, _ int64) error            { return nil }
-func (f *fakeScheduleRepo) List(_ context.Context, _, _ string) ([]store.Schedule, error) { return nil, nil }
-func (f *fakeScheduleRepo) ListAll(_ context.Context) ([]store.Schedule, error)          { return nil, nil }
+func (f *fakeScheduleRepo) Delete(_ context.Context, _, _ string, _ int64) error       { return nil }
+func (f *fakeScheduleRepo) List(_ context.Context, _, _ string) ([]store.Schedule, error) {
+	return nil, nil
+}
+func (f *fakeScheduleRepo) ListAll(_ context.Context) ([]store.Schedule, error) { return nil, nil }
 
 type fakeSessionRepo struct {
 	activeID string
