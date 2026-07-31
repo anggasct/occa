@@ -61,5 +61,6 @@ type Store interface {
 	SessionRepo() SessionRepo
 	ChannelRepo() ChannelRepo
 	OverrideRepo() OverrideRepo
+	ScheduleRepo() ScheduleRepo
 	Close() error
 }

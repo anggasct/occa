@@ -41,4 +41,5 @@ type Channel interface {
 	Name() string
 	Start(ctx context.Context, handler func(IncomingMessage)) error
 	Stop() error
+	Notify(channelID string, text string) error
 }

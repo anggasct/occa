@@ -25,6 +25,7 @@ func (m *mockChannel) Start(ctx context.Context, handler func(IncomingMessage)) 
 	return nil
 }
 func (m *mockChannel) Stop() error { return nil }
+func (m *mockChannel) Notify(channelID string, text string) error { return nil }
 
 var (
 	_ Channel      = (*mockChannel)(nil)

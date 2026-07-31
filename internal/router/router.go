@@ -39,6 +39,25 @@ type Router struct {
 	defaultWorkdir string
 	adminID        string
 	startedAt      time.Time
+	sched          ScheduleStore
+	tokenGen       TokenGenerator
+}
+
+type ScheduleStore interface {
+	ListSchedules(ctx context.Context, platform, channelID string) ([]store.Schedule, error)
+	RemoveSchedule(ctx context.Context, platform, channelID string, id int64) error
+}
+
+type TokenGenerator interface {
+	Generate(platform, channelID string) string
+}
+
+func (r *Router) SetScheduler(s ScheduleStore) {
+	r.sched = s
+}
+
+func (r *Router) SetTokenGenerator(t TokenGenerator) {
+	r.tokenGen = t
 }
 
 func New(instances InstanceProvider, st store.Store, defaultWorkdir string, adminID string) *Router {
@@ -189,6 +208,12 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 
 	msg.ReplyCtx.SendTyping()
 
+	text := msg.Text
+	if !strings.HasPrefix(text, "/") && r.tokenGen != nil {
+		token := r.tokenGen.Generate(msg.Platform, msg.ChannelID)
+		text = text + "\n\n—\nOCCA schedule token: " + token
+	}
+
 	if strings.HasPrefix(msg.Text, "/") {
 		err = inst.Client().RunCommand(ctx, sessionID, msg.Text)
 	} else {
@@ -196,7 +221,7 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 		for i, a := range msg.Attachments {
 			attachments[i] = relay.Attachment{Filename: a.Filename, MimeType: a.MimeType, Data: a.Data}
 		}
-		err = inst.Client().SendMessage(ctx, sessionID, msg.Text, attachments)
+		err = inst.Client().SendMessage(ctx, sessionID, text, attachments)
 	}
 	if err != nil {
 		if errors.Is(err, relay.ErrAttachmentTooLarge) {
@@ -250,6 +275,11 @@ func (r *Router) registerDefaults() {
 		Admin:   true,
 		Handler: r.handleChannel,
 	}
+	r.commands["schedules"] = Command{
+		Name:    "schedules",
+		Admin:   true,
+		Handler: r.handleSchedules,
+	}
 }
 
 func (r *Router) helpText() string {
@@ -259,6 +289,7 @@ func (r *Router) helpText() string {
 		"• /occa:session [list|new|switch <id>|delete <id>] — manage sessions\n" +
 		"• /occa:dir [path] — view or set this channel's working directory\n" +
 		"• /occa:channel [mention|all|thread] — view or set listen mode\n" +
+		"• /occa:schedules [delete <id>] — view or delete scheduled tasks\n" +
 		"• /occa:reset — clear current session and start fresh\n\n" +
 		"All other messages and /commands are forwarded to the agent."
 }

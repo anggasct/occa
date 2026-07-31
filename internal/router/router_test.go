@@ -34,6 +34,7 @@ func (f fakeRef) ID() string { return f.id }
 type fakeRelayClient struct {
 	sessionID string
 	lastMsg   string
+	rawMsg    string
 	lastCmd   string
 }
 
@@ -41,6 +42,10 @@ func (f *fakeRelayClient) CreateSession(_ context.Context) (string, error) {
 	return f.sessionID, nil
 }
 func (f *fakeRelayClient) SendMessage(_ context.Context, _, text string, _ []relay.Attachment) error {
+	f.rawMsg = text
+	if idx := strings.Index(text, "\n\n—\nOCCA"); idx >= 0 {
+		text = text[:idx]
+	}
 	f.lastMsg = text
 	return nil
 }
@@ -128,12 +133,21 @@ type fakeStore struct {
 	sessionRepo  *fakeSessionRepo
 	channelRepo  *fakeChannelRepo
 	overrideRepo *fakeOverrideRepo
+	scheduleRepo *fakeScheduleRepo
 }
 
 func (f *fakeStore) SessionRepo() store.SessionRepo   { return f.sessionRepo }
 func (f *fakeStore) ChannelRepo() store.ChannelRepo   { return f.channelRepo }
 func (f *fakeStore) OverrideRepo() store.OverrideRepo { return f.overrideRepo }
+func (f *fakeStore) ScheduleRepo() store.ScheduleRepo { return f.scheduleRepo }
 func (f *fakeStore) Close() error                     { return nil }
+
+type fakeScheduleRepo struct{}
+
+func (f *fakeScheduleRepo) Create(_ context.Context, s *store.Schedule) (int64, error) { return 1, nil }
+func (f *fakeScheduleRepo) Delete(_ context.Context, _, _ string, _ int64) error            { return nil }
+func (f *fakeScheduleRepo) List(_ context.Context, _, _ string) ([]store.Schedule, error) { return nil, nil }
+func (f *fakeScheduleRepo) ListAll(_ context.Context) ([]store.Schedule, error)          { return nil, nil }
 
 type fakeSessionRepo struct {
 	activeID string
@@ -180,6 +194,7 @@ func newTestRouterWithAccess() (*Router, *fakeRelayClient, *fakeReplyCtx, *fakeO
 		sessionRepo:  &fakeSessionRepo{},
 		channelRepo:  newFakeChannelRepo(),
 		overrideRepo: overrideRepo,
+		scheduleRepo: &fakeScheduleRepo{},
 	}
 	provider := &fakeInstanceProvider{client: client}
 	r := New(provider, st, "/default-workdir", "")
@@ -543,6 +558,7 @@ func TestBootstrapAdminFirstMessage(t *testing.T) {
 		sessionRepo:  &fakeSessionRepo{},
 		channelRepo:  newFakeChannelRepo(),
 		overrideRepo: overrideRepo,
+		scheduleRepo: &fakeScheduleRepo{},
 	}
 	provider := &fakeInstanceProvider{client: client}
 	r := New(provider, st, "/default-workdir", "admin123")
@@ -572,6 +588,7 @@ func TestBootstrapAdminCanRunCommandsImmediately(t *testing.T) {
 		sessionRepo:  &fakeSessionRepo{},
 		channelRepo:  newFakeChannelRepo(),
 		overrideRepo: overrideRepo,
+		scheduleRepo: &fakeScheduleRepo{},
 	}
 	provider := &fakeInstanceProvider{client: client}
 	r := New(provider, st, "/default-workdir", "admin123")
@@ -598,6 +615,7 @@ func TestBootstrapAdminDoesNotWeakenDenyForOthers(t *testing.T) {
 		sessionRepo:  &fakeSessionRepo{},
 		channelRepo:  newFakeChannelRepo(),
 		overrideRepo: overrideRepo,
+		scheduleRepo: &fakeScheduleRepo{},
 	}
 	provider := &fakeInstanceProvider{client: client}
 	r := New(provider, st, "/default-workdir", "admin123")
@@ -758,5 +776,24 @@ func TestChannelThreadIsolation(t *testing.T) {
 	}
 	if parent := st.channelRepo.channels["telegram:chat1"]; parent != nil && parent.ListenMode == "thread" {
 		t.Fatalf("parent listen_mode should not be changed, got %q", parent.ListenMode)
+	}
+}
+
+type fakeTokenGen struct{}
+
+func (f *fakeTokenGen) Generate(_, _ string) string { return "test-token-123" }
+
+func TestPassthroughAppendsScheduleToken(t *testing.T) {
+	r, client, reply := newTestRouter()
+	r.SetTokenGenerator(&fakeTokenGen{})
+
+	if err := r.Route(context.Background(), msg("hello world", reply)); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if !strings.Contains(client.rawMsg, "OCCA schedule token: test-token-123") {
+		t.Fatalf("expected schedule token in message, got: %q", client.rawMsg)
+	}
+	if !strings.HasPrefix(client.rawMsg, "hello world") {
+		t.Fatalf("original text should be preserved, got: %q", client.rawMsg)
 	}
 }
