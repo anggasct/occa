@@ -21,7 +21,7 @@ type Schedule struct {
 
 type ScheduleRepo interface {
 	Create(ctx context.Context, s *Schedule) (int64, error)
-	Delete(ctx context.Context, id int64) error
+	Delete(ctx context.Context, platform, channelID string, id int64) error
 	List(ctx context.Context, platform, channelID string) ([]Schedule, error)
 	ListAll(ctx context.Context) ([]Schedule, error)
 }
@@ -54,8 +54,8 @@ func (r *sqliteScheduleRepo) Create(ctx context.Context, s *Schedule) (int64, er
 	return id, nil
 }
 
-func (r *sqliteScheduleRepo) Delete(ctx context.Context, id int64) error {
-	_, err := r.db.ExecContext(ctx, `DELETE FROM schedule WHERE id = ?`, id)
+func (r *sqliteScheduleRepo) Delete(ctx context.Context, platform, channelID string, id int64) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM schedule WHERE id = ? AND platform = ? AND channel_id = ?`, id, platform, channelID)
 	if err != nil {
 		return fmt.Errorf("store: schedule delete: %w", err)
 	}

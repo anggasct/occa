@@ -2,12 +2,12 @@ package mcpserver
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/anggasct/occa/internal/scheduler"
 	"github.com/anggasct/occa/internal/store"
@@ -20,9 +20,18 @@ type Server struct {
 	httpSrv   *http.Server
 	port      int
 
-	mu          sync.Mutex
-	currChannel string
-	currPlatform string
+	mu       sync.RWMutex
+	contexts map[string]contextEntry
+}
+
+type contextEntry struct {
+	platform  string
+	channelID string
+	ts        int64
+}
+
+func contextKey(platform, channelID string) string {
+	return platform + ":" + channelID
 }
 
 func New(sched *scheduler.Scheduler) *Server {
@@ -51,11 +60,7 @@ type scheduleTaskInput struct {
 }
 
 func (s *Server) handleScheduleTask(ctx context.Context, req *mcp.CallToolRequest, input scheduleTaskInput) (*mcp.CallToolResult, scheduleTaskInput, error) {
-	s.mu.Lock()
-	platform := s.currPlatform
-	channelID := s.currChannel
-	s.mu.Unlock()
-
+	platform, channelID := s.mostRecentContext()
 	if platform == "" || channelID == "" {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "Error: no active channel context"}},
@@ -88,9 +93,29 @@ func (s *Server) handleScheduleTask(ctx context.Context, req *mcp.CallToolReques
 
 func (s *Server) SetContext(platform, channelID string) {
 	s.mu.Lock()
-	s.currPlatform = platform
-	s.currChannel = channelID
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	if s.contexts == nil {
+		s.contexts = make(map[string]contextEntry)
+	}
+	s.contexts[contextKey(platform, channelID)] = contextEntry{
+		platform:  platform,
+		channelID: channelID,
+		ts:        time.Now().UnixNano(),
+	}
+}
+
+func (s *Server) mostRecentContext() (platform, channelID string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var bestTS int64
+	for _, entry := range s.contexts {
+		if entry.ts > bestTS {
+			bestTS = entry.ts
+			platform = entry.platform
+			channelID = entry.channelID
+		}
+	}
+	return
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -129,15 +154,4 @@ func (s *Server) Stop() {
 	if s.httpSrv != nil {
 		s.httpSrv.Close()
 	}
-}
-
-func (s *Server) RegistrationBody() string {
-	body, _ := json.Marshal(map[string]any{
-		"name": "occa",
-		"config": map[string]any{
-			"type": "remote",
-			"url":  s.URL(),
-		},
-	})
-	return string(body)
 }

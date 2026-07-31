@@ -44,24 +44,30 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	return nil
 }
 
-func (s *Scheduler) Stop() {
+func (s *Scheduler) Stop() error {
 	s.cron.Stop()
+	return nil
 }
 
 func (s *Scheduler) AddSchedule(ctx context.Context, sched store.Schedule) (int64, error) {
+	if _, err := cron.ParseStandard(sched.CronExpression); err != nil {
+		return 0, fmt.Errorf("scheduler: invalid cron expression %q: %w", sched.CronExpression, err)
+	}
+
 	id, err := s.store.Create(ctx, &sched)
 	if err != nil {
 		return 0, err
 	}
 	sched.ID = id
 	if err := s.register(sched); err != nil {
+		_ = s.store.Delete(ctx, sched.Platform, sched.ChannelID, id)
 		return 0, err
 	}
 	slog.Info("scheduler: schedule added", "id", id, "cron", sched.CronExpression, "channel", sched.ChannelID)
 	return id, nil
 }
 
-func (s *Scheduler) RemoveSchedule(ctx context.Context, id int64) error {
+func (s *Scheduler) RemoveSchedule(ctx context.Context, platform, channelID string, id int64) error {
 	s.mu.Lock()
 	entryID, ok := s.entryIDs[id]
 	if ok {
@@ -69,7 +75,7 @@ func (s *Scheduler) RemoveSchedule(ctx context.Context, id int64) error {
 		delete(s.entryIDs, id)
 	}
 	s.mu.Unlock()
-	return s.store.Delete(ctx, id)
+	return s.store.Delete(ctx, platform, channelID, id)
 }
 
 func (s *Scheduler) ListSchedules(ctx context.Context, platform, channelID string) ([]store.Schedule, error) {

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -89,10 +90,66 @@ func main() {
 	}
 
 	executor := func(ctx context.Context, platform, channelID, prompt string) {
+		var adapter channel.Channel
 		for _, ch := range channels {
 			if ch.Name() == platform {
-				ch.Notify(channelID, "⏰ Scheduled task running: "+prompt)
+				adapter = ch
 				break
+			}
+		}
+		if adapter == nil {
+			slog.Warn("scheduler: no channel adapter", "platform", platform)
+			return
+		}
+
+		workdir := cfg.Agent.DefaultWorkdir
+		chRow, err := db.ChannelRepo().Get(ctx, platform, channelID)
+		if err == nil && chRow != nil && chRow.Workdir != "" {
+			workdir = chRow.Workdir
+		}
+
+		inst, err := manager.Instance(ctx, workdir)
+		if err != nil {
+			adapter.Notify(channelID, "⚠️ Scheduled task failed: agent unreachable")
+			return
+		}
+		defer inst.End()
+
+		resolver := relay.NewSessionResolver(db.SessionRepo(), inst.Client())
+		sessionID, err := resolver.Resolve(ctx, platform, channelID)
+		if err != nil {
+			adapter.Notify(channelID, "⚠️ Scheduled task failed: session error")
+			return
+		}
+
+		adapter.Notify(channelID, "⏰ Running: "+prompt)
+
+		if err := inst.Client().SendMessage(ctx, sessionID, prompt, nil); err != nil {
+			adapter.Notify(channelID, "⚠️ Scheduled task failed: "+err.Error())
+			return
+		}
+
+		events, err := inst.Client().Events(ctx, sessionID)
+		if err != nil {
+			adapter.Notify(channelID, "⚠️ Scheduled task failed: events stream error")
+			return
+		}
+
+		var buf strings.Builder
+		for ev := range events {
+			switch ev.Type {
+			case "delta":
+				buf.WriteString(ev.Delta)
+			case "done":
+				result := buf.String()
+				if result == "" {
+					result = "(no output)"
+				}
+				adapter.Notify(channelID, "✅ "+result)
+				return
+			case "error":
+				adapter.Notify(channelID, "⚠️ Scheduled task error: "+ev.Delta)
+				return
 			}
 		}
 	}
@@ -101,7 +158,7 @@ func main() {
 	if err := sched.Start(ctx); err != nil {
 		slog.Error("failed to start scheduler", "error", err)
 	}
-	defer sched.Stop()
+	defer func() { _ = sched.Stop() }()
 
 	mcpSrv := mcpserver.New(sched)
 	if err := mcpSrv.Start(ctx); err != nil {

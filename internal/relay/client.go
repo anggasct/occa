@@ -263,8 +263,10 @@ type filePart struct {
 }
 
 func buildMessagePayload(text string, attachments []Attachment) map[string]any {
+	tools := map[string]bool{"schedule_task": true}
+
 	if len(attachments) == 0 {
-		return map[string]any{"content": text}
+		return map[string]any{"content": text, "tools": tools}
 	}
 
 	var parts []any
@@ -280,7 +282,7 @@ func buildMessagePayload(text string, attachments []Attachment) map[string]any {
 			parts = append(parts, filePart{Type: "file", Filename: a.Filename, MimeType: a.MimeType, Data: dataURL})
 		}
 	}
-	return map[string]any{"parts": parts}
+	return map[string]any{"parts": parts, "tools": tools}
 }
 
 var textMimeAllowlist = map[string]bool{

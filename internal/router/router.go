@@ -49,7 +49,7 @@ type Router struct {
 
 type ScheduleStore interface {
 	ListSchedules(ctx context.Context, platform, channelID string) ([]store.Schedule, error)
-	RemoveSchedule(ctx context.Context, id int64) error
+	RemoveSchedule(ctx context.Context, platform, channelID string, id int64) error
 }
 
 func (r *Router) SetScheduler(s ScheduleStore) {
@@ -275,6 +275,7 @@ func (r *Router) registerDefaults() {
 	}
 	r.commands["schedules"] = Command{
 		Name:    "schedules",
+		Admin:   true,
 		Handler: r.handleSchedules,
 	}
 }

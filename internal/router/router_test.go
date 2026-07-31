@@ -140,7 +140,7 @@ func (f *fakeStore) Close() error                     { return nil }
 type fakeScheduleRepo struct{}
 
 func (f *fakeScheduleRepo) Create(_ context.Context, s *store.Schedule) (int64, error) { return 1, nil }
-func (f *fakeScheduleRepo) Delete(_ context.Context, id int64) error                    { return nil }
+func (f *fakeScheduleRepo) Delete(_ context.Context, _, _ string, _ int64) error            { return nil }
 func (f *fakeScheduleRepo) List(_ context.Context, _, _ string) ([]store.Schedule, error) { return nil, nil }
 func (f *fakeScheduleRepo) ListAll(_ context.Context) ([]store.Schedule, error)          { return nil, nil }
 

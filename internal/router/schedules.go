@@ -20,7 +20,7 @@ func (r *Router) handleSchedules(ctx context.Context, msg channel.IncomingMessag
 		}
 		var id int64
 		fmt.Sscanf(parts[1], "%d", &id)
-		if err := r.sched.RemoveSchedule(ctx, id); err != nil {
+		if err := r.sched.RemoveSchedule(ctx, msg.Platform, msg.ChannelID, id); err != nil {
 			return "", fmt.Errorf("schedules delete: %w", err)
 		}
 		return fmt.Sprintf("✅ Deleted schedule %d", id), nil
