@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/relay"
@@ -37,6 +38,7 @@ type Router struct {
 	store          store.Store
 	defaultWorkdir string
 	adminID        string
+	startedAt      time.Time
 }
 
 func New(instances InstanceProvider, st store.Store, defaultWorkdir string, adminID string) *Router {
@@ -46,6 +48,7 @@ func New(instances InstanceProvider, st store.Store, defaultWorkdir string, admi
 		store:          st,
 		defaultWorkdir: defaultWorkdir,
 		adminID:        adminID,
+		startedAt:      time.Now(),
 	}
 	r.registerDefaults()
 	return r
@@ -267,12 +270,19 @@ func (r *Router) handleStatus(ctx context.Context, msg channel.IncomingMessage, 
 	}
 	defer inst.End()
 
+	start := time.Now()
 	resolver := relay.NewSessionResolver(r.store.SessionRepo(), inst.Client())
 	sessionID, err := resolver.Resolve(ctx, msg.Platform, msg.ChannelID)
 	if err != nil {
 		return "⚠️ Agent unreachable", nil
 	}
-	return fmt.Sprintf("✅ Agent connected\nSession: %s", sessionID), nil
+	latency := time.Since(start).Truncate(time.Millisecond)
+
+	uptime := time.Since(r.startedAt).Truncate(time.Second)
+	workdir := r.effectiveWorkdir(ctx, msg.Platform, msg.ChannelID)
+
+	return fmt.Sprintf("✅ Agent connected\nSession: %s\nUptime: %s\nWorkdir: %s\nLatency: %s",
+		sessionID, uptime, workdir, latency), nil
 }
 
 func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage, args string) (string, error) {
