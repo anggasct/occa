@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -18,6 +19,7 @@ type Config struct {
 	Agent    AgentConfig    `yaml:"agent"`
 	Database DatabaseConfig `yaml:"database"`
 	Logging  LoggingConfig  `yaml:"logging"`
+	Webhooks WebhookConfig  `yaml:"webhooks"`
 }
 
 type AgentConfig struct {
@@ -36,6 +38,20 @@ type LoggingConfig struct {
 	Format string `yaml:"format"`
 }
 
+type WebhookConfig struct {
+	Bind      string           `yaml:"bind"`
+	Endpoints []EndpointConfig `yaml:"endpoints"`
+}
+
+type EndpointConfig struct {
+	Name      string `yaml:"name"`
+	Path      string `yaml:"path"`
+	Secret    string `yaml:"secret"`
+	Platform  string `yaml:"platform"`
+	ChannelID string `yaml:"channel_id"`
+	Prompt    string `yaml:"prompt"`
+}
+
 // fileConfig mirrors Config for YAML parsing, holding durations as strings so
 // values like "20m" decode cleanly; build() converts them to time.Duration.
 type fileConfig struct {
@@ -52,6 +68,7 @@ type fileConfig struct {
 	Logging struct {
 		Format string `yaml:"format"`
 	} `yaml:"logging"`
+	Webhooks WebhookConfig `yaml:"webhooks"`
 }
 
 const defaultConfigTemplate = `agent:
@@ -186,6 +203,15 @@ func build(fc fileConfig, adminID string) (Config, error) {
 		return Config{}, err
 	}
 
+	if len(fc.Webhooks.Endpoints) > 0 {
+		if fc.Webhooks.Bind == "" {
+			fc.Webhooks.Bind = "127.0.0.1:8787"
+		}
+		if !isLoopbackBind(fc.Webhooks.Bind) {
+			return Config{}, fmt.Errorf("config: webhooks.bind must be a loopback address (127.0.0.1, localhost, or ::1), got %q", fc.Webhooks.Bind)
+		}
+	}
+
 	return Config{
 		AdminID: adminID,
 		Agent: AgentConfig{
@@ -197,7 +223,22 @@ func build(fc fileConfig, adminID string) (Config, error) {
 		},
 		Database: DatabaseConfig{Path: dbPath},
 		Logging:  LoggingConfig{Format: fc.Logging.Format},
+		Webhooks: fc.Webhooks,
 	}, nil
+}
+
+func isLoopbackBind(addr string) bool {
+	host := addr
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		host = h
+	}
+	host = strings.TrimPrefix(host, "[")
+	host = strings.TrimSuffix(host, "]")
+	switch strings.ToLower(host) {
+	case "127.0.0.1", "localhost", "::1":
+		return true
+	}
+	return false
 }
 
 // expandHome expands a leading "~" to the user's home directory.

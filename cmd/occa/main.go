@@ -21,6 +21,7 @@ import (
 	"github.com/anggasct/occa/internal/router"
 	"github.com/anggasct/occa/internal/scheduler"
 	"github.com/anggasct/occa/internal/store"
+	"github.com/anggasct/occa/internal/webhook"
 )
 
 // managerProvider adapts *process.Manager (concrete Instance) to the
@@ -171,6 +172,65 @@ func main() {
 	rt.SetTokenGenerator(tokens)
 
 	registerMCP(ctx, manager, mcpSrv, cfg.Agent.DefaultWorkdir)
+
+	if len(cfg.Webhooks.Endpoints) > 0 {
+		webhookExecutor := func(ctx context.Context, platform, channelID, prompt string) {
+			for _, ch := range channels {
+				if ch.Name() == platform {
+					ch.Notify(channelID, "📨 Webhook: analyzing...")
+					inst, err := manager.Instance(ctx, cfg.Agent.DefaultWorkdir)
+					if err != nil {
+						ch.Notify(channelID, "⚠️ Webhook analysis failed: agent unreachable")
+						return
+					}
+					defer inst.End()
+
+					resolver := relay.NewSessionResolver(db.SessionRepo(), inst.Client())
+					sessionID, err := resolver.Resolve(ctx, platform, channelID)
+					if err != nil {
+						ch.Notify(channelID, "⚠️ Webhook analysis failed: session error")
+						return
+					}
+
+					if err := inst.Client().SendMessage(ctx, sessionID, prompt, nil); err != nil {
+						ch.Notify(channelID, "⚠️ Webhook analysis failed: "+err.Error())
+						return
+					}
+
+					events, err := inst.Client().Events(ctx, sessionID)
+					if err != nil {
+						ch.Notify(channelID, "⚠️ Webhook analysis failed: events error")
+						return
+					}
+
+					var buf strings.Builder
+					for ev := range events {
+						switch ev.Type {
+						case "delta":
+							buf.WriteString(ev.Delta)
+						case "done":
+							result := buf.String()
+							if result == "" {
+								result = "(no output)"
+							}
+							ch.Notify(channelID, result)
+							return
+						case "error":
+							ch.Notify(channelID, "⚠️ "+ev.Delta)
+							return
+						}
+					}
+					break
+				}
+			}
+		}
+
+		webhookSrv := webhook.New(cfg.Webhooks, webhookExecutor)
+		if err := webhookSrv.Start(ctx); err != nil {
+			slog.Error("failed to start webhook server", "error", err)
+		}
+		defer webhookSrv.Stop()
+	}
 
 	for _, ch := range channels {
 		go func(c channel.Channel) {

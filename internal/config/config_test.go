@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -196,5 +197,45 @@ func TestExpandHome(t *testing.T) {
 	}
 	if got != "/abs/path" {
 		t.Errorf("expandHome(/abs/path) = %q, want /abs/path", got)
+	}
+}
+
+func TestWebhookLoopbackValidation(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
+	tests := []struct {
+		bind    string
+		wantErr bool
+	}{
+		{"127.0.0.1:8787", false},
+		{"localhost:8787", false},
+		{"[::1]:8787", false},
+		{"0.0.0.0:8787", true},
+		{"192.168.1.1:8787", true},
+		{"example.com:8787", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.bind, func(t *testing.T) {
+			yaml := fmt.Sprintf("webhooks:\n  bind: %q\n  endpoints:\n    - name: test\n      path: /test\n      secret: s\n      platform: telegram\n      channel_id: c1\n      prompt: p\n", tt.bind)
+			path := writeConfig(t, t.TempDir(), yaml)
+			_, err := Load(path)
+			if tt.wantErr && err == nil {
+				t.Fatal("expected error for non-loopback bind")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestWebhookNoEndpointsSkipsValidation(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
+	path := writeConfig(t, t.TempDir(), "")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Webhooks.Endpoints) != 0 {
+		t.Fatalf("expected no webhook endpoints, got %d", len(cfg.Webhooks.Endpoints))
 	}
 }
