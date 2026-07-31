@@ -11,7 +11,7 @@ func (m mockMessageRef) ID() string { return m.id }
 
 type mockReplyContext struct{}
 
-func (m *mockReplyContext) SendTyping() error                { return nil }
+func (m *mockReplyContext) SendTyping() error                    { return nil }
 func (m *mockReplyContext) Send(text string) (MessageRef, error) { return mockMessageRef{id: "1"}, nil }
 func (m *mockReplyContext) SendWithButtons(text string, buttons []Button) (MessageRef, error) {
 	return mockMessageRef{id: "1"}, nil
@@ -24,7 +24,7 @@ func (m *mockChannel) Name() string { return "mock" }
 func (m *mockChannel) Start(ctx context.Context, handler func(IncomingMessage)) error {
 	return nil
 }
-func (m *mockChannel) Stop() error { return nil }
+func (m *mockChannel) Stop() error                                { return nil }
 func (m *mockChannel) Notify(channelID string, text string) error { return nil }
 
 var (

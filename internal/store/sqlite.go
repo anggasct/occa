@@ -93,9 +93,9 @@ CREATE TABLE IF NOT EXISTS schedule (
 }
 
 func (s *SQLiteStore) SessionRepo() SessionRepo   { return s.sessions }
-func (s *SQLiteStore) ChannelRepo() ChannelRepo    { return s.channels }
-func (s *SQLiteStore) OverrideRepo() OverrideRepo  { return s.overrides }
-func (s *SQLiteStore) ScheduleRepo() ScheduleRepo  { return s.schedules }
+func (s *SQLiteStore) ChannelRepo() ChannelRepo   { return s.channels }
+func (s *SQLiteStore) OverrideRepo() OverrideRepo { return s.overrides }
+func (s *SQLiteStore) ScheduleRepo() ScheduleRepo { return s.schedules }
 
 func (s *SQLiteStore) Close() error {
 	return s.db.Close()

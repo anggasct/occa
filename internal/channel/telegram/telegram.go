@@ -15,7 +15,7 @@ import (
 )
 
 type Adapter struct {
-	bot  *tgbotapi.BotAPI
+	bot   *tgbotapi.BotAPI
 	token string
 }
 

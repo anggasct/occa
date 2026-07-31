@@ -9,7 +9,7 @@ import (
 )
 
 type OpenAPIDoc struct {
-	Info  OpenAPIInfo         `json:"info"`
+	Info  OpenAPIInfo    `json:"info"`
 	Paths map[string]any `json:"paths"`
 }
 
