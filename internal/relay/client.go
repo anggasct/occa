@@ -156,12 +156,12 @@ func (c *HTTPClient) SendMessage(ctx context.Context, sessionID, text string, mo
 func (c *HTTPClient) Providers(ctx context.Context) (Providers, error) {
 	resp, err := c.get(ctx, "/provider")
 	if err != nil {
-		return Providers{}, err
+		return Providers{}, fmt.Errorf("relay: providers: request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return Providers{}, ErrNotFound
+		return Providers{}, fmt.Errorf("relay: providers: %w", ErrNotFound)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return Providers{}, fmt.Errorf("relay: providers: unexpected status %d", resp.StatusCode)

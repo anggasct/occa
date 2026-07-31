@@ -96,6 +96,27 @@ func TestProviders(t *testing.T) {
 	}
 }
 
+func TestProvidersPreservesSentinelCauses(t *testing.T) {
+	t.Run("not found", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+
+		_, err := NewHTTPClient(srv.URL).Providers(context.Background())
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("expected ErrNotFound, got: %v", err)
+		}
+	})
+
+	t.Run("unreachable", func(t *testing.T) {
+		_, err := NewHTTPClient("http://127.0.0.1:1").Providers(context.Background())
+		if !errors.Is(err, ErrUnreachable) {
+			t.Fatalf("expected ErrUnreachable, got: %v", err)
+		}
+	})
+}
+
 func TestRunCommand(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/session/s1/command" {

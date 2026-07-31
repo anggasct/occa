@@ -13,31 +13,59 @@ type sqliteChannelRepo struct {
 
 func (r *sqliteChannelRepo) Get(ctx context.Context, platform, channelID string) (*Channel, error) {
 	var ch Channel
-	var workdir sql.NullString
+	var model, workdir sql.NullString
 	err := r.db.QueryRowContext(ctx,
 		`SELECT channel_id, platform, model, listen_mode, workdir, created_at, updated_at FROM channel WHERE platform = ? AND channel_id = ?`,
 		platform, channelID,
-	).Scan(&ch.ChannelID, &ch.Platform, &ch.Model, &ch.ListenMode, &workdir, &ch.CreatedAt, &ch.UpdatedAt)
+	).Scan(&ch.ChannelID, &ch.Platform, &model, &ch.ListenMode, &workdir, &ch.CreatedAt, &ch.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("store: channel get: %w", err)
 	}
-	ch.Workdir = workdir.String
+	ch.Model, ch.Workdir = model.String, workdir.String
 	return &ch, nil
 }
 
-func (r *sqliteChannelRepo) Upsert(ctx context.Context, ch *Channel) error {
+func (r *sqliteChannelRepo) UpsertModel(ctx context.Context, platform, channelID, model string) error {
 	now := time.Now().Unix()
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO channel (channel_id, platform, model, listen_mode, workdir, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT (channel_id, platform) DO UPDATE SET model = excluded.model, listen_mode = excluded.listen_mode, workdir = excluded.workdir, updated_at = excluded.updated_at`,
-		ch.ChannelID, ch.Platform, ch.Model, ch.ListenMode, ch.Workdir, now, now,
+		`INSERT INTO channel (channel_id, platform, model, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT (channel_id, platform) DO UPDATE SET model = excluded.model, updated_at = excluded.updated_at`,
+		channelID, platform, model, now, now,
 	)
 	if err != nil {
-		return fmt.Errorf("store: channel upsert: %w", err)
+		return fmt.Errorf("store: channel upsert model: %w", err)
+	}
+	return nil
+}
+
+func (r *sqliteChannelRepo) UpsertListenMode(ctx context.Context, platform, channelID, listenMode string) error {
+	now := time.Now().Unix()
+	_, err := r.db.ExecContext(ctx,
+		`INSERT INTO channel (channel_id, platform, listen_mode, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT (channel_id, platform) DO UPDATE SET listen_mode = excluded.listen_mode, updated_at = excluded.updated_at`,
+		channelID, platform, listenMode, now, now,
+	)
+	if err != nil {
+		return fmt.Errorf("store: channel upsert listen mode: %w", err)
+	}
+	return nil
+}
+
+func (r *sqliteChannelRepo) UpsertWorkdir(ctx context.Context, platform, channelID, workdir string) error {
+	now := time.Now().Unix()
+	_, err := r.db.ExecContext(ctx,
+		`INSERT INTO channel (channel_id, platform, workdir, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT (channel_id, platform) DO UPDATE SET workdir = excluded.workdir, updated_at = excluded.updated_at`,
+		channelID, platform, workdir, now, now,
+	)
+	if err != nil {
+		return fmt.Errorf("store: channel upsert workdir: %w", err)
 	}
 	return nil
 }

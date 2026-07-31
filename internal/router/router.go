@@ -178,7 +178,15 @@ func (r *Router) handleCommand(ctx context.Context, msg channel.IncomingMessage)
 
 	reply, err := cmd.Handler(ctx, msg, args)
 	if err != nil {
-		msg.ReplyCtx.Send("⚠️ " + err.Error())
+		var replyErr *replyError
+		if !errors.As(err, &replyErr) || replyErr.cause != nil {
+			slog.Error("command failed", "command", name, "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID, "error", err)
+		}
+		message := "Command failed. Please try again."
+		if replyErr != nil {
+			message = replyErr.message
+		}
+		msg.ReplyCtx.Send("⚠️ " + message)
 		return nil
 	}
 	msg.ReplyCtx.Send(reply)
@@ -219,8 +227,9 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 	} else {
 		model, modelErr := r.modelForMessage(ctx, msg)
 		if modelErr != nil {
-			slog.Warn("failed to resolve message model; using agent default", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID, "error", modelErr)
-			model = nil
+			slog.Error("failed to resolve message model; message not sent", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID, "error", modelErr)
+			msg.ReplyCtx.Send("⚠️ Unable to resolve model configuration. Message not sent.")
+			return nil
 		}
 		attachments := make([]relay.Attachment, len(msg.Attachments))
 		for i, a := range msg.Attachments {

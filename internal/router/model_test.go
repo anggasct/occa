@@ -3,6 +3,8 @@ package router
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -36,7 +38,9 @@ func TestModelViewUsesPersonalThenChannelThenDefault(t *testing.T) {
 		t.Fatalf("expected personal model, got %q", reply.sends[0])
 	}
 
-	delete(overrides.overrides, "telegram:chat1:user1")
+	o := overrides.overrides["telegram:chat1:user1"]
+	o.Model = ""
+	o.Role = "allow"
 	reply2 := &fakeReplyCtx{}
 	if err := r.Route(context.Background(), msg("/occa:model", reply2)); err != nil {
 		t.Fatalf("Route channel model view: %v", err)
@@ -71,6 +75,50 @@ func TestModelSetPersonalOverride(t *testing.T) {
 	}
 	if !strings.Contains(reply.sends[0], "Personal model set") {
 		t.Fatalf("unexpected response: %q", reply.sends[0])
+	}
+}
+
+func TestModelCommandRequiresAllowedUser(t *testing.T) {
+	roles := []struct {
+		name string
+		role string
+	}{
+		{name: "unknown"},
+		{name: "denied", role: "deny"},
+	}
+	actions := []struct {
+		name string
+		text string
+	}{
+		{name: "view", text: "/occa:model"},
+		{name: "set personal", text: "/occa:model openai/gpt-4o"},
+	}
+
+	for _, role := range roles {
+		for _, action := range actions {
+			t.Run(role.name+" "+action.name, func(t *testing.T) {
+				r, client, reply, overrides := newTestRouterWithAccess()
+				client.providers = modelTestProviders()
+				if role.role != "" {
+					overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+						ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: role.role,
+					}
+				}
+
+				if err := r.Route(context.Background(), msg(action.text, reply)); err != nil {
+					t.Fatalf("Route: %v", err)
+				}
+				if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], "Access denied") {
+					t.Fatalf("unexpected response: %v", reply.sends)
+				}
+				if client.providerCalls != 0 {
+					t.Fatalf("provider calls = %d, want 0", client.providerCalls)
+				}
+				if stored := overrides.overrides["telegram:chat1:user1"]; stored != nil && stored.Model != "" {
+					t.Fatalf("model was persisted for denied user: %+v", stored)
+				}
+			})
+		}
 	}
 }
 
@@ -155,6 +203,100 @@ func TestModelValidationRejectsMalformedAndUnknownValues(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestModelProviderErrorsUseSafeReplies(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "unreachable", err: fmt.Errorf("private backend detail: %w", relay.ErrUnreachable), want: "Agent unreachable"},
+		{name: "unexpected", err: errors.New("private backend detail"), want: "Model provider list unavailable"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, client, reply, overrides := newTestRouterWithAccess()
+			client.providersErr = tt.err
+			overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+				ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+			}
+
+			if err := r.Route(context.Background(), msg("/occa:model openai/gpt-4o", reply)); err != nil {
+				t.Fatalf("Route: %v", err)
+			}
+			if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], tt.want) {
+				t.Fatalf("response = %v, want %q", reply.sends, tt.want)
+			}
+			if strings.Contains(reply.sends[0], "private backend detail") {
+				t.Fatalf("raw error leaked to chat: %q", reply.sends[0])
+			}
+		})
+	}
+}
+
+func TestModelInstanceErrorUsesSafeReply(t *testing.T) {
+	r, client, reply, overrides := newTestRouterWithAccess()
+	r.instances.(*fakeInstanceProvider).err = errors.New("private instance detail")
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+	}
+
+	if err := r.Route(context.Background(), msg("/occa:model openai/gpt-4o", reply)); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], "Agent unreachable") {
+		t.Fatalf("unexpected response: %v", reply.sends)
+	}
+	if strings.Contains(reply.sends[0], "private instance detail") {
+		t.Fatalf("raw error leaked to chat: %q", reply.sends[0])
+	}
+	if client.providerCalls != 0 {
+		t.Fatalf("provider calls = %d, want 0", client.providerCalls)
+	}
+}
+
+func TestModelCommandHidesRepositoryError(t *testing.T) {
+	r, _, reply, overrides := newTestRouterWithAccess()
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+	}
+	r.store.(*fakeStore).channelRepo.getErr = errors.New("private database detail")
+
+	if err := r.Route(context.Background(), msg("/occa:model", reply)); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], "Command failed") {
+		t.Fatalf("unexpected response: %v", reply.sends)
+	}
+	if strings.Contains(reply.sends[0], "private database detail") {
+		t.Fatalf("raw error leaked to chat: %q", reply.sends[0])
+	}
+}
+
+func TestModelValidationPreservesInternalCause(t *testing.T) {
+	t.Run("provider", func(t *testing.T) {
+		r, client, _, _ := newTestRouterWithAccess()
+		cause := errors.New("provider decode failed")
+		client.providersErr = cause
+
+		err := r.validateModel(context.Background(), msg("", &fakeReplyCtx{}), relay.ModelRef{ProviderID: "openai", ID: "gpt-4o"})
+		if !errors.Is(err, cause) {
+			t.Fatalf("error does not preserve cause: %v", err)
+		}
+	})
+
+	t.Run("instance", func(t *testing.T) {
+		r, _, _, _ := newTestRouterWithAccess()
+		cause := errors.New("instance spawn failed")
+		r.instances.(*fakeInstanceProvider).err = cause
+
+		err := r.validateModel(context.Background(), msg("", &fakeReplyCtx{}), relay.ModelRef{ProviderID: "openai", ID: "gpt-4o"})
+		if !errors.Is(err, cause) {
+			t.Fatalf("error does not preserve cause: %v", err)
+		}
+	})
 }
 
 func TestMessagesResolvePersonalModelsPerUser(t *testing.T) {
@@ -251,19 +393,80 @@ func TestMessageWithoutModelUsesAgentDefault(t *testing.T) {
 	}
 }
 
-func TestMessageFallsBackToAgentDefaultOnInvalidStoredModel(t *testing.T) {
-	r, client, _, overrides := newTestRouterWithAccess()
+func TestMessageRejectsInvalidStoredModel(t *testing.T) {
+	r, client, reply, overrides := newTestRouterWithAccess()
 	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
 		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin", Model: "invalid",
 	}
 
-	if err := r.Route(context.Background(), msg("hello", &fakeReplyCtx{})); err != nil {
+	if err := r.Route(context.Background(), msg("hello", reply)); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
-	if client.lastMsg != "hello" {
-		t.Fatalf("message was not forwarded: %q", client.lastMsg)
+	if client.sendCalls != 0 {
+		t.Fatalf("message was forwarded with invalid stored model: %q", client.lastMsg)
 	}
-	if client.lastModel != nil {
-		t.Fatalf("expected agent default after invalid stored model, got %+v", client.lastModel)
+	if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], "Message not sent") {
+		t.Fatalf("unexpected response: %v", reply.sends)
+	}
+}
+
+func TestMessageRejectsModelRepositoryFailure(t *testing.T) {
+	r, client, reply, overrides := newTestRouterWithAccess()
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+	}
+	r.store.(*fakeStore).channelRepo.getErr = errors.New("database unavailable")
+
+	if err := r.Route(context.Background(), msg("hello", reply)); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if client.sendCalls != 0 {
+		t.Fatalf("message was forwarded after repository failure: %q", client.lastMsg)
+	}
+	if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], "Message not sent") {
+		t.Fatalf("unexpected response: %v", reply.sends)
+	}
+}
+
+func TestUnresolvedChannelScopeDoesNotReadWriteOrSendModel(t *testing.T) {
+	r, client, commandReply, overrides := newTestRouterWithAccess()
+	client.providers = modelTestProviders()
+	overrides.overrides["discord:thread:user1"] = &store.UserOverride{
+		ChannelID: "thread", Platform: "discord", UserID: "user1", Role: "admin",
+	}
+	command := channel.IncomingMessage{
+		Platform:               "discord",
+		ChannelID:              "thread",
+		ChannelScopeUnresolved: true,
+		UserID:                 "user1",
+		Text:                   "/occa:model channel openai/gpt-4o",
+		IsMention:              true,
+		ReplyCtx:               commandReply,
+	}
+
+	if err := r.Route(context.Background(), command); err != nil {
+		t.Fatalf("Route command: %v", err)
+	}
+	if len(commandReply.sends) != 1 || !strings.Contains(commandReply.sends[0], "Channel information unavailable") {
+		t.Fatalf("unexpected command response: %v", commandReply.sends)
+	}
+	if client.providerCalls != 0 {
+		t.Fatalf("provider calls = %d, want 0", client.providerCalls)
+	}
+	if len(r.store.(*fakeStore).channelRepo.channels) != 0 {
+		t.Fatalf("model row created with unresolved scope: %+v", r.store.(*fakeStore).channelRepo.channels)
+	}
+
+	messageReply := &fakeReplyCtx{}
+	command.Text = "hello"
+	command.ReplyCtx = messageReply
+	if err := r.Route(context.Background(), command); err != nil {
+		t.Fatalf("Route message: %v", err)
+	}
+	if client.sendCalls != 0 {
+		t.Fatal("message was sent with unresolved scope")
+	}
+	if len(messageReply.sends) != 1 || !strings.Contains(messageReply.sends[0], "Message not sent") {
+		t.Fatalf("unexpected message response: %v", messageReply.sends)
 	}
 }

@@ -32,18 +32,22 @@ type fakeRef struct{ id string }
 func (f fakeRef) ID() string { return f.id }
 
 type fakeRelayClient struct {
-	sessionID string
-	lastMsg   string
-	rawMsg    string
-	lastCmd   string
-	providers relay.Providers
-	lastModel *relay.ModelRef
+	sessionID     string
+	lastMsg       string
+	rawMsg        string
+	lastCmd       string
+	providers     relay.Providers
+	providersErr  error
+	lastModel     *relay.ModelRef
+	providerCalls int
+	sendCalls     int
 }
 
 func (f *fakeRelayClient) CreateSession(_ context.Context) (string, error) {
 	return f.sessionID, nil
 }
 func (f *fakeRelayClient) SendMessage(_ context.Context, _, text string, model *relay.ModelRef, _ []relay.Attachment) error {
+	f.sendCalls++
 	f.rawMsg = text
 	if model != nil {
 		copy := *model
@@ -58,7 +62,8 @@ func (f *fakeRelayClient) SendMessage(_ context.Context, _, text string, model *
 	return nil
 }
 func (f *fakeRelayClient) Providers(_ context.Context) (relay.Providers, error) {
-	return f.providers, nil
+	f.providerCalls++
+	return f.providers, f.providersErr
 }
 func (f *fakeRelayClient) RunCommand(_ context.Context, _, cmd string) error {
 	f.lastCmd = cmd
@@ -123,6 +128,7 @@ func (f *fakeOverrideRepo) ListByChannel(_ context.Context, platform, channelID 
 
 type fakeChannelRepo struct {
 	channels map[string]*store.Channel
+	getErr   error
 }
 
 func newFakeChannelRepo() *fakeChannelRepo {
@@ -132,11 +138,34 @@ func newFakeChannelRepo() *fakeChannelRepo {
 func (f *fakeChannelRepo) key(platform, channelID string) string { return platform + ":" + channelID }
 
 func (f *fakeChannelRepo) Get(_ context.Context, platform, channelID string) (*store.Channel, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
 	return f.channels[f.key(platform, channelID)], nil
 }
 
-func (f *fakeChannelRepo) Upsert(_ context.Context, ch *store.Channel) error {
-	f.channels[f.key(ch.Platform, ch.ChannelID)] = ch
+func (f *fakeChannelRepo) channel(platform, channelID string) *store.Channel {
+	k := f.key(platform, channelID)
+	ch := f.channels[k]
+	if ch == nil {
+		ch = &store.Channel{ChannelID: channelID, Platform: platform, ListenMode: "mention"}
+		f.channels[k] = ch
+	}
+	return ch
+}
+
+func (f *fakeChannelRepo) UpsertModel(_ context.Context, platform, channelID, model string) error {
+	f.channel(platform, channelID).Model = model
+	return nil
+}
+
+func (f *fakeChannelRepo) UpsertListenMode(_ context.Context, platform, channelID, listenMode string) error {
+	f.channel(platform, channelID).ListenMode = listenMode
+	return nil
+}
+
+func (f *fakeChannelRepo) UpsertWorkdir(_ context.Context, platform, channelID, workdir string) error {
+	f.channel(platform, channelID).Workdir = workdir
 	return nil
 }
 
@@ -194,9 +223,13 @@ func (f *fakeInstance) End()                 {}
 
 type fakeInstanceProvider struct {
 	client relay.Client
+	err    error
 }
 
 func (p *fakeInstanceProvider) Instance(_ context.Context, _ string) (AgentInstance, error) {
+	if p.err != nil {
+		return nil, p.err
+	}
 	return &fakeInstance{client: p.client}, nil
 }
 

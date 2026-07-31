@@ -43,7 +43,9 @@ type SessionRepo interface {
 
 type ChannelRepo interface {
 	Get(ctx context.Context, platform, channelID string) (*Channel, error)
-	Upsert(ctx context.Context, ch *Channel) error
+	UpsertModel(ctx context.Context, platform, channelID, model string) error
+	UpsertListenMode(ctx context.Context, platform, channelID, listenMode string) error
+	UpsertWorkdir(ctx context.Context, platform, channelID, workdir string) error
 }
 
 // OverrideRepo splits writes by field (UpsertRole, UpsertModel) rather than a single

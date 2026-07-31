@@ -16,9 +16,10 @@ import (
 const maxDownloadSize = 10 * 1024 * 1024
 
 type Adapter struct {
-	session *discordgo.Session
-	token   string
-	botID   string
+	session       *discordgo.Session
+	token         string
+	botID         string
+	channelLookup func(string) (*discordgo.Channel, error)
 }
 
 func New(token string) *Adapter {
@@ -62,15 +63,18 @@ func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessag
 				slog.Warn("discord: defer component interaction failed", "error", err)
 			}
 
+			parentChannelID, isThread, scopeUnresolved := a.channelScope(i.Interaction.GuildID, i.ChannelID)
 			msg := channel.IncomingMessage{
-				Platform:        "discord",
-				ChannelID:       i.ChannelID,
-				ParentChannelID: a.parentChannelID(i.ChannelID),
-				UserID:          userID,
-				IsCallback:      true,
-				CallbackData:    data.CustomID,
-				IsMention:       true,
-				ReplyCtx:        &replyContext{session: sess, channelID: i.ChannelID, interaction: i.Interaction},
+				Platform:               "discord",
+				ChannelID:              i.ChannelID,
+				ParentChannelID:        parentChannelID,
+				ChannelScopeUnresolved: scopeUnresolved,
+				UserID:                 userID,
+				IsThread:               isThread,
+				IsCallback:             true,
+				CallbackData:           data.CustomID,
+				IsMention:              true,
+				ReplyCtx:               &replyContext{session: sess, channelID: i.ChannelID, interaction: i.Interaction},
 			}
 			handler(msg)
 
@@ -94,14 +98,17 @@ func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessag
 				slog.Warn("discord: defer interaction failed", "error", err)
 			}
 
+			parentChannelID, isThread, scopeUnresolved := a.channelScope(i.Interaction.GuildID, i.ChannelID)
 			msg := channel.IncomingMessage{
-				Platform:        "discord",
-				ChannelID:       i.ChannelID,
-				ParentChannelID: a.parentChannelID(i.ChannelID),
-				UserID:          userID,
-				Text:            strings.TrimSpace(text),
-				IsMention:       true,
-				ReplyCtx:        &replyContext{session: sess, channelID: i.ChannelID, interaction: i.Interaction},
+				Platform:               "discord",
+				ChannelID:              i.ChannelID,
+				ParentChannelID:        parentChannelID,
+				ChannelScopeUnresolved: scopeUnresolved,
+				UserID:                 userID,
+				Text:                   strings.TrimSpace(text),
+				IsMention:              true,
+				IsThread:               isThread,
+				ReplyCtx:               &replyContext{session: sess, channelID: i.ChannelID, interaction: i.Interaction},
 			}
 			handler(msg)
 		}
@@ -150,16 +157,18 @@ func (a *Adapter) normalizeMessage(m *discordgo.Message) channel.IncomingMessage
 		}
 	}
 
+	parentChannelID, isThread, scopeUnresolved := a.channelScope(m.GuildID, m.ChannelID)
 	return channel.IncomingMessage{
-		Platform:        "discord",
-		ChannelID:       m.ChannelID,
-		ParentChannelID: a.parentChannelID(m.ChannelID),
-		UserID:          m.Author.ID,
-		Text:            m.Content,
-		IsMention:       isMention,
-		IsThread:        a.isThreadChannel(m.ChannelID),
-		Attachments:     a.downloadAttachments(m),
-		ReplyCtx:        &replyContext{session: a.session, channelID: m.ChannelID},
+		Platform:               "discord",
+		ChannelID:              m.ChannelID,
+		ParentChannelID:        parentChannelID,
+		ChannelScopeUnresolved: scopeUnresolved,
+		UserID:                 m.Author.ID,
+		Text:                   m.Content,
+		IsMention:              isMention,
+		IsThread:               isThread,
+		Attachments:            a.downloadAttachments(m),
+		ReplyCtx:               &replyContext{session: a.session, channelID: m.ChannelID},
 	}
 }
 
@@ -190,28 +199,37 @@ func (a *Adapter) downloadAttachments(m *discordgo.Message) []channel.Attachment
 	return attachments
 }
 
-func (a *Adapter) isThreadChannel(channelID string) bool {
-	ch := a.lookupChannel(channelID)
-	return ch != nil && isThreadType(ch.Type)
-}
-
-func (a *Adapter) parentChannelID(channelID string) string {
-	ch := a.lookupChannel(channelID)
-	if ch == nil || !isThreadType(ch.Type) {
-		return ""
+func (a *Adapter) channelScope(guildID, channelID string) (string, bool, bool) {
+	if guildID == "" {
+		return "", false, false
 	}
-	return ch.ParentID
+	ch, err := a.lookupChannel(channelID)
+	if err != nil {
+		slog.Warn("discord: channel scope lookup failed", "channel_id", channelID, "error", err)
+		return "", false, true
+	}
+	if !isThreadType(ch.Type) {
+		return "", false, false
+	}
+	if ch.ParentID == "" {
+		slog.Warn("discord: thread parent missing", "channel_id", channelID)
+		return "", true, true
+	}
+	return ch.ParentID, true, false
 }
 
-func (a *Adapter) lookupChannel(channelID string) *discordgo.Channel {
+func (a *Adapter) lookupChannel(channelID string) (*discordgo.Channel, error) {
+	if a.channelLookup != nil {
+		return a.channelLookup(channelID)
+	}
 	ch, err := a.session.State.Channel(channelID)
 	if err != nil {
 		ch, err = a.session.Channel(channelID)
 		if err != nil {
-			return nil
+			return nil, fmt.Errorf("discord: lookup channel %s: %w", channelID, err)
 		}
 	}
-	return ch
+	return ch, nil
 }
 
 func isThreadType(channelType discordgo.ChannelType) bool {
