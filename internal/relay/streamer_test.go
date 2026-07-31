@@ -44,6 +44,14 @@ func (f *fakeReplyContext) Edit(ref channel.MessageRef, text string) error {
 	return nil
 }
 
+func (f *fakeReplyContext) SendWithButtons(text string, buttons []channel.Button) (channel.MessageRef, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sends = append(f.sends, text)
+	f.refCount++
+	return fakeRef{id: fmt.Sprintf("msg-%d", f.refCount)}, nil
+}
+
 func (f *fakeReplyContext) lastOutput() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()

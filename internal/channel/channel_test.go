@@ -13,6 +13,9 @@ type mockReplyContext struct{}
 
 func (m *mockReplyContext) SendTyping() error                { return nil }
 func (m *mockReplyContext) Send(text string) (MessageRef, error) { return mockMessageRef{id: "1"}, nil }
+func (m *mockReplyContext) SendWithButtons(text string, buttons []Button) (MessageRef, error) {
+	return mockMessageRef{id: "1"}, nil
+}
 func (m *mockReplyContext) Edit(ref MessageRef, text string) error { return nil }
 
 type mockChannel struct{}

@@ -46,37 +46,63 @@ func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessag
 	})
 
 	s.AddHandler(func(sess *discordgo.Session, i *discordgo.InteractionCreate) {
-		if i.Type != discordgo.InteractionApplicationCommand {
-			return
-		}
-		data := i.ApplicationCommandData()
-		text := "/" + data.Name
-		for _, opt := range data.Options {
-			text += " " + fmt.Sprintf("%v", opt.Value)
-		}
+		switch i.Type {
+		case discordgo.InteractionMessageComponent:
+			data := i.MessageComponentData()
+			var userID string
+			if i.Member != nil {
+				userID = i.Member.User.ID
+			} else if i.User != nil {
+				userID = i.User.ID
+			}
 
-		var userID string
-		if i.Member != nil {
-			userID = i.Member.User.ID
-		} else if i.User != nil {
-			userID = i.User.ID
-		}
+			if err := sess.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseUpdateMessage,
+			}); err != nil {
+				slog.Warn("discord: defer component interaction failed", "error", err)
+			}
 
-		if err := sess.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
-		}); err != nil {
-			slog.Warn("discord: defer interaction failed", "error", err)
-		}
+			msg := channel.IncomingMessage{
+				Platform:     "discord",
+				ChannelID:    i.ChannelID,
+				UserID:       userID,
+				IsCallback:   true,
+				CallbackData: data.CustomID,
+				IsMention:    true,
+				ReplyCtx:     &replyContext{session: sess, channelID: i.ChannelID, interaction: i.Interaction},
+			}
+			handler(msg)
 
-		msg := channel.IncomingMessage{
-			Platform:  "discord",
-			ChannelID: i.ChannelID,
-			UserID:    userID,
-			Text:      strings.TrimSpace(text),
-			IsMention: true,
-			ReplyCtx:  &replyContext{session: sess, channelID: i.ChannelID, interaction: i.Interaction},
+		case discordgo.InteractionApplicationCommand:
+			data := i.ApplicationCommandData()
+			text := "/" + data.Name
+			for _, opt := range data.Options {
+				text += " " + fmt.Sprintf("%v", opt.Value)
+			}
+
+			var userID string
+			if i.Member != nil {
+				userID = i.Member.User.ID
+			} else if i.User != nil {
+				userID = i.User.ID
+			}
+
+			if err := sess.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+			}); err != nil {
+				slog.Warn("discord: defer interaction failed", "error", err)
+			}
+
+			msg := channel.IncomingMessage{
+				Platform:  "discord",
+				ChannelID: i.ChannelID,
+				UserID:    userID,
+				Text:      strings.TrimSpace(text),
+				IsMention: true,
+				ReplyCtx:  &replyContext{session: sess, channelID: i.ChannelID, interaction: i.Interaction},
+			}
+			handler(msg)
 		}
-		handler(msg)
 	})
 
 	if err := s.Open(); err != nil {
@@ -203,6 +229,28 @@ func (rc *replyContext) Send(text string) (channel.MessageRef, error) {
 		lastRef = messageRef{id: msg.ID}
 	}
 	return lastRef, nil
+}
+
+func (rc *replyContext) SendWithButtons(text string, buttons []channel.Button) (channel.MessageRef, error) {
+	var components []discordgo.MessageComponent
+	var btns []discordgo.MessageComponent
+	for _, b := range buttons {
+		btns = append(btns, discordgo.Button{
+			Label:    b.Label,
+			Style:    discordgo.SecondaryButton,
+			CustomID: b.Value,
+		})
+	}
+	components = append(components, discordgo.ActionsRow{Components: btns})
+
+	msg, err := rc.session.ChannelMessageSendComplex(rc.channelID, &discordgo.MessageSend{
+		Content:    text,
+		Components: components,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("discord: send with buttons: %w", err)
+	}
+	return messageRef{id: msg.ID}, nil
 }
 
 func (rc *replyContext) Edit(ref channel.MessageRef, text string) error {

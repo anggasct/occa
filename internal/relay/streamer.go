@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -72,6 +73,10 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 			case "error":
 				s.reply.Send("⚠️ Agent error: " + ev.Delta)
 				return nil
+			case "permission_asked":
+				if ev.Permission != nil {
+					s.sendPermissionPrompt(ev.Permission)
+				}
 			}
 
 		case <-timer.C:
@@ -164,4 +169,21 @@ func (s *Streamer) finalSync(refs *[]channel.MessageRef, lastChunks *[]string, r
 
 	*lastChunks = chunks
 	return nil
+}
+
+func (s *Streamer) sendPermissionPrompt(perm *PermissionRequest) {
+	text := fmt.Sprintf("🔐 Permission requested: %s", perm.Permission)
+	if perm.Tool != "" {
+		text += fmt.Sprintf(" (%s)", perm.Tool)
+	}
+
+	buttons := []channel.Button{
+		{Label: "✅ Allow once", Value: "permission:" + perm.ID + ":once"},
+		{Label: "✅ Always allow", Value: "permission:" + perm.ID + ":always"},
+		{Label: "❌ Deny", Value: "permission:" + perm.ID + ":reject"},
+	}
+
+	if _, err := s.reply.SendWithButtons(text, buttons); err != nil {
+		slog.Warn("streaming: send permission prompt failed", "error", err)
+	}
 }

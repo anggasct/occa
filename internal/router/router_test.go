@@ -22,6 +22,10 @@ func (f *fakeReplyCtx) Send(text string) (channel.MessageRef, error) {
 	return fakeRef{id: "1"}, nil
 }
 func (f *fakeReplyCtx) Edit(ref channel.MessageRef, text string) error { return nil }
+func (f *fakeReplyCtx) SendWithButtons(text string, buttons []channel.Button) (channel.MessageRef, error) {
+	f.sends = append(f.sends, text)
+	return fakeRef{id: "1"}, nil
+}
 
 type fakeRef struct{ id string }
 
