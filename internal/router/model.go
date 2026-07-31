@@ -13,13 +13,6 @@ import (
 var errChannelScopeUnresolved = errors.New("channel scope unresolved")
 
 func (r *Router) handleModel(ctx context.Context, msg channel.IncomingMessage, args string) (string, error) {
-	if err := r.authorize(ctx, msg); err != nil {
-		if errors.Is(err, ErrDenied) {
-			return "", safeReplyError("Access denied. Ask an admin to /occa:allow you.", nil)
-		}
-		return "", safeReplyError("Unable to verify access. Please try again.", fmt.Errorf("model: authorize: %w", err))
-	}
-
 	parts := strings.Fields(args)
 	if len(parts) == 0 {
 		return r.viewModel(ctx, msg)
