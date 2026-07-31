@@ -32,10 +32,6 @@ type InstanceProvider interface {
 	Instance(ctx context.Context, workdir string) (AgentInstance, error)
 }
 
-type MCPContextSetter interface {
-	SetContext(platform, channelID string)
-}
-
 type Router struct {
 	commands       map[string]Command
 	instances      InstanceProvider
@@ -44,7 +40,6 @@ type Router struct {
 	adminID        string
 	startedAt      time.Time
 	sched          ScheduleStore
-	mcpSetter      MCPContextSetter
 }
 
 type ScheduleStore interface {
@@ -54,10 +49,6 @@ type ScheduleStore interface {
 
 func (r *Router) SetScheduler(s ScheduleStore) {
 	r.sched = s
-}
-
-func (r *Router) SetMCPContextSetter(m MCPContextSetter) {
-	r.mcpSetter = m
 }
 
 func New(instances InstanceProvider, st store.Store, defaultWorkdir string, adminID string) *Router {
@@ -208,8 +199,9 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 
 	msg.ReplyCtx.SendTyping()
 
-	if r.mcpSetter != nil {
-		r.mcpSetter.SetContext(msg.Platform, msg.ChannelID)
+	text := msg.Text
+	if !strings.HasPrefix(text, "/") {
+		text = text + "\n\n—\nOCCA context: platform=" + msg.Platform + ", channel_id=" + msg.ChannelID
 	}
 
 	if strings.HasPrefix(msg.Text, "/") {
@@ -219,7 +211,7 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 		for i, a := range msg.Attachments {
 			attachments[i] = relay.Attachment{Filename: a.Filename, MimeType: a.MimeType, Data: a.Data}
 		}
-		err = inst.Client().SendMessage(ctx, sessionID, msg.Text, attachments)
+		err = inst.Client().SendMessage(ctx, sessionID, text, attachments)
 	}
 	if err != nil {
 		if errors.Is(err, relay.ErrAttachmentTooLarge) {

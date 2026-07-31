@@ -167,7 +167,6 @@ func main() {
 	defer mcpSrv.Stop()
 
 	rt.SetScheduler(sched)
-	rt.SetMCPContextSetter(mcpSrv)
 
 	registerMCP(ctx, manager, mcpSrv, cfg.Agent.DefaultWorkdir)
 

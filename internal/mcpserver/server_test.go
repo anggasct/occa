@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/anggasct/occa/internal/scheduler"
@@ -11,13 +12,16 @@ import (
 )
 
 type fakeStore struct {
+	mu        sync.Mutex
 	schedules []store.Schedule
 }
 
 func (f *fakeStore) Create(_ context.Context, s *store.Schedule) (int64, error) {
-	s.ID = 1
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s.ID = int64(len(f.schedules)) + 1
 	f.schedules = append(f.schedules, *s)
-	return 1, nil
+	return s.ID, nil
 }
 
 func (f *fakeStore) Delete(_ context.Context, _, _ string, _ int64) error { return nil }
@@ -30,7 +34,7 @@ func (f *fakeStore) ListAll(_ context.Context) ([]store.Schedule, error) {
 	return f.schedules, nil
 }
 
-func TestMCPServerNoContext(t *testing.T) {
+func TestMCPServerNoChannelContext(t *testing.T) {
 	repo := &fakeStore{}
 	executor := func(ctx context.Context, platform, channelID, prompt string) {}
 	sched := scheduler.New(repo, executor)
@@ -45,19 +49,19 @@ func TestMCPServerNoContext(t *testing.T) {
 		t.Fatalf("handleScheduleTask: %v", err)
 	}
 	if !result.IsError {
-		t.Fatal("expected error when no context is set")
+		t.Fatal("expected error when platform/channel_id missing")
 	}
 }
 
-func TestMCPServerWithContext(t *testing.T) {
+func TestMCPServerWithChannelInput(t *testing.T) {
 	repo := &fakeStore{}
 	executor := func(ctx context.Context, platform, channelID, prompt string) {}
 	sched := scheduler.New(repo, executor)
 	srv := New(sched)
 
-	srv.SetContext("telegram", "chat123")
-
 	result, _, err := srv.handleScheduleTask(context.Background(), nil, scheduleTaskInput{
+		Platform:       "telegram",
+		ChannelID:      "chat123",
 		CronExpression: "0 9 * * 1-5",
 		Prompt:         "run tests",
 		HumanSchedule:  "weekdays at 9am",
@@ -66,7 +70,7 @@ func TestMCPServerWithContext(t *testing.T) {
 		t.Fatalf("handleScheduleTask: %v", err)
 	}
 	if result.IsError {
-		t.Fatalf("expected success, got error")
+		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
 	text := ""
@@ -79,25 +83,41 @@ func TestMCPServerWithContext(t *testing.T) {
 		t.Fatalf("expected 'Scheduled' in result, got: %s", text)
 	}
 	if len(repo.schedules) != 1 {
-		t.Fatalf("expected 1 schedule created, got %d", len(repo.schedules))
+		t.Fatalf("expected 1 schedule, got %d", len(repo.schedules))
 	}
 	s := repo.schedules[0]
 	if s.Platform != "telegram" || s.ChannelID != "chat123" {
-		t.Fatalf("schedule created with wrong context: platform=%s channel=%s", s.Platform, s.ChannelID)
+		t.Fatalf("wrong context: platform=%s channel=%s", s.Platform, s.ChannelID)
 	}
 }
 
-func TestMCPContextMostRecent(t *testing.T) {
+func TestMCPServerConcurrentNoRace(t *testing.T) {
 	repo := &fakeStore{}
 	executor := func(ctx context.Context, platform, channelID, prompt string) {}
 	sched := scheduler.New(repo, executor)
 	srv := New(sched)
 
-	srv.SetContext("telegram", "chatA")
-	srv.SetContext("discord", "chatB")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _, _ = srv.handleScheduleTask(context.Background(), nil, scheduleTaskInput{
+			Platform:       "telegram",
+			ChannelID:      "chatA",
+			CronExpression: "0 9 * * 1-5",
+			Prompt:         "from A",
+			HumanSchedule:  "daily",
+		})
+	}()
+	_, _, _ = srv.handleScheduleTask(context.Background(), nil, scheduleTaskInput{
+		Platform:       "discord",
+		ChannelID:      "chatB",
+		CronExpression: "0 10 * * 1-5",
+		Prompt:         "from B",
+		HumanSchedule:  "daily",
+	})
+	<-done
 
-	platform, channelID := srv.mostRecentContext()
-	if platform != "discord" || channelID != "chatB" {
-		t.Fatalf("expected discord/chatB as most recent, got %s/%s", platform, channelID)
+	if len(repo.schedules) != 2 {
+		t.Fatalf("expected 2 schedules, got %d", len(repo.schedules))
 	}
 }

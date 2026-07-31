@@ -6,8 +6,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"sync"
-	"time"
 
 	"github.com/anggasct/occa/internal/scheduler"
 	"github.com/anggasct/occa/internal/store"
@@ -19,25 +17,10 @@ type Server struct {
 	mcpServer *mcp.Server
 	httpSrv   *http.Server
 	port      int
-
-	mu       sync.RWMutex
-	contexts map[string]contextEntry
-}
-
-type contextEntry struct {
-	platform  string
-	channelID string
-	ts        int64
-}
-
-func contextKey(platform, channelID string) string {
-	return platform + ":" + channelID
 }
 
 func New(sched *scheduler.Scheduler) *Server {
-	s := &Server{
-		sched: sched,
-	}
+	s := &Server{sched: sched}
 
 	mcpServer := mcp.NewServer(&mcp.Implementation{
 		Name:    "occa",
@@ -46,7 +29,7 @@ func New(sched *scheduler.Scheduler) *Server {
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
 		Name:        "schedule_task",
-		Description: "Schedule a recurring background task. The prompt will be executed automatically at the specified cron schedule and results pushed to the chat.",
+		Description: "Schedule a recurring background task. The prompt will be executed automatically at the specified cron schedule and results pushed to the chat. The channel_id and platform values are provided in the OCCA context line at the end of the user's message — include them verbatim.",
 	}, s.handleScheduleTask)
 
 	s.mcpServer = mcpServer
@@ -54,23 +37,24 @@ func New(sched *scheduler.Scheduler) *Server {
 }
 
 type scheduleTaskInput struct {
+	Platform       string `json:"platform" jsonschema:"the platform from the OCCA context line (e.g. 'telegram' or 'discord')"`
+	ChannelID      string `json:"channel_id" jsonschema:"the channel_id from the OCCA context line"`
 	CronExpression string `json:"cron_expression" jsonschema:"the 5-field cron expression (e.g. '0 9 * * 1-5' for weekdays at 9 AM)"`
 	Prompt         string `json:"prompt" jsonschema:"the prompt or instruction to execute at each scheduled run"`
 	HumanSchedule  string `json:"human_schedule" jsonschema:"human-readable description of the schedule (e.g. 'every weekday at 9 AM')"`
 }
 
 func (s *Server) handleScheduleTask(ctx context.Context, req *mcp.CallToolRequest, input scheduleTaskInput) (*mcp.CallToolResult, scheduleTaskInput, error) {
-	platform, channelID := s.mostRecentContext()
-	if platform == "" || channelID == "" {
+	if input.Platform == "" || input.ChannelID == "" {
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "Error: no active channel context"}},
+			Content: []mcp.Content{&mcp.TextContent{Text: "Error: platform and channel_id are required. Include the values from the OCCA context line at the end of the user's message."}},
 			IsError: true,
 		}, input, nil
 	}
 
 	sched := store.Schedule{
-		Platform:       platform,
-		ChannelID:      channelID,
+		Platform:       input.Platform,
+		ChannelID:      input.ChannelID,
 		CronExpression: input.CronExpression,
 		HumanSchedule:  input.HumanSchedule,
 		Prompt:         input.Prompt,
@@ -85,37 +69,10 @@ func (s *Server) handleScheduleTask(ctx context.Context, req *mcp.CallToolReques
 		}, input, nil
 	}
 
-	result := fmt.Sprintf("✅ Scheduled (ID: %d): %s\nPrompt: %s\nCron: %s", id, input.HumanSchedule, input.Prompt, input.CronExpression)
+	result := fmt.Sprintf("Scheduled (ID: %d): %s\nPrompt: %s\nCron: %s", id, input.HumanSchedule, input.Prompt, input.CronExpression)
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: result}},
 	}, input, nil
-}
-
-func (s *Server) SetContext(platform, channelID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.contexts == nil {
-		s.contexts = make(map[string]contextEntry)
-	}
-	s.contexts[contextKey(platform, channelID)] = contextEntry{
-		platform:  platform,
-		channelID: channelID,
-		ts:        time.Now().UnixNano(),
-	}
-}
-
-func (s *Server) mostRecentContext() (platform, channelID string) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	var bestTS int64
-	for _, entry := range s.contexts {
-		if entry.ts > bestTS {
-			bestTS = entry.ts
-			platform = entry.platform
-			channelID = entry.channelID
-		}
-	}
-	return
 }
 
 func (s *Server) Start(ctx context.Context) error {

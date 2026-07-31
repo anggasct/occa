@@ -41,6 +41,9 @@ func (f *fakeRelayClient) CreateSession(_ context.Context) (string, error) {
 	return f.sessionID, nil
 }
 func (f *fakeRelayClient) SendMessage(_ context.Context, _, text string, _ []relay.Attachment) error {
+	if idx := strings.Index(text, "\n\n—\nOCCA context:"); idx >= 0 {
+		text = text[:idx]
+	}
 	f.lastMsg = text
 	return nil
 }
