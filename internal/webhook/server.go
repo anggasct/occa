@@ -12,7 +12,6 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/config"
 )
 
@@ -71,6 +70,15 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	ep, ok := s.endpoints[r.URL.Path]
 	if !ok {
 		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if strings.TrimSpace(ep.Secret) == "" {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -133,16 +141,4 @@ func renderTemplate(prompt string, data any) (string, error) {
 		return "", fmt.Errorf("webhook: execute template: %w", err)
 	}
 	return buf.String(), nil
-}
-
-func ExecuteWithChannels(channels []channel.Channel) Executor {
-	return func(ctx context.Context, platform, channelID, prompt string) {
-		for _, ch := range channels {
-			if ch.Name() == platform {
-				ch.Notify(channelID, "📨 Webhook event received. Analyzing...")
-				ch.Notify(channelID, prompt)
-				break
-			}
-		}
-	}
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -237,5 +238,25 @@ func TestWebhookNoEndpointsSkipsValidation(t *testing.T) {
 	}
 	if len(cfg.Webhooks.Endpoints) != 0 {
 		t.Fatalf("expected no webhook endpoints, got %d", len(cfg.Webhooks.Endpoints))
+	}
+}
+
+func TestWebhookEmptySecretValidation(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
+	path := writeConfig(t, t.TempDir(), `webhooks:
+  endpoints:
+    - name: test
+      path: /test
+      platform: telegram
+      channel_id: c1
+      prompt: p
+`)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected empty webhook secret to fail validation")
+	}
+	if !strings.Contains(err.Error(), "webhooks.endpoints[0].secret") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

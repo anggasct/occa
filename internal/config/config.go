@@ -210,6 +210,11 @@ func build(fc fileConfig, adminID string) (Config, error) {
 		if !isLoopbackBind(fc.Webhooks.Bind) {
 			return Config{}, fmt.Errorf("config: webhooks.bind must be a loopback address (127.0.0.1, localhost, or ::1), got %q", fc.Webhooks.Bind)
 		}
+		for i, endpoint := range fc.Webhooks.Endpoints {
+			if strings.TrimSpace(endpoint.Secret) == "" {
+				return Config{}, fmt.Errorf("config: webhooks.endpoints[%d].secret must not be empty", i)
+			}
+		}
 	}
 
 	return Config{

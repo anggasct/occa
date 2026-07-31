@@ -101,6 +101,56 @@ func TestWebhookMissingSecret(t *testing.T) {
 	}
 }
 
+func TestWebhookEmptySecret(t *testing.T) {
+	srv, _ := newTestServer(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	for _, url := range []string{ts.URL + "/github", ts.URL + "/github?secret=anything"} {
+		resp, err := http.Post(url, "application/json", strings.NewReader(`{}`))
+		if err != nil {
+			t.Fatalf("POST: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for empty endpoint secret, got %d", resp.StatusCode)
+		}
+	}
+}
+
+func TestWebhookRejectsNonPost(t *testing.T) {
+	srv, _ := newTestServer(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/github", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", resp.StatusCode)
+	}
+	if resp.Header.Get("Allow") != http.MethodPost {
+		t.Fatalf("Allow = %q, want POST", resp.Header.Get("Allow"))
+	}
+}
+
 func TestWebhookHeaderSecret(t *testing.T) {
 	srv, _ := newTestServer(t, []config.EndpointConfig{
 		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
