@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/anggasct/occa/internal/channel"
-	"github.com/anggasct/occa/internal/store"
 )
 
 var validListenModes = map[string]bool{"mention": true, "all": true, "thread": true}
@@ -36,15 +35,7 @@ func (r *Router) setChannel(ctx context.Context, msg channel.IncomingMessage, mo
 		return "Usage: /occa:channel [mention|all|thread]", nil
 	}
 
-	ch, err := r.store.ChannelRepo().Get(ctx, msg.Platform, msg.ChannelID)
-	if err != nil {
-		return "", fmt.Errorf("channel: %w", err)
-	}
-	if ch == nil {
-		ch = &store.Channel{ChannelID: msg.ChannelID, Platform: msg.Platform, ListenMode: "mention"}
-	}
-	ch.ListenMode = mode
-	if err := r.store.ChannelRepo().Upsert(ctx, ch); err != nil {
+	if err := r.store.ChannelRepo().UpsertListenMode(ctx, msg.Platform, msg.ChannelID, mode); err != nil {
 		return "", fmt.Errorf("channel: %w", err)
 	}
 	return fmt.Sprintf("✅ Listen mode set: %s", mode), nil

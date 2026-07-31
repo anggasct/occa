@@ -8,7 +8,6 @@ import (
 
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/process"
-	"github.com/anggasct/occa/internal/store"
 )
 
 func (r *Router) handleDir(ctx context.Context, msg channel.IncomingMessage, args string) (string, error) {
@@ -51,15 +50,7 @@ func (r *Router) setDir(ctx context.Context, msg channel.IncomingMessage, path s
 
 	// A Discord thread has its own channel_id, so writing under msg.ChannelID
 	// isolates the override to that thread and leaves the parent unchanged.
-	ch, err := r.store.ChannelRepo().Get(ctx, msg.Platform, msg.ChannelID)
-	if err != nil {
-		return "", fmt.Errorf("dir: %w", err)
-	}
-	if ch == nil {
-		ch = &store.Channel{ChannelID: msg.ChannelID, Platform: msg.Platform, ListenMode: "mention"}
-	}
-	ch.Workdir = dir
-	if err := r.store.ChannelRepo().Upsert(ctx, ch); err != nil {
+	if err := r.store.ChannelRepo().UpsertWorkdir(ctx, msg.Platform, msg.ChannelID, dir); err != nil {
 		return "", fmt.Errorf("dir: %w", err)
 	}
 

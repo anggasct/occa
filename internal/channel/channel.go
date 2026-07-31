@@ -14,17 +14,18 @@ type Button struct {
 }
 
 type IncomingMessage struct {
-	Platform        string
-	ChannelID       string
-	ParentChannelID string
-	UserID          string
-	Text            string
-	IsMention       bool
-	IsThread        bool
-	IsCallback      bool
-	CallbackData    string
-	Attachments     []Attachment
-	ReplyCtx        ReplyContext
+	Platform               string
+	ChannelID              string
+	ParentChannelID        string
+	ChannelScopeUnresolved bool
+	UserID                 string
+	Text                   string
+	IsMention              bool
+	IsThread               bool
+	IsCallback             bool
+	CallbackData           string
+	Attachments            []Attachment
+	ReplyCtx               ReplyContext
 }
 
 type ReplyContext interface {

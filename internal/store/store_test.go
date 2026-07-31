@@ -121,9 +121,20 @@ func TestSessionSetActiveAtomic(t *testing.T) {
 	}
 }
 
-func TestChannelUpsert(t *testing.T) {
+func TestChannelFieldUpsertsPreserveOtherSettings(t *testing.T) {
 	s := tempStore(t)
 	ctx := context.Background()
+
+	if err := s.ChannelRepo().UpsertWorkdir(ctx, "telegram", "workdir-first", "/repo"); err != nil {
+		t.Fatalf("UpsertWorkdir first: %v", err)
+	}
+	workdirFirst, err := s.ChannelRepo().Get(ctx, "telegram", "workdir-first")
+	if err != nil {
+		t.Fatalf("Get workdir-first channel: %v", err)
+	}
+	if workdirFirst == nil || workdirFirst.Model != "" || workdirFirst.ListenMode != "mention" || workdirFirst.Workdir != "/repo" {
+		t.Fatalf("unexpected workdir-first channel: %+v", workdirFirst)
+	}
 
 	ch, err := s.ChannelRepo().Get(ctx, "telegram", "chat1")
 	if err != nil {
@@ -133,14 +144,8 @@ func TestChannelUpsert(t *testing.T) {
 		t.Fatal("expected nil for missing channel")
 	}
 
-	err = s.ChannelRepo().Upsert(ctx, &Channel{
-		ChannelID:  "chat1",
-		Platform:   "telegram",
-		Model:      "gpt-4",
-		ListenMode: "all",
-	})
-	if err != nil {
-		t.Fatalf("Upsert: %v", err)
+	if err := s.ChannelRepo().UpsertModel(ctx, "telegram", "chat1", "gpt-4"); err != nil {
+		t.Fatalf("UpsertModel: %v", err)
 	}
 
 	ch, err = s.ChannelRepo().Get(ctx, "telegram", "chat1")
@@ -150,64 +155,41 @@ func TestChannelUpsert(t *testing.T) {
 	if ch == nil {
 		t.Fatal("expected channel")
 	}
-	if ch.Model != "gpt-4" || ch.ListenMode != "all" {
+	if ch.Model != "gpt-4" || ch.ListenMode != "mention" || ch.Workdir != "" {
 		t.Fatalf("unexpected channel: %+v", ch)
 	}
 
-	err = s.ChannelRepo().Upsert(ctx, &Channel{
-		ChannelID:  "chat1",
-		Platform:   "telegram",
-		Model:      "claude",
-		ListenMode: "mention",
-	})
-	if err != nil {
-		t.Fatalf("Upsert update: %v", err)
+	if err := s.ChannelRepo().UpsertListenMode(ctx, "telegram", "chat1", "all"); err != nil {
+		t.Fatalf("UpsertListenMode: %v", err)
 	}
-
 	ch, err = s.ChannelRepo().Get(ctx, "telegram", "chat1")
 	if err != nil {
-		t.Fatalf("Get after update: %v", err)
+		t.Fatalf("Get after listen mode: %v", err)
 	}
-	if ch.Model != "claude" || ch.ListenMode != "mention" {
-		t.Fatalf("unexpected updated channel: %+v", ch)
-	}
-}
-
-func TestChannelWorkdir(t *testing.T) {
-	s := tempStore(t)
-	ctx := context.Background()
-
-	// No workdir set → reads back empty.
-	if err := s.ChannelRepo().Upsert(ctx, &Channel{
-		ChannelID:  "chat1",
-		Platform:   "telegram",
-		ListenMode: "mention",
-	}); err != nil {
-		t.Fatalf("Upsert: %v", err)
-	}
-	ch, err := s.ChannelRepo().Get(ctx, "telegram", "chat1")
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if ch.Workdir != "" {
-		t.Fatalf("expected empty workdir, got %q", ch.Workdir)
+	if ch.Model != "gpt-4" || ch.ListenMode != "all" || ch.Workdir != "" {
+		t.Fatalf("listen mode update changed another field: %+v", ch)
 	}
 
-	// Set workdir → round-trips.
-	if err := s.ChannelRepo().Upsert(ctx, &Channel{
-		ChannelID:  "chat1",
-		Platform:   "telegram",
-		ListenMode: "mention",
-		Workdir:    "/repo/api",
-	}); err != nil {
-		t.Fatalf("Upsert workdir: %v", err)
+	if err := s.ChannelRepo().UpsertWorkdir(ctx, "telegram", "chat1", "/repo/api"); err != nil {
+		t.Fatalf("UpsertWorkdir: %v", err)
 	}
 	ch, err = s.ChannelRepo().Get(ctx, "telegram", "chat1")
 	if err != nil {
 		t.Fatalf("Get after workdir: %v", err)
 	}
-	if ch.Workdir != "/repo/api" {
-		t.Fatalf("workdir = %q, want /repo/api", ch.Workdir)
+	if ch.Model != "gpt-4" || ch.ListenMode != "all" || ch.Workdir != "/repo/api" {
+		t.Fatalf("workdir update changed another field: %+v", ch)
+	}
+
+	if err := s.ChannelRepo().UpsertModel(ctx, "telegram", "chat1", "claude"); err != nil {
+		t.Fatalf("UpsertModel update: %v", err)
+	}
+	ch, err = s.ChannelRepo().Get(ctx, "telegram", "chat1")
+	if err != nil {
+		t.Fatalf("Get after model update: %v", err)
+	}
+	if ch.Model != "claude" || ch.ListenMode != "all" || ch.Workdir != "/repo/api" {
+		t.Fatalf("model update changed another field: %+v", ch)
 	}
 }
 

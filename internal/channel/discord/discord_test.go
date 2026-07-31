@@ -1,9 +1,56 @@
 package discord
 
 import (
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/bwmarrin/discordgo"
 )
+
+func TestNormalizeMessageResolvesThreadScopeOnce(t *testing.T) {
+	calls := 0
+	a := &Adapter{
+		botID: "bot",
+		channelLookup: func(channelID string) (*discordgo.Channel, error) {
+			calls++
+			return &discordgo.Channel{ID: channelID, ParentID: "parent", Type: discordgo.ChannelTypeGuildPublicThread}, nil
+		},
+	}
+
+	got := a.normalizeMessage(&discordgo.Message{
+		GuildID:   "guild",
+		ChannelID: "thread",
+		Author:    &discordgo.User{ID: "user"},
+		Content:   "hello",
+	})
+
+	if calls != 1 {
+		t.Fatalf("channel lookup calls = %d, want 1", calls)
+	}
+	if got.ParentChannelID != "parent" || !got.IsThread || got.ChannelScopeUnresolved {
+		t.Fatalf("unexpected normalized scope: %+v", got)
+	}
+}
+
+func TestNormalizeMessageMarksFailedScopeLookup(t *testing.T) {
+	a := &Adapter{
+		botID: "bot",
+		channelLookup: func(string) (*discordgo.Channel, error) {
+			return nil, errors.New("lookup failed")
+		},
+	}
+
+	got := a.normalizeMessage(&discordgo.Message{
+		GuildID:   "guild",
+		ChannelID: "thread",
+		Author:    &discordgo.User{ID: "user"},
+	})
+
+	if !got.ChannelScopeUnresolved || got.ParentChannelID != "" {
+		t.Fatalf("unexpected failed scope normalization: %+v", got)
+	}
+}
 
 func TestSplitMessageShort(t *testing.T) {
 	chunks := splitMessage("hello", 2000)
