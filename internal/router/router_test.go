@@ -34,6 +34,7 @@ func (f fakeRef) ID() string { return f.id }
 type fakeRelayClient struct {
 	sessionID string
 	lastMsg   string
+	rawMsg    string
 	lastCmd   string
 }
 
@@ -41,7 +42,8 @@ func (f *fakeRelayClient) CreateSession(_ context.Context) (string, error) {
 	return f.sessionID, nil
 }
 func (f *fakeRelayClient) SendMessage(_ context.Context, _, text string, _ []relay.Attachment) error {
-	if idx := strings.Index(text, "\n\n—\nOCCA context:"); idx >= 0 {
+	f.rawMsg = text
+	if idx := strings.Index(text, "\n\n—\nOCCA"); idx >= 0 {
 		text = text[:idx]
 	}
 	f.lastMsg = text
@@ -774,5 +776,24 @@ func TestChannelThreadIsolation(t *testing.T) {
 	}
 	if parent := st.channelRepo.channels["telegram:chat1"]; parent != nil && parent.ListenMode == "thread" {
 		t.Fatalf("parent listen_mode should not be changed, got %q", parent.ListenMode)
+	}
+}
+
+type fakeTokenGen struct{}
+
+func (f *fakeTokenGen) Generate(_, _ string) string { return "test-token-123" }
+
+func TestPassthroughAppendsScheduleToken(t *testing.T) {
+	r, client, reply := newTestRouter()
+	r.SetTokenGenerator(&fakeTokenGen{})
+
+	if err := r.Route(context.Background(), msg("hello world", reply)); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if !strings.Contains(client.rawMsg, "OCCA schedule token: test-token-123") {
+		t.Fatalf("expected schedule token in message, got: %q", client.rawMsg)
+	}
+	if !strings.HasPrefix(client.rawMsg, "hello world") {
+		t.Fatalf("original text should be preserved, got: %q", client.rawMsg)
 	}
 }

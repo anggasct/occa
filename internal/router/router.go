@@ -40,6 +40,7 @@ type Router struct {
 	adminID        string
 	startedAt      time.Time
 	sched          ScheduleStore
+	tokenGen       TokenGenerator
 }
 
 type ScheduleStore interface {
@@ -47,8 +48,16 @@ type ScheduleStore interface {
 	RemoveSchedule(ctx context.Context, platform, channelID string, id int64) error
 }
 
+type TokenGenerator interface {
+	Generate(platform, channelID string) string
+}
+
 func (r *Router) SetScheduler(s ScheduleStore) {
 	r.sched = s
+}
+
+func (r *Router) SetTokenGenerator(t TokenGenerator) {
+	r.tokenGen = t
 }
 
 func New(instances InstanceProvider, st store.Store, defaultWorkdir string, adminID string) *Router {
@@ -200,8 +209,9 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 	msg.ReplyCtx.SendTyping()
 
 	text := msg.Text
-	if !strings.HasPrefix(text, "/") {
-		text = text + "\n\n—\nOCCA context: platform=" + msg.Platform + ", channel_id=" + msg.ChannelID
+	if !strings.HasPrefix(text, "/") && r.tokenGen != nil {
+		token := r.tokenGen.Generate(msg.Platform, msg.ChannelID)
+		text = text + "\n\n—\nOCCA schedule token: " + token
 	}
 
 	if strings.HasPrefix(msg.Text, "/") {

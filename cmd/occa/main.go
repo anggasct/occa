@@ -160,13 +160,15 @@ func main() {
 	}
 	defer func() { _ = sched.Stop() }()
 
-	mcpSrv := mcpserver.New(sched)
+	tokens := mcpserver.NewTokenStore()
+	mcpSrv := mcpserver.New(sched, tokens)
 	if err := mcpSrv.Start(ctx); err != nil {
 		slog.Error("failed to start mcp server", "error", err)
 	}
 	defer mcpSrv.Stop()
 
 	rt.SetScheduler(sched)
+	rt.SetTokenGenerator(tokens)
 
 	registerMCP(ctx, manager, mcpSrv, cfg.Agent.DefaultWorkdir)
 

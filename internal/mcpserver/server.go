@@ -14,13 +14,14 @@ import (
 
 type Server struct {
 	sched     *scheduler.Scheduler
+	tokens    *TokenStore
 	mcpServer *mcp.Server
 	httpSrv   *http.Server
 	port      int
 }
 
-func New(sched *scheduler.Scheduler) *Server {
-	s := &Server{sched: sched}
+func New(sched *scheduler.Scheduler, tokens *TokenStore) *Server {
+	s := &Server{sched: sched, tokens: tokens}
 
 	mcpServer := mcp.NewServer(&mcp.Implementation{
 		Name:    "occa",
@@ -29,7 +30,7 @@ func New(sched *scheduler.Scheduler) *Server {
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
 		Name:        "schedule_task",
-		Description: "Schedule a recurring background task. The prompt will be executed automatically at the specified cron schedule and results pushed to the chat. The channel_id and platform values are provided in the OCCA context line at the end of the user's message — include them verbatim.",
+		Description: "Schedule a recurring background task. The prompt will be executed automatically at the specified cron schedule and results pushed to the chat. The schedule_token is provided in the OCCA context line at the end of the user's message — include it verbatim.",
 	}, s.handleScheduleTask)
 
 	s.mcpServer = mcpServer
@@ -37,24 +38,24 @@ func New(sched *scheduler.Scheduler) *Server {
 }
 
 type scheduleTaskInput struct {
-	Platform       string `json:"platform" jsonschema:"the platform from the OCCA context line (e.g. 'telegram' or 'discord')"`
-	ChannelID      string `json:"channel_id" jsonschema:"the channel_id from the OCCA context line"`
+	ScheduleToken  string `json:"schedule_token" jsonschema:"the token from the OCCA context line at the end of the user's message"`
 	CronExpression string `json:"cron_expression" jsonschema:"the 5-field cron expression (e.g. '0 9 * * 1-5' for weekdays at 9 AM)"`
 	Prompt         string `json:"prompt" jsonschema:"the prompt or instruction to execute at each scheduled run"`
 	HumanSchedule  string `json:"human_schedule" jsonschema:"human-readable description of the schedule (e.g. 'every weekday at 9 AM')"`
 }
 
 func (s *Server) handleScheduleTask(ctx context.Context, req *mcp.CallToolRequest, input scheduleTaskInput) (*mcp.CallToolResult, scheduleTaskInput, error) {
-	if input.Platform == "" || input.ChannelID == "" {
+	platform, channelID, ok := s.tokens.Lookup(input.ScheduleToken)
+	if !ok {
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "Error: platform and channel_id are required. Include the values from the OCCA context line at the end of the user's message."}},
+			Content: []mcp.Content{&mcp.TextContent{Text: "Error: invalid or expired schedule token. Include the schedule_token from the OCCA context line at the end of the user's message."}},
 			IsError: true,
 		}, input, nil
 	}
 
 	sched := store.Schedule{
-		Platform:       input.Platform,
-		ChannelID:      input.ChannelID,
+		Platform:       platform,
+		ChannelID:      channelID,
 		CronExpression: input.CronExpression,
 		HumanSchedule:  input.HumanSchedule,
 		Prompt:         input.Prompt,

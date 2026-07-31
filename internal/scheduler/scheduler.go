@@ -95,4 +95,3 @@ func (s *Scheduler) register(sched store.Schedule) error {
 	s.mu.Unlock()
 	return nil
 }
-
