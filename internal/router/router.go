@@ -217,11 +217,16 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 	if strings.HasPrefix(msg.Text, "/") {
 		err = inst.Client().RunCommand(ctx, sessionID, msg.Text)
 	} else {
+		model, modelErr := r.modelForMessage(ctx, msg)
+		if modelErr != nil {
+			slog.Warn("failed to resolve message model; using agent default", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID, "error", modelErr)
+			model = nil
+		}
 		attachments := make([]relay.Attachment, len(msg.Attachments))
 		for i, a := range msg.Attachments {
 			attachments[i] = relay.Attachment{Filename: a.Filename, MimeType: a.MimeType, Data: a.Data}
 		}
-		err = inst.Client().SendMessage(ctx, sessionID, text, attachments)
+		err = inst.Client().SendMessage(ctx, sessionID, text, model, attachments)
 	}
 	if err != nil {
 		if errors.Is(err, relay.ErrAttachmentTooLarge) {
@@ -275,6 +280,10 @@ func (r *Router) registerDefaults() {
 		Admin:   true,
 		Handler: r.handleChannel,
 	}
+	r.commands["model"] = Command{
+		Name:    "model",
+		Handler: r.handleModel,
+	}
 	r.commands["schedules"] = Command{
 		Name:    "schedules",
 		Admin:   true,
@@ -289,6 +298,7 @@ func (r *Router) helpText() string {
 		"• /occa:session [list|new|switch <id>|delete <id>] — manage sessions\n" +
 		"• /occa:dir [path] — view or set this channel's working directory\n" +
 		"• /occa:channel [mention|all|thread] — view or set listen mode\n" +
+		"• /occa:model [channel] [provider/model-id] — view or set model\n" +
 		"• /occa:schedules [delete <id>] — view or delete scheduled tasks\n" +
 		"• /occa:reset — clear current session and start fresh\n\n" +
 		"All other messages and /commands are forwarded to the agent."

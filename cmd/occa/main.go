@@ -125,7 +125,7 @@ func main() {
 
 		adapter.Notify(channelID, "⏰ Running: "+prompt)
 
-		if err := inst.Client().SendMessage(ctx, sessionID, prompt, nil); err != nil {
+		if err := inst.Client().SendMessage(ctx, sessionID, prompt, nil, nil); err != nil {
 			adapter.Notify(channelID, "⚠️ Scheduled task failed: "+err.Error())
 			return
 		}
@@ -198,7 +198,7 @@ func main() {
 						return
 					}
 
-					if err := inst.Client().SendMessage(ctx, sessionID, prompt, nil); err != nil {
+					if err := inst.Client().SendMessage(ctx, sessionID, prompt, nil, nil); err != nil {
 						notify("⚠️ Webhook analysis failed: " + err.Error())
 						return
 					}
