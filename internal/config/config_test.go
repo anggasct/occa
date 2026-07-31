@@ -210,6 +210,7 @@ func TestWebhookLoopbackValidation(t *testing.T) {
 		{"127.0.0.1:8787", false},
 		{"localhost:8787", false},
 		{"[::1]:8787", false},
+		{"127.0.0.1", true},
 		{"0.0.0.0:8787", true},
 		{"192.168.1.1:8787", true},
 		{"example.com:8787", true},
@@ -220,7 +221,7 @@ func TestWebhookLoopbackValidation(t *testing.T) {
 			path := writeConfig(t, t.TempDir(), yaml)
 			_, err := Load(path)
 			if tt.wantErr && err == nil {
-				t.Fatal("expected error for non-loopback bind")
+				t.Fatal("expected invalid bind to fail validation")
 			}
 			if !tt.wantErr && err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -257,6 +258,33 @@ func TestWebhookEmptySecretValidation(t *testing.T) {
 		t.Fatal("expected empty webhook secret to fail validation")
 	}
 	if !strings.Contains(err.Error(), "webhooks.endpoints[0].secret") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestWebhookDuplicatePathValidation(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
+	path := writeConfig(t, t.TempDir(), `webhooks:
+  endpoints:
+    - name: first
+      path: /same
+      secret: first-secret
+      platform: telegram
+      channel_id: c1
+      prompt: p
+    - name: second
+      path: /same
+      secret: second-secret
+      platform: telegram
+      channel_id: c2
+      prompt: p
+`)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected duplicate webhook path to fail validation")
+	}
+	if !strings.Contains(err.Error(), "webhooks.endpoints[1].path") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

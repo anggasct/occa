@@ -3,7 +3,9 @@ package webhook
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,13 +17,19 @@ import (
 	"github.com/anggasct/occa/internal/config"
 )
 
+const (
+	maxWebhookBodySize         int64 = 10 * 1024 * 1024
+	maxConcurrentWebhookEvents       = 16
+)
+
 type Executor func(ctx context.Context, platform, channelID, prompt string)
 
 type Server struct {
-	bind      string
-	endpoints map[string]config.EndpointConfig
-	executor  Executor
-	httpSrv   *http.Server
+	bind       string
+	endpoints  map[string]config.EndpointConfig
+	executor   Executor
+	httpSrv    *http.Server
+	eventSlots chan struct{}
 }
 
 func New(cfg config.WebhookConfig, executor Executor) *Server {
@@ -30,10 +38,24 @@ func New(cfg config.WebhookConfig, executor Executor) *Server {
 		endpoints[ep.Path] = ep
 	}
 	return &Server{
-		bind:      cfg.Bind,
-		endpoints: endpoints,
-		executor:  executor,
+		bind:       cfg.Bind,
+		endpoints:  endpoints,
+		executor:   executor,
+		eventSlots: make(chan struct{}, maxConcurrentWebhookEvents),
 	}
+}
+
+func (s *Server) tryAcquireEvent() bool {
+	select {
+	case s.eventSlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) releaseEvent() {
+	<-s.eventSlots
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -60,10 +82,11 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
-func (s *Server) Stop() {
-	if s.httpSrv != nil {
-		s.httpSrv.Close()
+func (s *Server) Stop(ctx context.Context) error {
+	if s.httpSrv == nil {
+		return nil
 	}
+	return s.httpSrv.Shutdown(ctx)
 }
 
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
@@ -86,20 +109,38 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	if secret == "" {
 		secret = r.URL.Query().Get("secret")
 	}
-	if secret != ep.Secret {
+	if subtle.ConstantTimeCompare([]byte(secret), []byte(ep.Secret)) != 1 {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024))
+	if r.ContentLength > maxWebhookBodySize {
+		http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	if !s.tryAcquireEvent() {
+		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
+		return
+	}
+
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBodySize))
 	if err != nil {
-		http.Error(w, "Bad Request", http.StatusBadRequest)
+		s.releaseEvent()
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
+		} else {
+			http.Error(w, "Bad Request", http.StatusBadRequest)
+		}
 		return
 	}
 
 	w.WriteHeader(http.StatusOK)
 
-	go s.processAsync(ep, body)
+	go func() {
+		defer s.releaseEvent()
+		s.processAsync(ep, body)
+	}()
 }
 
 func (s *Server) processAsync(ep config.EndpointConfig, body []byte) {
@@ -115,10 +156,11 @@ func (s *Server) processAsync(ep config.EndpointConfig, body []byte) {
 
 	rendered, err := renderTemplate(ep.Prompt, tmplData)
 	if err != nil {
-		slog.Error("webhook: template render failed", "endpoint", ep.Name, "error", err)
-		rendered = ep.Prompt
+		slog.Error("webhook: template render failed", "endpoint", ep.Name, "payload_bytes", len(body), "error", err)
+		rendered = ep.Prompt + "\n\nRaw webhook payload:\n" + string(body)
 	}
 
+	rendered = strings.ReplaceAll(rendered, "</untrusted_payload>", "&lt;/untrusted_payload&gt;")
 	wrapped := fmt.Sprintf("<untrusted_payload>\n%s\n</untrusted_payload>", rendered)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)

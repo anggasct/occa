@@ -177,10 +177,16 @@ func main() {
 		webhookExecutor := func(ctx context.Context, platform, channelID, prompt string) {
 			for _, ch := range channels {
 				if ch.Name() == platform {
-					ch.Notify(channelID, "📨 Webhook: analyzing...")
+					notify := func(text string) {
+						if err := ch.Notify(channelID, text); err != nil {
+							slog.Warn("webhook: channel notification failed", "platform", platform, "channel_id", channelID, "error", err)
+						}
+					}
+
+					notify("📨 Webhook: analyzing...")
 					inst, err := manager.Instance(ctx, cfg.Agent.DefaultWorkdir)
 					if err != nil {
-						ch.Notify(channelID, "⚠️ Webhook analysis failed: agent unreachable")
+						notify("⚠️ Webhook analysis failed: agent unreachable")
 						return
 					}
 					defer inst.End()
@@ -188,18 +194,18 @@ func main() {
 					resolver := relay.NewSessionResolver(db.SessionRepo(), inst.Client())
 					sessionID, err := resolver.Resolve(ctx, platform, channelID)
 					if err != nil {
-						ch.Notify(channelID, "⚠️ Webhook analysis failed: session error")
+						notify("⚠️ Webhook analysis failed: session error")
 						return
 					}
 
 					if err := inst.Client().SendMessage(ctx, sessionID, prompt, nil); err != nil {
-						ch.Notify(channelID, "⚠️ Webhook analysis failed: "+err.Error())
+						notify("⚠️ Webhook analysis failed: " + err.Error())
 						return
 					}
 
 					events, err := inst.Client().Events(ctx, sessionID)
 					if err != nil {
-						ch.Notify(channelID, "⚠️ Webhook analysis failed: events error")
+						notify("⚠️ Webhook analysis failed: events error")
 						return
 					}
 
@@ -213,23 +219,30 @@ func main() {
 							if result == "" {
 								result = "(no output)"
 							}
-							ch.Notify(channelID, result)
+							notify(result)
 							return
 						case "error":
-							ch.Notify(channelID, "⚠️ "+ev.Delta)
+							notify("⚠️ " + ev.Delta)
 							return
 						}
 					}
-					break
+					return
 				}
 			}
+			slog.Warn("webhook: no channel adapter", "platform", platform, "channel_id", channelID)
 		}
 
 		webhookSrv := webhook.New(cfg.Webhooks, webhookExecutor)
 		if err := webhookSrv.Start(ctx); err != nil {
 			slog.Error("failed to start webhook server", "error", err)
 		}
-		defer webhookSrv.Stop()
+		defer func() {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := webhookSrv.Stop(stopCtx); err != nil {
+				slog.Warn("webhook: shutdown failed", "error", err)
+			}
+		}()
 	}
 
 	for _, ch := range channels {

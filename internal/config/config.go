@@ -208,12 +208,17 @@ func build(fc fileConfig, adminID string) (Config, error) {
 			fc.Webhooks.Bind = "127.0.0.1:8787"
 		}
 		if !isLoopbackBind(fc.Webhooks.Bind) {
-			return Config{}, fmt.Errorf("config: webhooks.bind must be a loopback address (127.0.0.1, localhost, or ::1), got %q", fc.Webhooks.Bind)
+			return Config{}, fmt.Errorf("config: webhooks.bind must be a loopback host:port (127.0.0.1, localhost, or ::1), got %q", fc.Webhooks.Bind)
 		}
+		paths := make(map[string]struct{}, len(fc.Webhooks.Endpoints))
 		for i, endpoint := range fc.Webhooks.Endpoints {
 			if strings.TrimSpace(endpoint.Secret) == "" {
 				return Config{}, fmt.Errorf("config: webhooks.endpoints[%d].secret must not be empty", i)
 			}
+			if _, exists := paths[endpoint.Path]; exists {
+				return Config{}, fmt.Errorf("config: webhooks.endpoints[%d].path duplicates %q", i, endpoint.Path)
+			}
+			paths[endpoint.Path] = struct{}{}
 		}
 	}
 
@@ -233,12 +238,10 @@ func build(fc fileConfig, adminID string) (Config, error) {
 }
 
 func isLoopbackBind(addr string) bool {
-	host := addr
-	if h, _, err := net.SplitHostPort(addr); err == nil {
-		host = h
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || port == "" {
+		return false
 	}
-	host = strings.TrimPrefix(host, "[")
-	host = strings.TrimSuffix(host, "]")
 	switch strings.ToLower(host) {
 	case "127.0.0.1", "localhost", "::1":
 		return true
