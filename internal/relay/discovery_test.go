@@ -13,10 +13,10 @@ func TestDiscoverSuccess(t *testing.T) {
 	doc := OpenAPIDoc{
 		Info: OpenAPIInfo{Version: "1.2.3"},
 		Paths: map[string]any{
-			"/session":                nil,
-			"/session/{id}/message":   nil,
-			"/session/{id}/command":   nil,
-			"/event":                  nil,
+			"/session":              nil,
+			"/session/{id}/message": nil,
+			"/session/{id}/command": nil,
+			"/event":                nil,
 		},
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
