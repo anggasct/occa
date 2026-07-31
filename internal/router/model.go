@@ -31,12 +31,13 @@ func (r *Router) handleModel(ctx context.Context, msg channel.IncomingMessage, a
 			return "", err
 		}
 
-		ch, err := r.store.ChannelRepo().Get(ctx, msg.Platform, msg.ChannelID)
+		modelChannelID := modelScopeChannelID(msg)
+		ch, err := r.store.ChannelRepo().Get(ctx, msg.Platform, modelChannelID)
 		if err != nil {
 			return "", fmt.Errorf("model: get channel: %w", err)
 		}
 		if ch == nil {
-			ch = &store.Channel{ChannelID: msg.ChannelID, Platform: msg.Platform, ListenMode: "mention"}
+			ch = &store.Channel{ChannelID: modelChannelID, Platform: msg.Platform, ListenMode: "mention"}
 		}
 		ch.Model = formatModelRef(ref)
 		if err := r.store.ChannelRepo().Upsert(ctx, ch); err != nil {
@@ -55,7 +56,7 @@ func (r *Router) handleModel(ctx context.Context, msg channel.IncomingMessage, a
 	if err := r.validateModel(ctx, msg, ref); err != nil {
 		return "", err
 	}
-	if err := r.store.OverrideRepo().UpsertModel(ctx, msg.Platform, msg.ChannelID, msg.UserID, formatModelRef(ref)); err != nil {
+	if err := r.store.OverrideRepo().UpsertModel(ctx, msg.Platform, modelScopeChannelID(msg), msg.UserID, formatModelRef(ref)); err != nil {
 		return "", fmt.Errorf("model: set personal: %w", err)
 	}
 	return fmt.Sprintf("✅ Personal model set: %s", formatModelRef(ref)), nil
@@ -70,7 +71,8 @@ func (r *Router) viewModel(ctx context.Context, msg channel.IncomingMessage) (st
 }
 
 func (r *Router) effectiveModel(ctx context.Context, msg channel.IncomingMessage) (string, error) {
-	o, err := r.store.OverrideRepo().Get(ctx, msg.Platform, msg.ChannelID, msg.UserID)
+	modelChannelID := modelScopeChannelID(msg)
+	o, err := r.store.OverrideRepo().Get(ctx, msg.Platform, modelChannelID, msg.UserID)
 	if err != nil {
 		return "", fmt.Errorf("model: get personal override: %w", err)
 	}
@@ -78,7 +80,7 @@ func (r *Router) effectiveModel(ctx context.Context, msg channel.IncomingMessage
 		return o.Model, nil
 	}
 
-	ch, err := r.store.ChannelRepo().Get(ctx, msg.Platform, msg.ChannelID)
+	ch, err := r.store.ChannelRepo().Get(ctx, msg.Platform, modelChannelID)
 	if err != nil {
 		return "", fmt.Errorf("model: get channel: %w", err)
 	}
@@ -86,6 +88,13 @@ func (r *Router) effectiveModel(ctx context.Context, msg channel.IncomingMessage
 		return ch.Model, nil
 	}
 	return "agent default", nil
+}
+
+func modelScopeChannelID(msg channel.IncomingMessage) string {
+	if msg.Platform == "discord" && msg.ParentChannelID != "" {
+		return msg.ParentChannelID
+	}
+	return msg.ChannelID
 }
 
 func (r *Router) modelForMessage(ctx context.Context, msg channel.IncomingMessage) (*relay.ModelRef, error) {

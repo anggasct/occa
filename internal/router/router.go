@@ -219,9 +219,8 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 	} else {
 		model, modelErr := r.modelForMessage(ctx, msg)
 		if modelErr != nil {
-			slog.Error("failed to resolve message model", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID, "error", modelErr)
-			msg.ReplyCtx.Send("⚠️ Model configuration unavailable")
-			return nil
+			slog.Warn("failed to resolve message model; using agent default", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID, "error", modelErr)
+			model = nil
 		}
 		attachments := make([]relay.Attachment, len(msg.Attachments))
 		for i, a := range msg.Attachments {

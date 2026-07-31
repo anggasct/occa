@@ -63,13 +63,14 @@ func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessag
 			}
 
 			msg := channel.IncomingMessage{
-				Platform:     "discord",
-				ChannelID:    i.ChannelID,
-				UserID:       userID,
-				IsCallback:   true,
-				CallbackData: data.CustomID,
-				IsMention:    true,
-				ReplyCtx:     &replyContext{session: sess, channelID: i.ChannelID, interaction: i.Interaction},
+				Platform:        "discord",
+				ChannelID:       i.ChannelID,
+				ParentChannelID: a.parentChannelID(i.ChannelID),
+				UserID:          userID,
+				IsCallback:      true,
+				CallbackData:    data.CustomID,
+				IsMention:       true,
+				ReplyCtx:        &replyContext{session: sess, channelID: i.ChannelID, interaction: i.Interaction},
 			}
 			handler(msg)
 
@@ -94,12 +95,13 @@ func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessag
 			}
 
 			msg := channel.IncomingMessage{
-				Platform:  "discord",
-				ChannelID: i.ChannelID,
-				UserID:    userID,
-				Text:      strings.TrimSpace(text),
-				IsMention: true,
-				ReplyCtx:  &replyContext{session: sess, channelID: i.ChannelID, interaction: i.Interaction},
+				Platform:        "discord",
+				ChannelID:       i.ChannelID,
+				ParentChannelID: a.parentChannelID(i.ChannelID),
+				UserID:          userID,
+				Text:            strings.TrimSpace(text),
+				IsMention:       true,
+				ReplyCtx:        &replyContext{session: sess, channelID: i.ChannelID, interaction: i.Interaction},
 			}
 			handler(msg)
 		}
@@ -149,14 +151,15 @@ func (a *Adapter) normalizeMessage(m *discordgo.Message) channel.IncomingMessage
 	}
 
 	return channel.IncomingMessage{
-		Platform:    "discord",
-		ChannelID:   m.ChannelID,
-		UserID:      m.Author.ID,
-		Text:        m.Content,
-		IsMention:   isMention,
-		IsThread:    a.isThreadChannel(m.ChannelID),
-		Attachments: a.downloadAttachments(m),
-		ReplyCtx:    &replyContext{session: a.session, channelID: m.ChannelID},
+		Platform:        "discord",
+		ChannelID:       m.ChannelID,
+		ParentChannelID: a.parentChannelID(m.ChannelID),
+		UserID:          m.Author.ID,
+		Text:            m.Content,
+		IsMention:       isMention,
+		IsThread:        a.isThreadChannel(m.ChannelID),
+		Attachments:     a.downloadAttachments(m),
+		ReplyCtx:        &replyContext{session: a.session, channelID: m.ChannelID},
 	}
 }
 
@@ -188,14 +191,31 @@ func (a *Adapter) downloadAttachments(m *discordgo.Message) []channel.Attachment
 }
 
 func (a *Adapter) isThreadChannel(channelID string) bool {
+	ch := a.lookupChannel(channelID)
+	return ch != nil && isThreadType(ch.Type)
+}
+
+func (a *Adapter) parentChannelID(channelID string) string {
+	ch := a.lookupChannel(channelID)
+	if ch == nil || !isThreadType(ch.Type) {
+		return ""
+	}
+	return ch.ParentID
+}
+
+func (a *Adapter) lookupChannel(channelID string) *discordgo.Channel {
 	ch, err := a.session.State.Channel(channelID)
 	if err != nil {
 		ch, err = a.session.Channel(channelID)
 		if err != nil {
-			return false
+			return nil
 		}
 	}
-	switch ch.Type {
+	return ch
+}
+
+func isThreadType(channelType discordgo.ChannelType) bool {
+	switch channelType {
 	case discordgo.ChannelTypeGuildPublicThread,
 		discordgo.ChannelTypeGuildPrivateThread,
 		discordgo.ChannelTypeGuildNewsThread:

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/relay"
 	"github.com/anggasct/occa/internal/store"
 )
@@ -88,6 +89,20 @@ func TestModelSetChannelDefaultRequiresAdmin(t *testing.T) {
 	}
 	if ch := r.store.(*fakeStore).channelRepo.channels["telegram:chat1"]; ch != nil {
 		t.Fatalf("non-admin changed channel model: %+v", ch)
+	}
+}
+
+func TestModelChannelUsageRequiresModelID(t *testing.T) {
+	r, _, reply, overrides := newTestRouterWithAccess()
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
+	}
+
+	if err := r.Route(context.Background(), msg("/occa:model channel", reply)); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if !strings.Contains(reply.sends[0], "Usage: /occa:model channel") {
+		t.Fatalf("unexpected response: %q", reply.sends[0])
 	}
 }
 
@@ -183,6 +198,45 @@ func TestMessageUsesChannelModelWithoutPersonalOverride(t *testing.T) {
 	}
 }
 
+func TestThreadModelUsesParentChannelScope(t *testing.T) {
+	r, client, reply, overrides := newTestRouterWithAccess()
+	client.providers = modelTestProviders()
+	st := r.store.(*fakeStore)
+	overrides.overrides["discord:thread:user1"] = &store.UserOverride{
+		ChannelID: "thread", Platform: "discord", UserID: "user1", Role: "admin",
+	}
+	st.channelRepo.channels["discord:parent"] = &store.Channel{
+		ChannelID: "parent", Platform: "discord", Model: "openai/gpt-4o", ListenMode: "mention",
+	}
+
+	threadMsg := channel.IncomingMessage{
+		Platform:        "discord",
+		ChannelID:       "thread",
+		ParentChannelID: "parent",
+		UserID:          "user1",
+		Text:            "/occa:model",
+		IsThread:        true,
+		ReplyCtx:        reply,
+	}
+	if err := r.Route(context.Background(), threadMsg); err != nil {
+		t.Fatalf("Route view: %v", err)
+	}
+	if !strings.Contains(reply.sends[0], "openai/gpt-4o") {
+		t.Fatalf("expected parent model, got %q", reply.sends[0])
+	}
+
+	threadMsg.Text = "/occa:model channel anthropic/claude-3"
+	if err := r.Route(context.Background(), threadMsg); err != nil {
+		t.Fatalf("Route set: %v", err)
+	}
+	if got := st.channelRepo.channels["discord:parent"].Model; got != "anthropic/claude-3" {
+		t.Fatalf("parent model = %q, want anthropic/claude-3", got)
+	}
+	if st.channelRepo.channels["discord:thread"] != nil {
+		t.Fatal("thread-local model row should not be created")
+	}
+}
+
 func TestMessageWithoutModelUsesAgentDefault(t *testing.T) {
 	r, client, _, overrides := newTestRouterWithAccess()
 	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
@@ -194,5 +248,22 @@ func TestMessageWithoutModelUsesAgentDefault(t *testing.T) {
 	}
 	if client.lastModel != nil {
 		t.Fatalf("expected agent default to omit model, got %+v", client.lastModel)
+	}
+}
+
+func TestMessageFallsBackToAgentDefaultOnInvalidStoredModel(t *testing.T) {
+	r, client, _, overrides := newTestRouterWithAccess()
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin", Model: "invalid",
+	}
+
+	if err := r.Route(context.Background(), msg("hello", &fakeReplyCtx{})); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if client.lastMsg != "hello" {
+		t.Fatalf("message was not forwarded: %q", client.lastMsg)
+	}
+	if client.lastModel != nil {
+		t.Fatalf("expected agent default after invalid stored model, got %+v", client.lastModel)
 	}
 }
