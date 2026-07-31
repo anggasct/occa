@@ -126,6 +126,15 @@ func (a *Adapter) Stop() error {
 	return nil
 }
 
+func (a *Adapter) Notify(channelID string, text string) error {
+	for _, chunk := range splitMessage(text, 2000) {
+		if _, err := a.session.ChannelMessageSend(channelID, chunk); err != nil {
+			return fmt.Errorf("discord: notify: %w", err)
+		}
+	}
+	return nil
+}
+
 func (a *Adapter) normalizeMessage(m *discordgo.Message) channel.IncomingMessage {
 	isMention := false
 	if m.GuildID == "" {

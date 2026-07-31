@@ -159,6 +159,27 @@ func (c *HTTPClient) ReplyPermission(ctx context.Context, requestID string, repl
 	return nil
 }
 
+type McpConfig struct {
+	Type string `json:"type"`
+	URL  string `json:"url"`
+}
+
+func (c *HTTPClient) RegisterMCP(ctx context.Context, name string, config McpConfig) error {
+	payload := map[string]any{"name": name, "config": config}
+	resp, err := c.post(ctx, "/mcp", payload)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		return fmt.Errorf("relay: register mcp: drain body: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusAccepted {
+		return fmt.Errorf("relay: register mcp: unexpected status %d", resp.StatusCode)
+	}
+	return nil
+}
+
 func (c *HTTPClient) Events(ctx context.Context, sessionID string) (<-chan Event, error) {
 	url := c.base + "/event?session_id=" + sessionID
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)

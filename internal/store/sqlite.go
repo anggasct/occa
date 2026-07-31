@@ -8,10 +8,11 @@ import (
 )
 
 type SQLiteStore struct {
-	db       *sql.DB
-	sessions *sqliteSessionRepo
-	channels *sqliteChannelRepo
+	db        *sql.DB
+	sessions  *sqliteSessionRepo
+	channels  *sqliteChannelRepo
 	overrides *sqliteOverrideRepo
+	schedules *sqliteScheduleRepo
 }
 
 func Open(path string) (*SQLiteStore, error) {
@@ -34,6 +35,7 @@ func Open(path string) (*SQLiteStore, error) {
 	s.sessions = &sqliteSessionRepo{db: db}
 	s.channels = &sqliteChannelRepo{db: db}
 	s.overrides = &sqliteOverrideRepo{db: db}
+	s.schedules = &sqliteScheduleRepo{db: db}
 	return s, nil
 }
 
@@ -71,6 +73,18 @@ CREATE TABLE IF NOT EXISTS user_override (
 	updated_at INTEGER NOT NULL,
 	UNIQUE (platform, channel_id, user_id)
 );
+
+CREATE TABLE IF NOT EXISTS schedule (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	channel_id TEXT NOT NULL,
+	platform TEXT NOT NULL,
+	cron_expression TEXT NOT NULL,
+	human_schedule TEXT,
+	prompt TEXT NOT NULL,
+	enabled INTEGER NOT NULL DEFAULT 1,
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL
+);
 `
 	if _, err := s.db.Exec(ddl); err != nil {
 		return fmt.Errorf("store: migrate: %w", err)
@@ -81,6 +95,7 @@ CREATE TABLE IF NOT EXISTS user_override (
 func (s *SQLiteStore) SessionRepo() SessionRepo   { return s.sessions }
 func (s *SQLiteStore) ChannelRepo() ChannelRepo    { return s.channels }
 func (s *SQLiteStore) OverrideRepo() OverrideRepo  { return s.overrides }
+func (s *SQLiteStore) ScheduleRepo() ScheduleRepo  { return s.schedules }
 
 func (s *SQLiteStore) Close() error {
 	return s.db.Close()

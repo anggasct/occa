@@ -32,6 +32,10 @@ type InstanceProvider interface {
 	Instance(ctx context.Context, workdir string) (AgentInstance, error)
 }
 
+type MCPContextSetter interface {
+	SetContext(platform, channelID string)
+}
+
 type Router struct {
 	commands       map[string]Command
 	instances      InstanceProvider
@@ -39,6 +43,21 @@ type Router struct {
 	defaultWorkdir string
 	adminID        string
 	startedAt      time.Time
+	sched          ScheduleStore
+	mcpSetter      MCPContextSetter
+}
+
+type ScheduleStore interface {
+	ListSchedules(ctx context.Context, platform, channelID string) ([]store.Schedule, error)
+	RemoveSchedule(ctx context.Context, id int64) error
+}
+
+func (r *Router) SetScheduler(s ScheduleStore) {
+	r.sched = s
+}
+
+func (r *Router) SetMCPContextSetter(m MCPContextSetter) {
+	r.mcpSetter = m
 }
 
 func New(instances InstanceProvider, st store.Store, defaultWorkdir string, adminID string) *Router {
@@ -189,6 +208,10 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 
 	msg.ReplyCtx.SendTyping()
 
+	if r.mcpSetter != nil {
+		r.mcpSetter.SetContext(msg.Platform, msg.ChannelID)
+	}
+
 	if strings.HasPrefix(msg.Text, "/") {
 		err = inst.Client().RunCommand(ctx, sessionID, msg.Text)
 	} else {
@@ -250,6 +273,10 @@ func (r *Router) registerDefaults() {
 		Admin:   true,
 		Handler: r.handleChannel,
 	}
+	r.commands["schedules"] = Command{
+		Name:    "schedules",
+		Handler: r.handleSchedules,
+	}
 }
 
 func (r *Router) helpText() string {
@@ -259,6 +286,7 @@ func (r *Router) helpText() string {
 		"• /occa:session [list|new|switch <id>|delete <id>] — manage sessions\n" +
 		"• /occa:dir [path] — view or set this channel's working directory\n" +
 		"• /occa:channel [mention|all|thread] — view or set listen mode\n" +
+		"• /occa:schedules [delete <id>] — view or delete scheduled tasks\n" +
 		"• /occa:reset — clear current session and start fresh\n\n" +
 		"All other messages and /commands are forwarded to the agent."
 }

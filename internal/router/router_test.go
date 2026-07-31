@@ -128,12 +128,21 @@ type fakeStore struct {
 	sessionRepo  *fakeSessionRepo
 	channelRepo  *fakeChannelRepo
 	overrideRepo *fakeOverrideRepo
+	scheduleRepo *fakeScheduleRepo
 }
 
 func (f *fakeStore) SessionRepo() store.SessionRepo   { return f.sessionRepo }
 func (f *fakeStore) ChannelRepo() store.ChannelRepo   { return f.channelRepo }
 func (f *fakeStore) OverrideRepo() store.OverrideRepo { return f.overrideRepo }
+func (f *fakeStore) ScheduleRepo() store.ScheduleRepo { return f.scheduleRepo }
 func (f *fakeStore) Close() error                     { return nil }
+
+type fakeScheduleRepo struct{}
+
+func (f *fakeScheduleRepo) Create(_ context.Context, s *store.Schedule) (int64, error) { return 1, nil }
+func (f *fakeScheduleRepo) Delete(_ context.Context, id int64) error                    { return nil }
+func (f *fakeScheduleRepo) List(_ context.Context, _, _ string) ([]store.Schedule, error) { return nil, nil }
+func (f *fakeScheduleRepo) ListAll(_ context.Context) ([]store.Schedule, error)          { return nil, nil }
 
 type fakeSessionRepo struct {
 	activeID string
@@ -180,6 +189,7 @@ func newTestRouterWithAccess() (*Router, *fakeRelayClient, *fakeReplyCtx, *fakeO
 		sessionRepo:  &fakeSessionRepo{},
 		channelRepo:  newFakeChannelRepo(),
 		overrideRepo: overrideRepo,
+		scheduleRepo: &fakeScheduleRepo{},
 	}
 	provider := &fakeInstanceProvider{client: client}
 	r := New(provider, st, "/default-workdir", "")
@@ -543,6 +553,7 @@ func TestBootstrapAdminFirstMessage(t *testing.T) {
 		sessionRepo:  &fakeSessionRepo{},
 		channelRepo:  newFakeChannelRepo(),
 		overrideRepo: overrideRepo,
+		scheduleRepo: &fakeScheduleRepo{},
 	}
 	provider := &fakeInstanceProvider{client: client}
 	r := New(provider, st, "/default-workdir", "admin123")
@@ -572,6 +583,7 @@ func TestBootstrapAdminCanRunCommandsImmediately(t *testing.T) {
 		sessionRepo:  &fakeSessionRepo{},
 		channelRepo:  newFakeChannelRepo(),
 		overrideRepo: overrideRepo,
+		scheduleRepo: &fakeScheduleRepo{},
 	}
 	provider := &fakeInstanceProvider{client: client}
 	r := New(provider, st, "/default-workdir", "admin123")
@@ -598,6 +610,7 @@ func TestBootstrapAdminDoesNotWeakenDenyForOthers(t *testing.T) {
 		sessionRepo:  &fakeSessionRepo{},
 		channelRepo:  newFakeChannelRepo(),
 		overrideRepo: overrideRepo,
+		scheduleRepo: &fakeScheduleRepo{},
 	}
 	provider := &fakeInstanceProvider{client: client}
 	r := New(provider, st, "/default-workdir", "admin123")

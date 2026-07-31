@@ -66,6 +66,20 @@ func (a *Adapter) Stop() error {
 	return nil
 }
 
+func (a *Adapter) Notify(channelID string, text string) error {
+	var chatID int64
+	fmt.Sscanf(channelID, "%d", &chatID)
+	for _, chunk := range splitMessage(text, 4096) {
+		msg := tgbotapi.NewMessage(chatID, chunk)
+		msg.ParseMode = "HTML"
+		msg.DisableWebPagePreview = true
+		if _, err := a.bot.Send(msg); err != nil {
+			return fmt.Errorf("telegram: notify: %w", err)
+		}
+	}
+	return nil
+}
+
 func (a *Adapter) normalize(update tgbotapi.Update) channel.IncomingMessage {
 	msg := update.Message
 	chatID := fmt.Sprintf("%d", msg.Chat.ID)

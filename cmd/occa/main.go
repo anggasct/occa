@@ -14,9 +14,11 @@ import (
 	"github.com/anggasct/occa/internal/channel/discord"
 	"github.com/anggasct/occa/internal/channel/telegram"
 	"github.com/anggasct/occa/internal/config"
+	"github.com/anggasct/occa/internal/mcpserver"
 	"github.com/anggasct/occa/internal/process"
 	"github.com/anggasct/occa/internal/relay"
 	"github.com/anggasct/occa/internal/router"
+	"github.com/anggasct/occa/internal/scheduler"
 	"github.com/anggasct/occa/internal/store"
 )
 
@@ -86,6 +88,32 @@ func main() {
 		channels = append(channels, discord.New(discordToken))
 	}
 
+	executor := func(ctx context.Context, platform, channelID, prompt string) {
+		for _, ch := range channels {
+			if ch.Name() == platform {
+				ch.Notify(channelID, "⏰ Scheduled task running: "+prompt)
+				break
+			}
+		}
+	}
+
+	sched := scheduler.New(db.ScheduleRepo(), executor)
+	if err := sched.Start(ctx); err != nil {
+		slog.Error("failed to start scheduler", "error", err)
+	}
+	defer sched.Stop()
+
+	mcpSrv := mcpserver.New(sched)
+	if err := mcpSrv.Start(ctx); err != nil {
+		slog.Error("failed to start mcp server", "error", err)
+	}
+	defer mcpSrv.Stop()
+
+	rt.SetScheduler(sched)
+	rt.SetMCPContextSetter(mcpSrv)
+
+	registerMCP(ctx, manager, mcpSrv, cfg.Agent.DefaultWorkdir)
+
 	for _, ch := range channels {
 		go func(c channel.Channel) {
 			slog.Info("starting channel", "platform", c.Name())
@@ -129,4 +157,32 @@ func discoverAgent(ctx context.Context, manager *process.Manager, workdir string
 	if missing := doc.MissingEndpoints(); len(missing) > 0 {
 		slog.Warn("agent missing expected endpoints", "endpoints", missing)
 	}
+}
+
+func registerMCP(ctx context.Context, manager *process.Manager, mcpSrv *mcpserver.Server, workdir string) {
+	regCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	inst, err := manager.Instance(regCtx, workdir)
+	if err != nil {
+		slog.Warn("mcp self-registration skipped — agent unreachable", "error", err)
+		return
+	}
+	defer inst.End()
+
+	httpClient, ok := inst.Client().(*relay.HTTPClient)
+	if !ok {
+		slog.Warn("mcp self-registration skipped — not an HTTP client")
+		return
+	}
+
+	err = httpClient.RegisterMCP(regCtx, "occa", relay.McpConfig{
+		Type: "remote",
+		URL:  mcpSrv.URL(),
+	})
+	if err != nil {
+		slog.Warn("mcp self-registration failed", "error", err)
+		return
+	}
+	slog.Info("mcp self-registered", "url", mcpSrv.URL())
 }
