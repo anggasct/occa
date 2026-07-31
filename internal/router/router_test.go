@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -75,6 +76,7 @@ func (f *fakeRelayClient) Events(_ context.Context, _ string) (<-chan relay.Even
 
 type fakeOverrideRepo struct {
 	overrides map[string]*store.UserOverride
+	getErr    error
 }
 
 func newFakeOverrideRepo() *fakeOverrideRepo {
@@ -86,6 +88,9 @@ func (f *fakeOverrideRepo) key(platform, channelID, userID string) string {
 }
 
 func (f *fakeOverrideRepo) Get(_ context.Context, platform, channelID, userID string) (*store.UserOverride, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
 	return f.overrides[f.key(platform, channelID, userID)], nil
 }
 
@@ -224,9 +229,11 @@ func (f *fakeInstance) End()                 {}
 type fakeInstanceProvider struct {
 	client relay.Client
 	err    error
+	calls  int
 }
 
 func (p *fakeInstanceProvider) Instance(_ context.Context, _ string) (AgentInstance, error) {
+	p.calls++
 	if p.err != nil {
 		return nil, p.err
 	}
@@ -392,6 +399,117 @@ func TestAccessDeniedForUnknownUser(t *testing.T) {
 	}
 	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Access denied") {
 		t.Fatalf("expected access denied, got: %v", reply.sends)
+	}
+}
+
+func TestIngressAuthorizationMatrix(t *testing.T) {
+	roles := []struct {
+		name   string
+		userID string
+		role   string
+		denied bool
+	}{
+		{name: "unknown", userID: "stranger", denied: true},
+		{name: "deny", userID: "user1", role: "deny", denied: true},
+		{name: "allow", userID: "user1", role: "allow"},
+		{name: "admin", userID: "user1", role: "admin"},
+	}
+	actions := []struct {
+		name     string
+		text     string
+		callback bool
+	}{
+		{name: "ordinary", text: "hello"},
+		{name: "non-admin command", text: "/occa:help"},
+		{name: "admin command", text: "/occa:allow user2"},
+		{name: "permission callback", callback: true, text: "permission:req-1:once"},
+	}
+
+	for _, role := range roles {
+		for _, action := range actions {
+			t.Run(role.name+"/"+action.name, func(t *testing.T) {
+				r, client, reply, overrideRepo := newTestRouterWithAccess()
+				provider := r.instances.(*fakeInstanceProvider)
+				if role.role != "" {
+					overrideRepo.overrides[overrideRepo.key("telegram", "chat1", role.userID)] = &store.UserOverride{
+						ChannelID: "chat1",
+						Platform:  "telegram",
+						UserID:    role.userID,
+						Role:      role.role,
+					}
+				}
+
+				m := channel.IncomingMessage{
+					Platform:     "telegram",
+					ChannelID:    "chat1",
+					UserID:       role.userID,
+					Text:         action.text,
+					IsMention:    true,
+					IsCallback:   action.callback,
+					CallbackData: action.text,
+					ReplyCtx:     reply,
+				}
+
+				if err := r.Route(context.Background(), m); err != nil {
+					t.Fatalf("Route: %v", err)
+				}
+
+				if role.denied {
+					if len(reply.sends) != 1 || reply.sends[0] != accessDeniedMessage {
+						t.Fatalf("denied response = %v, want exactly %q", reply.sends, accessDeniedMessage)
+					}
+					if provider.calls != 0 {
+						t.Fatalf("instance provider calls = %d, want 0", provider.calls)
+					}
+					if client.lastMsg != "" || client.lastCmd != "" {
+						t.Fatalf("denied request reached client: message=%q command=%q", client.lastMsg, client.lastCmd)
+					}
+					return
+				}
+
+				if len(reply.sends) > 0 && reply.sends[0] == accessDeniedMessage {
+					t.Fatalf("authorized request was denied: %v", reply.sends)
+				}
+				switch {
+				case action.name == "ordinary":
+					if client.lastMsg != "hello" {
+						t.Fatalf("ordinary message = %q, want hello", client.lastMsg)
+					}
+				case action.name == "non-admin command":
+					if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "/occa:help") {
+						t.Fatalf("non-admin command response = %v", reply.sends)
+					}
+				case action.name == "admin command":
+					if role.role == "admin" {
+						if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Allowed user: user2") {
+							t.Fatalf("admin command response = %v", reply.sends)
+						}
+					} else if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Admin access required") {
+						t.Fatalf("non-admin command response = %v", reply.sends)
+					}
+				case action.name == "permission callback":
+					if provider.calls != 1 {
+						t.Fatalf("callback instance provider calls = %d, want 1", provider.calls)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestIngressAuthorizationStoreErrorFailsClosed(t *testing.T) {
+	r, client, reply, overrideRepo := newTestRouterWithAccess()
+	provider := r.instances.(*fakeInstanceProvider)
+	overrideRepo.getErr = errors.New("database unavailable")
+
+	if err := r.Route(context.Background(), msgFrom("stranger", "hello", reply)); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if len(reply.sends) != 1 || reply.sends[0] != accessVerifyMessage {
+		t.Fatalf("verification response = %v, want exactly %q", reply.sends, accessVerifyMessage)
+	}
+	if provider.calls != 0 || client.lastMsg != "" {
+		t.Fatalf("store error reached downstream: provider calls=%d, message=%q", provider.calls, client.lastMsg)
 	}
 }
 

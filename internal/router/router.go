@@ -15,6 +15,11 @@ import (
 
 var ErrDenied = errors.New("access denied")
 
+const (
+	accessDeniedMessage = "⚠️ Access denied. Ask an admin to /occa:allow you."
+	accessVerifyMessage = "⚠️ Unable to verify access. Try again."
+)
+
 type Command struct {
 	Name    string
 	Admin   bool
@@ -74,6 +79,19 @@ func New(instances InstanceProvider, st store.Store, defaultWorkdir string, admi
 }
 
 func (r *Router) Route(ctx context.Context, msg channel.IncomingMessage) error {
+	inputKind := routeInputKind(msg)
+	if err := r.authorize(ctx, msg); err != nil {
+		if errors.Is(err, ErrDenied) {
+			slog.Info("access denied", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID, "input_kind", inputKind, "outcome", "denied")
+			r.sendAccessReply(msg, accessDeniedMessage)
+			return nil
+		}
+
+		slog.Error("access verification failed", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID, "input_kind", inputKind, "outcome", "error", "error", err)
+		r.sendAccessReply(msg, accessVerifyMessage)
+		return nil
+	}
+
 	if msg.IsCallback {
 		return r.handleCallback(ctx, msg)
 	}
@@ -82,16 +100,31 @@ func (r *Router) Route(ctx context.Context, msg channel.IncomingMessage) error {
 		return r.handleCommand(ctx, msg)
 	}
 
-	if err := r.authorize(ctx, msg); err != nil {
-		msg.ReplyCtx.Send("⚠️ Access denied. Ask an admin to /occa:allow you.")
-		return nil
-	}
-
 	if !r.listenModeAllows(ctx, msg) {
 		return nil
 	}
 
 	return r.passthrough(ctx, msg)
+}
+
+func routeInputKind(msg channel.IncomingMessage) string {
+	if msg.IsCallback {
+		return "callback"
+	}
+	if strings.HasPrefix(msg.Text, "/occa:") {
+		return "occa_command"
+	}
+	return "message"
+}
+
+func (r *Router) sendAccessReply(msg channel.IncomingMessage, text string) {
+	if msg.ReplyCtx == nil {
+		slog.Warn("access response has no reply context", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID)
+		return
+	}
+	if _, err := msg.ReplyCtx.Send(text); err != nil {
+		slog.Warn("failed to send access response", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID, "error", err)
+	}
 }
 
 func (r *Router) listenModeAllows(ctx context.Context, msg channel.IncomingMessage) bool {
@@ -110,34 +143,32 @@ func (r *Router) listenModeAllows(ctx context.Context, msg channel.IncomingMessa
 	}
 }
 
-func (r *Router) ensureAdminBootstrap(ctx context.Context, msg channel.IncomingMessage) {
+func (r *Router) ensureAdminBootstrap(ctx context.Context, msg channel.IncomingMessage) error {
 	if r.adminID == "" || msg.UserID != r.adminID {
-		return
+		return nil
 	}
 	o, err := r.store.OverrideRepo().Get(ctx, msg.Platform, msg.ChannelID, msg.UserID)
 	if err != nil {
-		slog.Error("failed to check override for admin bootstrap", "error", err)
-		return
+		return fmt.Errorf("admin bootstrap lookup: %w", err)
 	}
 	if o == nil || o.Role != "admin" {
 		if err := r.store.OverrideRepo().UpsertRole(ctx, msg.Platform, msg.ChannelID, msg.UserID, "admin"); err != nil {
-			slog.Error("failed to bootstrap admin role", "error", err)
-			return
+			return fmt.Errorf("admin bootstrap persist: %w", err)
 		}
 		slog.Info("bootstrapped admin role for channel", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID)
 	}
+	return nil
 }
 
 func (r *Router) authorize(ctx context.Context, msg channel.IncomingMessage) error {
 	if r.adminID != "" && msg.UserID == r.adminID {
-		r.ensureAdminBootstrap(ctx, msg)
-		return nil
+		return r.ensureAdminBootstrap(ctx, msg)
 	}
 	o, err := r.store.OverrideRepo().Get(ctx, msg.Platform, msg.ChannelID, msg.UserID)
 	if err != nil {
 		return fmt.Errorf("authorize: %w", err)
 	}
-	if o == nil || o.Role == "deny" {
+	if o == nil || (o.Role != "allow" && o.Role != "admin") {
 		return ErrDenied
 	}
 	return nil
@@ -145,7 +176,6 @@ func (r *Router) authorize(ctx context.Context, msg channel.IncomingMessage) err
 
 func (r *Router) isAdmin(ctx context.Context, msg channel.IncomingMessage) bool {
 	if r.adminID != "" && msg.UserID == r.adminID {
-		r.ensureAdminBootstrap(ctx, msg)
 		return true
 	}
 	o, err := r.store.OverrideRepo().Get(ctx, msg.Platform, msg.ChannelID, msg.UserID)
