@@ -1,0 +1,445 @@
+package router
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/anggasct/occa/internal/channel"
+	"github.com/anggasct/occa/internal/relay"
+	"github.com/anggasct/occa/internal/store"
+)
+
+type responseReply struct {
+	mu       sync.Mutex
+	sends    []string
+	edits    []string
+	activity chan struct{}
+}
+
+type responseRef string
+
+func (r responseRef) ID() string { return string(r) }
+
+func newResponseReply() *responseReply {
+	return &responseReply{activity: make(chan struct{}, 8)}
+}
+
+func (r *responseReply) SendTyping() error { return nil }
+
+func (r *responseReply) Send(text string) (channel.MessageRef, error) {
+	r.mu.Lock()
+	r.sends = append(r.sends, text)
+	r.mu.Unlock()
+	r.signalActivity()
+	return responseRef("response"), nil
+}
+
+func (r *responseReply) SendWithButtons(text string, _ []channel.Button) (channel.MessageRef, error) {
+	return r.Send(text)
+}
+
+func (r *responseReply) Edit(_ channel.MessageRef, text string) error {
+	r.mu.Lock()
+	r.edits = append(r.edits, text)
+	r.mu.Unlock()
+	r.signalActivity()
+	return nil
+}
+
+func (r *responseReply) signalActivity() {
+	select {
+	case r.activity <- struct{}{}:
+	default:
+	}
+}
+
+func (r *responseReply) texts() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append(append([]string(nil), r.sends...), r.edits...)
+}
+
+func (r *responseReply) contains(text string) bool {
+	for _, got := range r.texts() {
+		if strings.Contains(got, text) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *responseReply) hasExact(text string) bool {
+	for _, got := range r.texts() {
+		if got == text {
+			return true
+		}
+	}
+	return false
+}
+
+type responseClient struct {
+	mu           sync.Mutex
+	events       chan relay.Event
+	eventsCall   int
+	sendCalls    int
+	commandCalls int
+	started      chan struct{}
+	startOnce    sync.Once
+	dispatch     func(context.Context, chan<- relay.Event) error
+}
+
+func newResponseClient(dispatch func(context.Context, chan<- relay.Event) error) *responseClient {
+	return &responseClient{started: make(chan struct{}), dispatch: dispatch}
+}
+
+func (c *responseClient) CreateSession(_ context.Context) (string, error) { return "session", nil }
+
+func (c *responseClient) SendMessage(ctx context.Context, _ string, _ string, _ *relay.ModelRef, _ []relay.Attachment) error {
+	c.mu.Lock()
+	c.sendCalls++
+	events := c.events
+	dispatch := c.dispatch
+	c.mu.Unlock()
+	c.startOnce.Do(func() { close(c.started) })
+	return c.runDispatch(ctx, events, dispatch)
+}
+
+func (c *responseClient) RunCommand(ctx context.Context, _ string, _ string) error {
+	c.mu.Lock()
+	c.commandCalls++
+	events := c.events
+	dispatch := c.dispatch
+	c.mu.Unlock()
+	c.startOnce.Do(func() { close(c.started) })
+	return c.runDispatch(ctx, events, dispatch)
+}
+
+func (c *responseClient) runDispatch(ctx context.Context, events chan<- relay.Event, dispatch func(context.Context, chan<- relay.Event) error) error {
+	if dispatch != nil {
+		return dispatch(ctx, events)
+	}
+	events <- relay.Event{Type: "delta", Delta: "response"}
+	events <- relay.Event{Type: "done"}
+	close(events)
+	return nil
+}
+
+func (c *responseClient) Providers(_ context.Context) (relay.Providers, error) {
+	return relay.Providers{}, nil
+}
+
+func (c *responseClient) Events(_ context.Context, _ string) (<-chan relay.Event, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.eventsCall++
+	c.events = make(chan relay.Event, 8)
+	return c.events, nil
+}
+
+func (c *responseClient) eventCalls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.eventsCall
+}
+
+func newResponseRouter(client relay.Client) (*Router, *fakeStore) {
+	overrides := newFakeOverrideRepo()
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+		Platform: "telegram", ChannelID: "chat1", UserID: "user1", Role: "allow",
+	}
+	st := &fakeStore{
+		sessionRepo:  &fakeSessionRepo{},
+		channelRepo:  newFakeChannelRepo(),
+		overrideRepo: overrides,
+		scheduleRepo: &fakeScheduleRepo{},
+	}
+	r := New(&fakeInstanceProvider{client: client}, st, "/default-workdir", "")
+	return r, st
+}
+
+func responseMessage(userID, channelID, text string, reply channel.ReplyContext) channel.IncomingMessage {
+	return channel.IncomingMessage{
+		Platform:  "telegram",
+		ChannelID: channelID,
+		UserID:    userID,
+		Text:      text,
+		IsMention: true,
+		ReplyCtx:  reply,
+	}
+}
+
+func waitForReply(t *testing.T, reply *responseReply, text string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if reply.contains(text) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("reply did not contain %q: %v", text, reply.texts())
+}
+
+func TestResponseCoordinatorSubscribesBeforeDispatch(t *testing.T) {
+	client := newResponseClient(nil)
+	r, _ := newResponseRouter(client)
+	reply := newResponseReply()
+
+	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "hello", reply)); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	select {
+	case <-client.started:
+	case <-time.After(time.Second):
+		t.Fatal("dispatch did not start")
+	}
+	waitForResponse(t, r)
+
+	if client.eventCalls() != 1 {
+		t.Fatalf("Events calls = %d, want 1", client.eventCalls())
+	}
+	if !reply.contains("response") {
+		t.Fatalf("response was not delivered: %v", reply.texts())
+	}
+	if reply.contains("Response stream ended before completion") {
+		t.Fatalf("complete response emitted incomplete notice: %v", reply.texts())
+	}
+}
+
+func TestResponseCoordinatorUsesSamePathForCommands(t *testing.T) {
+	client := newResponseClient(nil)
+	r, _ := newResponseRouter(client)
+	reply := newResponseReply()
+
+	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "/plan build", reply)); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	select {
+	case <-client.started:
+	case <-time.After(time.Second):
+		t.Fatal("command did not start")
+	}
+	waitForResponse(t, r)
+
+	client.mu.Lock()
+	sends, commands := client.sendCalls, client.commandCalls
+	client.mu.Unlock()
+	if sends != 0 || commands != 1 {
+		t.Fatalf("dispatch counts = send %d, command %d", sends, commands)
+	}
+	if !reply.contains("response") {
+		t.Fatalf("command response was not delivered: %v", reply.texts())
+	}
+}
+
+func TestResponseCoordinatorBusyDoesNotDispatchSecondPrompt(t *testing.T) {
+	release := make(chan struct{})
+	client := newResponseClient(func(ctx context.Context, events chan<- relay.Event) error {
+		events <- relay.Event{Type: "delta", Delta: "partial"}
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	r, _ := newResponseRouter(client)
+	firstReply := newResponseReply()
+	secondReply := newResponseReply()
+
+	start := time.Now()
+	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "first", firstReply)); err != nil {
+		t.Fatalf("first Route: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("Route blocked for %s", elapsed)
+	}
+	select {
+	case <-client.started:
+	case <-time.After(time.Second):
+		t.Fatal("first dispatch did not start")
+	}
+	waitForReply(t, firstReply, "partial")
+
+	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "second", secondReply)); err != nil {
+		t.Fatalf("second Route: %v", err)
+	}
+	if !secondReply.hasExact(busyResponseMessage) {
+		t.Fatalf("busy response = %v", secondReply.texts())
+	}
+	if client.eventCalls() != 1 {
+		t.Fatalf("Events calls = %d, want 1", client.eventCalls())
+	}
+
+	close(release)
+	client.mu.Lock()
+	events := client.events
+	client.mu.Unlock()
+	events <- relay.Event{Type: "done"}
+	close(events)
+	waitForResponse(t, r)
+}
+
+func TestResponseCoordinatorDispatchAndStreamOverlap(t *testing.T) {
+	reply := newResponseReply()
+	client := newResponseClient(func(ctx context.Context, events chan<- relay.Event) error {
+		events <- relay.Event{Type: "delta", Delta: "waiting"}
+		select {
+		case <-reply.activity:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		events <- relay.Event{Type: "done"}
+		close(events)
+		return nil
+	})
+	r, _ := newResponseRouter(client)
+
+	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "hello", reply)); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	waitForReply(t, reply, "waiting")
+	waitForResponse(t, r)
+	if !reply.contains("waiting") {
+		t.Fatalf("overlapped response missing: %v", reply.texts())
+	}
+}
+
+func TestResponseCoordinatorDispatchFailureReleasesSlot(t *testing.T) {
+	var calls int
+	client := newResponseClient(func(ctx context.Context, events chan<- relay.Event) error {
+		calls++
+		if calls == 1 {
+			return errors.New("dispatch failed")
+		}
+		events <- relay.Event{Type: "delta", Delta: "recovered"}
+		events <- relay.Event{Type: "done"}
+		close(events)
+		return nil
+	})
+	r, _ := newResponseRouter(client)
+	firstReply := newResponseReply()
+	secondReply := newResponseReply()
+
+	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "first", firstReply)); err != nil {
+		t.Fatalf("first Route: %v", err)
+	}
+	waitForReply(t, firstReply, "Agent unreachable")
+	waitForResponse(t, r)
+
+	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "second", secondReply)); err != nil {
+		t.Fatalf("second Route: %v", err)
+	}
+	waitForReply(t, secondReply, "recovered")
+	waitForResponse(t, r)
+	if calls != 2 {
+		t.Fatalf("dispatch calls = %d, want 2", calls)
+	}
+}
+
+func TestResponseCoordinatorPrematureEOFNotifiesAndReleasesSlot(t *testing.T) {
+	client := newResponseClient(func(_ context.Context, events chan<- relay.Event) error {
+		events <- relay.Event{Type: "delta", Delta: "partial"}
+		close(events)
+		return nil
+	})
+	r, _ := newResponseRouter(client)
+	reply := newResponseReply()
+
+	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "hello", reply)); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	waitForReply(t, reply, "Response stream ended before completion")
+	waitForResponse(t, r)
+	if !reply.contains("partial") {
+		t.Fatalf("buffered response was not final-synced: %v", reply.texts())
+	}
+	if !reply.hasExact("⚠️ Response stream ended before completion. The task may still be running; check /occa:status.") {
+		t.Fatalf("missing exact incomplete notice: %v", reply.texts())
+	}
+}
+
+func TestResponseCoordinatorCancellationIsSilent(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	client := newResponseClient(func(ctx context.Context, events chan<- relay.Event) error {
+		events <- relay.Event{Type: "delta", Delta: "partial"}
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	r, _ := newResponseRouter(client)
+	reply := newResponseReply()
+
+	if err := r.Route(ctx, responseMessage("user1", "chat1", "hello", reply)); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	select {
+	case <-client.started:
+	case <-time.After(time.Second):
+		t.Fatal("dispatch did not start")
+	}
+	cancel()
+	waitForResponse(t, r)
+	for _, text := range reply.texts() {
+		if strings.Contains(text, "Agent unreachable") || strings.Contains(text, "Response stream ended") {
+			t.Fatalf("cancellation sent failure message: %v", reply.texts())
+		}
+	}
+}
+
+type responseProvider struct {
+	clients map[string]relay.Client
+}
+
+func (p *responseProvider) Instance(_ context.Context, workdir string) (AgentInstance, error) {
+	client := p.clients[workdir]
+	if client == nil {
+		return nil, errors.New("missing response client")
+	}
+	return &fakeInstance{client: client}, nil
+}
+
+func TestResponseCoordinatorAllowsDifferentChannels(t *testing.T) {
+	first := newResponseClient(nil)
+	second := newResponseClient(nil)
+	overrides := newFakeOverrideRepo()
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{Platform: "telegram", ChannelID: "chat1", UserID: "user1", Role: "allow"}
+	overrides.overrides["telegram:chat2:user1"] = &store.UserOverride{Platform: "telegram", ChannelID: "chat2", UserID: "user1", Role: "allow"}
+	channels := newFakeChannelRepo()
+	channels.channels["telegram:chat2"] = &store.Channel{Platform: "telegram", ChannelID: "chat2", Workdir: "/chat2", ListenMode: "mention"}
+	st := &fakeStore{
+		sessionRepo:  &fakeSessionRepo{},
+		channelRepo:  channels,
+		overrideRepo: overrides,
+		scheduleRepo: &fakeScheduleRepo{},
+	}
+	r := New(&responseProvider{clients: map[string]relay.Client{
+		"/default-workdir": first,
+		"/chat2":           second,
+	}}, st, "/default-workdir", "")
+
+	firstReply := newResponseReply()
+	secondReply := newResponseReply()
+	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "first", firstReply)); err != nil {
+		t.Fatalf("first Route: %v", err)
+	}
+	if err := r.Route(context.Background(), responseMessage("user1", "chat2", "second", secondReply)); err != nil {
+		t.Fatalf("second Route: %v", err)
+	}
+	waitForReply(t, firstReply, "response")
+	waitForReply(t, secondReply, "response")
+	waitForResponse(t, r)
+
+	first.mu.Lock()
+	firstCalls := first.sendCalls
+	first.mu.Unlock()
+	second.mu.Lock()
+	secondCalls := second.sendCalls
+	second.mu.Unlock()
+	if firstCalls != 1 || secondCalls != 1 {
+		t.Fatalf("send calls = first %d, second %d", firstCalls, secondCalls)
+	}
+}

@@ -24,7 +24,12 @@ func readSSE(ctx context.Context, r io.Reader, ch chan<- Event) {
 
 		if line == "" {
 			if hasFields {
-				ch <- parseSSEEvent(eventType, data)
+				event := parseSSEEvent(eventType, data)
+				select {
+				case ch <- event:
+				case <-ctx.Done():
+					return
+				}
 				eventType = ""
 				data = ""
 				hasFields = false

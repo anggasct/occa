@@ -311,6 +311,8 @@ func TestMessagesResolvePersonalModelsPerUser(t *testing.T) {
 	if err := r.Route(context.Background(), msgFrom("user1", "first", &fakeReplyCtx{})); err != nil {
 		t.Fatalf("Route user1: %v", err)
 	}
+	waitForDispatch(t, client)
+	waitForResponse(t, r)
 	if client.lastModel == nil || client.lastModel.ProviderID != "openai" {
 		t.Fatalf("user1 model = %+v", client.lastModel)
 	}
@@ -318,6 +320,8 @@ func TestMessagesResolvePersonalModelsPerUser(t *testing.T) {
 	if err := r.Route(context.Background(), msgFrom("user2", "second", &fakeReplyCtx{})); err != nil {
 		t.Fatalf("Route user2: %v", err)
 	}
+	waitForDispatch(t, client)
+	waitForResponse(t, r)
 	if client.lastModel == nil || client.lastModel.ProviderID != "anthropic" {
 		t.Fatalf("user2 model = %+v", client.lastModel)
 	}
@@ -335,6 +339,8 @@ func TestMessageUsesChannelModelWithoutPersonalOverride(t *testing.T) {
 	if err := r.Route(context.Background(), msg("hello", &fakeReplyCtx{})); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
+	waitForDispatch(t, client)
+	waitForResponse(t, r)
 	if client.lastModel == nil || client.lastModel.ProviderID != "openai" || client.lastModel.ID != "gpt-4o" {
 		t.Fatalf("expected channel model, got %+v", client.lastModel)
 	}
@@ -388,6 +394,8 @@ func TestMessageWithoutModelUsesAgentDefault(t *testing.T) {
 	if err := r.Route(context.Background(), msg("hello", &fakeReplyCtx{})); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
+	waitForDispatch(t, client)
+	waitForResponse(t, r)
 	if client.lastModel != nil {
 		t.Fatalf("expected agent default to omit model, got %+v", client.lastModel)
 	}

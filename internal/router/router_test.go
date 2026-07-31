@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/relay"
@@ -42,6 +43,8 @@ type fakeRelayClient struct {
 	lastModel     *relay.ModelRef
 	providerCalls int
 	sendCalls     int
+	events        chan relay.Event
+	dispatchDone  chan struct{}
 }
 
 func (f *fakeRelayClient) CreateSession(_ context.Context) (string, error) {
@@ -60,6 +63,9 @@ func (f *fakeRelayClient) SendMessage(_ context.Context, _, text string, model *
 		text = text[:idx]
 	}
 	f.lastMsg = text
+	f.events <- relay.Event{Type: "done"}
+	close(f.events)
+	close(f.dispatchDone)
 	return nil
 }
 func (f *fakeRelayClient) Providers(_ context.Context) (relay.Providers, error) {
@@ -68,10 +74,39 @@ func (f *fakeRelayClient) Providers(_ context.Context) (relay.Providers, error) 
 }
 func (f *fakeRelayClient) RunCommand(_ context.Context, _, cmd string) error {
 	f.lastCmd = cmd
+	f.events <- relay.Event{Type: "done"}
+	close(f.events)
+	close(f.dispatchDone)
 	return nil
 }
 func (f *fakeRelayClient) Events(_ context.Context, _ string) (<-chan relay.Event, error) {
-	return nil, nil
+	f.events = make(chan relay.Event, 1)
+	f.dispatchDone = make(chan struct{})
+	return f.events, nil
+}
+
+func waitForDispatch(t *testing.T, client *fakeRelayClient) {
+	t.Helper()
+	select {
+	case <-client.dispatchDone:
+	case <-time.After(time.Second):
+		t.Fatal("dispatch did not complete")
+	}
+}
+
+func waitForResponse(t *testing.T, r *Router) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		r.responses.mu.Lock()
+		active := len(r.responses.active)
+		r.responses.mu.Unlock()
+		if active == 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("response did not finish")
 }
 
 type fakeOverrideRepo struct {
@@ -305,6 +340,8 @@ func TestRoutePassthrough(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
+	waitForDispatch(t, client)
+	waitForResponse(t, r)
 	if client.lastMsg != "hello world" {
 		t.Fatalf("expected passthrough 'hello world', got %q", client.lastMsg)
 	}
@@ -316,6 +353,8 @@ func TestRoutePassthroughCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
+	waitForDispatch(t, client)
+	waitForResponse(t, r)
 	if client.lastCmd != "/plan build a thing" {
 		t.Fatalf("expected command passthrough, got %q", client.lastCmd)
 	}
@@ -453,6 +492,10 @@ func TestIngressAuthorizationMatrix(t *testing.T) {
 				if err := r.Route(context.Background(), m); err != nil {
 					t.Fatalf("Route: %v", err)
 				}
+				if action.name == "ordinary" && !role.denied {
+					waitForDispatch(t, client)
+					waitForResponse(t, r)
+				}
 
 				if role.denied {
 					if len(reply.sends) != 1 || reply.sends[0] != accessDeniedMessage {
@@ -527,6 +570,8 @@ func TestAccessAllowedAfterAllow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
+	waitForDispatch(t, client)
+	waitForResponse(t, r)
 	if client.lastMsg != "hello" {
 		t.Fatalf("expected passthrough after allow, got %q", client.lastMsg)
 	}
@@ -732,6 +777,8 @@ func TestBootstrapAdminFirstMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
+	waitForDispatch(t, client)
+	waitForResponse(t, r)
 	if client.lastMsg != "hello admin" {
 		t.Fatalf("expected passthrough for bootstrap admin, got %q", client.lastMsg)
 	}
@@ -852,6 +899,10 @@ func TestListenModeEnforcement(t *testing.T) {
 			if err := r.Route(context.Background(), m); err != nil {
 				t.Fatalf("Route: %v", err)
 			}
+			if !tt.isCommand && tt.wantFwd {
+				waitForDispatch(t, client)
+				waitForResponse(t, r)
+			}
 
 			if tt.isCommand {
 				if len(reply.sends) == 0 {
@@ -954,6 +1005,8 @@ func TestPassthroughAppendsScheduleToken(t *testing.T) {
 	if err := r.Route(context.Background(), msg("hello world", reply)); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
+	waitForDispatch(t, client)
+	waitForResponse(t, r)
 	if !strings.Contains(client.rawMsg, "OCCA schedule token: test-token-123") {
 		t.Fatalf("expected schedule token in message, got: %q", client.rawMsg)
 	}
