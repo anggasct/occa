@@ -38,7 +38,7 @@ jobs:
           test -z "$unformatted" || (echo "Unformatted files:"; echo "$unformatted"; exit 1)
 
       - name: Lint
-        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --new-from-rev=origin/main ./...
 
       - name: Diff check
         run: git diff --check origin/main...HEAD
