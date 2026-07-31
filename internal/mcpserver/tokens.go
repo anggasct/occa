@@ -27,12 +27,18 @@ func (t *TokenStore) Generate(platform, channelID string) string {
 	rand.Read(b)
 	token := hex.EncodeToString(b)
 
+	now := time.Now()
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	for k, v := range t.tokens {
+		if now.After(v.expires) {
+			delete(t.tokens, k)
+		}
+	}
 	t.tokens[token] = tokenEntry{
 		platform:  platform,
 		channelID: channelID,
-		expires:   time.Now().Add(5 * time.Minute),
+		expires:   now.Add(5 * time.Minute),
 	}
 	return token
 }

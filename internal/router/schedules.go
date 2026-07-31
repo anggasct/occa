@@ -19,7 +19,9 @@ func (r *Router) handleSchedules(ctx context.Context, msg channel.IncomingMessag
 			return "Usage: /occa:schedules delete <id>", nil
 		}
 		var id int64
-		fmt.Sscanf(parts[1], "%d", &id)
+		if _, err := fmt.Sscanf(parts[1], "%d", &id); err != nil || id <= 0 {
+			return "⚠️ Invalid schedule ID. Usage: /occa:schedules delete <id>", nil
+		}
 		if err := r.sched.RemoveSchedule(ctx, msg.Platform, msg.ChannelID, id); err != nil {
 			return "", fmt.Errorf("schedules delete: %w", err)
 		}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/anggasct/occa/internal/store"
 	"github.com/robfig/cron/v3"
@@ -85,7 +86,9 @@ func (s *Scheduler) ListSchedules(ctx context.Context, platform, channelID strin
 func (s *Scheduler) register(sched store.Schedule) error {
 	entryID, err := s.cron.AddFunc(sched.CronExpression, func() {
 		slog.Info("scheduler: executing", "id", sched.ID, "prompt", sched.Prompt)
-		s.executor(context.Background(), sched.Platform, sched.ChannelID, sched.Prompt)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		s.executor(ctx, sched.Platform, sched.ChannelID, sched.Prompt)
 	})
 	if err != nil {
 		return fmt.Errorf("scheduler: register cron: %w", err)
