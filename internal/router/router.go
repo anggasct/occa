@@ -46,6 +46,7 @@ type Router struct {
 	startedAt      time.Time
 	sched          ScheduleStore
 	tokenGen       TokenGenerator
+	responses      *responseCoordinator
 }
 
 type ScheduleStore interface {
@@ -73,6 +74,7 @@ func New(instances InstanceProvider, st store.Store, defaultWorkdir string, admi
 		defaultWorkdir: defaultWorkdir,
 		adminID:        adminID,
 		startedAt:      time.Now(),
+		responses:      newResponseCoordinator(),
 	}
 	r.registerDefaults()
 	return r
@@ -230,50 +232,70 @@ func (r *Router) clientFor(ctx context.Context, msg channel.IncomingMessage) (Ag
 }
 
 func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) error {
+	key := responseKey{platform: msg.Platform, channelID: msg.ChannelID}
+	if !r.responses.acquire(key) {
+		msg.ReplyCtx.Send(busyResponseMessage)
+		return nil
+	}
+
 	inst, err := r.clientFor(ctx, msg)
 	if err != nil {
+		r.responses.release(key)
 		msg.ReplyCtx.Send("⚠️ Agent unreachable")
 		return nil
 	}
-	defer inst.End()
 
 	resolver := relay.NewSessionResolver(r.store.SessionRepo(), inst.Client())
 	sessionID, err := resolver.Resolve(ctx, msg.Platform, msg.ChannelID)
 	if err != nil {
+		inst.End()
+		r.responses.release(key)
 		msg.ReplyCtx.Send("⚠️ Agent unreachable")
 		return nil
 	}
 
-	msg.ReplyCtx.SendTyping()
-
 	text := msg.Text
+	var model *relay.ModelRef
+	var attachments []relay.Attachment
 	if !strings.HasPrefix(text, "/") && r.tokenGen != nil {
 		token := r.tokenGen.Generate(msg.Platform, msg.ChannelID)
 		text = text + "\n\n—\nOCCA schedule token: " + token
 	}
 
-	if strings.HasPrefix(msg.Text, "/") {
-		err = inst.Client().RunCommand(ctx, sessionID, msg.Text)
-	} else {
-		model, modelErr := r.modelForMessage(ctx, msg)
-		if modelErr != nil {
-			slog.Error("failed to resolve message model; message not sent", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID, "error", modelErr)
+	if !strings.HasPrefix(msg.Text, "/") {
+		model, err = r.modelForMessage(ctx, msg)
+		if err != nil {
+			inst.End()
+			r.responses.release(key)
+			slog.Error("failed to resolve message model; message not sent", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID, "error", err)
 			msg.ReplyCtx.Send("⚠️ Unable to resolve model configuration. Message not sent.")
 			return nil
 		}
-		attachments := make([]relay.Attachment, len(msg.Attachments))
+		attachments = make([]relay.Attachment, len(msg.Attachments))
 		for i, a := range msg.Attachments {
 			attachments[i] = relay.Attachment{Filename: a.Filename, MimeType: a.MimeType, Data: a.Data}
 		}
-		err = inst.Client().SendMessage(ctx, sessionID, text, model, attachments)
 	}
-	if err != nil {
-		if errors.Is(err, relay.ErrAttachmentTooLarge) {
-			msg.ReplyCtx.Send("⚠️ " + err.Error())
-		} else {
-			msg.ReplyCtx.Send("⚠️ Agent unreachable")
+
+	msg.ReplyCtx.SendTyping()
+	taskCtx, cancel := context.WithCancel(ctx)
+	events, err := inst.Client().Events(taskCtx, sessionID)
+	if err != nil || events == nil {
+		cancel()
+		inst.End()
+		r.responses.release(key)
+		msg.ReplyCtx.Send("⚠️ Agent unreachable")
+		return nil
+	}
+
+	dispatch := func(dispatchCtx context.Context) error {
+		if strings.HasPrefix(msg.Text, "/") {
+			return inst.Client().RunCommand(dispatchCtx, sessionID, msg.Text)
 		}
+		return inst.Client().SendMessage(dispatchCtx, sessionID, text, model, attachments)
 	}
+
+	go r.runResponse(taskCtx, cancel, key, msg, inst, events, dispatch)
 	return nil
 }
 

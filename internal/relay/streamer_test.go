@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -144,8 +145,11 @@ func TestStreamerChannelClosed(t *testing.T) {
 	close(events)
 
 	err := s.Run(context.Background(), events)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
+	if !errors.Is(err, ErrIncompleteStream) {
+		t.Fatalf("Run error = %v, want ErrIncompleteStream", err)
+	}
+	if got := reply.lastOutput(); got != incompleteStreamMessage {
+		t.Fatalf("incomplete notice = %q, want %q", got, incompleteStreamMessage)
 	}
 }
 
@@ -179,8 +183,8 @@ func TestStreamerErrorEvent(t *testing.T) {
 	close(events)
 
 	err := s.Run(context.Background(), events)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
+	if !errors.Is(err, ErrStreamFailed) {
+		t.Fatalf("Run error = %v, want ErrStreamFailed", err)
 	}
 
 	reply.mu.Lock()

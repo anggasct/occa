@@ -243,7 +243,9 @@ func (c *HTTPClient) Events(ctx context.Context, sessionID string) (<-chan Event
 	}
 	req.Header.Set("Accept", "text/event-stream")
 
-	resp, err := c.http.Do(req)
+	httpClient := *c.http
+	httpClient.Timeout = 0
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, c.wrapTransportErr(err)
 	}

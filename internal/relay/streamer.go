@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -12,6 +13,13 @@ import (
 )
 
 const noEventTimeout = 10 * time.Minute
+
+var (
+	ErrIncompleteStream = errors.New("response stream ended before completion")
+	ErrStreamFailed     = errors.New("response stream failed")
+)
+
+const incompleteStreamMessage = "⚠️ Response stream ended before completion. The task may still be running; check /occa:status."
 
 const (
 	continuationReserve = 64
@@ -59,7 +67,14 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 
 		case ev, ok := <-events:
 			if !ok {
-				return s.finalSync(&refs, &lastChunks, buf.String())
+				syncErr := s.finalSync(&refs, &lastChunks, buf.String())
+				if _, err := s.reply.Send(incompleteStreamMessage); err != nil {
+					slog.Warn("streaming: incomplete response notice failed", "error", err)
+				}
+				if syncErr != nil {
+					return fmt.Errorf("%w: final sync: %v", ErrIncompleteStream, syncErr)
+				}
+				return ErrIncompleteStream
 			}
 
 			timeoutTimer.Reset(noEventTimeout)
@@ -72,7 +87,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				return s.finalSync(&refs, &lastChunks, buf.String())
 			case "error":
 				s.reply.Send("⚠️ Agent error: " + ev.Delta)
-				return nil
+				return fmt.Errorf("%w: %s", ErrStreamFailed, ev.Delta)
 			case "permission_asked":
 				if ev.Permission != nil {
 					s.sendPermissionPrompt(ev.Permission)
