@@ -27,7 +27,7 @@ func (h testPermissionPromptHandler) Prompt(_ context.Context, request Permissio
 
 func TestParsePermissionAskedEvent(t *testing.T) {
 	payload := `{"properties":{"id":"per-123","sessionID":"sess-1","permission":"external_directory","tool":"bash"}}`
-	ev := parseSSEEvent("permission.asked", payload)
+	ev, _ := parseSSEEvent("permission.asked", payload)
 
 	if ev.Type != "permission_asked" {
 		t.Fatalf("expected permission_asked, got %q", ev.Type)
@@ -47,7 +47,7 @@ func TestParsePermissionAskedEvent(t *testing.T) {
 }
 
 func TestParsePermissionAskedInvalidJSON(t *testing.T) {
-	ev := parseSSEEvent("permission.asked", "not json")
+	ev, _ := parseSSEEvent("permission.asked", "not json")
 	if ev.Type != "delta" {
 		t.Fatalf("expected fallback to delta for invalid JSON, got %q", ev.Type)
 	}
