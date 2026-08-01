@@ -76,5 +76,5 @@ func addOpenCodeBinToPath() {
 			return
 		}
 	}
-	os.Setenv("PATH", dir+string(os.PathListSeparator)+path)
+	_ = os.Setenv("PATH", dir+string(os.PathListSeparator)+path)
 }
