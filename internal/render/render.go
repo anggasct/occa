@@ -2,10 +2,14 @@ package render
 
 import (
 	"bytes"
+	"strconv"
 	"strings"
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
+	east "github.com/yuin/goldmark/extension/ast"
+
+	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/text"
 )
 
@@ -32,7 +36,9 @@ type GoldmarkRenderer struct {
 
 func New() *GoldmarkRenderer {
 	return &GoldmarkRenderer{
-		md: goldmark.New(),
+		md: goldmark.New(
+			goldmark.WithExtensions(extension.Table, extension.Strikethrough, extension.TaskList),
+		),
 	}
 }
 
@@ -118,6 +124,14 @@ func Split(s string, limit int) []string {
 
 func findSafeBreak(s string, limit int) (int, bool) {
 	end := maxPrefix(s, limit)
+	// A cut can land mid-formation of a tag itself (e.g. after "<a" but
+	// before "href=...">", or after "<pr" but before "e>") — distinct from
+	// landing inside an open-but-unclosed span, which htmlBalanced already
+	// rejects below. Retreat before the dangling tag so no chunk boundary
+	// ever splits a tag's own literal bytes.
+	if idx, ok := danglingTagStart(s[:end]); ok && idx > 0 {
+		end = idx
+	}
 	window := s[:end]
 
 	// Each chunk is parsed by the platform independently, so a boundary that
@@ -132,33 +146,75 @@ func findSafeBreak(s string, limit int) (int, bool) {
 	return end, true
 }
 
-// openTagStack returns the tags currently open in s, innermost last.
-func openTagStack(s string) []string {
-	var stack []string
+// danglingTagStart reports the byte index where s ends mid-way through
+// forming a recognized tag — s ran out before the tag could be confirmed as
+// open, closed, or ruled out as a tag entirely.
+func danglingTagStart(s string) (int, bool) {
 	for i := 0; i < len(s); {
-		matched := false
-		for _, t := range openTagTokens {
-			if strings.HasPrefix(s[i:], t) {
-				stack = append(stack, tagName(t))
-				i += len(t)
-				matched = true
-				break
-			}
-		}
-		if matched {
+		if _, n, ok := matchOpenTag(s[i:]); ok {
+			i += n
 			continue
 		}
-		for _, t := range closeTagTokens {
-			if strings.HasPrefix(s[i:], t) {
-				if len(stack) > 0 {
-					stack = stack[:len(stack)-1]
-				}
-				i += len(t)
-				matched = true
-				break
-			}
+		if n, ok := matchCloseTag(s[i:]); ok {
+			i += n
+			continue
 		}
-		if matched {
+		if s[i] == '<' && looksLikeTagStart(s[i:]) {
+			return i, true
+		}
+		i++
+	}
+	return 0, false
+}
+
+// looksLikeTagStart reports whether s could still become a longer recognized
+// tag if more bytes followed — e.g. "<pr" (a prefix of "<pre>") or
+// `<a href="https` (aOpenPrefix matched but no closing quote yet).
+func looksLikeTagStart(s string) bool {
+	for _, t := range openTagTokens {
+		if len(s) < len(t) && strings.HasPrefix(t, s) {
+			return true
+		}
+	}
+	for _, t := range closeTagTokens {
+		if len(s) < len(t) && strings.HasPrefix(t, s) {
+			return true
+		}
+	}
+	if len(s) < len("</a>") && strings.HasPrefix("</a>", s) {
+		return true
+	}
+	if strings.HasPrefix(s, aOpenPrefix) {
+		rest := s[len(aOpenPrefix):]
+		idx := strings.IndexByte(rest, '"')
+		return idx < 0 || idx+1 >= len(rest)
+	}
+	return len(s) < len(aOpenPrefix) && strings.HasPrefix(aOpenPrefix, s)
+}
+
+// openTag is a tag currently open in a chunk: name pairs it with its closing
+// tag, text is the exact bytes needed to reopen it verbatim (this matters for
+// <a href="...">, whose text varies per link — reopening with a bare "<a>"
+// would drop the destination and produce an invalid tag).
+type openTag struct {
+	name string
+	text string
+}
+
+// openTagStack returns the tags currently open in s, innermost last.
+func openTagStack(s string) []openTag {
+	var stack []openTag
+	for i := 0; i < len(s); {
+		if tag, n, ok := matchOpenTag(s[i:]); ok {
+			stack = append(stack, tag)
+			i += n
+			continue
+		}
+		if n, ok := matchCloseTag(s[i:]); ok {
+			if len(stack) > 0 {
+				stack = stack[:len(stack)-1]
+			}
+			i += n
 			continue
 		}
 		i++
@@ -166,18 +222,18 @@ func openTagStack(s string) []string {
 	return stack
 }
 
-func closeTags(stack []string) string {
+func closeTags(stack []openTag) string {
 	var out string
 	for i := len(stack) - 1; i >= 0; i-- {
-		out += "</" + stack[i] + ">"
+		out += "</" + stack[i].name + ">"
 	}
 	return out
 }
 
-func openTags(stack []string) string {
+func openTags(stack []openTag) string {
 	var out string
-	for _, name := range stack {
-		out += "<" + name + ">"
+	for _, t := range stack {
+		out += t.text
 	}
 	return out
 }
@@ -207,29 +263,23 @@ func candidateBreaks(window string) []int {
 // tag appears without its opener. Plain text with no tags is trivially
 // balanced.
 func htmlBalanced(s string) bool {
+	// A candidate break can land inside a tag's own bytes (e.g. the space
+	// between "a" and "href" in "<a href=..."), which a plain opens/closes
+	// count would miss entirely — the fragment matches no known tag, open or
+	// closed, and would otherwise be reported vacuously balanced.
+	if _, ok := danglingTagStart(s); ok {
+		return false
+	}
 	opens, closes := 0, 0
 	for i := 0; i < len(s); {
-		matched := false
-		for _, t := range openTagTokens {
-			if strings.HasPrefix(s[i:], t) {
-				opens++
-				i += len(t)
-				matched = true
-				break
-			}
-		}
-		if matched {
+		if _, n, ok := matchOpenTag(s[i:]); ok {
+			opens++
+			i += n
 			continue
 		}
-		for _, t := range closeTagTokens {
-			if strings.HasPrefix(s[i:], t) {
-				closes++
-				i += len(t)
-				matched = true
-				break
-			}
-		}
-		if matched {
+		if n, ok := matchCloseTag(s[i:]); ok {
+			closes++
+			i += n
 			continue
 		}
 		i++
@@ -238,9 +288,45 @@ func htmlBalanced(s string) bool {
 }
 
 var (
-	openTagTokens  = []string{"<b>", "<i>", "<code>", "<pre>"}
-	closeTagTokens = []string{"</b>", "</i>", "</code>", "</pre>"}
+	openTagTokens  = []string{"<b>", "<i>", "<code>", "<pre>", "<blockquote>", "<s>"}
+	closeTagTokens = []string{"</b>", "</i>", "</code>", "</pre>", "</blockquote>", "</s>"}
 )
+
+const aOpenPrefix = `<a href="`
+
+// matchOpenTag reports whether s begins with a recognized opening tag.
+// <a href="..."> has a variable attribute value, but this codebase always
+// escapes it through escapeHTMLAttr first, which guarantees no literal '"'
+// appears before the closing quote — so the first '"' after the prefix
+// reliably ends the attribute, making the match deterministic.
+func matchOpenTag(s string) (tag openTag, length int, ok bool) {
+	for _, t := range openTagTokens {
+		if strings.HasPrefix(s, t) {
+			return openTag{name: tagName(t), text: t}, len(t), true
+		}
+	}
+	if strings.HasPrefix(s, aOpenPrefix) {
+		if end := strings.IndexByte(s[len(aOpenPrefix):], '"'); end >= 0 {
+			tagEnd := len(aOpenPrefix) + end + 1
+			if tagEnd < len(s) && s[tagEnd] == '>' {
+				return openTag{name: "a", text: s[:tagEnd+1]}, tagEnd + 1, true
+			}
+		}
+	}
+	return openTag{}, 0, false
+}
+
+func matchCloseTag(s string) (length int, ok bool) {
+	for _, t := range closeTagTokens {
+		if strings.HasPrefix(s, t) {
+			return len(t), true
+		}
+	}
+	if strings.HasPrefix(s, "</a>") {
+		return len("</a>"), true
+	}
+	return 0, false
+}
 
 // maxPrefix returns the largest rune-aligned byte index whose prefix measures
 // at most limit. It always advances by at least one rune so Split terminates
@@ -275,8 +361,23 @@ func utf16Len(r rune) int {
 	return 1
 }
 
+// listCtx tracks one open list's numbering: ordered lists render real
+// sequential numbers starting at Start, unordered lists render a bullet.
+type listCtx struct {
+	ordered bool
+	next    int
+}
+
+const telegramThematicBreak = "──────────\n\n"
+const discordThematicBreak = "---\n\n"
+
 func renderTelegramHTML(doc ast.Node, source []byte) string {
-	var buf bytes.Buffer
+	root := &bytes.Buffer{}
+	buf := root
+	var bufStack []*bytes.Buffer
+	var listStack []*listCtx
+	tableFirstCell := false
+
 	ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
 		switch node := n.(type) {
 		case *ast.CodeBlock:
@@ -319,6 +420,43 @@ func renderTelegramHTML(doc ast.Node, source []byte) string {
 					buf.WriteString("</i>")
 				}
 			}
+		case *east.Strikethrough:
+			if entering {
+				buf.WriteString("<s>")
+			} else {
+				buf.WriteString("</s>")
+			}
+		case *ast.Link:
+			if entering {
+				buf.WriteString(`<a href="`)
+				buf.Write(escapeHTMLAttr(node.Destination))
+				buf.WriteString(`">`)
+			} else {
+				buf.WriteString("</a>")
+			}
+		case *ast.AutoLink:
+			if entering {
+				url := node.URL(source)
+				buf.WriteString(`<a href="`)
+				buf.Write(escapeHTMLAttr(url))
+				buf.WriteString(`">`)
+				buf.Write(escapeHTML(url))
+				buf.WriteString("</a>")
+			}
+		case *ast.Blockquote:
+			if entering {
+				bufStack = append(bufStack, buf)
+				buf = &bytes.Buffer{}
+			} else {
+				inner := strings.TrimRight(buf.String(), "\n")
+				buf = bufStack[len(bufStack)-1]
+				bufStack = bufStack[:len(bufStack)-1]
+				buf.WriteString("<blockquote>" + inner + "</blockquote>\n\n")
+			}
+		case *ast.ThematicBreak:
+			if entering {
+				buf.WriteString(telegramThematicBreak)
+			}
 		case *ast.Text:
 			if entering {
 				buf.Write(escapeHTML(node.Value(source)))
@@ -351,6 +489,10 @@ func renderTelegramHTML(doc ast.Node, source []byte) string {
 			if !entering {
 				buf.WriteString("\n\n")
 			}
+		case *ast.TextBlock:
+			if !entering {
+				buf.WriteByte('\n')
+			}
 		case *ast.Heading:
 			if entering {
 				buf.WriteString("<b>")
@@ -358,23 +500,75 @@ func renderTelegramHTML(doc ast.Node, source []byte) string {
 				buf.WriteString("</b>\n\n")
 			}
 		case *ast.List:
-			if !entering {
-				buf.WriteByte('\n')
+			if entering {
+				listStack = append(listStack, &listCtx{ordered: node.IsOrdered(), next: node.Start})
+			} else {
+				listStack = listStack[:len(listStack)-1]
+				if len(listStack) == 0 {
+					buf.WriteByte('\n')
+				}
 			}
 		case *ast.ListItem:
 			if entering {
-				buf.WriteString("• ")
+				depth := len(listStack)
+				ctx := listStack[depth-1]
+				buf.WriteString(strings.Repeat("  ", depth-1))
+				if ctx.ordered {
+					buf.WriteString(strconv.Itoa(ctx.next) + ". ")
+					ctx.next++
+				} else {
+					buf.WriteString("• ")
+				}
+			}
+		case *east.TaskCheckBox:
+			if entering {
+				if node.IsChecked {
+					buf.WriteString("☑ ")
+				} else {
+					buf.WriteString("☐ ")
+				}
+			}
+		case *east.Table:
+			if entering {
+				buf.WriteString("<pre><code>")
 			} else {
-				buf.WriteByte('\n')
+				buf.WriteString("</code></pre>\n")
+			}
+		case *east.TableHeader:
+			if entering {
+				buf.WriteString("| ")
+				tableFirstCell = true
+			} else {
+				buf.WriteString(" |\n")
+				buf.WriteString("|" + strings.Repeat(" --- |", node.ChildCount()) + "\n")
+			}
+		case *east.TableRow:
+			if entering {
+				buf.WriteString("| ")
+				tableFirstCell = true
+			} else {
+				buf.WriteString(" |\n")
+			}
+		case *east.TableCell:
+			if entering {
+				if !tableFirstCell {
+					buf.WriteString(" | ")
+				}
+				tableFirstCell = false
 			}
 		}
 		return ast.WalkContinue, nil
 	})
-	return strings.TrimRight(buf.String(), "\n")
+	return strings.TrimRight(root.String(), "\n")
 }
 
 func renderDiscord(doc ast.Node, source []byte) string {
-	var buf bytes.Buffer
+	root := &bytes.Buffer{}
+	buf := root
+	var bufStack []*bytes.Buffer
+	var listStack []*listCtx
+	tableFirstCell := false
+
 	ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
 		switch node := n.(type) {
 		case *ast.FencedCodeBlock:
@@ -418,6 +612,34 @@ func renderDiscord(doc ast.Node, source []byte) string {
 					buf.WriteByte('*')
 				}
 			}
+		case *east.Strikethrough:
+			buf.WriteString("~~")
+		case *ast.Link:
+			if entering {
+				buf.WriteByte('[')
+			} else {
+				buf.WriteString("](")
+				buf.Write(node.Destination)
+				buf.WriteByte(')')
+			}
+		case *ast.AutoLink:
+			if entering {
+				buf.Write(node.URL(source))
+			}
+		case *ast.Blockquote:
+			if entering {
+				bufStack = append(bufStack, buf)
+				buf = &bytes.Buffer{}
+			} else {
+				inner := strings.TrimRight(buf.String(), "\n")
+				buf = bufStack[len(bufStack)-1]
+				bufStack = bufStack[:len(bufStack)-1]
+				buf.WriteString(quoteLines(inner) + "\n\n")
+			}
+		case *ast.ThematicBreak:
+			if entering {
+				buf.WriteString(discordThematicBreak)
+			}
 		case *ast.Text:
 			if entering {
 				buf.Write(node.Value(source))
@@ -447,6 +669,10 @@ func renderDiscord(doc ast.Node, source []byte) string {
 			if !entering {
 				buf.WriteString("\n\n")
 			}
+		case *ast.TextBlock:
+			if !entering {
+				buf.WriteByte('\n')
+			}
 		case *ast.Heading:
 			if entering {
 				buf.WriteString("**")
@@ -454,19 +680,71 @@ func renderDiscord(doc ast.Node, source []byte) string {
 				buf.WriteString("**\n\n")
 			}
 		case *ast.List:
-			if !entering {
-				buf.WriteByte('\n')
+			if entering {
+				listStack = append(listStack, &listCtx{ordered: node.IsOrdered(), next: node.Start})
+			} else {
+				listStack = listStack[:len(listStack)-1]
+				if len(listStack) == 0 {
+					buf.WriteByte('\n')
+				}
 			}
 		case *ast.ListItem:
 			if entering {
-				buf.WriteString("• ")
+				depth := len(listStack)
+				ctx := listStack[depth-1]
+				buf.WriteString(strings.Repeat("  ", depth-1))
+				if ctx.ordered {
+					buf.WriteString(strconv.Itoa(ctx.next) + ". ")
+					ctx.next++
+				} else {
+					buf.WriteString("• ")
+				}
+			}
+		case *east.TaskCheckBox:
+			if entering {
+				if node.IsChecked {
+					buf.WriteString("☑ ")
+				} else {
+					buf.WriteString("☐ ")
+				}
+			}
+		case *east.Table:
+			buf.WriteString("```\n")
+		case *east.TableHeader:
+			if entering {
+				buf.WriteString("| ")
+				tableFirstCell = true
 			} else {
-				buf.WriteByte('\n')
+				buf.WriteString(" |\n")
+				buf.WriteString("|" + strings.Repeat(" --- |", node.ChildCount()) + "\n")
+			}
+		case *east.TableRow:
+			if entering {
+				buf.WriteString("| ")
+				tableFirstCell = true
+			} else {
+				buf.WriteString(" |\n")
+			}
+		case *east.TableCell:
+			if entering {
+				if !tableFirstCell {
+					buf.WriteString(" | ")
+				}
+				tableFirstCell = false
 			}
 		}
 		return ast.WalkContinue, nil
 	})
-	return strings.TrimRight(buf.String(), "\n")
+	return strings.TrimRight(root.String(), "\n")
+}
+
+// quoteLines prefixes every line of s with Discord's blockquote marker.
+func quoteLines(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = "> " + line
+	}
+	return strings.Join(lines, "\n")
 }
 
 func escapeHTML(b []byte) []byte {
@@ -475,6 +753,13 @@ func escapeHTML(b []byte) []byte {
 	s = strings.ReplaceAll(s, "<", "&lt;")
 	s = strings.ReplaceAll(s, ">", "&gt;")
 	return []byte(s)
+}
+
+// escapeHTMLAttr escapes b for use inside a double-quoted HTML attribute
+// value, on top of escapeHTML's escaping — without it, a destination
+// containing a literal '"' could break out of the href attribute.
+func escapeHTMLAttr(b []byte) []byte {
+	return []byte(strings.ReplaceAll(string(escapeHTML(b)), `"`, "&quot;"))
 }
 
 var _ Renderer = (*GoldmarkRenderer)(nil)

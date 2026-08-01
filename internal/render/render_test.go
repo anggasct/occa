@@ -315,3 +315,264 @@ func TestSplitPrefersBalancedBoundaryInsideBoldSpan(t *testing.T) {
 		}
 	}
 }
+
+func TestStrikethrough(t *testing.T) {
+	r := New()
+	md := "This is ~~deleted~~ text."
+
+	tg, err := r.Render(md, Telegram)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if !strings.Contains(tg[0], "<s>deleted</s>") {
+		t.Fatalf("expected <s>deleted</s>, got: %q", tg[0])
+	}
+
+	dc, err := r.Render(md, Discord)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if !strings.Contains(dc[0], "~~deleted~~") {
+		t.Fatalf("expected ~~deleted~~, got: %q", dc[0])
+	}
+}
+
+func TestTable(t *testing.T) {
+	r := New()
+	md := "| A | B |\n|---|---|\n| 1 | 2 |\n"
+
+	tg, err := r.Render(md, Telegram)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	want := "<pre><code>| A | B |\n| --- | --- |\n| 1 | 2 |\n</code></pre>"
+	if tg[0] != want {
+		t.Fatalf("telegram table mismatch:\n got:  %q\n want: %q", tg[0], want)
+	}
+
+	dc, err := r.Render(md, Discord)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	wantDC := "```\n| A | B |\n| --- | --- |\n| 1 | 2 |\n```"
+	if dc[0] != wantDC {
+		t.Fatalf("discord table mismatch:\n got:  %q\n want: %q", dc[0], wantDC)
+	}
+}
+
+func TestTaskList(t *testing.T) {
+	r := New()
+	md := "- [ ] todo\n- [x] done\n"
+
+	tg, err := r.Render(md, Telegram)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	want := "• ☐ todo\n• ☑ done"
+	if tg[0] != want {
+		t.Fatalf("telegram tasklist mismatch:\n got:  %q\n want: %q", tg[0], want)
+	}
+
+	dc, err := r.Render(md, Discord)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if dc[0] != want {
+		t.Fatalf("discord tasklist mismatch:\n got:  %q\n want: %q", dc[0], want)
+	}
+}
+
+func TestLink(t *testing.T) {
+	r := New()
+	md := "[docs](https://example.com)"
+
+	tg, err := r.Render(md, Telegram)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	want := `<a href="https://example.com">docs</a>`
+	if tg[0] != want {
+		t.Fatalf("telegram link mismatch:\n got:  %q\n want: %q", tg[0], want)
+	}
+
+	dc, err := r.Render(md, Discord)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	wantDC := "[docs](https://example.com)"
+	if dc[0] != wantDC {
+		t.Fatalf("discord link mismatch:\n got:  %q\n want: %q", dc[0], wantDC)
+	}
+}
+
+func TestLinkDestinationWithQuoteIsAttributeEscaped(t *testing.T) {
+	r := New()
+	md := `[docs](https://example.com/"x)`
+
+	tg, err := r.Render(md, Telegram)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	want := `<a href="https://example.com/&quot;x">docs</a>`
+	if tg[0] != want {
+		t.Fatalf("expected attribute-escaped quote:\n got:  %q\n want: %q", tg[0], want)
+	}
+	if strings.Contains(tg[0], `x">docs</a>"`) {
+		t.Fatalf("destination broke out of the href attribute: %q", tg[0])
+	}
+}
+
+func TestAutoLink(t *testing.T) {
+	r := New()
+	md := "<https://example.com>"
+
+	tg, err := r.Render(md, Telegram)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	want := `<a href="https://example.com">https://example.com</a>`
+	if tg[0] != want {
+		t.Fatalf("telegram autolink mismatch:\n got:  %q\n want: %q", tg[0], want)
+	}
+
+	dc, err := r.Render(md, Discord)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if dc[0] != "https://example.com" {
+		t.Fatalf("discord autolink mismatch:\n got:  %q\n want: %q", dc[0], "https://example.com")
+	}
+}
+
+func TestBlockquote(t *testing.T) {
+	r := New()
+	md := "> quoted\n> two lines\n\nAfter."
+
+	tg, err := r.Render(md, Telegram)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	want := "<blockquote>quoted\ntwo lines</blockquote>\n\nAfter."
+	if tg[0] != want {
+		t.Fatalf("telegram blockquote mismatch:\n got:  %q\n want: %q", tg[0], want)
+	}
+
+	dc, err := r.Render(md, Discord)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	wantDC := "> quoted\n> two lines\n\nAfter."
+	if dc[0] != wantDC {
+		t.Fatalf("discord blockquote mismatch:\n got:  %q\n want: %q", dc[0], wantDC)
+	}
+}
+
+func TestThematicBreak(t *testing.T) {
+	r := New()
+	md := "Before\n\n---\n\nAfter"
+
+	tg, err := r.Render(md, Telegram)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if tg[0] == "Before\n\nAfter" {
+		t.Fatalf("thematic break vanished: %q", tg[0])
+	}
+	want := "Before\n\n──────────\n\nAfter"
+	if tg[0] != want {
+		t.Fatalf("telegram thematic break mismatch:\n got:  %q\n want: %q", tg[0], want)
+	}
+
+	dc, err := r.Render(md, Discord)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	wantDC := "Before\n\n---\n\nAfter"
+	if dc[0] != wantDC {
+		t.Fatalf("discord thematic break mismatch:\n got:  %q\n want: %q", dc[0], wantDC)
+	}
+}
+
+func TestOrderedList(t *testing.T) {
+	r := New()
+	md := "1. first\n2. second"
+
+	tg, err := r.Render(md, Telegram)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	want := "1. first\n2. second"
+	if tg[0] != want {
+		t.Fatalf("expected sequential numbering, got: %q", tg[0])
+	}
+}
+
+func TestNestedListDoesNotConcatenate(t *testing.T) {
+	r := New()
+	md := "- a\n  - b\n  - c\n- d\n"
+
+	tg, err := r.Render(md, Telegram)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	want := "• a\n  • b\n  • c\n• d"
+	if tg[0] != want {
+		t.Fatalf("nested list mismatch:\n got:  %q\n want: %q", tg[0], want)
+	}
+
+	dc, err := r.Render(md, Discord)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if dc[0] != want {
+		t.Fatalf("discord nested list mismatch:\n got:  %q\n want: %q", dc[0], want)
+	}
+}
+
+func TestOrderedNestedList(t *testing.T) {
+	r := New()
+	md := "1. first\n2. second\n   1. nested\n"
+
+	tg, err := r.Render(md, Telegram)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	want := "1. first\n2. second\n  1. nested"
+	if tg[0] != want {
+		t.Fatalf("ordered nested list mismatch:\n got:  %q\n want: %q", tg[0], want)
+	}
+}
+
+func TestSplitKeepsLinkTagBalanced(t *testing.T) {
+	label := strings.Repeat("word ", 2000)
+	md := "[" + label + "](https://example.com/very/long/destination)"
+
+	chunks, err := New().RenderWithLimit(md, Telegram, 4096)
+	if err != nil {
+		t.Fatalf("RenderWithLimit: %v", err)
+	}
+	if len(chunks) < 2 {
+		t.Fatalf("expected a multi-chunk split, got %d", len(chunks))
+	}
+	for i, chunk := range chunks {
+		if !htmlBalanced(chunk) {
+			t.Fatalf("chunk %d is not tag-balanced: %q", i, chunk[:min(80, len(chunk))])
+		}
+		if measure(chunk) > 4096 {
+			t.Fatalf("chunk %d exceeds the limit: %d units", i, measure(chunk))
+		}
+		if !strings.HasPrefix(chunk, `<a href="https://example.com/very/long/destination">`) {
+			t.Fatalf("chunk %d does not reopen the full link tag: %q", i, chunk[:min(80, len(chunk))])
+		}
+		if !strings.HasSuffix(chunk, "</a>") {
+			t.Fatalf("chunk %d does not close the link tag: %q", i, chunk[max(0, len(chunk)-20):])
+		}
+	}
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
