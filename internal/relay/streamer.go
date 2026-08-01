@@ -17,6 +17,7 @@ const noEventTimeout = 10 * time.Minute
 var (
 	ErrIncompleteStream = errors.New("response stream ended before completion")
 	ErrStreamFailed     = errors.New("response stream failed")
+	ErrStreamRead       = errors.New("response stream read failed")
 )
 
 const incompleteStreamMessage = "⚠️ Response stream ended before completion. The task may still be running; check /occa:status."

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -66,6 +67,7 @@ func (p Providers) HasModel(ref ModelRef) bool {
 type Event struct {
 	Type       string
 	Delta      string
+	Err        error
 	Permission *PermissionRequest
 }
 
@@ -259,7 +261,10 @@ func (c *HTTPClient) Events(ctx context.Context, sessionID string) (<-chan Event
 	go func() {
 		defer close(ch)
 		defer resp.Body.Close()
-		readSSE(ctx, resp.Body, ch)
+		err := readSSE(ctx, resp.Body, ch)
+		if err != nil && ctx.Err() == nil {
+			slog.Warn("relay: event stream read failed", "session_id", sessionID, "error", err)
+		}
 	}()
 	return ch, nil
 }
