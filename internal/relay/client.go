@@ -345,6 +345,11 @@ func buildMessagePayload(text string, model *ModelRef, attachments []Attachment)
 		payload["model"] = model
 	}
 
+	if len(attachments) == 0 {
+		payload["content"] = text
+		return payload
+	}
+
 	var parts []any
 	if text != "" {
 		parts = append(parts, textPart{Type: "text", Text: text})
