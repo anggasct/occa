@@ -161,6 +161,22 @@ if [ "$(count_calls "releases/latest/download/occa_linux_amd64")" -ne 1 ]; then
 fi
 pass "default download path is latest"
 
+# Token: OCCA_GH_TOKEN is sent as an Authorization header on the binary
+# download; without it no header is sent.
+: > "$calls"
+run_install "Linux" "x86_64" env OCCA_INSTALL_DIR="$inst" OCCA_GH_TOKEN="tok-123" sh ./install.sh
+if [ "$(count_calls "Authorization: Bearer tok-123")" -ne 1 ]; then
+	fail "token: Authorization header not sent on the binary download"
+fi
+pass "token: Authorization header sent when OCCA_GH_TOKEN set"
+
+: > "$calls"
+run_install "Linux" "x86_64" env OCCA_INSTALL_DIR="$inst" sh ./install.sh
+if grep -q "Authorization" "$calls"; then
+	fail "token: Authorization header sent without OCCA_GH_TOKEN"
+fi
+pass "token: no Authorization header by default"
+
 #: unsupported platform fails with nothing installed.
 inst_bad="$work/inst-bad"
 mkdir -p "$inst_bad"

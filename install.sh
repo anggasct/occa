@@ -45,7 +45,11 @@ url="${RELEASE_BASE}/${asset}"
 tmp="${install_dir}/.occa-download-$$"
 trap 'rm -f "$tmp"' EXIT
 
-curl -fsSL "$url" -o "$tmp"
+if [ -n "${OCCA_GH_TOKEN:-}" ]; then
+	curl -fsSL -H "Authorization: Bearer ${OCCA_GH_TOKEN}" "$url" -o "$tmp"
+else
+	curl -fsSL "$url" -o "$tmp"
+fi
 chmod +x "$tmp"
 mv -f "$tmp" "$install_dir/occa"
 
