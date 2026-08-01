@@ -60,7 +60,6 @@ func (r *GoldmarkRenderer) RenderWithLimit(markdown string, p Platform, limit in
 	return Split(output, limit), nil
 }
 
-// PlatformFor maps a platform name to its renderer.
 func PlatformFor(name string) Platform {
 	if name == "discord" {
 		return Discord
