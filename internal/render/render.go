@@ -51,46 +51,100 @@ func (r *GoldmarkRenderer) RenderWithLimit(markdown string, p Platform, limit in
 
 	var output string
 	switch p {
-	case Telegram:
-		output = renderTelegramHTML(doc, source)
 	case Discord:
 		output = renderDiscord(doc, source)
+	default:
+		output = renderTelegramHTML(doc, source)
 	}
 
-	return splitRendered(output, limit), nil
+	return Split(output, limit), nil
 }
 
-func splitRendered(text string, maxLen int) []string {
-	if len(text) <= maxLen {
-		return []string{text}
+// PlatformFor maps a platform name to its renderer.
+func PlatformFor(name string) Platform {
+	if name == "discord" {
+		return Discord
+	}
+	return Telegram
+}
+
+// Split cuts s into chunks that each measure at most limit, preferring a
+// code-block, paragraph, line, then word boundary. Chunks never split a rune:
+// both platforms reject invalid UTF-8, and text without ASCII whitespace
+// (CJK, Thai, base64) otherwise gets cut mid-character.
+//
+// Length is measured in UTF-16 code units, the unit Telegram counts against
+// its limit; Discord counts code points, for which this is a safe upper bound.
+func Split(s string, limit int) []string {
+	if limit <= 0 || measure(s) <= limit {
+		return []string{s}
 	}
 
 	var chunks []string
-	remaining := text
+	remaining := s
 	for len(remaining) > 0 {
-		if len(remaining) <= maxLen {
+		if measure(remaining) <= limit {
 			chunks = append(chunks, remaining)
 			break
 		}
 
-		breakAt := findSafeBreak(remaining, maxLen)
+		breakAt := findSafeBreak(remaining, limit)
 		chunks = append(chunks, remaining[:breakAt])
 		remaining = strings.TrimLeft(remaining[breakAt:], "\n")
 	}
 	return chunks
 }
 
-func findSafeBreak(s string, maxLen int) int {
-	if idx := strings.LastIndex(s[:maxLen], "</pre>"); idx > 0 {
+func findSafeBreak(s string, limit int) int {
+	end := maxPrefix(s, limit)
+	window := s[:end]
+
+	if idx := strings.LastIndex(window, "</pre>"); idx > 0 {
 		return idx + len("</pre>")
 	}
-	if idx := strings.LastIndex(s[:maxLen], "\n\n"); idx > 0 {
+	if idx := strings.LastIndex(window, "\n\n"); idx > 0 {
 		return idx
 	}
-	if idx := strings.LastIndex(s[:maxLen], "\n"); idx > 0 {
+	if idx := strings.LastIndex(window, "\n"); idx > 0 {
 		return idx
 	}
-	return maxLen
+	if idx := strings.LastIndex(window, " "); idx > 0 {
+		return idx
+	}
+	return end
+}
+
+// maxPrefix returns the largest rune-aligned byte index whose prefix measures
+// at most limit. It always advances by at least one rune so Split terminates
+// even when a single rune exceeds the limit.
+func maxPrefix(s string, limit int) int {
+	units := 0
+	for i, r := range s {
+		n := utf16Len(r)
+		if units+n > limit {
+			if i == 0 {
+				return len(string(r))
+			}
+			return i
+		}
+		units += n
+	}
+	return len(s)
+}
+
+func measure(s string) int {
+	n := 0
+	for _, r := range s {
+		n += utf16Len(r)
+	}
+	return n
+}
+
+func utf16Len(r rune) int {
+	if r > 0xFFFF {
+		return 2
+	}
+	return 1
 }
 
 func renderTelegramHTML(doc ast.Node, source []byte) string {
@@ -142,6 +196,27 @@ func renderTelegramHTML(doc ast.Node, source []byte) string {
 				buf.Write(escapeHTML(node.Value(source)))
 				if node.SoftLineBreak() {
 					buf.WriteByte('\n')
+				}
+			}
+		// Markup the author wrote literally is escaped, not passed through:
+		// the platform accepts only a small tag subset, and dropping these
+		// nodes would silently delete the user's text.
+		case *ast.RawHTML:
+			if entering {
+				for i := 0; i < node.Segments.Len(); i++ {
+					seg := node.Segments.At(i)
+					buf.Write(escapeHTML(seg.Value(source)))
+				}
+			}
+		case *ast.HTMLBlock:
+			if entering {
+				for i := 0; i < node.Lines().Len(); i++ {
+					line := node.Lines().At(i)
+					buf.Write(escapeHTML(line.Value(source)))
+				}
+				if node.HasClosure() {
+					closure := node.ClosureLine
+					buf.Write(escapeHTML(closure.Value(source)))
 				}
 			}
 		case *ast.Paragraph:
@@ -220,6 +295,24 @@ func renderDiscord(doc ast.Node, source []byte) string {
 				buf.Write(node.Value(source))
 				if node.SoftLineBreak() {
 					buf.WriteByte('\n')
+				}
+			}
+		case *ast.RawHTML:
+			if entering {
+				for i := 0; i < node.Segments.Len(); i++ {
+					seg := node.Segments.At(i)
+					buf.Write(seg.Value(source))
+				}
+			}
+		case *ast.HTMLBlock:
+			if entering {
+				for i := 0; i < node.Lines().Len(); i++ {
+					line := node.Lines().At(i)
+					buf.Write(line.Value(source))
+				}
+				if node.HasClosure() {
+					closure := node.ClosureLine
+					buf.Write(closure.Value(source))
 				}
 			}
 		case *ast.Paragraph:

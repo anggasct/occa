@@ -10,6 +10,7 @@ import (
 
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/relay"
+	"github.com/anggasct/occa/internal/render"
 	"github.com/anggasct/occa/internal/store"
 )
 
@@ -48,6 +49,7 @@ type Router struct {
 	tokenGen       TokenGenerator
 	responses      *responseCoordinator
 	permissions    *permissionBroker
+	renderer       render.Renderer
 }
 
 type ScheduleStore interface {
@@ -56,7 +58,7 @@ type ScheduleStore interface {
 }
 
 type TokenGenerator interface {
-	Generate(platform, channelID string) string
+	Generate(platform, channelID string) (string, error)
 }
 
 func (r *Router) SetScheduler(s ScheduleStore) {
@@ -77,6 +79,7 @@ func New(instances InstanceProvider, st store.Store, defaultWorkdir string, admi
 		startedAt:      time.Now(),
 		responses:      newResponseCoordinator(),
 		permissions:    newPermissionBroker(),
+		renderer:       render.New(),
 	}
 	r.registerDefaults()
 	return r
@@ -87,12 +90,12 @@ func (r *Router) Route(ctx context.Context, msg channel.IncomingMessage) error {
 	if err := r.authorize(ctx, msg); err != nil {
 		if errors.Is(err, ErrDenied) {
 			slog.Info("access denied", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID, "input_kind", inputKind, "outcome", "denied")
-			r.sendAccessReply(msg, accessDeniedMessage)
+			r.reply(msg, accessDeniedMessage)
 			return nil
 		}
 
 		slog.Error("access verification failed", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID, "input_kind", inputKind, "outcome", "error", "error", err)
-		r.sendAccessReply(msg, accessVerifyMessage)
+		r.reply(msg, accessVerifyMessage)
 		return nil
 	}
 
@@ -121,14 +124,33 @@ func routeInputKind(msg channel.IncomingMessage) string {
 	return "message"
 }
 
-func (r *Router) sendAccessReply(msg channel.IncomingMessage, text string) {
+// reply renders text for the destination platform before it reaches the
+// adapter. Every outbound string goes through here so that a workdir path, a
+// stored prompt, or an agent error containing markup characters is escaped
+// rather than silently rejected by the platform's parser.
+func (r *Router) reply(msg channel.IncomingMessage, text string) {
 	if msg.ReplyCtx == nil {
-		slog.Warn("access response has no reply context", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID)
+		slog.Warn("reply has no reply context", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID)
 		return
 	}
-	if _, err := msg.ReplyCtx.Send(text); err != nil {
-		slog.Warn("failed to send access response", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID, "error", err)
+	for _, chunk := range r.outbound(msg.Platform, text) {
+		if _, err := msg.ReplyCtx.Send(chunk); err != nil {
+			slog.Warn("failed to send reply", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID, "error", err)
+			return
+		}
 	}
+}
+
+func (r *Router) outbound(platform, text string) []string {
+	chunks, err := r.renderer.Render(text, render.PlatformFor(platform))
+	if err != nil || len(chunks) == 0 {
+		return []string{text}
+	}
+	return chunks
+}
+
+func (r *Router) inline(platform, text string) string {
+	return strings.Join(r.outbound(platform, text), "\n")
 }
 
 func (r *Router) listenModeAllows(ctx context.Context, msg channel.IncomingMessage) bool {
@@ -200,13 +222,12 @@ func (r *Router) handleCommand(ctx context.Context, msg channel.IncomingMessage)
 
 	cmd, ok := r.commands[name]
 	if !ok {
-		reply := r.helpText()
-		msg.ReplyCtx.Send(reply)
+		r.reply(msg, r.helpText())
 		return nil
 	}
 
 	if cmd.Admin && !r.isAdmin(ctx, msg) {
-		msg.ReplyCtx.Send("⚠️ Admin access required.")
+		r.reply(msg, "⚠️ Admin access required.")
 		return nil
 	}
 
@@ -220,10 +241,10 @@ func (r *Router) handleCommand(ctx context.Context, msg channel.IncomingMessage)
 		if replyErr != nil {
 			message = replyErr.message
 		}
-		msg.ReplyCtx.Send("⚠️ " + message)
+		r.reply(msg, "⚠️ "+message)
 		return nil
 	}
-	msg.ReplyCtx.Send(reply)
+	r.reply(msg, reply)
 	return nil
 }
 
@@ -236,14 +257,14 @@ func (r *Router) clientFor(ctx context.Context, msg channel.IncomingMessage) (Ag
 func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) error {
 	key := responseKey{platform: msg.Platform, channelID: msg.ChannelID}
 	if !r.responses.acquire(key) {
-		msg.ReplyCtx.Send(busyResponseMessage)
+		r.reply(msg, busyResponseMessage)
 		return nil
 	}
 
 	inst, err := r.clientFor(ctx, msg)
 	if err != nil {
 		r.responses.release(key)
-		msg.ReplyCtx.Send("⚠️ Agent unreachable")
+		r.reply(msg, "⚠️ Agent unreachable")
 		return nil
 	}
 
@@ -252,7 +273,7 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 	if err != nil {
 		inst.End()
 		r.responses.release(key)
-		msg.ReplyCtx.Send("⚠️ Agent unreachable")
+		r.reply(msg, "⚠️ Agent unreachable")
 		return nil
 	}
 
@@ -260,8 +281,12 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 	var model *relay.ModelRef
 	var attachments []relay.Attachment
 	if !strings.HasPrefix(text, "/") && r.tokenGen != nil {
-		token := r.tokenGen.Generate(msg.Platform, msg.ChannelID)
-		text = text + "\n\n—\nOCCA schedule token: " + token
+		token, err := r.tokenGen.Generate(msg.Platform, msg.ChannelID)
+		if err != nil {
+			slog.Error("failed to generate schedule token; message sent without it", "platform", msg.Platform, "channel_id", msg.ChannelID, "error", err)
+		} else {
+			text = text + "\n\n—\nOCCA schedule token: " + token
+		}
 	}
 
 	if !strings.HasPrefix(msg.Text, "/") {
@@ -270,7 +295,7 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 			inst.End()
 			r.responses.release(key)
 			slog.Error("failed to resolve message model; message not sent", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID, "error", err)
-			msg.ReplyCtx.Send("⚠️ Unable to resolve model configuration. Message not sent.")
+			r.reply(msg, "⚠️ Unable to resolve model configuration. Message not sent.")
 			return nil
 		}
 		attachments = make([]relay.Attachment, len(msg.Attachments))
@@ -286,7 +311,7 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 		cancel()
 		inst.End()
 		r.responses.release(key)
-		msg.ReplyCtx.Send("⚠️ Agent unreachable")
+		r.reply(msg, "⚠️ Agent unreachable")
 		return nil
 	}
 

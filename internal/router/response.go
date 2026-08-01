@@ -59,6 +59,7 @@ func (r *Router) runResponse(
 	owner := &permissionOwner{}
 	permissionHandler := &permissionPromptHandler{
 		broker:    r.permissions,
+		encode:    func(text string) string { return r.inline(msg.Platform, text) },
 		owner:     owner,
 		client:    inst.Client(),
 		platform:  key.platform,
@@ -82,7 +83,7 @@ func (r *Router) runResponse(
 		dispatchDone <- dispatch(ctx)
 	}()
 	go func() {
-		streamer := relay.NewStreamer(msg.ReplyCtx, render.New(), responsePlatform(msg.Platform))
+		streamer := relay.NewStreamer(msg.ReplyCtx, r.renderer, render.PlatformFor(msg.Platform))
 		streamer.SetPermissionPromptHandler(permissionHandler)
 		streamDone <- streamer.Run(ctx, events)
 	}()
@@ -119,19 +120,12 @@ func (r *Router) runResponse(
 	if dispatchErr != nil && !errors.Is(dispatchErr, context.Canceled) {
 		slog.Warn("response dispatch failed", "platform", key.platform, "channel_id", key.channelID, "error", dispatchErr)
 		if errors.Is(dispatchErr, relay.ErrAttachmentTooLarge) {
-			msg.ReplyCtx.Send("⚠️ " + dispatchErr.Error())
+			r.reply(msg, "⚠️ "+dispatchErr.Error())
 		} else {
-			msg.ReplyCtx.Send("⚠️ Agent unreachable")
+			r.reply(msg, "⚠️ Agent unreachable")
 		}
 	}
 	if streamErr != nil && !errors.Is(streamErr, context.Canceled) {
 		slog.Warn("response stream ended", "platform", key.platform, "channel_id", key.channelID, "error", streamErr)
 	}
-}
-
-func responsePlatform(platform string) render.Platform {
-	if platform == "discord" {
-		return render.Discord
-	}
-	return render.Telegram
 }

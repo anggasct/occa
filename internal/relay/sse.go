@@ -8,15 +8,24 @@ import (
 	"strings"
 )
 
-func readSSE(ctx context.Context, r io.Reader, ch chan<- Event) {
+// maxEventLineBytes bounds a single SSE line: 1 MB of data payload plus line
+// overhead. Agent output that embeds file content routinely exceeds bufio's
+// 64 KB default.
+const maxEventLineBytes = 1024*1024 + 64*1024
+
+// readSSE reads events until clean EOF, a read failure, or ctx cancellation.
+// A failure that is not a clean EOF is emitted as a terminal stream_error
+// event so callers can tell it apart from a clean close, and returned.
+func readSSE(ctx context.Context, r io.Reader, ch chan<- Event) error {
 	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 64*1024), maxEventLineBytes+1)
 	var eventType, data string
 	var hasFields bool
 
 	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		default:
 		}
 
@@ -28,7 +37,7 @@ func readSSE(ctx context.Context, r io.Reader, ch chan<- Event) {
 				select {
 				case ch <- event:
 				case <-ctx.Done():
-					return
+					return ctx.Err()
 				}
 				eventType = ""
 				data = ""
@@ -49,6 +58,18 @@ func readSSE(ctx context.Context, r io.Reader, ch chan<- Event) {
 			hasFields = true
 		}
 	}
+
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err := scanner.Err(); err != nil {
+		select {
+		case ch <- Event{Type: "stream_error", Err: err}:
+		case <-ctx.Done():
+		}
+		return err
+	}
+	return nil
 }
 
 func parseSSEEvent(eventType, data string) Event {

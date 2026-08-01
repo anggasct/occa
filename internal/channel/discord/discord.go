@@ -7,26 +7,41 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 
 	"github.com/anggasct/occa/internal/channel"
+	"github.com/anggasct/occa/internal/render"
 )
 
 const maxDownloadSize = 10 * 1024 * 1024
 
 type Adapter struct {
-	session       *discordgo.Session
-	token         string
-	botID         string
-	channelLookup func(string) (*discordgo.Channel, error)
+	session        *discordgo.Session
+	token          string
+	botID          atomic.Value
+	channelLookup  func(string) (*discordgo.Channel, error)
+	downloadClient *http.Client
 }
 
+const defaultDownloadTimeout = 60 * time.Second
+
 func New(token string) *Adapter {
-	return &Adapter{token: token}
+	return &Adapter{token: token, downloadClient: &http.Client{Timeout: defaultDownloadTimeout}}
 }
 
 func (a *Adapter) Name() string { return "discord" }
+
+func (a *Adapter) setBotID(id string) { a.botID.Store(id) }
+
+// selfID is empty until the gateway delivers READY. Callers must treat an
+// empty result as "not this bot" rather than as a match.
+func (a *Adapter) selfID() string {
+	id, _ := a.botID.Load().(string)
+	return id
+}
 
 func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessage)) error {
 	s, err := discordgo.New("Bot " + a.token)
@@ -34,16 +49,34 @@ func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessag
 		return fmt.Errorf("discord: init: %w", err)
 	}
 	a.session = s
-	a.botID = s.State.User.ID
+	a.configure(s, handler)
 
+	if err := s.Open(); err != nil {
+		return fmt.Errorf("discord: open gateway: %w", err)
+	}
+
+	slog.Info("discord adapter started")
+
+	go func() {
+		<-ctx.Done()
+		_ = s.Close()
+	}()
+
+	return nil
+}
+
+// configure registers intents and gateway handlers. It must not read session
+// state the gateway populates — State.User stays nil until READY arrives, so
+// reading it here would panic before the connection is even open.
+func (a *Adapter) configure(s *discordgo.Session, handler func(channel.IncomingMessage)) {
 	s.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsMessageContent | discordgo.IntentsDirectMessages
 
+	s.AddHandler(func(_ *discordgo.Session, r *discordgo.Ready) {
+		a.onReady(r)
+	})
+
 	s.AddHandler(func(_ *discordgo.Session, m *discordgo.MessageCreate) {
-		if m.Author.ID == a.botID || m.Author.Bot {
-			return
-		}
-		msg := a.normalizeMessage(m.Message)
-		handler(msg)
+		a.onMessage(m, handler)
 	})
 
 	s.AddHandler(func(sess *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -118,19 +151,25 @@ func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessag
 			handler(msg)
 		}
 	})
+}
 
-	if err := s.Open(); err != nil {
-		return fmt.Errorf("discord: open gateway: %w", err)
+func (a *Adapter) onReady(r *discordgo.Ready) {
+	if r == nil || r.User == nil {
+		slog.Warn("discord: ready event carried no bot identity")
+		return
 	}
+	a.setBotID(r.User.ID)
+	slog.Info("discord adapter connected", "bot_id", r.User.ID)
+}
 
-	slog.Info("discord adapter started")
-
-	go func() {
-		<-ctx.Done()
-		s.Close()
-	}()
-
-	return nil
+func (a *Adapter) onMessage(m *discordgo.MessageCreate, handler func(channel.IncomingMessage)) {
+	if m.Author.Bot {
+		return
+	}
+	if self := a.selfID(); self != "" && m.Author.ID == self {
+		return
+	}
+	handler(a.normalizeMessage(m.Message))
 }
 
 func (a *Adapter) Stop() error {
@@ -141,7 +180,7 @@ func (a *Adapter) Stop() error {
 }
 
 func (a *Adapter) Notify(channelID string, text string) error {
-	for _, chunk := range splitMessage(text, 2000) {
+	for _, chunk := range render.Split(text, 2000) {
 		if _, err := a.session.ChannelMessageSend(channelID, chunk); err != nil {
 			return fmt.Errorf("discord: notify: %w", err)
 		}
@@ -155,7 +194,7 @@ func (a *Adapter) normalizeMessage(m *discordgo.Message) channel.IncomingMessage
 		isMention = true
 	} else {
 		for _, mention := range m.Mentions {
-			if mention.ID == a.botID {
+			if self := a.selfID(); self != "" && mention.ID == self {
 				isMention = true
 				break
 			}
@@ -180,7 +219,12 @@ func (a *Adapter) normalizeMessage(m *discordgo.Message) channel.IncomingMessage
 func (a *Adapter) downloadAttachments(m *discordgo.Message) []channel.Attachment {
 	var attachments []channel.Attachment
 	for _, da := range m.Attachments {
-		resp, err := http.Get(da.URL)
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, da.URL, nil)
+		if err != nil {
+			slog.Warn("discord: download attachment failed", "filename", da.Filename, "error", err)
+			continue
+		}
+		resp, err := a.downloadClient.Do(req)
 		if err != nil {
 			slog.Warn("discord: download attachment failed", "filename", da.Filename, "error", err)
 			continue
@@ -270,7 +314,7 @@ func (rc *replyContext) Send(text string) (channel.MessageRef, error) {
 		return messageRef{id: msg.ID}, nil
 	}
 
-	chunks := splitMessage(text, 2000)
+	chunks := render.Split(text, 2000)
 	var lastRef channel.MessageRef
 
 	for _, chunk := range chunks {
@@ -326,39 +370,6 @@ func componentRows(buttons []channel.Button) []discordgo.MessageComponent {
 		})
 	}
 	return append(components, discordgo.ActionsRow{Components: btns})
-}
-
-func splitMessage(text string, maxLen int) []string {
-	if len(text) <= maxLen {
-		return []string{text}
-	}
-
-	var chunks []string
-	remaining := text
-	for len(remaining) > 0 {
-		if len(remaining) <= maxLen {
-			chunks = append(chunks, remaining)
-			break
-		}
-
-		breakAt := findBreakPoint(remaining, maxLen)
-		chunks = append(chunks, remaining[:breakAt])
-		remaining = strings.TrimLeft(remaining[breakAt:], "\n")
-	}
-	return chunks
-}
-
-func findBreakPoint(text string, maxLen int) int {
-	if idx := strings.LastIndex(text[:maxLen], "\n\n"); idx > 0 {
-		return idx
-	}
-	if idx := strings.LastIndex(text[:maxLen], "\n"); idx > 0 {
-		return idx
-	}
-	if idx := strings.LastIndex(text[:maxLen], " "); idx > 0 {
-		return idx
-	}
-	return maxLen
 }
 
 type messageRef struct {

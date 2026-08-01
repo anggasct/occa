@@ -2,6 +2,7 @@ package process
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sync"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/anggasct/occa/internal/config"
 )
+
+var errClosed = errors.New("process: manager closed")
 
 // entry is a pool slot: a ready instance or an in-progress spawn.
 type entry struct {
@@ -27,6 +30,7 @@ type Manager struct {
 	newInst instanceFactory
 	stop    chan struct{}
 	wg      sync.WaitGroup
+	spawnWG sync.WaitGroup
 	closed  atomic.Bool
 }
 
@@ -52,7 +56,7 @@ func NewManager(cfg config.AgentConfig, factory instanceFactory) (*Manager, erro
 
 // DefaultManager builds a Manager that spawns real `binary serve` subprocesses.
 func DefaultManager(cfg config.AgentConfig) (*Manager, error) {
-	factory := productionFactory(cfg.Binary, defaultReadinessTimeout)
+	factory := productionFactory(cfg.Binary, defaultReadinessTimeout, defaultStopGrace)
 	factory = wrapWithAutoInstall(factory, cfg.Binary, cfg.AutoInstall, func(ctx context.Context, _ string) error {
 		return installOpenCode(ctx)
 	})
@@ -77,7 +81,7 @@ func (m *Manager) Instance(ctx context.Context, workdir string) (*Instance, erro
 	workdir = NormalizeWorkdir(workdir)
 	for {
 		if m.closed.Load() {
-			return nil, fmt.Errorf("process: manager closed")
+			return nil, errClosed
 		}
 
 		m.mu.Lock()
@@ -121,7 +125,9 @@ func (m *Manager) Instance(ctx context.Context, workdir string) (*Instance, erro
 		m.mu.Unlock()
 
 		// Spawn outside the lock (readiness can take seconds).
+		m.spawnWG.Add(1)
 		inst, spawnErr := m.newInst(ctx, workdir, port)
+		defer m.spawnWG.Done()
 
 		m.mu.Lock()
 		if spawnErr != nil {
@@ -131,6 +137,17 @@ func (m *Manager) Instance(ctx context.Context, workdir string) (*Instance, erro
 			close(e.ready)
 			m.mu.Unlock()
 			return nil, spawnErr
+		}
+		if m.closed.Load() {
+			// Close drained the pool while this spawn was in flight: the
+			// instance must not outlive the manager.
+			inst.stop()
+			m.ports.Release(port)
+			delete(m.pool, workdir)
+			e.err = errClosed
+			close(e.ready)
+			m.mu.Unlock()
+			return nil, errClosed
 		}
 		e.inst = inst
 		inst.begin()
@@ -223,7 +240,6 @@ func (m *Manager) Close() error {
 	m.wg.Wait()
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	for k, e := range m.pool {
 		select {
 		case <-e.ready:
@@ -235,5 +251,10 @@ func (m *Manager) Close() error {
 		}
 		delete(m.pool, k)
 	}
+	m.mu.Unlock()
+
+	// A spawn that was in flight when Close ran finishes under the closed
+	// flag: Instance re-checks it after spawning and stops the instance.
+	m.spawnWG.Wait()
 	return nil
 }

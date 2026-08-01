@@ -3,6 +3,8 @@ package mcpserver
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
+	"io"
 	"sync"
 	"time"
 )
@@ -10,6 +12,7 @@ import (
 type TokenStore struct {
 	mu     sync.Mutex
 	tokens map[string]tokenEntry
+	random io.Reader
 }
 
 type tokenEntry struct {
@@ -19,12 +22,14 @@ type tokenEntry struct {
 }
 
 func NewTokenStore() *TokenStore {
-	return &TokenStore{tokens: make(map[string]tokenEntry)}
+	return &TokenStore{tokens: make(map[string]tokenEntry), random: rand.Reader}
 }
 
-func (t *TokenStore) Generate(platform, channelID string) string {
+func (t *TokenStore) Generate(platform, channelID string) (string, error) {
 	b := make([]byte, 16)
-	rand.Read(b)
+	if _, err := io.ReadFull(t.random, b); err != nil {
+		return "", fmt.Errorf("mcpserver: token randomness: %w", err)
+	}
 	token := hex.EncodeToString(b)
 
 	now := time.Now()
@@ -40,7 +45,7 @@ func (t *TokenStore) Generate(platform, channelID string) string {
 		channelID: channelID,
 		expires:   now.Add(5 * time.Minute),
 	}
-	return token
+	return token, nil
 }
 
 func (t *TokenStore) Lookup(token string) (platform, channelID string, ok bool) {

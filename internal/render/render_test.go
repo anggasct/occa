@@ -3,6 +3,7 @@ package render
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestTelegramCodeBlock(t *testing.T) {
@@ -162,4 +163,100 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func TestSplitNeverEmitsInvalidUTF8(t *testing.T) {
+	inputs := map[string]string{
+		"ascii":            strings.Repeat("a", 5000),
+		"cjk":              strings.Repeat("日", 3000),
+		"thai":             strings.Repeat("ก", 3000),
+		"emoji":            strings.Repeat("🎉", 2000),
+		"mixed":            strings.Repeat("halo 日本 🎉 ", 500),
+		"no-whitespace":    strings.Repeat("日本語テキスト", 800),
+		"single-long-word": strings.Repeat("Z", 9000),
+	}
+
+	for name, in := range inputs {
+		for _, limit := range []int{4, 17, 100, 2000, 4096} {
+			chunks := Split(in, limit)
+			for i, chunk := range chunks {
+				if !utf8.ValidString(chunk) {
+					t.Fatalf("%s/limit=%d: chunk %d is not valid UTF-8", name, limit, i)
+				}
+				if measure(chunk) > limit && utf8.RuneCountInString(chunk) > 1 {
+					t.Fatalf("%s/limit=%d: chunk %d measures %d", name, limit, i, measure(chunk))
+				}
+			}
+			if joined := strings.Join(chunks, ""); utf8.RuneCountInString(joined) > utf8.RuneCountInString(in) {
+				t.Fatalf("%s/limit=%d: split added content", name, limit)
+			}
+		}
+	}
+}
+
+func TestSplitPrefersBoundaries(t *testing.T) {
+	if got := Split("hello world\n\nsecond paragraph", 20); got[0] != "hello world" {
+		t.Fatalf("paragraph boundary not preferred: %q", got[0])
+	}
+	if got := Split("alpha beta\ngamma delta epsilon", 16); got[0] != "alpha beta" {
+		t.Fatalf("line boundary not preferred: %q", got[0])
+	}
+	if got := Split("alpha beta gamma delta", 16); got[0] != "alpha beta" {
+		t.Fatalf("word boundary not preferred: %q", got[0])
+	}
+	if got := Split("<pre><code>x</code></pre>tail text here", 30); got[0] != "<pre><code>x</code></pre>" {
+		t.Fatalf("code block boundary not preferred: %q", got[0])
+	}
+}
+
+func TestSplitMeasuresSurrogatePairs(t *testing.T) {
+	// One astral rune is two UTF-16 units, which is what Telegram counts.
+	if got := Split("🎉🎉", 2); len(got) != 2 {
+		t.Fatalf("expected one chunk per surrogate pair, got %d", len(got))
+	}
+	if got := Split("🎉", 1); len(got) != 1 || got[0] != "🎉" {
+		t.Fatalf("a rune larger than the limit must still advance: %v", got)
+	}
+}
+
+func TestRenderUnknownPlatformFallsBack(t *testing.T) {
+	chunks, err := New().Render("hello", Platform(99))
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if len(chunks) == 0 || chunks[0] == "" {
+		t.Fatalf("unknown platform produced no output: %v", chunks)
+	}
+}
+
+func TestPlatformFor(t *testing.T) {
+	if PlatformFor("discord") != Discord || PlatformFor("telegram") != Telegram || PlatformFor("") != Telegram {
+		t.Fatal("unexpected platform mapping")
+	}
+}
+
+func TestLiteralMarkupIsEscapedNotDropped(t *testing.T) {
+	chunks, err := New().Render("value <x> & <script>alert(1)</script> done", Telegram)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	got := strings.Join(chunks, "")
+	for _, want := range []string{"&lt;x&gt;", "&amp;", "&lt;script&gt;", "alert(1)"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in %q", want, got)
+		}
+	}
+	if strings.Contains(got, "<script>") {
+		t.Fatalf("raw markup survived: %q", got)
+	}
+}
+
+func TestLiteralMarkupPreservedForDiscord(t *testing.T) {
+	chunks, err := New().Render("value <x> & more", Discord)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if got := strings.Join(chunks, ""); !strings.Contains(got, "<x>") || !strings.Contains(got, "&") {
+		t.Fatalf("discord content altered: %q", got)
+	}
 }

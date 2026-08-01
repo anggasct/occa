@@ -58,6 +58,7 @@ type permissionBroker struct {
 type permissionPromptHandler struct {
 	broker    *permissionBroker
 	owner     *permissionOwner
+	encode    func(string) string
 	client    relay.Client
 	platform  string
 	channelID string
@@ -100,7 +101,7 @@ func (h *permissionPromptHandler) Prompt(ctx context.Context, request relay.Perm
 	h.broker.records[token] = record
 	h.broker.mu.Unlock()
 
-	ref, err := h.reply.SendWithButtons(permissionPromptText(request), record.buttons)
+	ref, err := h.reply.SendWithButtons(h.promptText(request), record.buttons)
 	if err != nil {
 		h.broker.removePending(record)
 		return fmt.Errorf("permission: send prompt: %w", err)
@@ -156,8 +157,9 @@ func (b *permissionBroker) handle(ctx context.Context, msg channel.IncomingMessa
 		reply := record.reply
 		origin := record.origin
 		terminal := record.terminal
+		state := record.state
 		b.mu.Unlock()
-		slog.Info("permission callback duplicate", "platform", msg.Platform, "channel_id", msg.ChannelID, "outcome", stateName(record.state))
+		slog.Info("permission callback duplicate", "platform", msg.Platform, "channel_id", msg.ChannelID, "outcome", stateName(state))
 		if terminal != "" {
 			if err := reply.EditWithButtons(origin, terminal, nil); err != nil {
 				slog.Warn("permission: reapply terminal view failed", "platform", msg.Platform, "channel_id", msg.ChannelID, "error", err)
@@ -189,6 +191,8 @@ func (b *permissionBroker) handle(ctx context.Context, msg channel.IncomingMessa
 
 	terminal := permissionTerminalLabel(decision)
 	if b.resolve(record, attempt, terminal) {
+		// createdAt is immutable after construction; the broker lock is not
+		// held here by design (the backend call above must stay outside it).
 		slog.Info("permission callback resolved", "platform", msg.Platform, "channel_id", msg.ChannelID, "decision", decision, "latency", time.Since(record.createdAt).Truncate(time.Millisecond))
 		if err := reply.EditWithButtons(origin, terminal, nil); err != nil {
 			slog.Warn("permission: terminal view update failed", "platform", msg.Platform, "channel_id", msg.ChannelID, "error", err)
@@ -200,6 +204,7 @@ func (b *permissionBroker) handle(ctx context.Context, msg channel.IncomingMessa
 func (b *permissionBroker) expireOwner(owner *permissionOwner) {
 	now := time.Now()
 	var expired []*permissionRecord
+	var origins []channel.MessageRef
 	b.mu.Lock()
 	b.cleanupLocked(now)
 	for _, record := range b.records {
@@ -211,13 +216,14 @@ func (b *permissionBroker) expireOwner(owner *permissionOwner) {
 		record.client = nil
 		record.expiresAt = now.Add(permissionTombstoneTTL)
 		expired = append(expired, record)
+		origins = append(origins, record.origin)
 	}
 	b.mu.Unlock()
 
-	for _, record := range expired {
+	for i, record := range expired {
 		slog.Info("permission prompt expired", "platform", record.platform, "channel_id", record.channelID, "outcome", "expired")
-		if record.origin != nil {
-			if err := record.reply.EditWithButtons(record.origin, permissionExpiredMessage, nil); err != nil {
+		if origin := origins[i]; origin != nil {
+			if err := record.reply.EditWithButtons(origin, permissionExpiredMessage, nil); err != nil {
 				slog.Warn("permission: expired view update failed", "platform", record.platform, "channel_id", record.channelID, "error", err)
 			}
 		}
@@ -304,6 +310,16 @@ func permissionButtons(token string) []channel.Button {
 		{Label: "✅ Always allow", Value: "permission:" + token + ":always"},
 		{Label: "❌ Deny", Value: "permission:" + token + ":reject"},
 	}
+}
+
+// promptText escapes through the platform renderer: the permission name and
+// tool come from the agent and can contain markup characters.
+func (h *permissionPromptHandler) promptText(request relay.PermissionRequest) string {
+	text := permissionPromptText(request)
+	if h.encode == nil {
+		return text
+	}
+	return h.encode(text)
 }
 
 func permissionPromptText(request relay.PermissionRequest) string {

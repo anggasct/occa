@@ -61,7 +61,10 @@ func TestMCPServerInvalidToken(t *testing.T) {
 
 func TestMCPServerValidToken(t *testing.T) {
 	srv, repo, tokens := newTestServer()
-	token := tokens.Generate("telegram", "chat123")
+	token, err := tokens.Generate("telegram", "chat123")
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
 
 	result, _, err := srv.handleScheduleTask(context.Background(), nil, scheduleTaskInput{
 		ScheduleToken:  token,
@@ -96,8 +99,14 @@ func TestMCPServerValidToken(t *testing.T) {
 
 func TestMCPServerTokenCannotBeUsedForOtherChannel(t *testing.T) {
 	srv, repo, tokens := newTestServer()
-	tokenA := tokens.Generate("telegram", "chatA")
-	tokenB := tokens.Generate("discord", "chatB")
+	tokenA, err := tokens.Generate("telegram", "chatA")
+	if err != nil {
+		t.Fatalf("Generate A: %v", err)
+	}
+	tokenB, err := tokens.Generate("discord", "chatB")
+	if err != nil {
+		t.Fatalf("Generate B: %v", err)
+	}
 
 	_, _, _ = srv.handleScheduleTask(context.Background(), nil, scheduleTaskInput{
 		ScheduleToken:  tokenA,
@@ -123,7 +132,7 @@ func TestMCPServerTokenCannotBeUsedForOtherChannel(t *testing.T) {
 
 func TestMCPServerForgedTokenRejected(t *testing.T) {
 	srv, repo, tokens := newTestServer()
-	_ = tokens.Generate("telegram", "chatA")
+	_, _ = tokens.Generate("telegram", "chatA")
 
 	result, _, _ := srv.handleScheduleTask(context.Background(), nil, scheduleTaskInput{
 		ScheduleToken:  "forged-token-not-in-store",
@@ -135,5 +144,18 @@ func TestMCPServerForgedTokenRejected(t *testing.T) {
 	}
 	if len(repo.schedules) != 0 {
 		t.Fatal("no schedule should be created with forged token")
+	}
+}
+
+func TestServerTimeoutsSet(t *testing.T) {
+	srv, _, _ := newTestServer()
+	if err := srv.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer srv.Stop()
+
+	s := srv.httpSrv
+	if s.ReadHeaderTimeout <= 0 || s.ReadTimeout <= 0 || s.WriteTimeout <= 0 || s.IdleTimeout <= 0 {
+		t.Fatalf("server timeouts not set: %+v", s)
 	}
 }

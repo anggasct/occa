@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"text/template"
@@ -20,16 +21,26 @@ import (
 const (
 	maxWebhookBodySize         int64 = 10 * 1024 * 1024
 	maxConcurrentWebhookEvents       = 16
+
+	readHeaderTimeout = 10 * time.Second
+	readTimeout       = 30 * time.Second
+	writeTimeout      = 30 * time.Second
+	idleTimeout       = 2 * time.Minute
 )
 
 type Executor func(ctx context.Context, platform, channelID, prompt string)
 
 type Server struct {
-	bind       string
-	endpoints  map[string]config.EndpointConfig
-	executor   Executor
-	httpSrv    *http.Server
-	eventSlots chan struct{}
+	bind              string
+	bindAddr          string
+	endpoints         map[string]config.EndpointConfig
+	executor          Executor
+	httpSrv           *http.Server
+	eventSlots        chan struct{}
+	readHeaderTimeout time.Duration
+	readTimeout       time.Duration
+	writeTimeout      time.Duration
+	idleTimeout       time.Duration
 }
 
 func New(cfg config.WebhookConfig, executor Executor) *Server {
@@ -38,10 +49,14 @@ func New(cfg config.WebhookConfig, executor Executor) *Server {
 		endpoints[ep.Path] = ep
 	}
 	return &Server{
-		bind:       cfg.Bind,
-		endpoints:  endpoints,
-		executor:   executor,
-		eventSlots: make(chan struct{}, maxConcurrentWebhookEvents),
+		bind:              cfg.Bind,
+		endpoints:         endpoints,
+		executor:          executor,
+		eventSlots:        make(chan struct{}, maxConcurrentWebhookEvents),
+		readHeaderTimeout: readHeaderTimeout,
+		readTimeout:       readTimeout,
+		writeTimeout:      writeTimeout,
+		idleTimeout:       idleTimeout,
 	}
 }
 
@@ -62,9 +77,18 @@ func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleRequest)
 
+	ln, err := net.Listen("tcp", s.bind)
+	if err != nil {
+		return fmt.Errorf("webhook: listen %s: %w", s.bind, err)
+	}
+	s.bindAddr = ln.Addr().String()
+
 	s.httpSrv = &http.Server{
-		Addr:    s.bind,
-		Handler: mux,
+		Handler:           mux,
+		ReadHeaderTimeout: s.readHeaderTimeout,
+		ReadTimeout:       s.readTimeout,
+		WriteTimeout:      s.writeTimeout,
+		IdleTimeout:       s.idleTimeout,
 	}
 
 	go func() {
@@ -73,7 +97,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}()
 
 	go func() {
-		if err := s.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := s.httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			slog.Error("webhook: serve error", "error", err)
 		}
 	}()
@@ -81,6 +105,9 @@ func (s *Server) Start(ctx context.Context) error {
 	slog.Info("webhook server started", "bind", s.bind, "endpoints", len(s.endpoints))
 	return nil
 }
+
+// Addr returns the bound listen address; valid after Start succeeds.
+func (s *Server) Addr() string { return s.bindAddr }
 
 func (s *Server) Stop(ctx context.Context) error {
 	if s.httpSrv == nil {

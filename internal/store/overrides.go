@@ -13,16 +13,18 @@ type sqliteOverrideRepo struct {
 
 func (r *sqliteOverrideRepo) Get(ctx context.Context, platform, channelID, userID string) (*UserOverride, error) {
 	var o UserOverride
+	var model sql.NullString
 	err := r.db.QueryRowContext(ctx,
 		`SELECT id, channel_id, platform, user_id, role, model, created_at, updated_at FROM user_override WHERE platform = ? AND channel_id = ? AND user_id = ?`,
 		platform, channelID, userID,
-	).Scan(&o.ID, &o.ChannelID, &o.Platform, &o.UserID, &o.Role, &o.Model, &o.CreatedAt, &o.UpdatedAt)
+	).Scan(&o.ID, &o.ChannelID, &o.Platform, &o.UserID, &o.Role, &model, &o.CreatedAt, &o.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("store: override get: %w", err)
 	}
+	o.Model = model.String
 	return &o, nil
 }
 
@@ -82,9 +84,11 @@ func (r *sqliteOverrideRepo) ListByChannel(ctx context.Context, platform, channe
 	var overrides []UserOverride
 	for rows.Next() {
 		var o UserOverride
-		if err := rows.Scan(&o.ID, &o.ChannelID, &o.Platform, &o.UserID, &o.Role, &o.Model, &o.CreatedAt, &o.UpdatedAt); err != nil {
+		var model sql.NullString
+		if err := rows.Scan(&o.ID, &o.ChannelID, &o.Platform, &o.UserID, &o.Role, &model, &o.CreatedAt, &o.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("store: override list: scan: %w", err)
 		}
+		o.Model = model.String
 		overrides = append(overrides, o)
 	}
 	return overrides, rows.Err()

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/anggasct/occa/internal/scheduler"
 	"github.com/anggasct/occa/internal/store"
@@ -87,7 +88,15 @@ func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", handler)
 
-	s.httpSrv = &http.Server{Handler: mux}
+	// WriteTimeout is generous because streamable HTTP keeps responses open
+	// for server-to-client messages over SSE.
+	s.httpSrv = &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      5 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
+	}
 
 	go func() {
 		<-ctx.Done()

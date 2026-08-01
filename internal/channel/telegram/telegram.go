@@ -6,21 +6,24 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"github.com/anggasct/occa/internal/channel"
+	"github.com/anggasct/occa/internal/render"
 )
 
 type Adapter struct {
-	bot   *tgbotapi.BotAPI
-	token string
+	bot            *tgbotapi.BotAPI
+	token          string
+	downloadClient *http.Client
 }
 
+const defaultDownloadTimeout = 60 * time.Second
+
 func New(token string) *Adapter {
-	return &Adapter{token: token}
+	return &Adapter{token: token, downloadClient: &http.Client{Timeout: defaultDownloadTimeout}}
 }
 
 func (a *Adapter) Name() string { return "telegram" }
@@ -69,7 +72,7 @@ func (a *Adapter) Stop() error {
 func (a *Adapter) Notify(channelID string, text string) error {
 	var chatID int64
 	fmt.Sscanf(channelID, "%d", &chatID)
-	for _, chunk := range splitMessage(text, 4096) {
+	for _, chunk := range render.Split(text, 4096) {
 		msg := tgbotapi.NewMessage(chatID, chunk)
 		msg.ParseMode = "HTML"
 		msg.DisableWebPagePreview = true
@@ -186,16 +189,9 @@ func (a *Adapter) downloadFile(fileID, filename, mimeType string) *channel.Attac
 		slog.Warn("telegram: get file url failed", "file_id", fileID, "error", err)
 		return nil
 	}
-	resp, err := http.Get(url)
+	data, err := a.fetchFile(url)
 	if err != nil {
 		slog.Warn("telegram: download file failed", "file_id", fileID, "error", err)
-		return nil
-	}
-	defer resp.Body.Close()
-
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxDownloadSize+1))
-	if err != nil {
-		slog.Warn("telegram: read file failed", "file_id", fileID, "error", err)
 		return nil
 	}
 
@@ -203,6 +199,21 @@ func (a *Adapter) downloadFile(fileID, filename, mimeType string) *channel.Attac
 		filename = fileID
 	}
 	return &channel.Attachment{Filename: filename, MimeType: mimeType, Data: data}
+}
+
+// fetchFile downloads a file URL with a bounded client: a stalled CDN must
+// fail the attachment instead of blocking the update loop.
+func (a *Adapter) fetchFile(url string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := a.downloadClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	return io.ReadAll(io.LimitReader(resp.Body, maxDownloadSize+1))
 }
 
 type replyContext struct {
@@ -217,7 +228,7 @@ func (rc *replyContext) SendTyping() error {
 }
 
 func (rc *replyContext) Send(text string) (channel.MessageRef, error) {
-	chunks := splitMessage(text, 4096)
+	chunks := render.Split(text, 4096)
 	var lastRef channel.MessageRef
 
 	for _, chunk := range chunks {
@@ -323,39 +334,6 @@ func extractRetryAfter(err error) int {
 		return int(apiErr.ResponseParameters.RetryAfter)
 	}
 	return 0
-}
-
-func splitMessage(text string, maxLen int) []string {
-	if len(text) <= maxLen {
-		return []string{text}
-	}
-
-	var chunks []string
-	remaining := text
-	for len(remaining) > 0 {
-		if len(remaining) <= maxLen {
-			chunks = append(chunks, remaining)
-			break
-		}
-
-		breakAt := findBreakPoint(remaining, maxLen)
-		chunks = append(chunks, remaining[:breakAt])
-		remaining = strings.TrimLeft(remaining[breakAt:], "\n")
-	}
-	return chunks
-}
-
-func findBreakPoint(text string, maxLen int) int {
-	if idx := strings.LastIndex(text[:maxLen], "\n\n"); idx > 0 {
-		return idx
-	}
-	if idx := strings.LastIndex(text[:maxLen], "\n"); idx > 0 {
-		return idx
-	}
-	if idx := strings.LastIndex(text[:maxLen], " "); idx > 0 {
-		return idx
-	}
-	return maxLen
 }
 
 type messageRef struct {

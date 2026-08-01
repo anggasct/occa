@@ -77,12 +77,13 @@ type permissionCall struct {
 }
 
 type permissionClient struct {
-	mu       sync.Mutex
-	calls    []permissionCall
-	errors   []error
-	started  chan struct{}
-	startOne sync.Once
-	release  chan struct{}
+	mu             sync.Mutex
+	calls          []permissionCall
+	errors         []error
+	started        chan struct{}
+	startOne       sync.Once
+	release        chan struct{}
+	blockFirstCall bool
 }
 
 func (c *permissionClient) CreateSession(_ context.Context) (string, error) { return "session", nil }
@@ -106,11 +107,15 @@ func (c *permissionClient) ReplyPermission(ctx context.Context, requestID string
 		err = c.errors[callIndex]
 	}
 	release := c.release
+	blockFirst := c.blockFirstCall
+	if blockFirst {
+		c.blockFirstCall = false
+	}
 	c.mu.Unlock()
 	if c.started != nil {
 		c.startOne.Do(func() { close(c.started) })
 	}
-	if release != nil {
+	if release != nil && blockFirst {
 		select {
 		case <-release:
 		case <-ctx.Done():
@@ -352,5 +357,106 @@ func TestPermissionBrokerExpiresOwnerAndUnknownTokens(t *testing.T) {
 	}
 	if got := reply.lastEdit(); got.text != permissionExpiredMessage || len(got.buttons) != 0 {
 		t.Fatalf("unknown token view = %+v", got)
+	}
+}
+
+func TestExpireInterleavedWithDuplicateCallbackNoRace(t *testing.T) {
+	client := &permissionClient{}
+	broker, owner, reply, token, origin := newPermissionPrompt(t, client)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		broker.expireOwner(owner)
+	}()
+
+	// The duplicate callback may land before or after the expiry; both orders
+	// must be race-free on the broker record.
+	_ = broker.handle(context.Background(), permissionCallback(token, origin, reply))
+	<-done
+}
+
+func TestExpireWhileHandlingThenDuplicateCallback(t *testing.T) {
+	client := &permissionClient{}
+	broker, owner, reply, token, origin := newPermissionPrompt(t, client)
+
+	// Resolve the record first so the duplicate branch reports "resolved".
+	if err := broker.handle(context.Background(), permissionCallback(token, origin, reply)); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if err := broker.handle(context.Background(), permissionCallback(token, origin, reply)); err != nil {
+		t.Fatalf("duplicate handle: %v", err)
+	}
+
+	// Expire an unrelated pending record concurrently with a resolved duplicate.
+	otherClient := &permissionClient{}
+	_, _, otherReply, otherToken, otherOrigin := newPermissionPrompt(t, otherClient)
+	_ = otherReply
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		broker.expireOwner(owner)
+	}()
+	_ = broker.handle(context.Background(), permissionCallback(otherToken, otherOrigin, otherReply))
+	<-done
+}
+
+func TestCallbackNotSerializedBehindBlockedBackend(t *testing.T) {
+	client := &permissionClient{
+		started:        make(chan struct{}),
+		release:        make(chan struct{}),
+		blockFirstCall: true,
+	}
+	broker := newPermissionBroker()
+	owner := &permissionOwner{}
+
+	newPrompt := func(requestID string) (channel.MessageRef, string, channel.ReplyContext) {
+		reply := &permissionReply{}
+		handler := &permissionPromptHandler{
+			broker:    broker,
+			owner:     owner,
+			client:    client,
+			platform:  "telegram",
+			channelID: "chat1",
+			sessionID: "session-1",
+			reply:     reply,
+		}
+		if err := handler.Prompt(context.Background(), relay.PermissionRequest{
+			ID:         requestID,
+			SessionID:  "session-1",
+			Permission: "external_directory",
+			Tool:       "bash",
+		}); err != nil {
+			t.Fatalf("Prompt: %v", err)
+		}
+		token, _, ok := parsePermissionCallback(reply.sends[0].buttons[0].Value)
+		if !ok {
+			t.Fatalf("invalid callback value: %q", reply.sends[0].buttons[0].Value)
+		}
+		return reply.sends[0].ref, token, reply
+	}
+
+	origin1, token1, reply1 := newPrompt("request-1")
+	origin2, token2, reply2 := newPrompt("request-2")
+
+	// First callback blocks inside the backend call.
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- broker.handle(context.Background(), permissionCallback(token1, origin1, reply1)) }()
+	<-client.started
+
+	// Second callback for a different record must reach the backend while the
+	// first is still blocked — the broker lock is not held across the call.
+	if err := broker.handle(context.Background(), permissionCallback(token2, origin2, reply2)); err != nil {
+		t.Fatalf("second handle: %v", err)
+	}
+	calls := client.callSnapshot()
+	if len(calls) != 2 {
+		t.Fatalf("second callback did not reach the backend: %d calls", len(calls))
+	}
+
+	close(client.release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first handle: %v", err)
 	}
 }

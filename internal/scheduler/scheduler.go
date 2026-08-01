@@ -11,26 +11,39 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
+const defaultStopGrace = 5 * time.Second
+
 type Executor func(ctx context.Context, platform, channelID, prompt string)
 
 type Scheduler struct {
-	cron     *cron.Cron
-	store    store.ScheduleRepo
-	executor Executor
-	mu       sync.Mutex
-	entryIDs map[int64]cron.EntryID
+	cron      *cron.Cron
+	store     store.ScheduleRepo
+	executor  Executor
+	mu        sync.Mutex
+	entryIDs  map[int64]cron.EntryID
+	nextJobID int64
+	active    []jobRef
+	appCtx    context.Context
+	stopGrace time.Duration
+}
+
+type jobRef struct {
+	id     int64
+	cancel context.CancelFunc
 }
 
 func New(st store.ScheduleRepo, executor Executor) *Scheduler {
 	return &Scheduler{
-		cron:     cron.New(),
-		store:    st,
-		executor: executor,
-		entryIDs: make(map[int64]cron.EntryID),
+		cron:      cron.New(),
+		store:     st,
+		executor:  executor,
+		entryIDs:  make(map[int64]cron.EntryID),
+		stopGrace: defaultStopGrace,
 	}
 }
 
 func (s *Scheduler) Start(ctx context.Context) error {
+	s.appCtx = ctx
 	schedules, err := s.store.ListAll(ctx)
 	if err != nil {
 		return fmt.Errorf("scheduler: load schedules: %w", err)
@@ -45,8 +58,33 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	return nil
 }
 
+// Stop waits for running jobs for a bounded grace period, then cancels them.
 func (s *Scheduler) Stop() error {
-	s.cron.Stop()
+	done := s.cron.Stop()
+
+	s.mu.Lock()
+	count := len(s.active)
+	s.mu.Unlock()
+	if count > 0 {
+		slog.Info("scheduler: waiting for running jobs", "running", count)
+	}
+
+	select {
+	case <-done.Done():
+		return nil
+	case <-time.After(s.stopGrace):
+		s.mu.Lock()
+		for _, ref := range s.active {
+			ref.cancel()
+		}
+		s.mu.Unlock()
+		slog.Warn("scheduler: grace period expired, cancelling running jobs", "running", count)
+
+		select {
+		case <-done.Done():
+		case <-time.After(2 * time.Second):
+		}
+	}
 	return nil
 }
 
@@ -86,9 +124,24 @@ func (s *Scheduler) ListSchedules(ctx context.Context, platform, channelID strin
 func (s *Scheduler) register(sched store.Schedule) error {
 	entryID, err := s.cron.AddFunc(sched.CronExpression, func() {
 		slog.Info("scheduler: executing", "id", sched.ID, "prompt", sched.Prompt)
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		defer cancel()
-		s.executor(ctx, sched.Platform, sched.ChannelID, sched.Prompt)
+		jobCtx, cancel := context.WithTimeout(s.appCtx, 10*time.Minute)
+		s.mu.Lock()
+		s.nextJobID++
+		ref := jobRef{id: s.nextJobID, cancel: cancel}
+		s.active = append(s.active, ref)
+		s.mu.Unlock()
+		defer func() {
+			cancel()
+			s.mu.Lock()
+			for i, j := range s.active {
+				if j.id == ref.id {
+					s.active = append(s.active[:i], s.active[i+1:]...)
+					break
+				}
+			}
+			s.mu.Unlock()
+		}()
+		s.executor(jobCtx, sched.Platform, sched.ChannelID, sched.Prompt)
 	})
 	if err != nil {
 		return fmt.Errorf("scheduler: register cron: %w", err)

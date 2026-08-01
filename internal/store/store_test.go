@@ -256,6 +256,42 @@ func TestOverrideCRUD(t *testing.T) {
 	}
 }
 
+func TestOverrideRoleOnlyRowRoundTrips(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+
+	if err := s.OverrideRepo().UpsertRole(ctx, "telegram", "chat1", "user1", "allow"); err != nil {
+		t.Fatalf("UpsertRole: %v", err)
+	}
+
+	o, err := s.OverrideRepo().Get(ctx, "telegram", "chat1", "user1")
+	if err != nil {
+		t.Fatalf("Get on a row with no model: %v", err)
+	}
+	if o == nil || o.Role != "allow" || o.Model != "" {
+		t.Fatalf("unexpected override: %+v", o)
+	}
+
+	list, err := s.OverrideRepo().ListByChannel(ctx, "telegram", "chat1")
+	if err != nil {
+		t.Fatalf("ListByChannel on a row with no model: %v", err)
+	}
+	if len(list) != 1 || list[0].Role != "allow" || list[0].Model != "" {
+		t.Fatalf("unexpected list: %+v", list)
+	}
+
+	if err := s.OverrideRepo().UpsertModel(ctx, "telegram", "chat1", "user1", "openai/gpt-4o"); err != nil {
+		t.Fatalf("UpsertModel: %v", err)
+	}
+	o, err = s.OverrideRepo().Get(ctx, "telegram", "chat1", "user1")
+	if err != nil {
+		t.Fatalf("Get after UpsertModel: %v", err)
+	}
+	if o.Model != "openai/gpt-4o" || o.Role != "allow" {
+		t.Fatalf("expected model set and role preserved, got %+v", o)
+	}
+}
+
 func TestOverrideUpsertDoesNotClobberOtherField(t *testing.T) {
 	s := tempStore(t)
 	ctx := context.Background()
