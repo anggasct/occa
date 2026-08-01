@@ -1,8 +1,11 @@
 package telegram
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/anggasct/occa/internal/render"
@@ -70,5 +73,38 @@ func TestSplitMessageNeverCutsRune(t *testing.T) {
 		if !utf8.ValidString(chunk) {
 			t.Fatal("chunk is not valid UTF-8")
 		}
+	}
+}
+
+func TestFetchFileTimeout(t *testing.T) {
+	blocked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer blocked.Close()
+
+	a := &Adapter{downloadClient: &http.Client{Timeout: 200 * time.Millisecond}}
+	start := time.Now()
+	data, err := a.fetchFile(blocked.URL)
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("download blocked for %v", elapsed)
+	}
+	if err == nil {
+		t.Fatalf("expected timeout error, got data %q", data)
+	}
+}
+
+func TestFetchFileSucceeds(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("voice-data"))
+	}))
+	defer ts.Close()
+
+	a := &Adapter{downloadClient: &http.Client{Timeout: 5 * time.Second}}
+	data, err := a.fetchFile(ts.URL)
+	if err != nil {
+		t.Fatalf("fetchFile: %v", err)
+	}
+	if string(data) != "voice-data" {
+		t.Fatalf("unexpected data: %q", data)
 	}
 }

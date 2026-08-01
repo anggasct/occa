@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 
@@ -18,14 +19,17 @@ import (
 const maxDownloadSize = 10 * 1024 * 1024
 
 type Adapter struct {
-	session       *discordgo.Session
-	token         string
-	botID         atomic.Value
-	channelLookup func(string) (*discordgo.Channel, error)
+	session        *discordgo.Session
+	token          string
+	botID          atomic.Value
+	channelLookup  func(string) (*discordgo.Channel, error)
+	downloadClient *http.Client
 }
 
+const defaultDownloadTimeout = 60 * time.Second
+
 func New(token string) *Adapter {
-	return &Adapter{token: token}
+	return &Adapter{token: token, downloadClient: &http.Client{Timeout: defaultDownloadTimeout}}
 }
 
 func (a *Adapter) Name() string { return "discord" }
@@ -215,7 +219,12 @@ func (a *Adapter) normalizeMessage(m *discordgo.Message) channel.IncomingMessage
 func (a *Adapter) downloadAttachments(m *discordgo.Message) []channel.Attachment {
 	var attachments []channel.Attachment
 	for _, da := range m.Attachments {
-		resp, err := http.Get(da.URL)
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, da.URL, nil)
+		if err != nil {
+			slog.Warn("discord: download attachment failed", "filename", da.Filename, "error", err)
+			continue
+		}
+		resp, err := a.downloadClient.Do(req)
 		if err != nil {
 			slog.Warn("discord: download attachment failed", "filename", da.Filename, "error", err)
 			continue

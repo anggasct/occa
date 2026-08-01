@@ -137,3 +137,16 @@ func TestMCPServerForgedTokenRejected(t *testing.T) {
 		t.Fatal("no schedule should be created with forged token")
 	}
 }
+
+func TestServerTimeoutsSet(t *testing.T) {
+	srv, _, _ := newTestServer()
+	if err := srv.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer srv.Stop()
+
+	s := srv.httpSrv
+	if s.ReadHeaderTimeout <= 0 || s.ReadTimeout <= 0 || s.WriteTimeout <= 0 || s.IdleTimeout <= 0 {
+		t.Fatalf("server timeouts not set: %+v", s)
+	}
+}

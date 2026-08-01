@@ -2,8 +2,11 @@ package discord
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/anggasct/occa/internal/render"
 
@@ -86,5 +89,43 @@ func TestComponentRowsEmptyRemovesButtons(t *testing.T) {
 	components := componentRows([]channel.Button{{Label: "Allow", Value: "allow"}})
 	if len(components) != 1 {
 		t.Fatalf("button components = %+v", components)
+	}
+}
+
+func TestDownloadAttachmentTimeout(t *testing.T) {
+	blocked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done() // never respond until the client gives up
+	}))
+	defer blocked.Close()
+
+	a := &Adapter{downloadClient: &http.Client{Timeout: 200 * time.Millisecond}}
+	start := time.Now()
+	atts := a.downloadAttachments(&discordgo.Message{
+		Attachments: []*discordgo.MessageAttachment{
+			{Filename: "stalled.bin", ContentType: "application/octet-stream", URL: blocked.URL},
+		},
+	})
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("download blocked for %v", elapsed)
+	}
+	if len(atts) != 0 {
+		t.Fatalf("expected stalled attachment dropped, got %d", len(atts))
+	}
+}
+
+func TestDownloadAttachmentSucceeds(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("file-data"))
+	}))
+	defer ts.Close()
+
+	a := &Adapter{downloadClient: &http.Client{Timeout: 5 * time.Second}}
+	atts := a.downloadAttachments(&discordgo.Message{
+		Attachments: []*discordgo.MessageAttachment{
+			{Filename: "ok.txt", ContentType: "text/plain", URL: ts.URL},
+		},
+	})
+	if len(atts) != 1 || string(atts[0].Data) != "file-data" {
+		t.Fatalf("unexpected attachments: %+v", atts)
 	}
 }

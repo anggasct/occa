@@ -15,12 +15,15 @@ import (
 )
 
 type Adapter struct {
-	bot   *tgbotapi.BotAPI
-	token string
+	bot            *tgbotapi.BotAPI
+	token          string
+	downloadClient *http.Client
 }
 
+const defaultDownloadTimeout = 60 * time.Second
+
 func New(token string) *Adapter {
-	return &Adapter{token: token}
+	return &Adapter{token: token, downloadClient: &http.Client{Timeout: defaultDownloadTimeout}}
 }
 
 func (a *Adapter) Name() string { return "telegram" }
@@ -186,16 +189,9 @@ func (a *Adapter) downloadFile(fileID, filename, mimeType string) *channel.Attac
 		slog.Warn("telegram: get file url failed", "file_id", fileID, "error", err)
 		return nil
 	}
-	resp, err := http.Get(url)
+	data, err := a.fetchFile(url)
 	if err != nil {
 		slog.Warn("telegram: download file failed", "file_id", fileID, "error", err)
-		return nil
-	}
-	defer resp.Body.Close()
-
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxDownloadSize+1))
-	if err != nil {
-		slog.Warn("telegram: read file failed", "file_id", fileID, "error", err)
 		return nil
 	}
 
@@ -203,6 +199,21 @@ func (a *Adapter) downloadFile(fileID, filename, mimeType string) *channel.Attac
 		filename = fileID
 	}
 	return &channel.Attachment{Filename: filename, MimeType: mimeType, Data: data}
+}
+
+// fetchFile downloads a file URL with a bounded client: a stalled CDN must
+// fail the attachment instead of blocking the update loop.
+func (a *Adapter) fetchFile(url string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := a.downloadClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(io.LimitReader(resp.Body, maxDownloadSize+1))
 }
 
 type replyContext struct {
