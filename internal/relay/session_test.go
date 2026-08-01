@@ -50,6 +50,9 @@ func (m *mockClient) SendMessage(_ context.Context, _, _ string, _ *ModelRef, _ 
 }
 func (m *mockClient) Providers(_ context.Context) (Providers, error)  { return Providers{}, nil }
 func (m *mockClient) RunCommand(_ context.Context, _, _ string) error { return nil }
+func (m *mockClient) ReplyPermission(_ context.Context, _ string, _ PermissionReply) error {
+	return nil
+}
 func (m *mockClient) Events(_ context.Context, _ string) (<-chan Event, error) {
 	return nil, nil
 }

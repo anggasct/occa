@@ -17,6 +17,9 @@ func (m *mockReplyContext) SendWithButtons(text string, buttons []Button) (Messa
 	return mockMessageRef{id: "1"}, nil
 }
 func (m *mockReplyContext) Edit(ref MessageRef, text string) error { return nil }
+func (m *mockReplyContext) EditWithButtons(ref MessageRef, text string, buttons []Button) error {
+	return nil
+}
 
 type mockChannel struct{}
 

@@ -50,6 +50,10 @@ func (r *responseReply) Edit(_ channel.MessageRef, text string) error {
 	return nil
 }
 
+func (r *responseReply) EditWithButtons(_ channel.MessageRef, text string, _ []channel.Button) error {
+	return r.Edit(nil, text)
+}
+
 func (r *responseReply) signalActivity() {
 	select {
 	case r.activity <- struct{}{}:
@@ -130,6 +134,10 @@ func (c *responseClient) runDispatch(ctx context.Context, events chan<- relay.Ev
 
 func (c *responseClient) Providers(_ context.Context) (relay.Providers, error) {
 	return relay.Providers{}, nil
+}
+
+func (c *responseClient) ReplyPermission(_ context.Context, _ string, _ relay.PermissionReply) error {
+	return nil
 }
 
 func (c *responseClient) Events(_ context.Context, _ string) (<-chan relay.Event, error) {

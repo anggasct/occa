@@ -8,8 +8,22 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/render"
 )
+
+type testPermissionPromptHandler struct {
+	reply *fakeReplyContext
+}
+
+func (h testPermissionPromptHandler) Prompt(_ context.Context, request PermissionRequest) error {
+	text := "🔐 Permission requested: " + request.Permission
+	if request.Tool != "" {
+		text += " (" + request.Tool + ")"
+	}
+	_, err := h.reply.SendWithButtons(text, []channel.Button{{Label: "Allow", Value: "permission:opaque:once"}})
+	return err
+}
 
 func TestParsePermissionAskedEvent(t *testing.T) {
 	payload := `{"properties":{"id":"per-123","sessionID":"sess-1","permission":"external_directory","tool":"bash"}}`
@@ -102,6 +116,7 @@ func TestStreamerPermissionPrompt(t *testing.T) {
 	reply := newFakeReplyContext()
 	renderer := render.New()
 	s := NewStreamer(reply, renderer, render.Telegram)
+	s.SetPermissionPromptHandler(testPermissionPromptHandler{reply: reply})
 
 	events := make(chan Event, 10)
 	events <- Event{Type: "delta", Delta: "Working..."}

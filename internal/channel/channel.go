@@ -24,6 +24,7 @@ type IncomingMessage struct {
 	IsThread               bool
 	IsCallback             bool
 	CallbackData           string
+	CallbackRef            MessageRef
 	Attachments            []Attachment
 	ReplyCtx               ReplyContext
 }
@@ -33,6 +34,7 @@ type ReplyContext interface {
 	Send(text string) (MessageRef, error)
 	SendWithButtons(text string, buttons []Button) (MessageRef, error)
 	Edit(ref MessageRef, text string) error
+	EditWithButtons(ref MessageRef, text string, buttons []Button) error
 }
 
 type MessageRef interface {

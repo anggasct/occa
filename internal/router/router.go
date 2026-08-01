@@ -47,6 +47,7 @@ type Router struct {
 	sched          ScheduleStore
 	tokenGen       TokenGenerator
 	responses      *responseCoordinator
+	permissions    *permissionBroker
 }
 
 type ScheduleStore interface {
@@ -75,6 +76,7 @@ func New(instances InstanceProvider, st store.Store, defaultWorkdir string, admi
 		adminID:        adminID,
 		startedAt:      time.Now(),
 		responses:      newResponseCoordinator(),
+		permissions:    newPermissionBroker(),
 	}
 	r.registerDefaults()
 	return r
@@ -295,7 +297,7 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 		return inst.Client().SendMessage(dispatchCtx, sessionID, text, model, attachments)
 	}
 
-	go r.runResponse(taskCtx, cancel, key, msg, inst, events, dispatch)
+	go r.runResponse(taskCtx, cancel, key, msg, inst, sessionID, events, dispatch)
 	return nil
 }
 
