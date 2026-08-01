@@ -28,6 +28,7 @@ type AgentConfig struct {
 	MaxInstances   int           `yaml:"max_instances"`
 	IdleTimeout    time.Duration `yaml:"idle_timeout"`
 	DefaultWorkdir string        `yaml:"default_workdir"`
+	AutoInstall    bool          `yaml:"auto_install"`
 }
 
 type DatabaseConfig struct {
@@ -61,6 +62,7 @@ type fileConfig struct {
 		MaxInstances   int    `yaml:"max_instances"`
 		IdleTimeout    string `yaml:"idle_timeout"`
 		DefaultWorkdir string `yaml:"default_workdir"`
+		AutoInstall    bool   `yaml:"auto_install"`
 	} `yaml:"agent"`
 	Database struct {
 		Path string `yaml:"path"`
@@ -77,6 +79,7 @@ const defaultConfigTemplate = `agent:
   max_instances: 5
   idle_timeout: 20m
   default_workdir: "~"
+  auto_install: false
 database:
   path: ~/.occa/occa.db
 logging:
@@ -173,6 +176,13 @@ func applyEnv(fc *fileConfig) error {
 	if v := os.Getenv("OCCA_AGENT_WORKDIR"); v != "" {
 		fc.Agent.DefaultWorkdir = v
 	}
+	if v := os.Getenv("OCCA_AGENT_AUTO_INSTALL"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("config: OCCA_AGENT_AUTO_INSTALL: %w", err)
+		}
+		fc.Agent.AutoInstall = b
+	}
 	if v := os.Getenv("OCCA_DB_PATH"); v != "" {
 		fc.Database.Path = v
 	}
@@ -230,6 +240,7 @@ func build(fc fileConfig, adminID string) (Config, error) {
 			MaxInstances:   fc.Agent.MaxInstances,
 			IdleTimeout:    idle,
 			DefaultWorkdir: workdir,
+			AutoInstall:    fc.Agent.AutoInstall,
 		},
 		Database: DatabaseConfig{Path: dbPath},
 		Logging:  LoggingConfig{Format: fc.Logging.Format},
