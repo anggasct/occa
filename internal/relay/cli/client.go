@@ -15,7 +15,6 @@ import (
 	"github.com/anggasct/occa/internal/relay"
 )
 
-// runResult exposes a spawned subprocess's stdout and its exit outcome.
 type runResult struct {
 	stdout io.ReadCloser
 	wait   func() error // blocks until exit; wraps exit errors with captured stderr
