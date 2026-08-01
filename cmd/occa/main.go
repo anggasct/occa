@@ -15,6 +15,7 @@ import (
 	"github.com/anggasct/occa/internal/channel/discord"
 	"github.com/anggasct/occa/internal/channel/telegram"
 	"github.com/anggasct/occa/internal/config"
+	"github.com/anggasct/occa/internal/logging"
 	"github.com/anggasct/occa/internal/mcpserver"
 	"github.com/anggasct/occa/internal/process"
 	"github.com/anggasct/occa/internal/relay"
@@ -44,6 +45,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Secrets are env-only (never in the config file). Read before the
+	// logger is built so every log line, including startup errors, is
+	// covered by redaction from the start.
+	telegramToken := os.Getenv("OCCA_TELEGRAM_TOKEN")
+	discordToken := os.Getenv("OCCA_DISCORD_TOKEN")
+	if telegramToken == "" && discordToken == "" {
+		fmt.Fprintln(os.Stderr, "occa: at least one of OCCA_TELEGRAM_TOKEN or OCCA_DISCORD_TOKEN must be set")
+		os.Exit(1)
+	}
+
 	var handler slog.Handler
 	opts := &slog.HandlerOptions{Level: slog.LevelInfo}
 	if cfg.Logging.Format == "json" {
@@ -51,7 +62,7 @@ func main() {
 	} else {
 		handler = slog.NewTextHandler(os.Stderr, opts)
 	}
-	slog.SetDefault(slog.New(handler))
+	slog.SetDefault(slog.New(logging.NewRedactHandler(handler, telegramToken, discordToken)))
 
 	db, err := store.Open(cfg.Database.Path)
 	if err != nil {
@@ -73,14 +84,6 @@ func main() {
 	defer stop()
 
 	discoverAgent(ctx, manager, cfg.Agent.DefaultWorkdir)
-
-	// Secrets are env-only (never in the config file).
-	telegramToken := os.Getenv("OCCA_TELEGRAM_TOKEN")
-	discordToken := os.Getenv("OCCA_DISCORD_TOKEN")
-	if telegramToken == "" && discordToken == "" {
-		slog.Error("at least one of OCCA_TELEGRAM_TOKEN or OCCA_DISCORD_TOKEN must be set")
-		os.Exit(1)
-	}
 
 	var channels []channel.Channel
 	if telegramToken != "" {
