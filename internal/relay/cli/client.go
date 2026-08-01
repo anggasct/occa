@@ -21,10 +21,9 @@ type runResult struct {
 	stderr func() string
 }
 
-// runner is injectable so tests can supply canned output.
 type runner func(ctx context.Context, binary string, args []string) (*runResult, error)
 
-// Client implements relay.Client against a subprocess-invoked CLI agent. The
+// Client implements relay.Client against a subprocess-invoked CLI agent: the
 // CLI couples send and stream, so each SendMessage spawns one subprocess and
 // pushes parsed stdout events onto a per-session channel Events returns.
 type Client struct {
@@ -70,7 +69,7 @@ func execRunner(ctx context.Context, binary string, args []string) (*runResult, 
 
 var _ relay.Client = (*Client)(nil)
 
-// CreateSession mints a local placeholder id; the tool has nothing to create
+// CreateSession returns a local placeholder id; the tool creates nothing
 // until the first message is sent.
 func (c *Client) CreateSession(ctx context.Context) (string, error) {
 	b := make([]byte, 16)
@@ -128,8 +127,8 @@ func (c *Client) SendMessage(ctx context.Context, sessionID, text string, model 
 	return nil
 }
 
-// stream parses stdout until EOF and closes the session channel. Zero
-// parsed events surface as an error event, never a silent empty response.
+// stream surfaces a run that produced no parsed events as an error event,
+// never a silent empty response.
 func (c *Client) stream(ctx context.Context, sessionID string, ch chan<- relay.Event, res *runResult) {
 	defer c.closeStream(sessionID)
 	defer func() { _ = res.stdout.Close() }()
