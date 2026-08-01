@@ -6,12 +6,12 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"github.com/anggasct/occa/internal/channel"
+	"github.com/anggasct/occa/internal/render"
 )
 
 type Adapter struct {
@@ -69,7 +69,7 @@ func (a *Adapter) Stop() error {
 func (a *Adapter) Notify(channelID string, text string) error {
 	var chatID int64
 	fmt.Sscanf(channelID, "%d", &chatID)
-	for _, chunk := range splitMessage(text, 4096) {
+	for _, chunk := range render.Split(text, 4096) {
 		msg := tgbotapi.NewMessage(chatID, chunk)
 		msg.ParseMode = "HTML"
 		msg.DisableWebPagePreview = true
@@ -217,7 +217,7 @@ func (rc *replyContext) SendTyping() error {
 }
 
 func (rc *replyContext) Send(text string) (channel.MessageRef, error) {
-	chunks := splitMessage(text, 4096)
+	chunks := render.Split(text, 4096)
 	var lastRef channel.MessageRef
 
 	for _, chunk := range chunks {
@@ -323,39 +323,6 @@ func extractRetryAfter(err error) int {
 		return int(apiErr.ResponseParameters.RetryAfter)
 	}
 	return 0
-}
-
-func splitMessage(text string, maxLen int) []string {
-	if len(text) <= maxLen {
-		return []string{text}
-	}
-
-	var chunks []string
-	remaining := text
-	for len(remaining) > 0 {
-		if len(remaining) <= maxLen {
-			chunks = append(chunks, remaining)
-			break
-		}
-
-		breakAt := findBreakPoint(remaining, maxLen)
-		chunks = append(chunks, remaining[:breakAt])
-		remaining = strings.TrimLeft(remaining[breakAt:], "\n")
-	}
-	return chunks
-}
-
-func findBreakPoint(text string, maxLen int) int {
-	if idx := strings.LastIndex(text[:maxLen], "\n\n"); idx > 0 {
-		return idx
-	}
-	if idx := strings.LastIndex(text[:maxLen], "\n"); idx > 0 {
-		return idx
-	}
-	if idx := strings.LastIndex(text[:maxLen], " "); idx > 0 {
-		return idx
-	}
-	return maxLen
 }
 
 type messageRef struct {

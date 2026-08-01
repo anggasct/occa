@@ -20,6 +20,7 @@ import (
 	"github.com/anggasct/occa/internal/mcpserver"
 	"github.com/anggasct/occa/internal/process"
 	"github.com/anggasct/occa/internal/relay"
+	"github.com/anggasct/occa/internal/render"
 	"github.com/anggasct/occa/internal/router"
 	"github.com/anggasct/occa/internal/scheduler"
 	"github.com/anggasct/occa/internal/store"
@@ -115,7 +116,7 @@ func main() {
 
 		inst, err := manager.Instance(ctx, workdir)
 		if err != nil {
-			adapter.Notify(channelID, "⚠️ Scheduled task failed: agent unreachable")
+			notify(adapter, channelID, "⚠️ Scheduled task failed: agent unreachable")
 			return
 		}
 		defer inst.End()
@@ -123,20 +124,20 @@ func main() {
 		resolver := relay.NewSessionResolver(db.SessionRepo(), inst.Client())
 		sessionID, err := resolver.Resolve(ctx, platform, channelID)
 		if err != nil {
-			adapter.Notify(channelID, "⚠️ Scheduled task failed: session error")
+			notify(adapter, channelID, "⚠️ Scheduled task failed: session error")
 			return
 		}
 
-		adapter.Notify(channelID, "⏰ Running: "+prompt)
+		notify(adapter, channelID, "⏰ Running: "+prompt)
 
 		if err := inst.Client().SendMessage(ctx, sessionID, prompt, nil, nil); err != nil {
-			adapter.Notify(channelID, "⚠️ Scheduled task failed: "+err.Error())
+			notify(adapter, channelID, "⚠️ Scheduled task failed: "+err.Error())
 			return
 		}
 
 		events, err := inst.Client().Events(ctx, sessionID)
 		if err != nil {
-			adapter.Notify(channelID, "⚠️ Scheduled task failed: events stream error")
+			notify(adapter, channelID, "⚠️ Scheduled task failed: events stream error")
 			return
 		}
 
@@ -150,10 +151,10 @@ func main() {
 				if result == "" {
 					result = "(no output)"
 				}
-				adapter.Notify(channelID, "✅ "+result)
+				notify(adapter, channelID, "✅ "+result)
 				return
 			case "error":
-				adapter.Notify(channelID, "⚠️ Scheduled task error: "+ev.Delta)
+				notify(adapter, channelID, "⚠️ Scheduled task error: "+ev.Delta)
 				return
 			}
 		}
@@ -181,16 +182,12 @@ func main() {
 		webhookExecutor := func(ctx context.Context, platform, channelID, prompt string) {
 			for _, ch := range channels {
 				if ch.Name() == platform {
-					notify := func(text string) {
-						if err := ch.Notify(channelID, text); err != nil {
-							slog.Warn("webhook: channel notification failed", "platform", platform, "channel_id", channelID, "error", err)
-						}
-					}
+					send := func(text string) { notify(ch, channelID, text) }
 
-					notify("📨 Webhook: analyzing...")
+					send("📨 Webhook: analyzing...")
 					inst, err := manager.Instance(ctx, cfg.Agent.DefaultWorkdir)
 					if err != nil {
-						notify("⚠️ Webhook analysis failed: agent unreachable")
+						send("⚠️ Webhook analysis failed: agent unreachable")
 						return
 					}
 					defer inst.End()
@@ -198,18 +195,18 @@ func main() {
 					resolver := relay.NewSessionResolver(db.SessionRepo(), inst.Client())
 					sessionID, err := resolver.Resolve(ctx, platform, channelID)
 					if err != nil {
-						notify("⚠️ Webhook analysis failed: session error")
+						send("⚠️ Webhook analysis failed: session error")
 						return
 					}
 
 					if err := inst.Client().SendMessage(ctx, sessionID, prompt, nil, nil); err != nil {
-						notify("⚠️ Webhook analysis failed: " + err.Error())
+						send("⚠️ Webhook analysis failed: " + err.Error())
 						return
 					}
 
 					events, err := inst.Client().Events(ctx, sessionID)
 					if err != nil {
-						notify("⚠️ Webhook analysis failed: events error")
+						send("⚠️ Webhook analysis failed: events error")
 						return
 					}
 
@@ -223,10 +220,10 @@ func main() {
 							if result == "" {
 								result = "(no output)"
 							}
-							notify(result)
+							send(result)
 							return
 						case "error":
-							notify("⚠️ " + ev.Delta)
+							send("⚠️ " + ev.Delta)
 							return
 						}
 					}
@@ -259,6 +256,24 @@ func main() {
 	slog.Info("shutting down")
 	for _, ch := range channels {
 		ch.Stop()
+	}
+}
+
+var outboundRenderer = render.New()
+
+// notify renders operator-facing text for the destination platform before it
+// reaches the adapter, so a prompt or agent result containing markup
+// characters is escaped rather than rejected by the platform.
+func notify(ch channel.Channel, channelID, text string) {
+	chunks, err := outboundRenderer.Render(text, render.PlatformFor(ch.Name()))
+	if err != nil || len(chunks) == 0 {
+		chunks = []string{text}
+	}
+	for _, chunk := range chunks {
+		if err := ch.Notify(channelID, chunk); err != nil {
+			slog.Warn("notification failed", "platform", ch.Name(), "channel_id", channelID, "error", err)
+			return
+		}
 	}
 }
 

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/anggasct/occa/internal/render"
+
 	"github.com/bwmarrin/discordgo"
 
 	"github.com/anggasct/occa/internal/channel"
@@ -55,7 +57,7 @@ func TestNormalizeMessageMarksFailedScopeLookup(t *testing.T) {
 }
 
 func TestSplitMessageShort(t *testing.T) {
-	chunks := splitMessage("hello", 2000)
+	chunks := render.Split("hello", 2000)
 	if len(chunks) != 1 {
 		t.Fatalf("expected 1 chunk, got %d", len(chunks))
 	}
@@ -66,7 +68,7 @@ func TestSplitMessageLong(t *testing.T) {
 	para2 := strings.Repeat("b", 1500)
 	text := para1 + "\n\n" + para2
 
-	chunks := splitMessage(text, 2000)
+	chunks := render.Split(text, 2000)
 	if len(chunks) < 2 {
 		t.Fatalf("expected at least 2 chunks, got %d", len(chunks))
 	}
@@ -74,14 +76,6 @@ func TestSplitMessageLong(t *testing.T) {
 		if len(chunk) > 2000 {
 			t.Fatalf("chunk %d exceeds 2000: %d", i, len(chunk))
 		}
-	}
-}
-
-func TestFindBreakPoint(t *testing.T) {
-	text := "hello world\n\nsecond paragraph"
-	bp := findBreakPoint(text, 20)
-	if bp != 11 {
-		t.Fatalf("expected break at 11, got %d", bp)
 	}
 }
 

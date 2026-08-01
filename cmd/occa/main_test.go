@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/anggasct/occa/internal/channel"
@@ -80,4 +81,44 @@ func TestRunChannelReportsStartError(t *testing.T) {
 	}
 
 	runChannel(context.Background(), failing, stubRouter{})
+}
+
+type captureChannel struct {
+	name string
+	send func(channelID, text string)
+}
+
+func (c *captureChannel) Name() string { return c.name }
+
+func (c *captureChannel) Start(context.Context, func(channel.IncomingMessage)) error { return nil }
+func (c *captureChannel) Stop() error                                                { return nil }
+func (c *captureChannel) Notify(channelID, text string) error {
+	if c.send != nil {
+		c.send(channelID, text)
+	}
+	return nil
+}
+
+func TestNotifyEscapesMarkupForTelegram(t *testing.T) {
+	var got string
+	notify(&captureChannel{
+		name: "telegram",
+		send: func(_, text string) { got = text },
+	}, "chat1", "scheduled run failed: <boom> & more")
+
+	if strings.Contains(got, "<boom>") || !strings.Contains(got, "&lt;boom&gt;") || !strings.Contains(got, "&amp; more") {
+		t.Fatalf("notify text not escaped for telegram: %q", got)
+	}
+}
+
+func TestNotifyPassesThroughDiscord(t *testing.T) {
+	var got string
+	notify(&captureChannel{
+		name: "discord",
+		send: func(_, text string) { got = text },
+	}, "123", "value <x> & more")
+
+	if got == "" || !strings.Contains(got, "<x>") {
+		t.Fatalf("discord content altered: %q", got)
+	}
 }

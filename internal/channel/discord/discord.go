@@ -12,6 +12,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 
 	"github.com/anggasct/occa/internal/channel"
+	"github.com/anggasct/occa/internal/render"
 )
 
 const maxDownloadSize = 10 * 1024 * 1024
@@ -175,7 +176,7 @@ func (a *Adapter) Stop() error {
 }
 
 func (a *Adapter) Notify(channelID string, text string) error {
-	for _, chunk := range splitMessage(text, 2000) {
+	for _, chunk := range render.Split(text, 2000) {
 		if _, err := a.session.ChannelMessageSend(channelID, chunk); err != nil {
 			return fmt.Errorf("discord: notify: %w", err)
 		}
@@ -304,7 +305,7 @@ func (rc *replyContext) Send(text string) (channel.MessageRef, error) {
 		return messageRef{id: msg.ID}, nil
 	}
 
-	chunks := splitMessage(text, 2000)
+	chunks := render.Split(text, 2000)
 	var lastRef channel.MessageRef
 
 	for _, chunk := range chunks {
@@ -360,39 +361,6 @@ func componentRows(buttons []channel.Button) []discordgo.MessageComponent {
 		})
 	}
 	return append(components, discordgo.ActionsRow{Components: btns})
-}
-
-func splitMessage(text string, maxLen int) []string {
-	if len(text) <= maxLen {
-		return []string{text}
-	}
-
-	var chunks []string
-	remaining := text
-	for len(remaining) > 0 {
-		if len(remaining) <= maxLen {
-			chunks = append(chunks, remaining)
-			break
-		}
-
-		breakAt := findBreakPoint(remaining, maxLen)
-		chunks = append(chunks, remaining[:breakAt])
-		remaining = strings.TrimLeft(remaining[breakAt:], "\n")
-	}
-	return chunks
-}
-
-func findBreakPoint(text string, maxLen int) int {
-	if idx := strings.LastIndex(text[:maxLen], "\n\n"); idx > 0 {
-		return idx
-	}
-	if idx := strings.LastIndex(text[:maxLen], "\n"); idx > 0 {
-		return idx
-	}
-	if idx := strings.LastIndex(text[:maxLen], " "); idx > 0 {
-		return idx
-	}
-	return maxLen
 }
 
 type messageRef struct {

@@ -3,12 +3,15 @@ package telegram
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
+
+	"github.com/anggasct/occa/internal/render"
 
 	"github.com/anggasct/occa/internal/channel"
 )
 
 func TestSplitMessageShort(t *testing.T) {
-	chunks := splitMessage("hello world", 4096)
+	chunks := render.Split("hello world", 4096)
 	if len(chunks) != 1 {
 		t.Fatalf("expected 1 chunk, got %d", len(chunks))
 	}
@@ -32,7 +35,7 @@ func TestSplitMessageLong(t *testing.T) {
 	para2 := strings.Repeat("b", 3000)
 	text := para1 + "\n\n" + para2
 
-	chunks := splitMessage(text, 4096)
+	chunks := render.Split(text, 4096)
 	if len(chunks) < 2 {
 		t.Fatalf("expected at least 2 chunks, got %d", len(chunks))
 	}
@@ -50,7 +53,7 @@ func TestSplitMessageCodeBlock(t *testing.T) {
 	}
 	text := strings.Join(lines, "\n")
 
-	chunks := splitMessage(text, 4096)
+	chunks := render.Split(text, 4096)
 	for i, chunk := range chunks {
 		if len(chunk) > 4096 {
 			t.Fatalf("chunk %d exceeds max: %d", i, len(chunk))
@@ -62,10 +65,10 @@ func TestSplitMessageCodeBlock(t *testing.T) {
 	}
 }
 
-func TestFindBreakPoint(t *testing.T) {
-	text := "hello world\n\nsecond paragraph"
-	bp := findBreakPoint(text, 20)
-	if bp != 11 {
-		t.Fatalf("expected break at 11 (double newline), got %d", bp)
+func TestSplitMessageNeverCutsRune(t *testing.T) {
+	for _, chunk := range render.Split(strings.Repeat("日", 3000), 4096) {
+		if !utf8.ValidString(chunk) {
+			t.Fatal("chunk is not valid UTF-8")
+		}
 	}
 }

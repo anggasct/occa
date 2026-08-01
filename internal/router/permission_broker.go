@@ -58,6 +58,7 @@ type permissionBroker struct {
 type permissionPromptHandler struct {
 	broker    *permissionBroker
 	owner     *permissionOwner
+	encode    func(string) string
 	client    relay.Client
 	platform  string
 	channelID string
@@ -100,7 +101,7 @@ func (h *permissionPromptHandler) Prompt(ctx context.Context, request relay.Perm
 	h.broker.records[token] = record
 	h.broker.mu.Unlock()
 
-	ref, err := h.reply.SendWithButtons(permissionPromptText(request), record.buttons)
+	ref, err := h.reply.SendWithButtons(h.promptText(request), record.buttons)
 	if err != nil {
 		h.broker.removePending(record)
 		return fmt.Errorf("permission: send prompt: %w", err)
@@ -304,6 +305,16 @@ func permissionButtons(token string) []channel.Button {
 		{Label: "✅ Always allow", Value: "permission:" + token + ":always"},
 		{Label: "❌ Deny", Value: "permission:" + token + ":reject"},
 	}
+}
+
+// promptText escapes through the platform renderer: the permission name and
+// tool come from the agent and can contain markup characters.
+func (h *permissionPromptHandler) promptText(request relay.PermissionRequest) string {
+	text := permissionPromptText(request)
+	if h.encode == nil {
+		return text
+	}
+	return h.encode(text)
 }
 
 func permissionPromptText(request relay.PermissionRequest) string {

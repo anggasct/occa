@@ -71,15 +71,13 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 			return ctx.Err()
 
 		case <-timeoutTimer.C:
-			s.reply.Send("⚠️ Task timed out (no events for 10 minutes). It may still be running, check /occa:status")
+			s.notice("⚠️ Task timed out (no events for 10 minutes). It may still be running, check /occa:status")
 			return ErrTimeout
 
 		case ev, ok := <-events:
 			if !ok {
 				syncErr := s.finalSync(&refs, &lastChunks, buf.String())
-				if _, err := s.reply.Send(incompleteStreamMessage); err != nil {
-					slog.Warn("streaming: incomplete response notice failed", "error", err)
-				}
+				s.notice(incompleteStreamMessage)
 				if syncErr != nil {
 					return fmt.Errorf("%w: final sync: %v", ErrIncompleteStream, syncErr)
 				}
@@ -95,7 +93,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 			case "done":
 				return s.finalSync(&refs, &lastChunks, buf.String())
 			case "error":
-				s.reply.Send("⚠️ Agent error: " + ev.Delta)
+				s.notice("⚠️ Agent error: " + ev.Delta)
 				return fmt.Errorf("%w: %s", ErrStreamFailed, ev.Delta)
 			case "permission_asked":
 				if ev.Permission != nil {
@@ -119,6 +117,18 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				intervalIdx++
 			}
 			timer.Reset(intervals[intervalIdx])
+		}
+	}
+}
+
+// notice sends a status line that did not come from the response buffer. It
+// goes through the renderer like everything else so agent-supplied error text
+// cannot break the platform's parser.
+func (s *Streamer) notice(text string) {
+	for _, chunk := range s.renderChunks(text) {
+		if _, err := s.reply.Send(chunk); err != nil {
+			slog.Warn("streaming: notice failed", "error", err)
+			return
 		}
 	}
 }
