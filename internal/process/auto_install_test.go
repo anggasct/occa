@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -114,5 +116,41 @@ func TestWrapWithAutoInstallConcurrentSpawnsShareOneInstall(t *testing.T) {
 
 	if got := atomic.LoadInt32(&installs); got != 1 {
 		t.Fatalf("installs = %d, want 1 for two concurrent workdirs racing on the same missing binary", got)
+	}
+}
+
+func TestWrapWithAutoInstallCachesFailureAcrossSequentialCalls(t *testing.T) {
+	var installs int32
+	factory := wrapWithAutoInstall(notFoundFactory("opencode"), "opencode", true, func(ctx context.Context, binary string) error {
+		atomic.AddInt32(&installs, 1)
+		return errors.New("curl: connection refused")
+	})
+
+	if _, err := factory(context.Background(), "/repo/a", 4096); !isBinaryNotFound(err) {
+		t.Fatalf("expected not-found error on first call, got %v", err)
+	}
+	if _, err := factory(context.Background(), "/repo/b", 4096); !isBinaryNotFound(err) {
+		t.Fatalf("expected not-found error on second call, got %v", err)
+	}
+
+	if got := atomic.LoadInt32(&installs); got != 1 {
+		t.Fatalf("installs = %d, want 1 (failed install cached, not re-run on later spawn failures)", got)
+	}
+}
+
+func TestAddOpenCodeBinToPathPrependsAndIsIdempotent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "/usr/bin")
+
+	addOpenCodeBinToPath()
+	want := filepath.Join(home, ".opencode", "bin") + string(os.PathListSeparator) + "/usr/bin"
+	if got := os.Getenv("PATH"); got != want {
+		t.Fatalf("PATH = %q, want %q", got, want)
+	}
+
+	addOpenCodeBinToPath()
+	if got := os.Getenv("PATH"); got != want {
+		t.Fatalf("PATH after second call = %q, want unchanged %q (idempotent)", got, want)
 	}
 }

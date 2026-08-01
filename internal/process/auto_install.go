@@ -4,52 +4,29 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 )
 
-// installAttempt tracks one in-flight (or just-finished) installer run so
-// concurrent callers share its result instead of installing in parallel.
-type installAttempt struct {
-	done chan struct{}
-	err  error
-}
-
 // wrapWithAutoInstall wraps factory: on a binary-not-found spawn error, if
-// autoInstall is enabled, runs installer once (shared across concurrent
-// callers via a mutex) and retries the spawn exactly once.
+// autoInstall is enabled, runs installer at most once for the life of the
+// wrapped factory — shared across concurrent callers and cached on both
+// success and failure — then retries the spawn exactly once per call.
 func wrapWithAutoInstall(factory instanceFactory, binary string, autoInstall bool, installer func(ctx context.Context, binary string) error) instanceFactory {
 	if !autoInstall {
 		return factory
 	}
 
-	var mu sync.Mutex
-	var attempt *installAttempt
-
+	var once sync.Once
+	var installErr error
 	ensureInstalled := func(ctx context.Context) error {
-		mu.Lock()
-		if a := attempt; a != nil {
-			mu.Unlock()
-			select {
-			case <-a.done:
-				return a.err
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-		a := &installAttempt{done: make(chan struct{})}
-		attempt = a
-		mu.Unlock()
-
-		err := installer(ctx, binary)
-
-		mu.Lock()
-		attempt = nil
-		mu.Unlock()
-		a.err = err
-		close(a.done)
-		return err
+		once.Do(func() {
+			installErr = installer(ctx, binary)
+		})
+		return installErr
 	}
 
 	return func(ctx context.Context, workdir string, port int) (*Instance, error) {
@@ -79,5 +56,25 @@ func installOpenCode(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("process: install opencode: %w: %s", err, strings.TrimSpace(string(out)))
 	}
+	addOpenCodeBinToPath()
 	return nil
+}
+
+// addOpenCodeBinToPath prepends OpenCode's fixed install directory
+// ($HOME/.opencode/bin) to this process's PATH so a freshly installed binary
+// resolves on retry. The official installer only appends to shell rc files
+// for future shells — it cannot update the already-running daemon's PATH.
+func addOpenCodeBinToPath() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	dir := filepath.Join(home, ".opencode", "bin")
+	path := os.Getenv("PATH")
+	for _, p := range filepath.SplitList(path) {
+		if p == dir {
+			return
+		}
+	}
+	os.Setenv("PATH", dir+string(os.PathListSeparator)+path)
 }
