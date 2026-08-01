@@ -1002,7 +1002,31 @@ func TestChannelThreadIsolation(t *testing.T) {
 
 type fakeTokenGen struct{}
 
-func (f *fakeTokenGen) Generate(_, _ string) string { return "test-token-123" }
+func (f *fakeTokenGen) Generate(_, _ string) (string, error) { return "test-token-123", nil }
+
+type failingTokenGen struct{}
+
+func (f *failingTokenGen) Generate(_, _ string) (string, error) { return "", errors.New("rng failed") }
+
+func TestPassthroughSkipsTokenLineWhenGenerationFails(t *testing.T) {
+	r, client, reply := newTestRouter()
+	r.SetTokenGenerator(&failingTokenGen{})
+
+	if err := r.Route(context.Background(), msg("hello world", reply)); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	waitForDispatch(t, client)
+	waitForResponse(t, r)
+	if client.rawMsg == "" {
+		t.Fatal("message was not dispatched")
+	}
+	if strings.Contains(client.rawMsg, "OCCA schedule token") {
+		t.Fatalf("token line appended despite failure: %q", client.rawMsg)
+	}
+	if strings.Contains(client.rawMsg, "test-token") {
+		t.Fatalf("weak token leaked into message: %q", client.rawMsg)
+	}
+}
 
 func TestPassthroughAppendsScheduleToken(t *testing.T) {
 	r, client, reply := newTestRouter()

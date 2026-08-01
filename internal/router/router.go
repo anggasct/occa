@@ -58,7 +58,7 @@ type ScheduleStore interface {
 }
 
 type TokenGenerator interface {
-	Generate(platform, channelID string) string
+	Generate(platform, channelID string) (string, error)
 }
 
 func (r *Router) SetScheduler(s ScheduleStore) {
@@ -281,8 +281,12 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 	var model *relay.ModelRef
 	var attachments []relay.Attachment
 	if !strings.HasPrefix(text, "/") && r.tokenGen != nil {
-		token := r.tokenGen.Generate(msg.Platform, msg.ChannelID)
-		text = text + "\n\n—\nOCCA schedule token: " + token
+		token, err := r.tokenGen.Generate(msg.Platform, msg.ChannelID)
+		if err != nil {
+			slog.Error("failed to generate schedule token; message sent without it", "platform", msg.Platform, "channel_id", msg.ChannelID, "error", err)
+		} else {
+			text = text + "\n\n—\nOCCA schedule token: " + token
+		}
 	}
 
 	if !strings.HasPrefix(msg.Text, "/") {
