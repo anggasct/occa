@@ -28,9 +28,12 @@ jobs:
             GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "dist/occa_${os}_${arch}" ./cmd/occa
           done
 
+      - name: Stage installer
+        run: cp install.sh dist/install.sh
+
       - name: Verify asset names
         run: |
-          for asset in occa_linux_amd64 occa_linux_arm64 occa_darwin_amd64 occa_darwin_arm64; do
+          for asset in occa_linux_amd64 occa_linux_arm64 occa_darwin_amd64 occa_darwin_arm64 install.sh; do
             test -f "dist/$asset" || { echo "missing $asset" >&2; exit 1; }
           done
 
