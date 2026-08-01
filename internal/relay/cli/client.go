@@ -21,15 +21,12 @@ type runResult struct {
 	stderr func() string
 }
 
-// runner is the subprocess seam; production uses exec, tests inject canned
-// output.
+// runner is injectable so tests can supply canned output.
 type runner func(ctx context.Context, binary string, args []string) (*runResult, error)
 
-// Client implements relay.Client against a subprocess-invoked CLI agent in
-// headless streaming mode. One subprocess runs per SendMessage call; stdout
-// JSONL is parsed into relay events pushed onto a per-session channel that
-// Events returns, reconciling the CLI's send+stream-coupled model with the
-// interface's decoupled shape.
+// Client implements relay.Client against a subprocess-invoked CLI agent. The
+// CLI couples send and stream, so each SendMessage spawns one subprocess and
+// pushes parsed stdout events onto a per-session channel Events returns.
 type Client struct {
 	binary  string
 	run     runner
@@ -73,8 +70,8 @@ func execRunner(ctx context.Context, binary string, args []string) (*runResult, 
 
 var _ relay.Client = (*Client)(nil)
 
-// CreateSession mints a local placeholder id; nothing exists to create in the
-// tool until the first message is sent.
+// CreateSession mints a local placeholder id; the tool has nothing to create
+// until the first message is sent.
 func (c *Client) CreateSession(ctx context.Context) (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
@@ -87,8 +84,7 @@ func (c *Client) Providers(ctx context.Context) (relay.Providers, error) {
 	return relay.Providers{}, nil
 }
 
-// Events returns the channel the session's latest SendMessage populates. A
-// fresh channel is minted per call, mirroring one event stream per turn.
+// Events mints a fresh channel per call, mirroring one event stream per turn.
 func (c *Client) Events(ctx context.Context, sessionID string) (<-chan relay.Event, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -97,11 +93,9 @@ func (c *Client) Events(ctx context.Context, sessionID string) (<-chan relay.Eve
 	return ch, nil
 }
 
-// SendMessage spawns one CLI invocation for the session. The first call for a
+// SendMessage spawns one CLI invocation per call. The first call for a
 // session runs without --resume; later calls resume with the tool's real
-// session id captured from the previous result line. Events are parsed from
-// stdout asynchronously, so a caller that calls Events afterwards still
-// receives them.
+// session id captured from the previous result line.
 func (c *Client) SendMessage(ctx context.Context, sessionID, text string, model *relay.ModelRef, attachments []relay.Attachment) error {
 	if len(attachments) > 0 {
 		return fmt.Errorf("cli: attachments are not supported by the CLI backend")
@@ -134,9 +128,8 @@ func (c *Client) SendMessage(ctx context.Context, sessionID, text string, model 
 	return nil
 }
 
-// stream parses stdout until EOF, records the tool's real session id, and
-// closes the session channel. An invocation that produced no events is
-// surfaced as an error event — never a silent empty response.
+// stream parses stdout until EOF and closes the session channel. Zero
+// parsed events surface as an error event, never a silent empty response.
 func (c *Client) stream(ctx context.Context, sessionID string, ch chan<- relay.Event, res *runResult) {
 	defer c.closeStream(sessionID)
 	defer func() { _ = res.stdout.Close() }()
@@ -180,14 +173,14 @@ func (c *Client) stream(ctx context.Context, sessionID string, ch chan<- relay.E
 	}
 }
 
-// RunCommand is best-effort for CLI backends: the command text is passed
-// through as a normal prompt, since no discrete command endpoint exists.
+// RunCommand passes the command through as a prompt; CLI backends have no
+// discrete command endpoint.
 func (c *Client) RunCommand(ctx context.Context, sessionID, command string) error {
 	return c.SendMessage(ctx, sessionID, command, nil, nil)
 }
 
-// ReplyPermission is unsupported: the CLI backend pre-approves tools for
-// unattended runs, so permission prompts never surface through it.
+// ReplyPermission is unsupported: tools are pre-approved for unattended runs,
+// so permission prompts never surface through this backend.
 func (c *Client) ReplyPermission(ctx context.Context, requestID string, reply relay.PermissionReply) error {
 	return fmt.Errorf("cli: permission replies are not supported by the CLI backend")
 }

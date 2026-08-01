@@ -7,8 +7,8 @@ import (
 	"github.com/anggasct/occa/internal/relay"
 )
 
-// parser converts stream-json stdout lines into relay events. It also
-// captures the tool's own session id from the terminal result line.
+// parser turns stream-json stdout lines into relay events and captures the
+// tool's own session id from the terminal result line.
 type parser struct {
 	realID string
 }
@@ -63,8 +63,8 @@ func (p *parser) parseAssistant(obj map[string]any) *relay.Event {
 	return &relay.Event{Type: "delta", Delta: text}
 }
 
-// textFromContent joins the text blocks of an assistant message's content,
-// which may be a string or a list of typed blocks.
+// textFromContent joins an assistant message's content, which is either a
+// string or a list of typed blocks.
 func textFromContent(content any) string {
 	switch c := content.(type) {
 	case string:
