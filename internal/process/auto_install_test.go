@@ -104,7 +104,7 @@ func TestWrapWithAutoInstallConcurrentSpawnsShareOneInstall(t *testing.T) {
 		wg.Add(1)
 		go func(workdir string) {
 			defer wg.Done()
-			factory(context.Background(), workdir, 4096)
+			_, _ = factory(context.Background(), workdir, 4096)
 		}(wd)
 	}
 
