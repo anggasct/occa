@@ -95,7 +95,7 @@ func TestFetchFileTimeout(t *testing.T) {
 
 func TestFetchFileSucceeds(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("voice-data"))
+		_, _ = w.Write([]byte("voice-data"))
 	}))
 	defer ts.Close()
 

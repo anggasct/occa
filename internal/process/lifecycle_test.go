@@ -36,7 +36,7 @@ func TestAgentHelperProcess(t *testing.T) {
 			port, err := strconv.Atoi(args[i+1])
 			if err == nil && port != 0 {
 				go func() {
-					http.ListenAndServe(fmt.Sprintf("127.0.0.1:%d", port), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					_ = http.ListenAndServe(fmt.Sprintf("127.0.0.1:%d", port), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 						w.WriteHeader(http.StatusOK)
 					}))
 				}()
@@ -51,7 +51,7 @@ func TestAgentHelperProcess(t *testing.T) {
 		if err := child.Start(); err != nil {
 			os.Exit(2)
 		}
-		os.WriteFile(os.Getenv("GO_HELPER_PID_FILE"), []byte(strconv.Itoa(child.Process.Pid)), 0o600)
+		_ = os.WriteFile(os.Getenv("GO_HELPER_PID_FILE"), []byte(strconv.Itoa(child.Process.Pid)), 0o600)
 		signal.Ignore(syscall.SIGTERM)
 	case "child-ignore-term":
 		signal.Ignore(syscall.SIGTERM)
@@ -59,7 +59,7 @@ func TestAgentHelperProcess(t *testing.T) {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGTERM)
 		<-sigCh
-		os.WriteFile(os.Getenv("GO_HELPER_MARKER"), []byte("term"), 0o600)
+		_ = os.WriteFile(os.Getenv("GO_HELPER_MARKER"), []byte("term"), 0o600)
 		os.Exit(0)
 	}
 	select {}
@@ -72,7 +72,7 @@ func freePort(t *testing.T) int {
 		t.Fatalf("free port: %v", err)
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
-	ln.Close()
+	_ = ln.Close()
 	return port
 }
 

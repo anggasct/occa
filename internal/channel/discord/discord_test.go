@@ -115,7 +115,7 @@ func TestDownloadAttachmentTimeout(t *testing.T) {
 
 func TestDownloadAttachmentSucceeds(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("file-data"))
+		_, _ = w.Write([]byte("file-data"))
 	}))
 	defer ts.Close()
 

@@ -24,7 +24,7 @@ func TestConcurrentWritersAllSucceed(t *testing.T) {
 		go func(w int) {
 			defer wg.Done()
 			for i := 0; i < perWriter; i++ {
-				platform := fmt.Sprintf("telegram")
+				platform := "telegram"
 				channelID := fmt.Sprintf("chat-%d", w)
 				userID := fmt.Sprintf("user-%d", i)
 
@@ -76,13 +76,13 @@ func TestSchemaVersionAndReopen(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	assertVersion(t, s, schemaVersion)
-	s.Close()
+	_ = s.Close()
 
 	s2, err := Open(path)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 	assertVersion(t, s2, schemaVersion)
 }
 
@@ -141,13 +141,13 @@ VALUES ('chat-legacy', 'telegram', 'agent-sess-1', 1, 1, 1);
 	if _, err := legacyDB.Exec(legacy); err != nil {
 		t.Fatalf("legacy ddl: %v", err)
 	}
-	legacyDB.Close()
+	_ = legacyDB.Close()
 
 	s, err := Open(path)
 	if err != nil {
 		t.Fatalf("adopt open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	assertVersion(t, s, schemaVersion)
 
 	id, err := s.SessionRepo().Active(context.Background(), "telegram", "chat-legacy")
@@ -193,17 +193,18 @@ func TestQueriesUseIndexes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: explain: %v", st.name, err)
 		}
+		defer func() { _ = rows.Close() }()
 		var plan strings.Builder
 		for rows.Next() {
 			var id, parent int
 			var notused, detail string
 			if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
-				rows.Close()
+				_ = rows.Close()
 				t.Fatalf("%s: scan plan: %v", st.name, err)
 			}
 			plan.WriteString(detail)
 		}
-		rows.Close()
+		_ = rows.Close()
 		if strings.Contains(plan.String(), "SCAN") {
 			t.Fatalf("%s: query plan scans the table: %s", st.name, plan.String())
 		}

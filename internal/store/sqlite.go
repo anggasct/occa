@@ -96,15 +96,15 @@ func Open(path string) (*SQLiteStore, error) {
 	}
 
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("store: wal mode: %w", err)
 	}
 	if _, err := db.Exec(fmt.Sprintf("PRAGMA busy_timeout=%d", busyTimeoutMilli)); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("store: busy timeout: %w", err)
 	}
 	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("store: foreign keys: %w", err)
 	}
 
@@ -114,7 +114,7 @@ func Open(path string) (*SQLiteStore, error) {
 
 	s := &SQLiteStore{db: db}
 	if err := s.migrate(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 
@@ -142,11 +142,11 @@ func (s *SQLiteStore) migrate() error {
 			return fmt.Errorf("store: begin migration %d: %w", i+1, err)
 		}
 		if err := migrations[i](tx); err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			return fmt.Errorf("store: migration %d: %w", i+1, err)
 		}
 		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", i+1)); err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			return fmt.Errorf("store: stamp version %d: %w", i+1, err)
 		}
 		if err := tx.Commit(); err != nil {

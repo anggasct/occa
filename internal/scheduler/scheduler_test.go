@@ -147,7 +147,7 @@ func TestStopWaitsForRunningJobThenCancels(t *testing.T) {
 	stopDone := make(chan struct{})
 	go func() {
 		defer close(stopDone)
-		s.Stop()
+		_ = s.Stop()
 	}()
 
 	select {
@@ -171,7 +171,7 @@ func TestStopWithoutJobsReturns(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	done := make(chan struct{})
-	go func() { defer close(done); s.Stop() }()
+	go func() { defer close(done); _ = s.Stop() }()
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):

@@ -59,7 +59,7 @@ func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessag
 
 	go func() {
 		<-ctx.Done()
-		s.Close()
+		_ = s.Close()
 	}()
 
 	return nil

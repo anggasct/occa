@@ -358,7 +358,7 @@ func TestStartBindFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	srv := New(config.WebhookConfig{Bind: ln.Addr().String()}, nil)
 	if err := srv.Start(context.Background()); err == nil {
@@ -371,13 +371,13 @@ func TestStartServesImmediately(t *testing.T) {
 	if err := srv.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer srv.Stop(context.Background())
+	defer func() { _ = srv.Stop(context.Background()) }()
 
 	resp, err := http.Get("http://" + srv.Addr() + "/unknown")
 	if err != nil {
 		t.Fatalf("request after Start returned: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404 for unknown path, got %d", resp.StatusCode)
 	}
@@ -388,7 +388,7 @@ func TestServerTimeoutsSet(t *testing.T) {
 	if err := srv.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer srv.Stop(context.Background())
+	defer func() { _ = srv.Stop(context.Background()) }()
 
 	s := srv.httpSrv
 	if s.ReadHeaderTimeout <= 0 || s.ReadTimeout <= 0 || s.WriteTimeout <= 0 || s.IdleTimeout <= 0 {
@@ -401,7 +401,7 @@ func TestReadHeaderTimeoutClosesSilentConnection(t *testing.T) {
 	if err := srv.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer srv.Stop(context.Background())
+	defer func() { _ = srv.Stop(context.Background()) }()
 
 	srv.readHeaderTimeout = 200 * time.Millisecond
 
@@ -409,9 +409,9 @@ func TestReadHeaderTimeoutClosesSilentConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
-	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
 	buf := make([]byte, 1)
 	if _, err := conn.Read(buf); err == nil {
 		t.Fatal("server held a silent connection open past the header timeout")

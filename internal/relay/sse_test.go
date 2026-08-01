@@ -15,7 +15,9 @@ import (
 func TestReadSSELargeLineDelivered(t *testing.T) {
 	big := strings.Repeat("x", 1024*1024)
 	ch := make(chan Event, 8)
-	go readSSE(context.Background(), strings.NewReader("event: message.part.delta\ndata: "+big+"\n\n"), ch)
+	go func() {
+		_ = readSSE(context.Background(), strings.NewReader("event: message.part.delta\ndata: "+big+"\n\n"), ch)
+	}()
 
 	ev := <-ch
 	if ev.Type != "delta" || ev.Delta != big {
@@ -97,7 +99,7 @@ func TestReadSSECancelIsNotReadFailure(t *testing.T) {
 	go func() { done <- readSSE(ctx, pr, ch) }()
 
 	cancel()
-	pw.Close() // unblock the pending read
+	_ = pw.Close() // unblock the pending read
 
 	select {
 	case err := <-done:
@@ -120,7 +122,7 @@ func TestEventsLargeLineThroughHTTPServer(t *testing.T) {
 	big := strings.Repeat("z", 1024*1024)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		io.WriteString(w, "event: message.part.delta\ndata: "+big+"\n\n")
+		_, _ = io.WriteString(w, "event: message.part.delta\ndata: "+big+"\n\n")
 	}))
 	defer ts.Close()
 

@@ -94,7 +94,7 @@ func newTestManager(t *testing.T, cfg config.AgentConfig, sp *fakeSpawner) *Mana
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	t.Cleanup(func() { m.Close() })
+	t.Cleanup(func() { _ = m.Close() })
 	return m
 }
 
@@ -357,7 +357,7 @@ func TestCloseDuringSpawnDoesNotLeak(t *testing.T) {
 	<-spawnStarted // the spawn is now inside the factory
 
 	closeDone := make(chan struct{})
-	go func() { m.Close(); close(closeDone) }()
+	go func() { _ = m.Close(); close(closeDone) }()
 
 	select {
 	case <-closeDone:
