@@ -44,3 +44,9 @@ jobs:
 
       - name: Test (race)
         run: go test ./... -race -count=1
+
+      - name: Shellcheck
+        run: shellcheck install.sh scripts/install_test.sh
+
+      - name: Install script test
+        run: sh scripts/install_test.sh

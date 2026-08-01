@@ -1,0 +1,161 @@
+#!/bin/sh
+set -eu
+
+# Shell harness for install.sh: stubs uname, curl, and opencode on PATH so
+# every acceptance criterion is an exit-code or file-existence assertion.
+# No network access and no real download happen.
+
+fail() {
+	echo "FAIL: $*" >&2
+	exit 1
+}
+
+pass() {
+	echo "ok: $*"
+}
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+stub_bin="$work/stub-bin"
+mkdir -p "$stub_bin"
+calls="$work/calls.log"
+home="$work/home"
+mkdir -p "$home"
+
+cat > "$stub_bin/uname" <<'STUB'
+#!/bin/sh
+if [ "${1:-}" = "-m" ]; then
+	echo "$FAKE_UNAME_M"
+else
+	echo "$FAKE_UNAME_S"
+fi
+STUB
+
+cat > "$stub_bin/curl" <<'STUB'
+#!/bin/sh
+{
+	echo "curl $*"
+} >> "$CALLS_LOG"
+prev=""
+for arg in "$@"; do
+	if [ "$prev" = "-o" ]; then
+		printf 'stub-binary\n' > "$arg"
+	fi
+	prev="$arg"
+done
+STUB
+
+cat > "$stub_bin/opencode" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+chmod +x "$stub_bin/uname" "$stub_bin/curl" "$stub_bin/opencode"
+
+run_install() {
+	(
+		export PATH="$stub_bin:/usr/bin:/bin"
+		export HOME="$home"
+		export CALLS_LOG="$calls"
+		export FAKE_UNAME_S="${1:-}"
+		export FAKE_UNAME_M="${2:-}"
+		shift 2 2>/dev/null || true
+		export OCCA_INSTALL_DIR="${OCCA_INSTALL_DIR:-}"
+		"$@"
+	) 2>"$work/err.log" || return $?
+	cat "$work/err.log" >&2
+}
+
+count_calls() {
+	grep -c "$1" "$calls" 2>/dev/null || true
+}
+
+asset_for() {
+	case "$1/$2" in
+		Linux/x86_64) echo "occa_linux_amd64" ;;
+		Linux/aarch64) echo "occa_linux_arm64" ;;
+		Darwin/x86_64) echo "occa_darwin_amd64" ;;
+		Darwin/arm64) echo "occa_darwin_arm64" ;;
+	esac
+}
+
+for pair in "Linux x86_64" "Linux aarch64" "Darwin x86_64" "Darwin arm64"; do
+	os=${pair% *}
+	arch=${pair#* }
+	inst="$work/inst-$os-$arch"
+	mkdir -p "$inst"
+	: > "$calls"
+	rm -f "$inst/occa"
+
+	if ! run_install "$os" "$arch" env OCCA_INSTALL_DIR="$inst" sh ./install.sh; then
+		fail "AC-01 $os/$arch: install exited non-zero"
+	fi
+	asset=$(asset_for "$os" "$arch")
+	if [ "$(count_calls "$asset")" -ne 1 ]; then
+		fail "AC-01 $os/$arch: expected one download of $asset"
+	fi
+	if [ ! -x "$inst/occa" ]; then
+		fail "AC-01 $os/$arch: no executable occa at install path"
+	fi
+	pass "AC-01 $os/$arch: binary installed"
+done
+
+# AC-02: OCCA_INSTALL_DIR overrides default and XDG_BIN_DIR.
+inst="$work/inst-override"
+xdg="$work/inst-xdg"
+mkdir -p "$inst" "$xdg"
+: > "$calls"
+run_install "Linux" "x86_64" env OCCA_INSTALL_DIR="$inst" XDG_BIN_DIR="$xdg" sh ./install.sh
+if [ ! -x "$inst/occa" ]; then
+	fail "AC-02: OCCA_INSTALL_DIR ignored"
+fi
+if [ -e "$xdg/occa" ]; then
+	fail "AC-02: binary landed in XDG_BIN_DIR despite OCCA_INSTALL_DIR"
+fi
+pass "AC-02: OCCA_INSTALL_DIR wins over XDG_BIN_DIR"
+
+# AC-03: opencode missing -> exactly one call to its installer.
+: > "$calls"
+mv "$stub_bin/opencode" "$work/opencode-hidden"
+run_install "Linux" "x86_64" env OCCA_INSTALL_DIR="$inst" sh ./install.sh
+if [ "$(count_calls "opencode.ai/install")" -ne 1 ]; then
+	fail "AC-03: expected exactly one opencode installer call"
+fi
+pass "AC-03: opencode installer invoked once when missing"
+
+# AC-04: opencode present -> no installer call.
+: > "$calls"
+mv "$work/opencode-hidden" "$stub_bin/opencode"
+run_install "Linux" "x86_64" env OCCA_INSTALL_DIR="$inst" sh ./install.sh
+if [ "$(count_calls "opencode.ai/install")" -ne 0 ]; then
+	fail "AC-04: opencode installer called despite binary on PATH"
+fi
+pass "AC-04: opencode not reinstalled when present"
+
+# AC-05: unsupported platform fails with nothing installed.
+inst_bad="$work/inst-bad"
+mkdir -p "$inst_bad"
+: > "$calls"
+rm -f "$inst_bad/occa"
+if run_install "Windows" "x86_64" env OCCA_INSTALL_DIR="$inst_bad" sh ./install.sh; then
+	fail "AC-05: unsupported OS did not fail"
+fi
+if ! grep -q "unsupported OS: Windows" "$work/err.log"; then
+	fail "AC-05: error message does not name the unsupported OS"
+fi
+if [ -e "$inst_bad/occa" ]; then
+	fail "AC-05: binary installed on unsupported platform"
+fi
+pass "AC-05: unsupported OS fails cleanly"
+
+# Idempotence: second run against the same install dir succeeds.
+: > "$calls"
+if ! run_install "Linux" "x86_64" env OCCA_INSTALL_DIR="$inst" sh ./install.sh; then
+	fail "idempotence: second run failed"
+fi
+if [ "$(count_calls "occa_linux_amd64")" -ne 1 ]; then
+	fail "idempotence: second run did not redownload/overwrite"
+fi
+pass "idempotence: repeat install exits 0"
+
+echo "all tests passed"
