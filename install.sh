@@ -5,7 +5,16 @@ set -eu
 # binary, and delegates the OpenCode prerequisite to its own official
 # installer when it is not already on PATH.
 
-RELEASE_BASE="${OCCA_RELEASE_BASE:-https://github.com/anggasct/occa/releases/latest/download}"
+version="${OCCA_VERSION:-}"
+if [ -n "$version" ]; then
+	case "$version" in
+		v*) ;;
+		*) version="v${version}" ;;
+	esac
+	RELEASE_BASE="https://github.com/anggasct/occa/releases/download/${version}"
+else
+	RELEASE_BASE="${OCCA_RELEASE_BASE:-https://github.com/anggasct/occa/releases/latest/download}"
+fi
 
 uname_os=$(uname -s)
 uname_arch=$(uname -m)
