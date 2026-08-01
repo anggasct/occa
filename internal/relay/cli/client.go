@@ -172,8 +172,7 @@ func (c *Client) stream(ctx context.Context, sessionID string, ch chan<- relay.E
 	}
 }
 
-// RunCommand passes the command through as a prompt; CLI backends have no
-// discrete command endpoint.
+// RunCommand is best-effort: CLI backends have no discrete command endpoint.
 func (c *Client) RunCommand(ctx context.Context, sessionID, command string) error {
 	return c.SendMessage(ctx, sessionID, command, nil, nil)
 }
