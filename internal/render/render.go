@@ -70,7 +70,10 @@ func PlatformFor(name string) Platform {
 // Split cuts s into chunks that each measure at most limit, preferring a
 // code-block, paragraph, line, then word boundary. Chunks never split a rune:
 // both platforms reject invalid UTF-8, and text without ASCII whitespace
-// (CJK, Thai, base64) otherwise gets cut mid-character.
+// (CJK, Thai, base64) otherwise gets cut mid-character. Boundaries never
+// leave an HTML tag open in a chunk; a hard cut inside an open tag span
+// closes the open tags at the cut and reopens them on the next chunk, which
+// is the one case where concatenating the chunks differs from the input.
 //
 // Length is measured in UTF-16 code units, the unit Telegram counts against
 // its limit; Discord counts code points, for which this is a safe upper bound.
@@ -94,8 +97,15 @@ func Split(s string, limit int) []string {
 			// in range: close the open tags here and reopen them on the next
 			// chunk so each chunk stays well-formed for the platform parser.
 			if stack := openTagStack(chunk); len(stack) > 0 {
-				chunk += closeTags(stack)
-				remaining = openTags(stack) + strings.TrimLeft(remaining[breakAt:], "\n")
+				closes := closeTags(stack)
+				// The closing tags consume budget too: shorten the cut so the
+				// chunk still measures at most limit.
+				if budget := limit - measure(closes); budget > 0 {
+					chunk = remaining[:maxPrefix(remaining, budget)]
+				}
+				chunk += closes
+				consumed := len(chunk) - len(closes)
+				remaining = openTags(stack) + strings.TrimLeft(remaining[consumed:], "\n")
 				chunks = append(chunks, chunk)
 				continue
 			}
@@ -140,7 +150,9 @@ func openTagStack(s string) []string {
 		}
 		for _, t := range closeTagTokens {
 			if strings.HasPrefix(s[i:], t) {
-				stack = stack[:len(stack)-1]
+				if len(stack) > 0 {
+					stack = stack[:len(stack)-1]
+				}
 				i += len(t)
 				matched = true
 				break
@@ -170,7 +182,7 @@ func openTags(stack []string) string {
 	return out
 }
 
-func tagName(t string) string { return t[1:] }
+func tagName(t string) string { return t[1 : len(t)-1] }
 
 // candidateBreaks lists boundary indices in preference order — after a closed
 // code block, then paragraph, line, and word boundaries, each from the last

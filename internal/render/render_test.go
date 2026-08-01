@@ -276,6 +276,28 @@ func TestSplitNeverBreaksTagBalance(t *testing.T) {
 		if !htmlBalanced(chunk) {
 			t.Fatalf("chunk %d is not tag-balanced: %q", i, chunk[:60])
 		}
+		if measure(chunk) > 4096 {
+			t.Fatalf("chunk %d exceeds the limit: %d units", i, measure(chunk))
+		}
+	}
+	// The hard cut must have repaired the tags exactly.
+	if !strings.HasSuffix(chunks[0], "</b>") {
+		t.Fatalf("chunk 0 must end with the repaired close tag: %q", chunks[0][len(chunks[0])-20:])
+	}
+	if !strings.HasPrefix(chunks[1], "<b>") {
+		t.Fatalf("chunk 1 must reopen the repaired tag: %q", chunks[1][:20])
+	}
+}
+
+func TestSplitStrayCloseTagDoesNotPanic(t *testing.T) {
+	chunks := Split("</b>"+strings.Repeat("x", 5000), 4096)
+	if len(chunks) == 0 {
+		t.Fatal("expected chunks")
+	}
+	for i, chunk := range chunks {
+		if measure(chunk) > 4096 {
+			t.Fatalf("chunk %d exceeds the limit: %d units", i, measure(chunk))
+		}
 	}
 }
 
