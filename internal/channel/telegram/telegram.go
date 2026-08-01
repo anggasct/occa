@@ -270,7 +270,10 @@ func (rc *replyContext) Edit(ref channel.MessageRef, text string) error {
 
 func (rc *replyContext) EditWithButtons(ref channel.MessageRef, text string, buttons []channel.Button) error {
 	msgID := 0
-	fmt.Sscanf(ref.ID(), "%d", &msgID)
+	refID := ref.ID()
+	if _, err := fmt.Sscanf(refID, "%d", &msgID); err != nil {
+		return fmt.Errorf("telegram: parse message id %q: %w", refID, err)
+	}
 
 	msg := tgbotapi.NewEditMessageTextAndMarkup(rc.chatID, msgID, text, inlineKeyboard(buttons))
 	msg.ParseMode = "HTML"

@@ -135,6 +135,12 @@ func (b *permissionBroker) handle(ctx context.Context, msg channel.IncomingMessa
 	b.cleanupLocked(time.Now())
 	record := b.records[token]
 	if record == nil || record.origin == nil || record.origin.ID() != msg.CallbackRef.ID() || record.platform != msg.Platform || record.channelID != msg.ChannelID {
+		if record != nil && record.origin == nil && record.state == permissionPending {
+			record.state = permissionExpired
+			record.terminal = permissionExpiredMessage
+			record.client = nil
+			record.expiresAt = time.Now().Add(permissionTombstoneTTL)
+		}
 		b.mu.Unlock()
 		slog.Info("permission callback rejected", "platform", msg.Platform, "channel_id", msg.ChannelID, "outcome", "scope_mismatch")
 		b.renderExpired(msg)
