@@ -45,6 +45,10 @@ func (f *fakeReplyContext) Edit(ref channel.MessageRef, text string) error {
 	return nil
 }
 
+func (f *fakeReplyContext) EditWithButtons(ref channel.MessageRef, text string, buttons []channel.Button) error {
+	return f.Edit(ref, text)
+}
+
 func (f *fakeReplyContext) SendWithButtons(text string, buttons []channel.Button) (channel.MessageRef, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

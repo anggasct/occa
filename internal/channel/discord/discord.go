@@ -50,6 +50,10 @@ func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessag
 		switch i.Type {
 		case discordgo.InteractionMessageComponent:
 			data := i.MessageComponentData()
+			var origin channel.MessageRef
+			if i.Message != nil {
+				origin = messageRef{id: i.Message.ID}
+			}
 			var userID string
 			if i.Member != nil {
 				userID = i.Member.User.ID
@@ -73,6 +77,7 @@ func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessag
 				IsThread:               isThread,
 				IsCallback:             true,
 				CallbackData:           data.CustomID,
+				CallbackRef:            origin,
 				IsMention:              true,
 				ReplyCtx:               &replyContext{session: sess, channelID: i.ChannelID, interaction: i.Interaction},
 			}
@@ -279,20 +284,9 @@ func (rc *replyContext) Send(text string) (channel.MessageRef, error) {
 }
 
 func (rc *replyContext) SendWithButtons(text string, buttons []channel.Button) (channel.MessageRef, error) {
-	var components []discordgo.MessageComponent
-	var btns []discordgo.MessageComponent
-	for _, b := range buttons {
-		btns = append(btns, discordgo.Button{
-			Label:    b.Label,
-			Style:    discordgo.SecondaryButton,
-			CustomID: b.Value,
-		})
-	}
-	components = append(components, discordgo.ActionsRow{Components: btns})
-
 	msg, err := rc.session.ChannelMessageSendComplex(rc.channelID, &discordgo.MessageSend{
 		Content:    text,
-		Components: components,
+		Components: componentRows(buttons),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("discord: send with buttons: %w", err)
@@ -303,6 +297,35 @@ func (rc *replyContext) SendWithButtons(text string, buttons []channel.Button) (
 func (rc *replyContext) Edit(ref channel.MessageRef, text string) error {
 	_, err := rc.session.ChannelMessageEdit(rc.channelID, ref.ID(), text)
 	return err
+}
+
+func (rc *replyContext) EditWithButtons(ref channel.MessageRef, text string, buttons []channel.Button) error {
+	content := text
+	components := componentRows(buttons)
+	_, err := rc.session.ChannelMessageEditComplex(&discordgo.MessageEdit{
+		ID:         ref.ID(),
+		Channel:    rc.channelID,
+		Content:    &content,
+		Components: &components,
+	})
+	return err
+}
+
+func componentRows(buttons []channel.Button) []discordgo.MessageComponent {
+	components := make([]discordgo.MessageComponent, 0, 1)
+	if len(buttons) == 0 {
+		return components
+	}
+
+	btns := make([]discordgo.MessageComponent, 0, len(buttons))
+	for _, b := range buttons {
+		btns = append(btns, discordgo.Button{
+			Label:    b.Label,
+			Style:    discordgo.SecondaryButton,
+			CustomID: b.Value,
+		})
+	}
+	return append(components, discordgo.ActionsRow{Components: btns})
 }
 
 func splitMessage(text string, maxLen int) []string {

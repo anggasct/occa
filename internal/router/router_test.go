@@ -24,6 +24,9 @@ func (f *fakeReplyCtx) Send(text string) (channel.MessageRef, error) {
 	return fakeRef{id: "1"}, nil
 }
 func (f *fakeReplyCtx) Edit(ref channel.MessageRef, text string) error { return nil }
+func (f *fakeReplyCtx) EditWithButtons(ref channel.MessageRef, text string, buttons []channel.Button) error {
+	return nil
+}
 func (f *fakeReplyCtx) SendWithButtons(text string, buttons []channel.Button) (channel.MessageRef, error) {
 	f.sends = append(f.sends, text)
 	return fakeRef{id: "1"}, nil
@@ -71,6 +74,9 @@ func (f *fakeRelayClient) SendMessage(_ context.Context, _, text string, model *
 func (f *fakeRelayClient) Providers(_ context.Context) (relay.Providers, error) {
 	f.providerCalls++
 	return f.providers, f.providersErr
+}
+func (f *fakeRelayClient) ReplyPermission(_ context.Context, _ string, _ relay.PermissionReply) error {
+	return nil
 }
 func (f *fakeRelayClient) RunCommand(_ context.Context, _, cmd string) error {
 	f.lastCmd = cmd
@@ -531,8 +537,8 @@ func TestIngressAuthorizationMatrix(t *testing.T) {
 						t.Fatalf("non-admin command response = %v", reply.sends)
 					}
 				case action.name == "permission callback":
-					if provider.calls != 1 {
-						t.Fatalf("callback instance provider calls = %d, want 1", provider.calls)
+					if provider.calls != 0 {
+						t.Fatalf("callback instance provider calls = %d, want 0", provider.calls)
 					}
 				}
 			})

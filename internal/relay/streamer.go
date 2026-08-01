@@ -27,9 +27,14 @@ const (
 )
 
 type Streamer struct {
-	reply    channel.ReplyContext
-	renderer render.Renderer
-	platform render.Platform
+	reply             channel.ReplyContext
+	renderer          render.Renderer
+	platform          render.Platform
+	permissionHandler PermissionPromptHandler
+}
+
+type PermissionPromptHandler interface {
+	Prompt(ctx context.Context, request PermissionRequest) error
 }
 
 func NewStreamer(reply channel.ReplyContext, renderer render.Renderer, platform render.Platform) *Streamer {
@@ -38,6 +43,10 @@ func NewStreamer(reply channel.ReplyContext, renderer render.Renderer, platform 
 		renderer: renderer,
 		platform: platform,
 	}
+}
+
+func (s *Streamer) SetPermissionPromptHandler(handler PermissionPromptHandler) {
+	s.permissionHandler = handler
 }
 
 func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
@@ -90,7 +99,13 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				return fmt.Errorf("%w: %s", ErrStreamFailed, ev.Delta)
 			case "permission_asked":
 				if ev.Permission != nil {
-					s.sendPermissionPrompt(ev.Permission)
+					if s.permissionHandler != nil {
+						if err := s.permissionHandler.Prompt(ctx, *ev.Permission); err != nil {
+							slog.Warn("streaming: permission prompt failed", "error", err)
+						}
+					} else {
+						slog.Warn("streaming: permission prompt handler unavailable")
+					}
 				}
 			}
 
@@ -184,21 +199,4 @@ func (s *Streamer) finalSync(refs *[]channel.MessageRef, lastChunks *[]string, r
 
 	*lastChunks = chunks
 	return nil
-}
-
-func (s *Streamer) sendPermissionPrompt(perm *PermissionRequest) {
-	text := fmt.Sprintf("🔐 Permission requested: %s", perm.Permission)
-	if perm.Tool != "" {
-		text += fmt.Sprintf(" (%s)", perm.Tool)
-	}
-
-	buttons := []channel.Button{
-		{Label: "✅ Allow once", Value: "permission:" + perm.ID + ":once"},
-		{Label: "✅ Always allow", Value: "permission:" + perm.ID + ":always"},
-		{Label: "❌ Deny", Value: "permission:" + perm.ID + ":reject"},
-	}
-
-	if _, err := s.reply.SendWithButtons(text, buttons); err != nil {
-		slog.Warn("streaming: send permission prompt failed", "error", err)
-	}
 }

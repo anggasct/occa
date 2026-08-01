@@ -90,6 +90,7 @@ type Client interface {
 	Providers(ctx context.Context) (Providers, error)
 	RunCommand(ctx context.Context, sessionID, command string) error
 	Events(ctx context.Context, sessionID string) (<-chan Event, error)
+	ReplyPermission(ctx context.Context, requestID string, reply PermissionReply) error
 }
 
 type HTTPClient struct {

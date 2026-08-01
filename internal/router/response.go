@@ -50,13 +50,25 @@ func (r *Router) runResponse(
 	key responseKey,
 	msg channel.IncomingMessage,
 	inst AgentInstance,
+	sessionID string,
 	events <-chan relay.Event,
 	dispatch func(context.Context) error,
 ) {
 	started := time.Now()
 	outcome := "complete"
+	owner := &permissionOwner{}
+	permissionHandler := &permissionPromptHandler{
+		broker:    r.permissions,
+		owner:     owner,
+		client:    inst.Client(),
+		platform:  key.platform,
+		channelID: key.channelID,
+		sessionID: sessionID,
+		reply:     msg.ReplyCtx,
+	}
 	slog.Info("response started", "platform", key.platform, "channel_id", key.channelID)
 	defer func() {
+		r.permissions.expireOwner(owner)
 		cancel()
 		inst.End()
 		r.responses.release(key)
@@ -70,7 +82,9 @@ func (r *Router) runResponse(
 		dispatchDone <- dispatch(ctx)
 	}()
 	go func() {
-		streamDone <- relay.NewStreamer(msg.ReplyCtx, render.New(), responsePlatform(msg.Platform)).Run(ctx, events)
+		streamer := relay.NewStreamer(msg.ReplyCtx, render.New(), responsePlatform(msg.Platform))
+		streamer.SetPermissionPromptHandler(permissionHandler)
+		streamDone <- streamer.Run(ctx, events)
 	}()
 
 	var dispatchErr, streamErr error

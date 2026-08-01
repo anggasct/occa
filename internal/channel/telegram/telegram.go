@@ -15,7 +15,7 @@ import (
 )
 
 type Adapter struct {
-	bot  *tgbotapi.BotAPI
+	bot   *tgbotapi.BotAPI
 	token string
 }
 
@@ -118,7 +118,14 @@ func (a *Adapter) normalize(update tgbotapi.Update) channel.IncomingMessage {
 
 func (a *Adapter) normalizeCallback(update tgbotapi.Update) channel.IncomingMessage {
 	cb := update.CallbackQuery
-	chatID := fmt.Sprintf("%d", cb.Message.Chat.ID)
+	chatID := ""
+	var origin channel.MessageRef
+	var numericChatID int64
+	if cb.Message != nil {
+		chatID = fmt.Sprintf("%d", cb.Message.Chat.ID)
+		numericChatID = cb.Message.Chat.ID
+		origin = messageRef{id: fmt.Sprintf("%d", cb.Message.MessageID)}
+	}
 	userID := fmt.Sprintf("%d", cb.From.ID)
 
 	callback := tgbotapi.NewCallback(cb.ID, "")
@@ -130,8 +137,9 @@ func (a *Adapter) normalizeCallback(update tgbotapi.Update) channel.IncomingMess
 		UserID:       userID,
 		IsCallback:   true,
 		CallbackData: cb.Data,
+		CallbackRef:  origin,
 		IsMention:    true,
-		ReplyCtx:     &replyContext{bot: a.bot, chatID: cb.Message.Chat.ID},
+		ReplyCtx:     &replyContext{bot: a.bot, chatID: numericChatID},
 	}
 }
 
@@ -229,14 +237,7 @@ func (rc *replyContext) Send(text string) (channel.MessageRef, error) {
 func (rc *replyContext) SendWithButtons(text string, buttons []channel.Button) (channel.MessageRef, error) {
 	msg := tgbotapi.NewMessage(rc.chatID, text)
 	msg.ParseMode = "HTML"
-
-	var rows [][]tgbotapi.InlineKeyboardButton
-	for _, b := range buttons {
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(b.Label, b.Value),
-		))
-	}
-	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(rows...)
+	msg.ReplyMarkup = inlineKeyboard(buttons)
 
 	sent, err := rc.sendWithRetry(msg)
 	if err != nil {
@@ -265,6 +266,38 @@ func (rc *replyContext) Edit(ref channel.MessageRef, text string) error {
 		slog.Warn("telegram: edit rate limited, retrying", "retry_after", retryAfter)
 		time.Sleep(time.Duration(retryAfter) * time.Second)
 	}
+}
+
+func (rc *replyContext) EditWithButtons(ref channel.MessageRef, text string, buttons []channel.Button) error {
+	msgID := 0
+	fmt.Sscanf(ref.ID(), "%d", &msgID)
+
+	msg := tgbotapi.NewEditMessageTextAndMarkup(rc.chatID, msgID, text, inlineKeyboard(buttons))
+	msg.ParseMode = "HTML"
+	msg.DisableWebPagePreview = true
+
+	for {
+		_, err := rc.bot.Send(msg)
+		if err == nil {
+			return nil
+		}
+		retryAfter := extractRetryAfter(err)
+		if retryAfter <= 0 {
+			return err
+		}
+		slog.Warn("telegram: edit rate limited, retrying", "retry_after", retryAfter)
+		time.Sleep(time.Duration(retryAfter) * time.Second)
+	}
+}
+
+func inlineKeyboard(buttons []channel.Button) tgbotapi.InlineKeyboardMarkup {
+	rows := make([][]tgbotapi.InlineKeyboardButton, 0, len(buttons))
+	for _, b := range buttons {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(b.Label, b.Value),
+		))
+	}
+	return tgbotapi.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
 func (rc *replyContext) sendWithRetry(msg tgbotapi.MessageConfig) (tgbotapi.Message, error) {

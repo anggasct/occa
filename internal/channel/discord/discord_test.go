@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/bwmarrin/discordgo"
+
+	"github.com/anggasct/occa/internal/channel"
 )
 
 func TestNormalizeMessageResolvesThreadScopeOnce(t *testing.T) {
@@ -80,5 +82,15 @@ func TestFindBreakPoint(t *testing.T) {
 	bp := findBreakPoint(text, 20)
 	if bp != 11 {
 		t.Fatalf("expected break at 11, got %d", bp)
+	}
+}
+
+func TestComponentRowsEmptyRemovesButtons(t *testing.T) {
+	if components := componentRows(nil); components == nil || len(components) != 0 {
+		t.Fatalf("empty components = %+v", components)
+	}
+	components := componentRows([]channel.Button{{Label: "Allow", Value: "allow"}})
+	if len(components) != 1 {
+		t.Fatalf("button components = %+v", components)
 	}
 }

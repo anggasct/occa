@@ -3,6 +3,8 @@ package telegram
 import (
 	"strings"
 	"testing"
+
+	"github.com/anggasct/occa/internal/channel"
 )
 
 func TestSplitMessageShort(t *testing.T) {
@@ -12,6 +14,16 @@ func TestSplitMessageShort(t *testing.T) {
 	}
 	if chunks[0] != "hello world" {
 		t.Fatalf("unexpected chunk: %q", chunks[0])
+	}
+}
+
+func TestInlineKeyboardEmptyRemovesButtons(t *testing.T) {
+	if markup := inlineKeyboard(nil); markup.InlineKeyboard == nil || len(markup.InlineKeyboard) != 0 {
+		t.Fatalf("empty markup = %+v", markup)
+	}
+	markup := inlineKeyboard([]channel.Button{{Label: "Allow", Value: "allow"}})
+	if len(markup.InlineKeyboard) != 1 || len(markup.InlineKeyboard[0]) != 1 {
+		t.Fatalf("button markup = %+v", markup)
 	}
 }
 
