@@ -136,6 +136,7 @@ func (c *Client) stream(ctx context.Context, sessionID string, ch chan<- relay.E
 	p := &parser{}
 	events := 0
 	scanner := bufio.NewScanner(res.stdout)
+	scanner.Buffer(make([]byte, 64*1024), relay.MaxEventLineBytes+1)
 	for scanner.Scan() {
 		if ev := p.parseLine(scanner.Bytes()); ev != nil {
 			events++
@@ -151,6 +152,18 @@ func (c *Client) stream(ctx context.Context, sessionID string, ch chan<- relay.E
 		c.mu.Lock()
 		c.realIDs[sessionID] = p.realID
 		c.mu.Unlock()
+	}
+
+	if scanErr := scanner.Err(); scanErr != nil {
+		// The child may still be writing to a full pipe; closing the read side
+		// unblocks it before reaping.
+		_ = res.stdout.Close()
+		_ = res.wait()
+		select {
+		case ch <- relay.Event{Type: "error", Delta: "cli: stream truncated: " + scanErr.Error()}:
+		case <-ctx.Done():
+		}
+		return
 	}
 
 	if waitErr := res.wait(); waitErr != nil {

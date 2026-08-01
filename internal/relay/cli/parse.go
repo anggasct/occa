@@ -28,6 +28,9 @@ func (p *parser) parseLine(line []byte) *relay.Event {
 		if id, ok := obj["session_id"].(string); ok && id != "" {
 			p.realID = id
 		}
+		if subtype, _ := obj["subtype"].(string); subtype != "" && subtype != "success" {
+			return &relay.Event{Type: "error", Delta: "cli: run finished with subtype " + subtype}
+		}
 		return &relay.Event{Type: "done"}
 	case "error":
 		return &relay.Event{Type: "error", Delta: stringify(obj["error"])}

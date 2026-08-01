@@ -289,3 +289,62 @@ func indexOf(args []string, want string) int {
 	}
 	return -1
 }
+
+func TestLargeLineDeliveredUpToCeiling(t *testing.T) {
+	big := strings.Repeat("x", 100*1024)
+	line := `{"type":"stream_event","event":{"type":"content_block_delta","delta":{"text":"` + big + `"}}}`
+	runner := &fakeRunner{outputs: []string{line + "\n" + `{"type":"result","session_id":"r1"}` + "\n"}}
+	c := New("claude")
+	c.run = runner.runner()
+
+	events, _ := c.Events(context.Background(), "sess")
+	if err := c.SendMessage(context.Background(), "sess", "hi", nil, nil); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	got := drainEvents(t, events)
+	if len(got) != 2 || got[0].Type != "delta" || got[0].Delta != big || got[1].Type != "done" {
+		t.Fatalf("large line not delivered intact: %d events, first=%q", len(got), got[0].Delta[:min(20, len(got[0].Delta))])
+	}
+}
+
+func TestOverCeilingLineSurfacesErrorEvent(t *testing.T) {
+	huge := strings.Repeat("y", relay.MaxEventLineBytes+1)
+	line := `{"type":"stream_event","event":{"type":"content_block_delta","delta":{"text":"` + huge + `"}}}`
+	runner := &fakeRunner{outputs: []string{line + "\n"}}
+	c := New("claude")
+	c.run = runner.runner()
+
+	events, _ := c.Events(context.Background(), "sess")
+	if err := c.SendMessage(context.Background(), "sess", "hi", nil, nil); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	got := drainEvents(t, events)
+	if len(got) != 1 || got[0].Type != "error" {
+		t.Fatalf("expected a truncation error event, got %+v", got)
+	}
+	if !strings.Contains(got[0].Delta, "truncated") {
+		t.Fatalf("unexpected error text: %q", got[0].Delta)
+	}
+}
+
+func TestNonSuccessResultSubtypeIsError(t *testing.T) {
+	runner := &fakeRunner{outputs: []string{`{"type":"result","subtype":"error_limit","session_id":"r1"}` + "\n"}}
+	c := New("claude")
+	c.run = runner.runner()
+
+	events, _ := c.Events(context.Background(), "sess")
+	if err := c.SendMessage(context.Background(), "sess", "hi", nil, nil); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	got := drainEvents(t, events)
+	if len(got) != 1 || got[0].Type != "error" || !strings.Contains(got[0].Delta, "error_limit") {
+		t.Fatalf("expected error event for non-success subtype, got %+v", got)
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}

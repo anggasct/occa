@@ -26,7 +26,7 @@ func TestReadSSELargeLineDelivered(t *testing.T) {
 }
 
 func TestReadSSELineOverLimitIsTypedError(t *testing.T) {
-	huge := strings.Repeat("y", maxEventLineBytes+1)
+	huge := strings.Repeat("y", MaxEventLineBytes+1)
 	ch := make(chan Event, 8)
 	done := make(chan error, 1)
 	go func() { done <- readSSE(context.Background(), strings.NewReader("data: "+huge+"\n\n"), ch) }()
