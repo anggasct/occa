@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read
@@ -25,6 +24,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache: true
 
       - name: Build
         run: go build ./...
@@ -32,16 +32,15 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Fmt check
+      - name: Gofmt check
         run: |
           unformatted=$(gofmt -l .)
           test -z "$unformatted" || (echo "Unformatted files:"; echo "$unformatted"; exit 1)
 
       - name: Lint
-        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --new-from-rev=origin/main ./...
-
-      - name: Diff check
-        run: git diff --check origin/main...HEAD
+        env:
+          LINT_BASE_REV: ${{ github.event_name == 'pull_request' && 'origin/main' || 'HEAD^' }}
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --new-from-rev="$LINT_BASE_REV" ./...
 
       - name: Test (race)
         run: go test ./... -race -count=1
