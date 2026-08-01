@@ -139,3 +139,36 @@ func TestEventsLargeLineThroughHTTPServer(t *testing.T) {
 		t.Fatalf("1MB event not delivered intact: %d bytes", len(ev.Delta))
 	}
 }
+
+func TestParseJSONEvents(t *testing.T) {
+	cases := []struct {
+		name string
+		data string
+		want Event
+		ok   bool
+	}{
+		{"text delta", `{"type":"message.part.delta","properties":{"field":"text","delta":"Hi"}}`, Event{Type: "delta", Delta: "Hi"}, true},
+		{"non-text delta skipped", `{"type":"message.part.delta","properties":{"field":"reasoning","delta":"thinking"}}`, Event{}, false},
+		{"idle is done", `{"type":"session.idle","properties":{}}`, Event{Type: "done"}, true},
+		{"heartbeat skipped", `{"type":"server.heartbeat","properties":{}}`, Event{}, false},
+		{"session status skipped", `{"type":"session.status","properties":{"status":{"type":"busy"}}}`, Event{}, false},
+		{"error surfaced", `{"type":"session.error","properties":{}}`, Event{Type: "error", Delta: `{"type":"session.error","properties":{}}`}, true},
+	}
+	for _, c := range cases {
+		got, ok := parseSSEEvent("", c.data)
+		if ok != c.ok || got.Type != c.want.Type || got.Delta != c.want.Delta {
+			t.Fatalf("%s: got (%+v, %v), want (%+v, %v)", c.name, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+func TestParseLegacyEventsStillWork(t *testing.T) {
+	ev, ok := parseSSEEvent("message.part.delta", "hello")
+	if !ok || ev.Type != "delta" || ev.Delta != "hello" {
+		t.Fatalf("legacy delta: %+v %v", ev, ok)
+	}
+	ev, ok = parseSSEEvent("done", "")
+	if !ok || ev.Type != "done" {
+		t.Fatalf("legacy done: %+v %v", ev, ok)
+	}
+}

@@ -33,11 +33,12 @@ func readSSE(ctx context.Context, r io.Reader, ch chan<- Event) error {
 
 		if line == "" {
 			if hasFields {
-				event := parseSSEEvent(eventType, data)
-				select {
-				case ch <- event:
-				case <-ctx.Done():
-					return ctx.Err()
+				if event, ok := parseSSEEvent(eventType, data); ok {
+					select {
+					case ch <- event:
+					case <-ctx.Done():
+						return ctx.Err()
+					}
 				}
 				eventType = ""
 				data = ""
@@ -72,18 +73,48 @@ func readSSE(ctx context.Context, r io.Reader, ch chan<- Event) error {
 	return nil
 }
 
-func parseSSEEvent(eventType, data string) Event {
+func parseSSEEvent(eventType, data string) (Event, bool) {
+	if eventType == "" {
+		return parseJSONEvent(data)
+	}
 	switch {
 	case strings.Contains(eventType, "permission.asked") || strings.Contains(eventType, "permission"):
-		return parsePermissionEvent(data)
+		return parsePermissionEvent(data), true
 	case strings.Contains(eventType, "delta") || strings.Contains(eventType, "message.part.delta"):
-		return Event{Type: "delta", Delta: data}
+		return Event{Type: "delta", Delta: data}, true
 	case strings.Contains(eventType, "done") || strings.Contains(eventType, "complete"):
-		return Event{Type: "done"}
+		return Event{Type: "done"}, true
 	case strings.Contains(eventType, "error"):
-		return Event{Type: "error", Delta: data}
+		return Event{Type: "error", Delta: data}, true
 	default:
-		return Event{Type: "delta", Delta: data}
+		return Event{Type: "delta", Delta: data}, true
+	}
+}
+
+// parseJSONEvent handles the current agent event stream, where the event
+// type lives inside the JSON payload rather than in an SSE event: line.
+// Bookkeeping events (heartbeats, session status) are skipped; text deltas
+// and the idle transition that marks completion are mapped to relay events.
+func parseJSONEvent(data string) (Event, bool) {
+	var ev struct {
+		Type       string `json:"type"`
+		Properties struct {
+			Field string `json:"field"`
+			Delta string `json:"delta"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal([]byte(data), &ev); err != nil {
+		return Event{Type: "delta", Delta: data}, true
+	}
+	switch {
+	case ev.Type == "message.part.delta" && ev.Properties.Field == "text":
+		return Event{Type: "delta", Delta: ev.Properties.Delta}, true
+	case ev.Type == "session.idle":
+		return Event{Type: "done"}, true
+	case strings.Contains(ev.Type, "error"):
+		return Event{Type: "error", Delta: data}, true
+	default:
+		return Event{}, false
 	}
 }
 
