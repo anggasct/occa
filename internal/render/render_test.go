@@ -260,3 +260,58 @@ func TestLiteralMarkupPreservedForDiscord(t *testing.T) {
 		t.Fatalf("discord content altered: %q", got)
 	}
 }
+
+func TestSplitNeverBreaksTagBalance(t *testing.T) {
+	long := strings.Repeat("filler line\n", 500)
+	md := "**bold start " + long + "bold end**\n\nnormal text here"
+
+	chunks, err := New().RenderWithLimit(md, Telegram, 4096)
+	if err != nil {
+		t.Fatalf("RenderWithLimit: %v", err)
+	}
+	if len(chunks) < 2 {
+		t.Fatalf("expected a multi-chunk split, got %d", len(chunks))
+	}
+	for i, chunk := range chunks {
+		if !htmlBalanced(chunk) {
+			t.Fatalf("chunk %d is not tag-balanced: %q", i, chunk[:60])
+		}
+		if measure(chunk) > 4096 {
+			t.Fatalf("chunk %d exceeds the limit: %d units", i, measure(chunk))
+		}
+	}
+	// The hard cut must have repaired the tags exactly.
+	if !strings.HasSuffix(chunks[0], "</b>") {
+		t.Fatalf("chunk 0 must end with the repaired close tag: %q", chunks[0][len(chunks[0])-20:])
+	}
+	if !strings.HasPrefix(chunks[1], "<b>") {
+		t.Fatalf("chunk 1 must reopen the repaired tag: %q", chunks[1][:20])
+	}
+}
+
+func TestSplitStrayCloseTagDoesNotPanic(t *testing.T) {
+	chunks := Split("</b>"+strings.Repeat("x", 5000), 4096)
+	if len(chunks) == 0 {
+		t.Fatal("expected chunks")
+	}
+	for i, chunk := range chunks {
+		if measure(chunk) > 4096 {
+			t.Fatalf("chunk %d exceeds the limit: %d units", i, measure(chunk))
+		}
+	}
+}
+
+func TestSplitPrefersBalancedBoundaryInsideBoldSpan(t *testing.T) {
+	// A multi-line bold span: the line boundary inside the span is not a safe
+	// break, so the split must land after the closing tag.
+	md := "**line one\nline two\nline three**\n\n" + strings.Repeat("pad ", 2000)
+	chunks, err := New().RenderWithLimit(md, Telegram, 4096)
+	if err != nil {
+		t.Fatalf("RenderWithLimit: %v", err)
+	}
+	for i, chunk := range chunks {
+		if !htmlBalanced(chunk) {
+			t.Fatalf("chunk %d is not tag-balanced: %q", i, chunk[:60])
+		}
+	}
+}
