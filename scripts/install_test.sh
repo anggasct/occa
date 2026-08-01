@@ -88,94 +88,94 @@ for pair in "Linux x86_64" "Linux aarch64" "Darwin x86_64" "Darwin arm64"; do
 	rm -f "$inst/occa"
 
 	if ! run_install "$os" "$arch" env OCCA_INSTALL_DIR="$inst" sh ./install.sh; then
-		fail "AC-01 $os/$arch: install exited non-zero"
+		fail "$os/$arch: install exited non-zero"
 	fi
 	asset=$(asset_for "$os" "$arch")
 	if [ "$(count_calls "$asset")" -ne 1 ]; then
-		fail "AC-01 $os/$arch: expected one download of $asset"
+		fail "$os/$arch: expected one download of $asset"
 	fi
 	if [ ! -x "$inst/occa" ]; then
-		fail "AC-01 $os/$arch: no executable occa at install path"
+		fail "$os/$arch: no executable occa at install path"
 	fi
-	pass "AC-01 $os/$arch: binary installed"
+	pass "$os/$arch: binary installed"
 done
 
-# AC-02: OCCA_INSTALL_DIR overrides default and XDG_BIN_DIR.
+#: OCCA_INSTALL_DIR overrides default and XDG_BIN_DIR.
 inst="$work/inst-override"
 xdg="$work/inst-xdg"
 mkdir -p "$inst" "$xdg"
 : > "$calls"
 run_install "Linux" "x86_64" env OCCA_INSTALL_DIR="$inst" XDG_BIN_DIR="$xdg" sh ./install.sh
 if [ ! -x "$inst/occa" ]; then
-	fail "AC-02: OCCA_INSTALL_DIR ignored"
+	fail "OCCA_INSTALL_DIR ignored"
 fi
 if [ -e "$xdg/occa" ]; then
-	fail "AC-02: binary landed in XDG_BIN_DIR despite OCCA_INSTALL_DIR"
+	fail "binary landed in XDG_BIN_DIR despite OCCA_INSTALL_DIR"
 fi
-pass "AC-02: OCCA_INSTALL_DIR wins over XDG_BIN_DIR"
+pass "OCCA_INSTALL_DIR wins over XDG_BIN_DIR"
 
-# AC-03: opencode missing -> exactly one call to its installer.
+#: opencode missing -> exactly one call to its installer.
 : > "$calls"
 mv "$stub_bin/opencode" "$work/opencode-hidden"
 run_install "Linux" "x86_64" env OCCA_INSTALL_DIR="$inst" sh ./install.sh
 if [ "$(count_calls "opencode.ai/install")" -ne 1 ]; then
-	fail "AC-03: expected exactly one opencode installer call"
+	fail "expected exactly one opencode installer call"
 fi
-pass "AC-03: opencode installer invoked once when missing"
+pass "opencode installer invoked once when missing"
 
-# AC-04: opencode present -> no installer call.
+#: opencode present -> no installer call.
 : > "$calls"
 mv "$work/opencode-hidden" "$stub_bin/opencode"
 run_install "Linux" "x86_64" env OCCA_INSTALL_DIR="$inst" sh ./install.sh
 if [ "$(count_calls "opencode.ai/install")" -ne 0 ]; then
-	fail "AC-04: opencode installer called despite binary on PATH"
+	fail "opencode installer called despite binary on PATH"
 fi
-pass "AC-04: opencode not reinstalled when present"
+pass "opencode not reinstalled when present"
 
-# AC-06: OCCA_VERSION pins the release download path.
+#: OCCA_VERSION pins the release download path.
 inst_ver="$work/inst-ver"
 mkdir -p "$inst_ver"
 : > "$calls"
 run_install "Linux" "x86_64" env OCCA_INSTALL_DIR="$inst_ver" OCCA_VERSION="v0.1.0" sh ./install.sh
 if [ "$(count_calls "releases/download/v0.1.0/occa_linux_amd64")" -ne 1 ]; then
-	fail "AC-06: OCCA_VERSION did not pin the download URL"
+	fail "OCCA_VERSION did not pin the download URL"
 fi
 if [ ! -x "$inst_ver/occa" ]; then
-	fail "AC-06: no binary installed from pinned version"
+	fail "no binary installed from pinned version"
 fi
-pass "AC-06: OCCA_VERSION pins the release download"
+pass "OCCA_VERSION pins the release download"
 
-# AC-07: OCCA_VERSION without the v prefix is normalized.
+#: OCCA_VERSION without the v prefix is normalized.
 : > "$calls"
 run_install "Linux" "x86_64" env OCCA_INSTALL_DIR="$inst_ver" OCCA_VERSION="0.1.0" sh ./install.sh
 if [ "$(count_calls "releases/download/v0.1.0/occa_linux_amd64")" -ne 1 ]; then
-	fail "AC-07: bare version not normalized to v prefix"
+	fail "bare version not normalized to v prefix"
 fi
-pass "AC-07: bare version normalized to v prefix"
+pass "bare version normalized to v prefix"
 
-# AC-08: without OCCA_VERSION the default latest path is used.
+#: without OCCA_VERSION the default latest path is used.
 : > "$calls"
 run_install "Linux" "x86_64" env OCCA_INSTALL_DIR="$inst_ver" sh ./install.sh
 if [ "$(count_calls "releases/latest/download/occa_linux_amd64")" -ne 1 ]; then
-	fail "AC-08: default download path is not latest"
+	fail "default download path is not latest"
 fi
-pass "AC-08: default download path is latest"
+pass "default download path is latest"
 
-# AC-05: unsupported platform fails with nothing installed.
+#: unsupported platform fails with nothing installed.
 inst_bad="$work/inst-bad"
 mkdir -p "$inst_bad"
 : > "$calls"
 rm -f "$inst_bad/occa"
 if run_install "Windows" "x86_64" env OCCA_INSTALL_DIR="$inst_bad" sh ./install.sh; then
-	fail "AC-05: unsupported OS did not fail"
+	fail "unsupported OS did not fail"
 fi
 if ! grep -q "unsupported OS: Windows" "$work/err.log"; then
-	fail "AC-05: error message does not name the unsupported OS"
+	fail "error message does not name the unsupported OS"
 fi
 if [ -e "$inst_bad/occa" ]; then
-	fail "AC-05: binary installed on unsupported platform"
+	fail "binary installed on unsupported platform"
 fi
-pass "AC-05: unsupported OS fails cleanly"
+pass "unsupported OS fails cleanly"
 
 # Idempotence: second run against the same install dir succeeds.
 : > "$calls"
