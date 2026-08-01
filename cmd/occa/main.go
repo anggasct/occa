@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -249,16 +250,7 @@ func main() {
 	}
 
 	for _, ch := range channels {
-		go func(c channel.Channel) {
-			slog.Info("starting channel", "platform", c.Name())
-			if err := c.Start(ctx, func(msg channel.IncomingMessage) {
-				if err := rt.Route(ctx, msg); err != nil {
-					slog.Error("route error", "platform", msg.Platform, "error", err)
-				}
-			}); err != nil {
-				slog.Error("channel error", "platform", c.Name(), "error", err)
-			}
-		}(ch)
+		go runChannel(ctx, ch, rt)
 	}
 
 	slog.Info("occa started", "default_workdir", cfg.Agent.DefaultWorkdir, "max_instances", cfg.Agent.MaxInstances)
@@ -267,6 +259,29 @@ func main() {
 	slog.Info("shutting down")
 	for _, ch := range channels {
 		ch.Stop()
+	}
+}
+
+type messageRouter interface {
+	Route(ctx context.Context, msg channel.IncomingMessage) error
+}
+
+// runChannel supervises one adapter. A panic here would otherwise take the
+// whole process down and with it every other connected platform.
+func runChannel(ctx context.Context, c channel.Channel, rt messageRouter) {
+	defer func() {
+		if v := recover(); v != nil {
+			slog.Error("channel panicked", "platform", c.Name(), "panic", v, "stack", string(debug.Stack()))
+		}
+	}()
+
+	slog.Info("starting channel", "platform", c.Name())
+	if err := c.Start(ctx, func(msg channel.IncomingMessage) {
+		if err := rt.Route(ctx, msg); err != nil {
+			slog.Error("route error", "platform", msg.Platform, "error", err)
+		}
+	}); err != nil {
+		slog.Error("channel error", "platform", c.Name(), "error", err)
 	}
 }
 

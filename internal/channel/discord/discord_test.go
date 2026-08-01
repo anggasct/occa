@@ -13,12 +13,12 @@ import (
 func TestNormalizeMessageResolvesThreadScopeOnce(t *testing.T) {
 	calls := 0
 	a := &Adapter{
-		botID: "bot",
 		channelLookup: func(channelID string) (*discordgo.Channel, error) {
 			calls++
 			return &discordgo.Channel{ID: channelID, ParentID: "parent", Type: discordgo.ChannelTypeGuildPublicThread}, nil
 		},
 	}
+	a.setBotID("bot")
 
 	got := a.normalizeMessage(&discordgo.Message{
 		GuildID:   "guild",
@@ -37,11 +37,11 @@ func TestNormalizeMessageResolvesThreadScopeOnce(t *testing.T) {
 
 func TestNormalizeMessageMarksFailedScopeLookup(t *testing.T) {
 	a := &Adapter{
-		botID: "bot",
 		channelLookup: func(string) (*discordgo.Channel, error) {
 			return nil, errors.New("lookup failed")
 		},
 	}
+	a.setBotID("bot")
 
 	got := a.normalizeMessage(&discordgo.Message{
 		GuildID:   "guild",
