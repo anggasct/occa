@@ -226,8 +226,8 @@ func htmlBalanced(s string) bool {
 }
 
 var (
-	openTagTokens  = []string{"<b>", "<code>", "<pre>"}
-	closeTagTokens = []string{"</b>", "</code>", "</pre>"}
+	openTagTokens  = []string{"<b>", "<i>", "<code>", "<pre>"}
+	closeTagTokens = []string{"</b>", "</i>", "</code>", "</pre>"}
 )
 
 // maxPrefix returns the largest rune-aligned byte index whose prefix measures
