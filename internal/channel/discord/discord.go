@@ -118,40 +118,50 @@ func (a *Adapter) configure(s *discordgo.Session, handler func(channel.IncomingM
 			handler(msg)
 
 		case discordgo.InteractionApplicationCommand:
-			data := i.ApplicationCommandData()
-			text := "/" + data.Name
-			for _, opt := range data.Options {
-				text += " " + fmt.Sprintf("%v", opt.Value)
-			}
-
-			var userID string
-			if i.Member != nil {
-				userID = i.Member.User.ID
-			} else if i.User != nil {
-				userID = i.User.ID
-			}
-
-			if err := sess.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
-			}); err != nil {
-				slog.Warn("discord: defer interaction failed", "error", err)
-			}
-
-			parentChannelID, isThread, scopeUnresolved := a.channelScope(i.Interaction.GuildID, i.ChannelID)
-			msg := channel.IncomingMessage{
-				Platform:               "discord",
-				ChannelID:              i.ChannelID,
-				ParentChannelID:        parentChannelID,
-				ChannelScopeUnresolved: scopeUnresolved,
-				UserID:                 userID,
-				Text:                   strings.TrimSpace(text),
-				IsMention:              true,
-				IsThread:               isThread,
-				ReplyCtx:               &replyContext{session: sess, channelID: i.ChannelID, interaction: i.Interaction},
-			}
-			handler(msg)
+			a.handleApplicationCommandInteraction(sess, i, handler)
 		}
 	})
+}
+
+// handleApplicationCommandInteraction reconstructs a slash-command
+// interaction into the same "/name arg" text the message-content path
+// produces, so both reach the router identically. The registered command
+// name is whatever native-menu alias was registered (e.g. "occa_session");
+// Router.normalizeCommandAlias reconciles it back to the canonical
+// "/occa:session" form before dispatch.
+func (a *Adapter) handleApplicationCommandInteraction(sess *discordgo.Session, i *discordgo.InteractionCreate, handler func(channel.IncomingMessage)) {
+	data := i.ApplicationCommandData()
+	text := "/" + data.Name
+	for _, opt := range data.Options {
+		text += " " + fmt.Sprintf("%v", opt.Value)
+	}
+
+	var userID string
+	if i.Member != nil {
+		userID = i.Member.User.ID
+	} else if i.User != nil {
+		userID = i.User.ID
+	}
+
+	if err := sess.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+	}); err != nil {
+		slog.Warn("discord: defer interaction failed", "error", err)
+	}
+
+	parentChannelID, isThread, scopeUnresolved := a.channelScope(i.Interaction.GuildID, i.ChannelID)
+	msg := channel.IncomingMessage{
+		Platform:               "discord",
+		ChannelID:              i.ChannelID,
+		ParentChannelID:        parentChannelID,
+		ChannelScopeUnresolved: scopeUnresolved,
+		UserID:                 userID,
+		Text:                   strings.TrimSpace(text),
+		IsMention:              true,
+		IsThread:               isThread,
+		ReplyCtx:               &replyContext{session: sess, channelID: i.ChannelID, interaction: i.Interaction},
+	}
+	handler(msg)
 }
 
 func (a *Adapter) onReady(r *discordgo.Ready) {

@@ -191,7 +191,7 @@ func (c *HTTPClient) ListCommands(ctx context.Context) ([]CommandInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("relay: list commands: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("relay: list commands: unexpected status %d", resp.StatusCode)

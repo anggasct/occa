@@ -179,6 +179,47 @@ func TestRegisterCommandsFailureDoesNotPanic(t *testing.T) {
 	a.registerCommands(&discordgo.Ready{Application: &discordgo.Application{ID: "app-1"}}) // must not panic
 }
 
+// TestApplicationCommandInteractionReconstructsAliasedText covers the
+// discord-side half of the round trip: a slash-command interaction using a
+// registered alias (e.g. "occa_session") reconstructs to "/occa_session
+// list" the same way the pre-existing message-content path would. The
+// router-side half — that normalizeCommandAlias maps this exact text to
+// "/occa:session list" before dispatch — is covered by
+// TestNormalizeCommandAlias in internal/router; together the two tests
+// verify the full round trip without an import-cycle-inducing cross-package
+// dependency here.
+func TestApplicationCommandInteractionReconstructsAliasedText(t *testing.T) {
+	s := newUnconnectedSession(t)
+	s.Client = &http.Client{Transport: fakeRoundTripper{do: func(req *http.Request) (*http.Response, error) {
+		return jsonResponse(200, "{}"), nil
+	}}}
+
+	a := New("fake-token", nil)
+	interaction := &discordgo.InteractionCreate{Interaction: &discordgo.Interaction{
+		ID:        "int-1",
+		Token:     "int-token",
+		Type:      discordgo.InteractionApplicationCommand,
+		ChannelID: "chan-1",
+		Data: discordgo.ApplicationCommandInteractionData{
+			Name: "occa_session",
+			Options: []*discordgo.ApplicationCommandInteractionDataOption{
+				{Name: "args", Value: "list"},
+			},
+		},
+		User: &discordgo.User{ID: "user-1"},
+	}}
+
+	var got channel.IncomingMessage
+	a.handleApplicationCommandInteraction(s, interaction, func(m channel.IncomingMessage) { got = m })
+
+	if got.Text != "/occa_session list" {
+		t.Fatalf("reconstructed text = %q, want %q", got.Text, "/occa_session list")
+	}
+	if got.Platform != "discord" || got.UserID != "user-1" || got.ChannelID != "chan-1" {
+		t.Fatalf("unexpected message fields: %+v", got)
+	}
+}
+
 func TestIdentityWriteAndReadAreConcurrencySafe(t *testing.T) {
 	a := New("fake-token", nil)
 	a.channelLookup = func(string) (*discordgo.Channel, error) {

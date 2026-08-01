@@ -123,7 +123,7 @@ func TestListCommands(t *testing.T) {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`[{"name":"plan","description":"Create a plan","source":"command","template":"...","hints":["$ARGUMENTS"]}]`))
+		_, _ = w.Write([]byte(`[{"name":"plan","description":"Create a plan","source":"command","template":"...","hints":["$ARGUMENTS"]}]`))
 	}))
 	defer srv.Close()
 
