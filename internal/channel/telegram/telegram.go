@@ -17,13 +17,14 @@ import (
 type Adapter struct {
 	bot            *tgbotapi.BotAPI
 	token          string
+	menu           []channel.MenuCommand
 	downloadClient *http.Client
 }
 
 const defaultDownloadTimeout = 60 * time.Second
 
-func New(token string) *Adapter {
-	return &Adapter{token: token, downloadClient: &http.Client{Timeout: defaultDownloadTimeout}}
+func New(token string, menu []channel.MenuCommand) *Adapter {
+	return &Adapter{token: token, menu: menu, downloadClient: &http.Client{Timeout: defaultDownloadTimeout}}
 }
 
 func (a *Adapter) Name() string { return "telegram" }
@@ -34,6 +35,8 @@ func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessag
 		return fmt.Errorf("telegram: init bot: %w", err)
 	}
 	a.bot = bot
+
+	a.registerCommands()
 
 	slog.Info("telegram adapter started", "bot_username", bot.Self.UserName)
 
@@ -60,6 +63,22 @@ func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessag
 		handler(msg)
 	}
 	return nil
+}
+
+// registerCommands populates Telegram's native "/" command menu. A failure
+// here is logged and never blocks the adapter — the bot remains fully usable
+// via typed commands regardless.
+func (a *Adapter) registerCommands() {
+	if len(a.menu) == 0 {
+		return
+	}
+	commands := make([]tgbotapi.BotCommand, len(a.menu))
+	for i, m := range a.menu {
+		commands[i] = tgbotapi.BotCommand{Command: m.Alias, Description: m.Description}
+	}
+	if _, err := a.bot.Request(tgbotapi.NewSetMyCommands(commands...)); err != nil {
+		slog.Warn("telegram: set commands failed", "error", err)
+	}
 }
 
 func (a *Adapter) Stop() error {

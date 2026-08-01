@@ -94,6 +94,9 @@ func (c *permissionClient) Providers(_ context.Context) (relay.Providers, error)
 	return relay.Providers{}, nil
 }
 func (c *permissionClient) RunCommand(_ context.Context, _ string, _ string) error { return nil }
+func (c *permissionClient) ListCommands(_ context.Context) ([]relay.CommandInfo, error) {
+	return nil, nil
+}
 func (c *permissionClient) Events(_ context.Context, _ string) (<-chan relay.Event, error) {
 	return nil, nil
 }

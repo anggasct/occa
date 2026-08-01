@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -8,10 +9,78 @@ import (
 	"time"
 	"unicode/utf8"
 
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+
 	"github.com/anggasct/occa/internal/render"
 
 	"github.com/anggasct/occa/internal/channel"
 )
+
+func fakeTelegramServer(t *testing.T, handleNonGetMe http.HandlerFunc) *tgbotapi.BotAPI {
+	t.Helper()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "getMe") {
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"id":1,"is_bot":true,"first_name":"test","username":"testbot"}}`))
+			return
+		}
+		handleNonGetMe(w, r)
+	}))
+	t.Cleanup(ts.Close)
+
+	bot, err := tgbotapi.NewBotAPIWithAPIEndpoint("faketoken", ts.URL+"/bot%s/%s")
+	if err != nil {
+		t.Fatalf("NewBotAPIWithAPIEndpoint: %v", err)
+	}
+	return bot
+}
+
+func TestRegisterCommandsSendsSetMyCommands(t *testing.T) {
+	var gotPath string
+	var gotBody []byte
+	bot := fakeTelegramServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotBody, _ = io.ReadAll(r.Body)
+		_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+	})
+
+	a := &Adapter{bot: bot, menu: []channel.MenuCommand{
+		{Alias: "occa_help", Description: "Show available commands"},
+		{Alias: "occa_session", Description: "Manage sessions", HasArgs: true},
+	}}
+	a.registerCommands()
+
+	if !strings.Contains(gotPath, "setMyCommands") {
+		t.Fatalf("expected setMyCommands call, got path %q", gotPath)
+	}
+	if !strings.Contains(string(gotBody), "occa_help") || !strings.Contains(string(gotBody), "occa_session") {
+		t.Fatalf("expected both commands in request body, got %q", gotBody)
+	}
+}
+
+func TestRegisterCommandsSkipsWhenMenuEmpty(t *testing.T) {
+	called := false
+	bot := fakeTelegramServer(t, func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+	})
+
+	a := &Adapter{bot: bot}
+	a.registerCommands()
+
+	if called {
+		t.Fatal("expected no HTTP call when menu is empty")
+	}
+}
+
+func TestRegisterCommandsFailureDoesNotPanic(t *testing.T) {
+	bot := fakeTelegramServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"ok":false,"description":"boom"}`))
+	})
+
+	a := &Adapter{bot: bot, menu: []channel.MenuCommand{{Alias: "occa_help", Description: "x"}}}
+	a.registerCommands() // must not panic despite the failed request
+}
 
 func TestSplitMessageShort(t *testing.T) {
 	chunks := render.Split("hello world", 4096)

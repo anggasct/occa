@@ -48,6 +48,8 @@ type fakeRelayClient struct {
 	sendCalls     int
 	events        chan relay.Event
 	dispatchDone  chan struct{}
+	commands      []relay.CommandInfo
+	commandsErr   error
 }
 
 func (f *fakeRelayClient) CreateSession(_ context.Context) (string, error) {
@@ -77,6 +79,9 @@ func (f *fakeRelayClient) Providers(_ context.Context) (relay.Providers, error) 
 }
 func (f *fakeRelayClient) ReplyPermission(_ context.Context, _ string, _ relay.PermissionReply) error {
 	return nil
+}
+func (f *fakeRelayClient) ListCommands(_ context.Context) ([]relay.CommandInfo, error) {
+	return f.commands, f.commandsErr
 }
 func (f *fakeRelayClient) RunCommand(_ context.Context, _, cmd string) error {
 	f.lastCmd = cmd
@@ -377,6 +382,119 @@ func TestRouteHelp(t *testing.T) {
 	}
 	if !strings.Contains(reply.sends[0], "/occa:help") {
 		t.Fatalf("unexpected help: %q", reply.sends[0])
+	}
+}
+
+func TestNormalizeCommandAlias(t *testing.T) {
+	cases := map[string]string{
+		"/occa_help":         "/occa:help",
+		"/occa_session list": "/occa:session list",
+		"/occa:help":         "/occa:help",
+		"hello world":        "hello world",
+		"/occa_status extra": "/occa:status extra",
+	}
+	for in, want := range cases {
+		if got := normalizeCommandAlias(in); got != want {
+			t.Fatalf("normalizeCommandAlias(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestRouteAcceptsUnderscoreAlias(t *testing.T) {
+	r, _, reply := newTestRouter()
+	err := r.Route(context.Background(), msg("/occa_help", reply))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if len(reply.sends) == 0 {
+		t.Fatal("expected help response")
+	}
+	if !strings.Contains(reply.sends[0], "/occa:help") {
+		t.Fatalf("unexpected help via alias: %q", reply.sends[0])
+	}
+}
+
+func TestRouteAcceptsUnderscoreAliasWithArgs(t *testing.T) {
+	r, _, reply := newTestRouter()
+	err := r.Route(context.Background(), msg("/occa_session list", reply))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if len(reply.sends) == 0 {
+		t.Fatal("expected session response")
+	}
+	if strings.Contains(reply.sends[0], "Usage:") {
+		t.Fatalf("alias with args did not reach the session handler: %q", reply.sends[0])
+	}
+}
+
+func TestHelpListsAgentCommands(t *testing.T) {
+	r, client, reply := newTestRouter()
+	client.commands = []relay.CommandInfo{
+		{Name: "plan", Description: "Create a plan", Source: "command"},
+	}
+	err := r.Route(context.Background(), msg("/occa:help", reply))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if len(reply.sends) == 0 {
+		t.Fatal("expected help response")
+	}
+	if !strings.Contains(reply.sends[0], "Agent commands:") {
+		t.Fatalf("expected agent commands section, got: %q", reply.sends[0])
+	}
+	if !strings.Contains(reply.sends[0], "/plan — Create a plan") {
+		t.Fatalf("expected plan command listed, got: %q", reply.sends[0])
+	}
+}
+
+func TestHelpOmitsAgentCommandsOnError(t *testing.T) {
+	r, client, reply := newTestRouter()
+	client.commandsErr = errors.New("agent unreachable")
+	err := r.Route(context.Background(), msg("/occa:help", reply))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if len(reply.sends) == 0 {
+		t.Fatal("expected help response")
+	}
+	if strings.Contains(reply.sends[0], "Agent commands:") {
+		t.Fatalf("expected no agent commands section on error, got: %q", reply.sends[0])
+	}
+	if !strings.Contains(reply.sends[0], "/occa:help") {
+		t.Fatalf("expected base help text still present, got: %q", reply.sends[0])
+	}
+}
+
+func TestHelpOmitsAgentCommandsWhenEmpty(t *testing.T) {
+	r, client, reply := newTestRouter()
+	client.commands = nil
+	err := r.Route(context.Background(), msg("/occa:help", reply))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if len(reply.sends) == 0 {
+		t.Fatal("expected help response")
+	}
+	if strings.Contains(reply.sends[0], "Agent commands:") {
+		t.Fatalf("expected no agent commands section when empty, got: %q", reply.sends[0])
+	}
+}
+
+func TestMenuCommandsCoversRegisteredCommands(t *testing.T) {
+	r, _, _ := newTestRouter()
+	menu := r.MenuCommands()
+	if len(menu) != len(r.commands) {
+		t.Fatalf("MenuCommands has %d entries, registered commands has %d", len(menu), len(r.commands))
+	}
+	for _, m := range menu {
+		if !strings.HasPrefix(m.Alias, "occa_") {
+			t.Fatalf("alias %q missing occa_ prefix", m.Alias)
+		}
+		name := strings.TrimPrefix(m.Alias, "occa_")
+		if _, ok := r.commands[name]; !ok {
+			t.Fatalf("alias %q has no matching registered command %q", m.Alias, name)
+		}
 	}
 }
 

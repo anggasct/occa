@@ -87,12 +87,13 @@ func main() {
 
 	discoverAgent(ctx, manager, cfg.Agent.DefaultWorkdir)
 
+	menu := rt.MenuCommands()
 	var channels []channel.Channel
 	if telegramToken != "" {
-		channels = append(channels, telegram.New(telegramToken))
+		channels = append(channels, telegram.New(telegramToken, menu))
 	}
 	if discordToken != "" {
-		channels = append(channels, discord.New(discordToken))
+		channels = append(channels, discord.New(discordToken, menu))
 	}
 
 	executor := func(ctx context.Context, platform, channelID, prompt string) {
