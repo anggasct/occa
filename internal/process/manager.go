@@ -52,7 +52,11 @@ func NewManager(cfg config.AgentConfig, factory instanceFactory) (*Manager, erro
 
 // DefaultManager builds a Manager that spawns real `binary serve` subprocesses.
 func DefaultManager(cfg config.AgentConfig) (*Manager, error) {
-	return NewManager(cfg, productionFactory(cfg.Binary, defaultReadinessTimeout))
+	factory := productionFactory(cfg.Binary, defaultReadinessTimeout)
+	factory = wrapWithAutoInstall(factory, cfg.Binary, cfg.AutoInstall, func(ctx context.Context, _ string) error {
+		return installOpenCode(ctx)
+	})
+	return NewManager(cfg, factory)
 }
 
 func reapInterval(idle time.Duration) time.Duration {

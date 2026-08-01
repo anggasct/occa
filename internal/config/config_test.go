@@ -41,6 +41,9 @@ func TestLoadDefaultsFromEmptyFile(t *testing.T) {
 	if cfg.Agent.IdleTimeout != 20*time.Minute {
 		t.Errorf("IdleTimeout = %v, want 20m", cfg.Agent.IdleTimeout)
 	}
+	if cfg.Agent.AutoInstall {
+		t.Error("AutoInstall = true, want false by default")
+	}
 	if cfg.Logging.Format != "text" {
 		t.Errorf("Format = %q, want text", cfg.Logging.Format)
 	}
@@ -63,6 +66,7 @@ agent:
   max_instances: 3
   idle_timeout: 5m
   default_workdir: /tmp/proj
+  auto_install: true
 database:
   path: /tmp/occa.db
 logging:
@@ -88,6 +92,9 @@ logging:
 	if cfg.Agent.DefaultWorkdir != "/tmp/proj" {
 		t.Errorf("DefaultWorkdir = %q", cfg.Agent.DefaultWorkdir)
 	}
+	if !cfg.Agent.AutoInstall {
+		t.Error("AutoInstall = false, want true")
+	}
 	if cfg.Database.Path != "/tmp/occa.db" {
 		t.Errorf("Database.Path = %q", cfg.Database.Path)
 	}
@@ -102,6 +109,7 @@ func TestLoadEnvOverridesYAML(t *testing.T) {
 
 	t.Setenv("OCCA_AGENT_BINARY", "from-env")
 	t.Setenv("OCCA_AGENT_MAX_INSTANCES", "9")
+	t.Setenv("OCCA_AGENT_AUTO_INSTALL", "true")
 
 	cfg, err := Load(path)
 	if err != nil {
@@ -112,6 +120,18 @@ func TestLoadEnvOverridesYAML(t *testing.T) {
 	}
 	if cfg.Agent.MaxInstances != 9 {
 		t.Errorf("MaxInstances = %d, want 9", cfg.Agent.MaxInstances)
+	}
+	if !cfg.Agent.AutoInstall {
+		t.Error("AutoInstall = false, want true (env must override default)")
+	}
+}
+
+func TestLoadInvalidAutoInstallEnvErrors(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
+	path := writeConfig(t, t.TempDir(), "")
+	t.Setenv("OCCA_AGENT_AUTO_INSTALL", "not-a-bool")
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for invalid OCCA_AGENT_AUTO_INSTALL")
 	}
 }
 
