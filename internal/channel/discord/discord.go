@@ -149,7 +149,7 @@ func (a *Adapter) handleApplicationCommandInteraction(sess *discordgo.Session, i
 		slog.Warn("discord: defer interaction failed", "error", err)
 	}
 
-	parentChannelID, isThread, scopeUnresolved := a.channelScope(i.Interaction.GuildID, i.ChannelID)
+	parentChannelID, isThread, scopeUnresolved := a.channelScope(i.GuildID, i.ChannelID)
 	msg := channel.IncomingMessage{
 		Platform:               "discord",
 		ChannelID:              i.ChannelID,
