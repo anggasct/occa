@@ -27,6 +27,24 @@ type Command struct {
 	Handler func(ctx context.Context, msg channel.IncomingMessage, args string) (string, error)
 }
 
+// MenuCommands is the single source of truth for native command-menu
+// registration on both platforms.
+func (r *Router) MenuCommands() []channel.MenuCommand {
+	return []channel.MenuCommand{
+		{Alias: "occa_help", Description: "Show available commands"},
+		{Alias: "occa_status", Description: "Agent health and session info"},
+		{Alias: "occa_session", Description: "Manage sessions: list, new, switch, or delete", HasArgs: true},
+		{Alias: "occa_reset", Description: "Clear current session and start fresh"},
+		{Alias: "occa_dir", Description: "View or set this channel's working directory", HasArgs: true},
+		{Alias: "occa_allow", Description: "Allow a user to use this bot", HasArgs: true},
+		{Alias: "occa_deny", Description: "Revoke a user's access to this bot", HasArgs: true},
+		{Alias: "occa_admin", Description: "Grant a user admin access", HasArgs: true},
+		{Alias: "occa_channel", Description: "View or set listen mode (mention, all, thread)", HasArgs: true},
+		{Alias: "occa_model", Description: "View or set the active model", HasArgs: true},
+		{Alias: "occa_schedules", Description: "View or delete scheduled tasks", HasArgs: true},
+	}
+}
+
 // AgentInstance is a ready agent backend handle for a working directory.
 type AgentInstance interface {
 	Client() relay.Client
@@ -86,6 +104,7 @@ func New(instances InstanceProvider, st store.Store, defaultWorkdir string, admi
 }
 
 func (r *Router) Route(ctx context.Context, msg channel.IncomingMessage) error {
+	msg.Text = normalizeCommandAlias(msg.Text)
 	inputKind := routeInputKind(msg)
 	if err := r.authorize(ctx, msg); err != nil {
 		if errors.Is(err, ErrDenied) {
@@ -112,6 +131,18 @@ func (r *Router) Route(ctx context.Context, msg channel.IncomingMessage) error {
 	}
 
 	return r.passthrough(ctx, msg)
+}
+
+// normalizeCommandAlias rewrites the "/occa_name" alias to the canonical
+// "/occa:name" form. Telegram and Discord command-menu registration forbids
+// ':' in a command name, so the native menu registers underscore aliases;
+// this is the one place that reconciles them back to the form the rest of
+// the router already understands.
+func normalizeCommandAlias(text string) string {
+	if strings.HasPrefix(text, "/occa_") {
+		return "/occa:" + strings.TrimPrefix(text, "/occa_")
+	}
+	return text
 }
 
 func routeInputKind(msg channel.IncomingMessage) string {
@@ -329,7 +360,7 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 func (r *Router) registerDefaults() {
 	r.commands["help"] = Command{
 		Name:    "help",
-		Handler: func(_ context.Context, _ channel.IncomingMessage, _ string) (string, error) { return r.helpText(), nil },
+		Handler: r.handleHelp,
 	}
 	r.commands["status"] = Command{
 		Name:    "status",
@@ -377,6 +408,30 @@ func (r *Router) registerDefaults() {
 		Admin:   true,
 		Handler: r.handleSchedules,
 	}
+}
+
+// handleHelp lists OCCA's own commands and, best-effort, the connected
+// agent's own commands. An unreachable agent or an empty/error result from
+// ListCommands never fails the command — it just omits that section.
+func (r *Router) handleHelp(ctx context.Context, msg channel.IncomingMessage, _ string) (string, error) {
+	text := r.helpText()
+
+	inst, err := r.clientFor(ctx, msg)
+	if err != nil {
+		return text, nil
+	}
+	defer inst.End()
+
+	commands, err := inst.Client().ListCommands(ctx)
+	if err != nil || len(commands) == 0 {
+		return text, nil
+	}
+
+	text += "\n\nAgent commands:\n"
+	for _, c := range commands {
+		text += fmt.Sprintf("• /%s — %s\n", c.Name, c.Description)
+	}
+	return strings.TrimRight(text, "\n"), nil
 }
 
 func (r *Router) helpText() string {

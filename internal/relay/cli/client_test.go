@@ -348,3 +348,14 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+func TestListCommandsReturnsEmpty(t *testing.T) {
+	c := New("claude")
+	commands, err := c.ListCommands(context.Background())
+	if err != nil {
+		t.Fatalf("ListCommands: %v", err)
+	}
+	if commands != nil {
+		t.Fatalf("expected nil commands, got %v", commands)
+	}
+}

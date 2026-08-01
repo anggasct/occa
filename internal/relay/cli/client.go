@@ -83,6 +83,12 @@ func (c *Client) Providers(ctx context.Context) (relay.Providers, error) {
 	return relay.Providers{}, nil
 }
 
+// ListCommands returns an empty list: no discrete command-list endpoint
+// exists for this backend, same best-effort posture as Providers.
+func (c *Client) ListCommands(ctx context.Context) ([]relay.CommandInfo, error) {
+	return nil, nil
+}
+
 // Events mints a fresh channel per call, mirroring one event stream per turn.
 func (c *Client) Events(ctx context.Context, sessionID string) (<-chan relay.Event, error) {
 	c.mu.Lock()

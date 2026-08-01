@@ -13,6 +13,17 @@ type Button struct {
 	Value string
 }
 
+// MenuCommand describes one command for native platform command-menu
+// registration (Telegram setMyCommands, Discord slash-command registration).
+// Alias is the platform-safe name (letters/digits/underscore only, no ':') —
+// adapters register Alias, the router normalizes it back to the canonical
+// colon-form command before dispatch.
+type MenuCommand struct {
+	Alias       string
+	Description string
+	HasArgs     bool
+}
+
 type IncomingMessage struct {
 	Platform               string
 	ChannelID              string

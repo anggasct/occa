@@ -21,6 +21,7 @@ const maxDownloadSize = 10 * 1024 * 1024
 type Adapter struct {
 	session        *discordgo.Session
 	token          string
+	menu           []channel.MenuCommand
 	botID          atomic.Value
 	channelLookup  func(string) (*discordgo.Channel, error)
 	downloadClient *http.Client
@@ -28,8 +29,8 @@ type Adapter struct {
 
 const defaultDownloadTimeout = 60 * time.Second
 
-func New(token string) *Adapter {
-	return &Adapter{token: token, downloadClient: &http.Client{Timeout: defaultDownloadTimeout}}
+func New(token string, menu []channel.MenuCommand) *Adapter {
+	return &Adapter{token: token, menu: menu, downloadClient: &http.Client{Timeout: defaultDownloadTimeout}}
 }
 
 func (a *Adapter) Name() string { return "discord" }
@@ -117,40 +118,50 @@ func (a *Adapter) configure(s *discordgo.Session, handler func(channel.IncomingM
 			handler(msg)
 
 		case discordgo.InteractionApplicationCommand:
-			data := i.ApplicationCommandData()
-			text := "/" + data.Name
-			for _, opt := range data.Options {
-				text += " " + fmt.Sprintf("%v", opt.Value)
-			}
-
-			var userID string
-			if i.Member != nil {
-				userID = i.Member.User.ID
-			} else if i.User != nil {
-				userID = i.User.ID
-			}
-
-			if err := sess.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
-			}); err != nil {
-				slog.Warn("discord: defer interaction failed", "error", err)
-			}
-
-			parentChannelID, isThread, scopeUnresolved := a.channelScope(i.Interaction.GuildID, i.ChannelID)
-			msg := channel.IncomingMessage{
-				Platform:               "discord",
-				ChannelID:              i.ChannelID,
-				ParentChannelID:        parentChannelID,
-				ChannelScopeUnresolved: scopeUnresolved,
-				UserID:                 userID,
-				Text:                   strings.TrimSpace(text),
-				IsMention:              true,
-				IsThread:               isThread,
-				ReplyCtx:               &replyContext{session: sess, channelID: i.ChannelID, interaction: i.Interaction},
-			}
-			handler(msg)
+			a.handleApplicationCommandInteraction(sess, i, handler)
 		}
 	})
+}
+
+// handleApplicationCommandInteraction reconstructs a slash-command
+// interaction into the same "/name arg" text the message-content path
+// produces, so both reach the router identically. The registered command
+// name is whatever native-menu alias was registered (e.g. "occa_session");
+// Router.normalizeCommandAlias reconciles it back to the canonical
+// "/occa:session" form before dispatch.
+func (a *Adapter) handleApplicationCommandInteraction(sess *discordgo.Session, i *discordgo.InteractionCreate, handler func(channel.IncomingMessage)) {
+	data := i.ApplicationCommandData()
+	text := "/" + data.Name
+	for _, opt := range data.Options {
+		text += " " + fmt.Sprintf("%v", opt.Value)
+	}
+
+	var userID string
+	if i.Member != nil {
+		userID = i.Member.User.ID
+	} else if i.User != nil {
+		userID = i.User.ID
+	}
+
+	if err := sess.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+	}); err != nil {
+		slog.Warn("discord: defer interaction failed", "error", err)
+	}
+
+	parentChannelID, isThread, scopeUnresolved := a.channelScope(i.GuildID, i.ChannelID)
+	msg := channel.IncomingMessage{
+		Platform:               "discord",
+		ChannelID:              i.ChannelID,
+		ParentChannelID:        parentChannelID,
+		ChannelScopeUnresolved: scopeUnresolved,
+		UserID:                 userID,
+		Text:                   strings.TrimSpace(text),
+		IsMention:              true,
+		IsThread:               isThread,
+		ReplyCtx:               &replyContext{session: sess, channelID: i.ChannelID, interaction: i.Interaction},
+	}
+	handler(msg)
 }
 
 func (a *Adapter) onReady(r *discordgo.Ready) {
@@ -160,6 +171,37 @@ func (a *Adapter) onReady(r *discordgo.Ready) {
 	}
 	a.setBotID(r.User.ID)
 	slog.Info("discord adapter connected", "bot_id", r.User.ID)
+	a.registerCommands(r)
+}
+
+// registerCommands populates Discord's native slash-command menu globally.
+// A failure here is logged and never blocks the adapter — the bot remains
+// fully usable via typed commands and existing slash interactions regardless.
+func (a *Adapter) registerCommands(r *discordgo.Ready) {
+	if len(a.menu) == 0 {
+		return
+	}
+	if r.Application == nil || r.Application.ID == "" {
+		slog.Warn("discord: set commands skipped — no application id in READY event")
+		return
+	}
+
+	commands := make([]*discordgo.ApplicationCommand, len(a.menu))
+	for i, m := range a.menu {
+		cmd := &discordgo.ApplicationCommand{Name: m.Alias, Description: m.Description}
+		if m.HasArgs {
+			cmd.Options = []*discordgo.ApplicationCommandOption{{
+				Type:        discordgo.ApplicationCommandOptionString,
+				Name:        "args",
+				Description: "Arguments for this command",
+			}}
+		}
+		commands[i] = cmd
+	}
+
+	if _, err := a.session.ApplicationCommandBulkOverwrite(r.Application.ID, "", commands); err != nil {
+		slog.Warn("discord: set commands failed", "error", err)
+	}
 }
 
 func (a *Adapter) onMessage(m *discordgo.MessageCreate, handler func(channel.IncomingMessage)) {

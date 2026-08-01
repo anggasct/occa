@@ -1,6 +1,9 @@
 package discord
 
 import (
+	"io"
+	"net/http"
+	"strings"
 	"sync"
 	"testing"
 
@@ -8,6 +11,20 @@ import (
 
 	"github.com/anggasct/occa/internal/channel"
 )
+
+type fakeRoundTripper struct {
+	do func(*http.Request) (*http.Response, error)
+}
+
+func (f fakeRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) { return f.do(req) }
+
+func jsonResponse(status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Header:     make(http.Header),
+	}
+}
 
 func newUnconnectedSession(t *testing.T) *discordgo.Session {
 	t.Helper()
@@ -22,7 +39,7 @@ func newUnconnectedSession(t *testing.T) *discordgo.Session {
 }
 
 func TestConfigureDoesNotReadGatewayState(t *testing.T) {
-	a := New("fake-token")
+	a := New("fake-token", nil)
 	a.configure(newUnconnectedSession(t), func(channel.IncomingMessage) {})
 
 	if a.selfID() != "" {
@@ -31,7 +48,7 @@ func TestConfigureDoesNotReadGatewayState(t *testing.T) {
 }
 
 func TestReadyPopulatesBotIdentity(t *testing.T) {
-	a := New("fake-token")
+	a := New("fake-token", nil)
 	a.onReady(&discordgo.Ready{User: &discordgo.User{ID: "bot-42"}})
 
 	if a.selfID() != "bot-42" {
@@ -40,7 +57,7 @@ func TestReadyPopulatesBotIdentity(t *testing.T) {
 }
 
 func TestReadyWithoutUserIsIgnored(t *testing.T) {
-	a := New("fake-token")
+	a := New("fake-token", nil)
 	a.onReady(&discordgo.Ready{})
 
 	if a.selfID() != "" {
@@ -49,7 +66,7 @@ func TestReadyWithoutUserIsIgnored(t *testing.T) {
 }
 
 func TestMessageBeforeReadyIsStillDelivered(t *testing.T) {
-	a := New("fake-token")
+	a := New("fake-token", nil)
 	a.channelLookup = func(string) (*discordgo.Channel, error) {
 		return &discordgo.Channel{Type: discordgo.ChannelTypeGuildText}, nil
 	}
@@ -67,7 +84,7 @@ func TestMessageBeforeReadyIsStillDelivered(t *testing.T) {
 }
 
 func TestOwnMessageDroppedOnceIdentityKnown(t *testing.T) {
-	a := New("fake-token")
+	a := New("fake-token", nil)
 	a.onReady(&discordgo.Ready{User: &discordgo.User{ID: "bot-42"}})
 
 	delivered := 0
@@ -89,8 +106,122 @@ func TestOwnMessageDroppedOnceIdentityKnown(t *testing.T) {
 	}
 }
 
+func TestRegisterCommandsSendsBulkOverwrite(t *testing.T) {
+	var gotPath, gotMethod string
+	var gotBody []byte
+	s := newUnconnectedSession(t)
+	s.Client = &http.Client{Transport: fakeRoundTripper{do: func(req *http.Request) (*http.Response, error) {
+		gotPath = req.URL.Path
+		gotMethod = req.Method
+		gotBody, _ = io.ReadAll(req.Body)
+		return jsonResponse(200, "[]"), nil
+	}}}
+
+	a := &Adapter{session: s, menu: []channel.MenuCommand{
+		{Alias: "occa_help", Description: "Show available commands"},
+		{Alias: "occa_session", Description: "Manage sessions", HasArgs: true},
+	}}
+	a.registerCommands(&discordgo.Ready{Application: &discordgo.Application{ID: "app-1"}})
+
+	if gotMethod != http.MethodPut {
+		t.Fatalf("expected PUT, got %q", gotMethod)
+	}
+	if !strings.Contains(gotPath, "applications/app-1/commands") {
+		t.Fatalf("expected bulk-overwrite path, got %q", gotPath)
+	}
+	if !strings.Contains(string(gotBody), "occa_help") || !strings.Contains(string(gotBody), "occa_session") {
+		t.Fatalf("expected both commands in request body, got %q", gotBody)
+	}
+	if !strings.Contains(string(gotBody), `"name":"args"`) {
+		t.Fatalf("expected args option for occa_session, got %q", gotBody)
+	}
+}
+
+func TestRegisterCommandsSkipsWhenMenuEmpty(t *testing.T) {
+	called := false
+	s := newUnconnectedSession(t)
+	s.Client = &http.Client{Transport: fakeRoundTripper{do: func(req *http.Request) (*http.Response, error) {
+		called = true
+		return jsonResponse(200, "[]"), nil
+	}}}
+
+	a := &Adapter{session: s}
+	a.registerCommands(&discordgo.Ready{Application: &discordgo.Application{ID: "app-1"}})
+
+	if called {
+		t.Fatal("expected no HTTP call when menu is empty")
+	}
+}
+
+func TestRegisterCommandsSkipsWhenApplicationIDMissing(t *testing.T) {
+	called := false
+	s := newUnconnectedSession(t)
+	s.Client = &http.Client{Transport: fakeRoundTripper{do: func(req *http.Request) (*http.Response, error) {
+		called = true
+		return jsonResponse(200, "[]"), nil
+	}}}
+
+	a := &Adapter{session: s, menu: []channel.MenuCommand{{Alias: "occa_help", Description: "x"}}}
+	a.registerCommands(&discordgo.Ready{})
+
+	if called {
+		t.Fatal("expected no HTTP call when Application is nil")
+	}
+}
+
+func TestRegisterCommandsFailureDoesNotPanic(t *testing.T) {
+	s := newUnconnectedSession(t)
+	s.Client = &http.Client{Transport: fakeRoundTripper{do: func(req *http.Request) (*http.Response, error) {
+		return jsonResponse(500, `{"message":"boom"}`), nil
+	}}}
+
+	a := &Adapter{session: s, menu: []channel.MenuCommand{{Alias: "occa_help", Description: "x"}}}
+	a.registerCommands(&discordgo.Ready{Application: &discordgo.Application{ID: "app-1"}}) // must not panic
+}
+
+// TestApplicationCommandInteractionReconstructsAliasedText covers the
+// discord-side half of the round trip: a slash-command interaction using a
+// registered alias (e.g. "occa_session") reconstructs to "/occa_session
+// list" the same way the pre-existing message-content path would. The
+// router-side half — that normalizeCommandAlias maps this exact text to
+// "/occa:session list" before dispatch — is covered by
+// TestNormalizeCommandAlias in internal/router; together the two tests
+// verify the full round trip without an import-cycle-inducing cross-package
+// dependency here.
+func TestApplicationCommandInteractionReconstructsAliasedText(t *testing.T) {
+	s := newUnconnectedSession(t)
+	s.Client = &http.Client{Transport: fakeRoundTripper{do: func(req *http.Request) (*http.Response, error) {
+		return jsonResponse(200, "{}"), nil
+	}}}
+
+	a := New("fake-token", nil)
+	interaction := &discordgo.InteractionCreate{Interaction: &discordgo.Interaction{
+		ID:        "int-1",
+		Token:     "int-token",
+		Type:      discordgo.InteractionApplicationCommand,
+		ChannelID: "chan-1",
+		Data: discordgo.ApplicationCommandInteractionData{
+			Name: "occa_session",
+			Options: []*discordgo.ApplicationCommandInteractionDataOption{
+				{Name: "args", Value: "list"},
+			},
+		},
+		User: &discordgo.User{ID: "user-1"},
+	}}
+
+	var got channel.IncomingMessage
+	a.handleApplicationCommandInteraction(s, interaction, func(m channel.IncomingMessage) { got = m })
+
+	if got.Text != "/occa_session list" {
+		t.Fatalf("reconstructed text = %q, want %q", got.Text, "/occa_session list")
+	}
+	if got.Platform != "discord" || got.UserID != "user-1" || got.ChannelID != "chan-1" {
+		t.Fatalf("unexpected message fields: %+v", got)
+	}
+}
+
 func TestIdentityWriteAndReadAreConcurrencySafe(t *testing.T) {
-	a := New("fake-token")
+	a := New("fake-token", nil)
 	a.channelLookup = func(string) (*discordgo.Channel, error) {
 		return &discordgo.Channel{Type: discordgo.ChannelTypeGuildText}, nil
 	}

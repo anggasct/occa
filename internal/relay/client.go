@@ -93,6 +93,15 @@ type Client interface {
 	RunCommand(ctx context.Context, sessionID, command string) error
 	Events(ctx context.Context, sessionID string) (<-chan Event, error)
 	ReplyPermission(ctx context.Context, requestID string, reply PermissionReply) error
+	ListCommands(ctx context.Context) ([]CommandInfo, error)
+}
+
+// CommandInfo describes one command the agent backend can invoke, used to
+// enrich the chat-facing help text with the agent's own commands.
+type CommandInfo struct {
+	Name        string
+	Description string
+	Source      string
 }
 
 type HTTPClient struct {
@@ -175,6 +184,33 @@ func (c *HTTPClient) Providers(ctx context.Context) (Providers, error) {
 		return Providers{}, fmt.Errorf("relay: providers: decode response: %w", err)
 	}
 	return providers, nil
+}
+
+func (c *HTTPClient) ListCommands(ctx context.Context) ([]CommandInfo, error) {
+	resp, err := c.get(ctx, "/command")
+	if err != nil {
+		return nil, fmt.Errorf("relay: list commands: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("relay: list commands: unexpected status %d", resp.StatusCode)
+	}
+
+	var raw []struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Source      string `json:"source"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, fmt.Errorf("relay: list commands: decode response: %w", err)
+	}
+
+	commands := make([]CommandInfo, len(raw))
+	for i, r := range raw {
+		commands[i] = CommandInfo{Name: r.Name, Description: r.Description, Source: r.Source}
+	}
+	return commands, nil
 }
 
 func (c *HTTPClient) RunCommand(ctx context.Context, sessionID, command string) error {

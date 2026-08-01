@@ -117,6 +117,35 @@ func TestProvidersPreservesSentinelCauses(t *testing.T) {
 	})
 }
 
+func TestListCommands(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/command" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"name":"plan","description":"Create a plan","source":"command","template":"...","hints":["$ARGUMENTS"]}]`))
+	}))
+	defer srv.Close()
+
+	commands, err := NewHTTPClient(srv.URL).ListCommands(context.Background())
+	if err != nil {
+		t.Fatalf("ListCommands: %v", err)
+	}
+	if len(commands) != 1 {
+		t.Fatalf("expected 1 command, got %d", len(commands))
+	}
+	if commands[0] != (CommandInfo{Name: "plan", Description: "Create a plan", Source: "command"}) {
+		t.Fatalf("unexpected command: %+v", commands[0])
+	}
+}
+
+func TestListCommandsUnreachable(t *testing.T) {
+	_, err := NewHTTPClient("http://127.0.0.1:1").ListCommands(context.Background())
+	if !errors.Is(err, ErrUnreachable) {
+		t.Fatalf("expected ErrUnreachable, got %v", err)
+	}
+}
+
 func TestRunCommand(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/session/s1/command" {
