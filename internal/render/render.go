@@ -87,31 +87,148 @@ func Split(s string, limit int) []string {
 			break
 		}
 
-		breakAt := findSafeBreak(remaining, limit)
-		chunks = append(chunks, remaining[:breakAt])
+		breakAt, hardCut := findSafeBreak(remaining, limit)
+		chunk := remaining[:breakAt]
+		if hardCut {
+			// The limit fell inside an open tag span with no balanced boundary
+			// in range: close the open tags here and reopen them on the next
+			// chunk so each chunk stays well-formed for the platform parser.
+			if stack := openTagStack(chunk); len(stack) > 0 {
+				chunk += closeTags(stack)
+				remaining = openTags(stack) + strings.TrimLeft(remaining[breakAt:], "\n")
+				chunks = append(chunks, chunk)
+				continue
+			}
+		}
+		chunks = append(chunks, chunk)
 		remaining = strings.TrimLeft(remaining[breakAt:], "\n")
 	}
 	return chunks
 }
 
-func findSafeBreak(s string, limit int) int {
+func findSafeBreak(s string, limit int) (int, bool) {
 	end := maxPrefix(s, limit)
 	window := s[:end]
 
-	if idx := strings.LastIndex(window, "</pre>"); idx > 0 {
-		return idx + len("</pre>")
+	// Each chunk is parsed by the platform independently, so a boundary that
+	// leaves an HTML tag open in the chunk (e.g. a split inside a multi-line
+	// <b> span) produces a message the platform rejects. Only break where the
+	// prefix is tag-balanced.
+	for _, idx := range candidateBreaks(window) {
+		if htmlBalanced(window[:idx]) {
+			return idx, false
+		}
 	}
-	if idx := strings.LastIndex(window, "\n\n"); idx > 0 {
-		return idx
-	}
-	if idx := strings.LastIndex(window, "\n"); idx > 0 {
-		return idx
-	}
-	if idx := strings.LastIndex(window, " "); idx > 0 {
-		return idx
-	}
-	return end
+	return end, true
 }
+
+// openTagStack returns the tags currently open in s, innermost last.
+func openTagStack(s string) []string {
+	var stack []string
+	for i := 0; i < len(s); {
+		matched := false
+		for _, t := range openTagTokens {
+			if strings.HasPrefix(s[i:], t) {
+				stack = append(stack, tagName(t))
+				i += len(t)
+				matched = true
+				break
+			}
+		}
+		if matched {
+			continue
+		}
+		for _, t := range closeTagTokens {
+			if strings.HasPrefix(s[i:], t) {
+				stack = stack[:len(stack)-1]
+				i += len(t)
+				matched = true
+				break
+			}
+		}
+		if matched {
+			continue
+		}
+		i++
+	}
+	return stack
+}
+
+func closeTags(stack []string) string {
+	var out string
+	for i := len(stack) - 1; i >= 0; i-- {
+		out += "</" + stack[i] + ">"
+	}
+	return out
+}
+
+func openTags(stack []string) string {
+	var out string
+	for _, name := range stack {
+		out += "<" + name + ">"
+	}
+	return out
+}
+
+func tagName(t string) string { return t[1:] }
+
+// candidateBreaks lists boundary indices in preference order — after a closed
+// code block, then paragraph, line, and word boundaries, each from the last
+// occurrence backwards.
+func candidateBreaks(window string) []int {
+	var out []int
+	collect := func(sep string, offset int) {
+		for i := len(window) - len(sep); i > 0; i-- {
+			if strings.HasPrefix(window[i:], sep) {
+				out = append(out, i+offset)
+			}
+		}
+	}
+	collect("</pre>", len("</pre>"))
+	collect("\n\n", 0)
+	collect("\n", 0)
+	collect(" ", 0)
+	return out
+}
+
+// htmlBalanced reports whether every tag opened in s is closed and no closing
+// tag appears without its opener. Plain text with no tags is trivially
+// balanced.
+func htmlBalanced(s string) bool {
+	opens, closes := 0, 0
+	for i := 0; i < len(s); {
+		matched := false
+		for _, t := range openTagTokens {
+			if strings.HasPrefix(s[i:], t) {
+				opens++
+				i += len(t)
+				matched = true
+				break
+			}
+		}
+		if matched {
+			continue
+		}
+		for _, t := range closeTagTokens {
+			if strings.HasPrefix(s[i:], t) {
+				closes++
+				i += len(t)
+				matched = true
+				break
+			}
+		}
+		if matched {
+			continue
+		}
+		i++
+	}
+	return opens == closes
+}
+
+var (
+	openTagTokens  = []string{"<b>", "<code>", "<pre>"}
+	closeTagTokens = []string{"</b>", "</code>", "</pre>"}
+)
 
 // maxPrefix returns the largest rune-aligned byte index whose prefix measures
 // at most limit. It always advances by at least one rune so Split terminates

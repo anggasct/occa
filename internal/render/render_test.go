@@ -260,3 +260,36 @@ func TestLiteralMarkupPreservedForDiscord(t *testing.T) {
 		t.Fatalf("discord content altered: %q", got)
 	}
 }
+
+func TestSplitNeverBreaksTagBalance(t *testing.T) {
+	long := strings.Repeat("filler line\n", 500)
+	md := "**bold start " + long + "bold end**\n\nnormal text here"
+
+	chunks, err := New().RenderWithLimit(md, Telegram, 4096)
+	if err != nil {
+		t.Fatalf("RenderWithLimit: %v", err)
+	}
+	if len(chunks) < 2 {
+		t.Fatalf("expected a multi-chunk split, got %d", len(chunks))
+	}
+	for i, chunk := range chunks {
+		if !htmlBalanced(chunk) {
+			t.Fatalf("chunk %d is not tag-balanced: %q", i, chunk[:60])
+		}
+	}
+}
+
+func TestSplitPrefersBalancedBoundaryInsideBoldSpan(t *testing.T) {
+	// A multi-line bold span: the line boundary inside the span is not a safe
+	// break, so the split must land after the closing tag.
+	md := "**line one\nline two\nline three**\n\n" + strings.Repeat("pad ", 2000)
+	chunks, err := New().RenderWithLimit(md, Telegram, 4096)
+	if err != nil {
+		t.Fatalf("RenderWithLimit: %v", err)
+	}
+	for i, chunk := range chunks {
+		if !htmlBalanced(chunk) {
+			t.Fatalf("chunk %d is not tag-balanced: %q", i, chunk[:60])
+		}
+	}
+}
