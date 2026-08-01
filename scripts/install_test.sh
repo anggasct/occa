@@ -132,6 +132,35 @@ if [ "$(count_calls "opencode.ai/install")" -ne 0 ]; then
 fi
 pass "AC-04: opencode not reinstalled when present"
 
+# AC-06: OCCA_VERSION pins the release download path.
+inst_ver="$work/inst-ver"
+mkdir -p "$inst_ver"
+: > "$calls"
+run_install "Linux" "x86_64" env OCCA_INSTALL_DIR="$inst_ver" OCCA_VERSION="v0.1.0" sh ./install.sh
+if [ "$(count_calls "releases/download/v0.1.0/occa_linux_amd64")" -ne 1 ]; then
+	fail "AC-06: OCCA_VERSION did not pin the download URL"
+fi
+if [ ! -x "$inst_ver/occa" ]; then
+	fail "AC-06: no binary installed from pinned version"
+fi
+pass "AC-06: OCCA_VERSION pins the release download"
+
+# AC-07: OCCA_VERSION without the v prefix is normalized.
+: > "$calls"
+run_install "Linux" "x86_64" env OCCA_INSTALL_DIR="$inst_ver" OCCA_VERSION="0.1.0" sh ./install.sh
+if [ "$(count_calls "releases/download/v0.1.0/occa_linux_amd64")" -ne 1 ]; then
+	fail "AC-07: bare version not normalized to v prefix"
+fi
+pass "AC-07: bare version normalized to v prefix"
+
+# AC-08: without OCCA_VERSION the default latest path is used.
+: > "$calls"
+run_install "Linux" "x86_64" env OCCA_INSTALL_DIR="$inst_ver" sh ./install.sh
+if [ "$(count_calls "releases/latest/download/occa_linux_amd64")" -ne 1 ]; then
+	fail "AC-08: default download path is not latest"
+fi
+pass "AC-08: default download path is latest"
+
 # AC-05: unsupported platform fails with nothing installed.
 inst_bad="$work/inst-bad"
 mkdir -p "$inst_bad"

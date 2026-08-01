@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build release assets
+        run: |
+          mkdir -p dist
+          for target in "linux amd64" "linux arm64" "darwin amd64" "darwin arm64"; do
+            os=${target% *}
+            arch=${target#* }
+            GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "dist/occa_${os}_${arch}" ./cmd/occa
+          done
+
+      - name: Smoke test linux asset
+        run: |
+          if ./dist/occa_linux_amd64 >/dev/null 2>&1; then
+            echo "expected startup to fail without bot tokens" >&2
+            exit 1
+          fi
+          ./dist/occa_linux_amd64 2>&1 | grep -q "OCCA_TELEGRAM_TOKEN"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes
