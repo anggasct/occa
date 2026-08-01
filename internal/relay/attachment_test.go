@@ -123,11 +123,16 @@ func TestSendMessageNoAttachmentsUsesContentField(t *testing.T) {
 		t.Fatalf("SendMessage: %v", err)
 	}
 
-	if gotBody["content"] != "plain message" {
-		t.Fatalf("expected content field for no-attachment message, got: %v", gotBody)
+	parts, ok := gotBody["parts"].([]any)
+	if !ok || len(parts) != 1 {
+		t.Fatalf("expected one text part for no-attachment message, got: %v", gotBody)
 	}
-	if _, hasParts := gotBody["parts"]; hasParts {
-		t.Fatal("should not have parts field when no attachments")
+	textPart, ok := parts[0].(map[string]any)
+	if !ok || textPart["type"] != "text" || textPart["text"] != "plain message" {
+		t.Fatalf("unexpected text part: %v", parts[0])
+	}
+	if _, hasContent := gotBody["content"]; hasContent {
+		t.Fatal("should not have content field")
 	}
 }
 
