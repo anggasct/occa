@@ -320,3 +320,31 @@ func TestModelBrowserBackToProviders(t *testing.T) {
 		t.Fatalf("back must show providers, got %v", labelsOf(buttons))
 	}
 }
+
+// TestModelBrowserShowsOnlyConnectedProviders: when the agent reports a
+// connected list, the browser shows only those providers — the rest of the
+// catalog is unusable (no credentials).
+func TestModelBrowserShowsOnlyConnectedProviders(t *testing.T) {
+	providers := browseProviders()
+	providers.Connected = []string{"openai"}
+	r, client, _ := newTestRouter()
+	client.providers = providers
+	reply := newBrowseReplyCtx()
+
+	m := msg("/occa:model", reply.fakeReplyCtx)
+	m.ReplyCtx = reply
+	if err := r.Route(context.Background(), m); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+
+	labels := labelsOf(reply.sendSnapshot())
+	want := []string{"openai", "✖️ Close"}
+	if len(labels) != len(want) {
+		t.Fatalf("buttons = %v, want %v", labels, want)
+	}
+	for i := range want {
+		if labels[i] != want[i] {
+			t.Fatalf("buttons = %v, want %v", labels, want)
+		}
+	}
+}

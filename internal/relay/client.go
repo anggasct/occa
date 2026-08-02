@@ -43,6 +43,9 @@ type Provider struct {
 
 type Providers struct {
 	All []Provider `json:"all"`
+	// Connected lists the provider ids with working credentials, as
+	// reported by the agent; empty when the backend does not report it.
+	Connected []string `json:"connected"`
 }
 
 func (p Providers) HasProvider(id string) bool {

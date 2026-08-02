@@ -341,7 +341,15 @@ func modelTotalPages(total int) int {
 	return (total + modelBrowserPage - 1) / modelBrowserPage
 }
 
+// providerIDs returns the browsable provider ids: the connected ones when
+// the agent reports them, otherwise the full catalog (backends without a
+// connected list still show everything).
 func providerIDs(providers relay.Providers) []string {
+	if len(providers.Connected) > 0 {
+		ids := append([]string(nil), providers.Connected...)
+		sort.Strings(ids)
+		return ids
+	}
 	ids := make([]string, 0, len(providers.All))
 	for _, p := range providers.All {
 		ids = append(ids, p.ID)
