@@ -441,3 +441,26 @@ func TestOutboundMessagesSuppressMentions(t *testing.T) {
 		}
 	}
 }
+
+// TestComponentRowsGroupsByRow: buttons sharing a Row hint land in one
+// action row; Row 0 keeps the legacy all-in-one-row layout.
+func TestComponentRowsGroupsByRow(t *testing.T) {
+	components := componentRows([]channel.Button{
+		{Label: "a", Value: "1", Row: 1},
+		{Label: "b", Value: "2", Row: 1},
+		{Label: "c", Value: "3"},
+		{Label: "d", Value: "4"},
+	})
+	rows := components
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2 (%+v)", len(rows), rows)
+	}
+	row1, ok := rows[0].(discordgo.ActionsRow)
+	if !ok || len(row1.Components) != 2 {
+		t.Fatalf("grouped row = %+v", rows[0])
+	}
+	row2, ok := rows[1].(discordgo.ActionsRow)
+	if !ok || len(row2.Components) != 2 {
+		t.Fatalf("legacy row = %+v", rows[1])
+	}
+}

@@ -348,3 +348,31 @@ func TestModelBrowserShowsOnlyConnectedProviders(t *testing.T) {
 		}
 	}
 }
+
+// TestModelBrowserRowLayout: item buttons pair up in two columns (Row i/2+1)
+// and nav buttons share one row.
+func TestModelBrowserRowLayout(t *testing.T) {
+	providers := browseProviders()
+	r, client, _ := newTestRouter()
+	client.providers = providers
+	reply := newBrowseReplyCtx()
+
+	m := msg("/occa:model", reply.fakeReplyCtx)
+	m.ReplyCtx = reply
+	if err := r.Route(context.Background(), m); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+
+	buttons := reply.sendSnapshot()
+	for i, b := range buttons {
+		if b.Label == "✖️ Close" {
+			if b.Row != modelBrowserNavRow {
+				t.Fatalf("nav button row = %d, want %d", b.Row, modelBrowserNavRow)
+			}
+			continue
+		}
+		if want := i/2 + 1; b.Row != want {
+			t.Fatalf("item %q row = %d, want %d", b.Label, b.Row, want)
+		}
+	}
+}

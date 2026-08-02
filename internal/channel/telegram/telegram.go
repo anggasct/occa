@@ -477,12 +477,35 @@ func (rc *replyContext) requestSilent(method string, params tgbotapi.Params) err
 	}
 }
 
+// inlineKeyboard renders buttons grouped by their Row hint: buttons sharing
+// a non-zero Row land in one platform row (max 8 per row); Row 0 keeps the
+// legacy one-button-per-row layout.
 func inlineKeyboard(buttons []channel.Button) tgbotapi.InlineKeyboardMarkup {
 	rows := make([][]tgbotapi.InlineKeyboardButton, 0, len(buttons))
+	var solo []tgbotapi.InlineKeyboardButton
+	grouped := make(map[int][]tgbotapi.InlineKeyboardButton)
+	var order []int
 	for _, b := range buttons {
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(b.Label, b.Value),
-		))
+		btn := tgbotapi.NewInlineKeyboardButtonData(b.Label, b.Value)
+		if b.Row == 0 {
+			solo = append(solo, btn)
+			continue
+		}
+		if _, ok := grouped[b.Row]; !ok {
+			order = append(order, b.Row)
+		}
+		grouped[b.Row] = append(grouped[b.Row], btn)
+	}
+	for _, r := range order {
+		row := grouped[r]
+		for len(row) > 8 {
+			rows = append(rows, row[:8])
+			row = row[8:]
+		}
+		rows = append(rows, row)
+	}
+	for _, btn := range solo {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(btn))
 	}
 	return tgbotapi.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
