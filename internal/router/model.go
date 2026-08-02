@@ -15,6 +15,12 @@ var errChannelScopeUnresolved = errors.New("channel scope unresolved")
 func (r *Router) handleModel(ctx context.Context, msg channel.IncomingMessage, args string) (string, error) {
 	parts := strings.Fields(args)
 	if len(parts) == 0 {
+		if err := r.openModelBrowser(ctx, msg); err != nil {
+			if errors.Is(err, errReplied) {
+				return "", errReplied
+			}
+			return "", err
+		}
 		return r.viewModel(ctx, msg)
 	}
 
