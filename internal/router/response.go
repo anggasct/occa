@@ -91,6 +91,9 @@ func (r *Router) runResponse(
 	go func() {
 		streamer := relay.NewStreamer(msg.ReplyCtx, r.renderer, render.PlatformFor(msg.Platform))
 		streamer.SetPermissionPromptHandler(permissionHandler)
+		if setter, ok := msg.ReplyCtx.(channel.ReactionSetter); ok {
+			streamer.SetReactionSetter(setter)
+		}
 		streamDone <- streamer.Run(ctx, events)
 	}()
 
