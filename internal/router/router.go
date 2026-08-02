@@ -108,12 +108,12 @@ func (r *Router) Route(ctx context.Context, msg channel.IncomingMessage) error {
 	inputKind := routeInputKind(msg)
 	if err := r.authorize(ctx, msg); err != nil {
 		if errors.Is(err, ErrDenied) {
-			slog.Info("access denied", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID, "input_kind", inputKind, "outcome", "denied")
+			slog.Info("access denied", "platform", msg.Platform, "channel_id", msg.ChannelID, "thread_id", msg.ThreadID, "user_id", msg.UserID, "input_kind", inputKind, "outcome", "denied")
 			r.reply(msg, accessDeniedMessage)
 			return nil
 		}
 
-		slog.Error("access verification failed", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID, "input_kind", inputKind, "outcome", "error", "error", err)
+		slog.Error("access verification failed", "platform", msg.Platform, "channel_id", msg.ChannelID, "thread_id", msg.ThreadID, "user_id", msg.UserID, "input_kind", inputKind, "outcome", "error", "error", err)
 		r.reply(msg, accessVerifyMessage)
 		return nil
 	}
@@ -285,8 +285,20 @@ func (r *Router) clientFor(ctx context.Context, msg channel.IncomingMessage) (Ag
 	return r.instances.Instance(ctx, workdir)
 }
 
+// conversationKey derives the session-key components (threadID, userID) from
+// a message per the session-key policy: threads are shared per thread; other
+// conversations are isolated per sender. DM chats resolve to the sender too —
+// a private chat has a single sender, so the key stays per-chat in effect.
+func conversationKey(msg channel.IncomingMessage) (threadID, userID string) {
+	if msg.IsThread && msg.ThreadID != "" {
+		return msg.ThreadID, ""
+	}
+	return "", msg.UserID
+}
+
 func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) error {
-	key := responseKey{platform: msg.Platform, channelID: msg.ChannelID}
+	threadID, userID := conversationKey(msg)
+	key := responseKey{platform: msg.Platform, channelID: msg.ChannelID, threadID: threadID, userID: userID}
 	if !r.responses.acquire(key) {
 		r.reply(msg, busyResponseMessage)
 		return nil
@@ -300,7 +312,7 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 	}
 
 	resolver := relay.NewSessionResolver(r.store.SessionRepo(), inst.Client())
-	sessionID, err := resolver.Resolve(ctx, msg.Platform, msg.ChannelID)
+	sessionID, err := resolver.Resolve(ctx, msg.Platform, msg.ChannelID, threadID, userID)
 	if err != nil {
 		inst.End()
 		r.responses.release(key)
@@ -456,7 +468,8 @@ func (r *Router) handleStatus(ctx context.Context, msg channel.IncomingMessage, 
 
 	start := time.Now()
 	resolver := relay.NewSessionResolver(r.store.SessionRepo(), inst.Client())
-	sessionID, err := resolver.Resolve(ctx, msg.Platform, msg.ChannelID)
+	threadID, userID := conversationKey(msg)
+	sessionID, err := resolver.Resolve(ctx, msg.Platform, msg.ChannelID, threadID, userID)
 	if err != nil {
 		return "⚠️ Agent unreachable", nil
 	}
@@ -506,7 +519,8 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 		if err != nil {
 			return "⚠️ Agent unreachable", nil
 		}
-		if err := r.store.SessionRepo().SetActive(ctx, msg.Platform, msg.ChannelID, sessionID); err != nil {
+		threadID, userID := conversationKey(msg)
+		if err := r.store.SessionRepo().SetActive(ctx, msg.Platform, msg.ChannelID, threadID, userID, sessionID); err != nil {
 			return "", fmt.Errorf("session new: %w", err)
 		}
 		return fmt.Sprintf("✅ New session: %s", sessionID), nil
@@ -530,7 +544,8 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 		if !found {
 			return "Session not found.", nil
 		}
-		if err := r.store.SessionRepo().SetActive(ctx, msg.Platform, msg.ChannelID, target); err != nil {
+		threadID, userID := conversationKey(msg)
+		if err := r.store.SessionRepo().SetActive(ctx, msg.Platform, msg.ChannelID, threadID, userID, target); err != nil {
 			return "", fmt.Errorf("session switch: %w", err)
 		}
 		return fmt.Sprintf("✅ Switched to: %s", target), nil
@@ -570,7 +585,8 @@ func (r *Router) handleReset(ctx context.Context, msg channel.IncomingMessage, _
 	if err != nil {
 		return "⚠️ Agent unreachable", nil
 	}
-	if err := r.store.SessionRepo().SetActive(ctx, msg.Platform, msg.ChannelID, sessionID); err != nil {
+	threadID, userID := conversationKey(msg)
+	if err := r.store.SessionRepo().SetActive(ctx, msg.Platform, msg.ChannelID, threadID, userID, sessionID); err != nil {
 		return "", fmt.Errorf("reset: %w", err)
 	}
 	return fmt.Sprintf("✅ Session reset. New session: %s", sessionID), nil

@@ -2,10 +2,12 @@ package telegram
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,29 +43,79 @@ func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessag
 
 	slog.Info("telegram adapter started", "bot_username", bot.Self.UserName)
 
-	u := tgbotapi.NewUpdate(0)
-	u.Timeout = 60
+	// Long-poll loop over the raw update JSON: the Telegram SDK predates
+	// forum topics and drops message_thread_id when parsing updates, so the
+	// raw payload is read in parallel to capture the topic id.
+	offset := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
 
-	updates := bot.GetUpdatesChan(u)
-
-	go func() {
-		<-ctx.Done()
-		bot.StopReceivingUpdates()
-	}()
-
-	for update := range updates {
-		if update.CallbackQuery != nil {
-			msg := a.normalizeCallback(update)
-			handler(msg)
+		resp, err := bot.MakeRequest("getUpdates", tgbotapi.Params{
+			"timeout": "60",
+			"offset":  strconv.Itoa(offset),
+		})
+		if err != nil {
+			slog.Warn("telegram: getUpdates failed, retrying", "error", err)
+			time.Sleep(3 * time.Second)
 			continue
 		}
-		if update.Message == nil {
+
+		var updates []tgbotapi.Update
+		if err := json.Unmarshal(resp.Result, &updates); err != nil {
+			slog.Warn("telegram: decode updates failed", "error", err)
 			continue
 		}
-		msg := a.normalize(update)
-		handler(msg)
+		var raw []rawUpdate
+		if err := json.Unmarshal(resp.Result, &raw); err != nil {
+			slog.Warn("telegram: decode raw updates failed", "error", err)
+			continue
+		}
+
+		for i, u := range updates {
+			if u.UpdateID >= offset {
+				offset = u.UpdateID + 1
+			}
+			threadID := int64(0)
+			if i < len(raw) {
+				threadID = raw[i].threadID()
+			}
+			if u.CallbackQuery != nil {
+				handler(a.normalizeCallback(u, threadID))
+				continue
+			}
+			if u.Message == nil {
+				continue
+			}
+			handler(a.normalize(u, threadID))
+		}
 	}
-	return nil
+}
+
+// rawUpdate captures the update fields the SDK's Update type drops, most
+// importantly message_thread_id (forum topics / private-chat topics).
+type rawUpdate struct {
+	Message *struct {
+		MessageThreadID int64 `json:"message_thread_id"`
+	} `json:"message"`
+	CallbackQuery *struct {
+		Message *struct {
+			MessageThreadID int64 `json:"message_thread_id"`
+		} `json:"message"`
+	} `json:"callback_query"`
+}
+
+func (r rawUpdate) threadID() int64 {
+	if r.Message != nil {
+		return r.Message.MessageThreadID
+	}
+	if r.CallbackQuery != nil && r.CallbackQuery.Message != nil {
+		return r.CallbackQuery.Message.MessageThreadID
+	}
+	return 0
 }
 
 // registerCommands populates Telegram's native "/" command menu. A failure
@@ -135,7 +187,7 @@ func (a *Adapter) Notify(channelID string, text string) error {
 	return nil
 }
 
-func (a *Adapter) normalize(update tgbotapi.Update) channel.IncomingMessage {
+func (a *Adapter) normalize(update tgbotapi.Update, threadID int64) channel.IncomingMessage {
 	msg := update.Message
 	chatID := fmt.Sprintf("%d", msg.Chat.ID)
 	userID := fmt.Sprintf("%d", msg.From.ID)
@@ -160,18 +212,25 @@ func (a *Adapter) normalize(update tgbotapi.Update) channel.IncomingMessage {
 		text = msg.Caption
 	}
 
+	threadIDStr := ""
+	if threadID != 0 {
+		threadIDStr = fmt.Sprintf("%d", threadID)
+	}
+
 	return channel.IncomingMessage{
 		Platform:    "telegram",
 		ChannelID:   chatID,
+		ThreadID:    threadIDStr,
 		UserID:      userID,
 		Text:        text,
 		IsMention:   isMention,
+		IsThread:    threadID != 0,
 		Attachments: a.downloadAttachments(msg),
-		ReplyCtx:    &replyContext{bot: a.bot, chatID: msg.Chat.ID},
+		ReplyCtx:    &replyContext{bot: a.bot, chatID: msg.Chat.ID, threadID: threadID},
 	}
 }
 
-func (a *Adapter) normalizeCallback(update tgbotapi.Update) channel.IncomingMessage {
+func (a *Adapter) normalizeCallback(update tgbotapi.Update, threadID int64) channel.IncomingMessage {
 	cb := update.CallbackQuery
 	chatID := ""
 	var origin channel.MessageRef
@@ -186,15 +245,22 @@ func (a *Adapter) normalizeCallback(update tgbotapi.Update) channel.IncomingMess
 	callback := tgbotapi.NewCallback(cb.ID, "")
 	a.bot.Request(callback)
 
+	threadIDStr := ""
+	if threadID != 0 {
+		threadIDStr = fmt.Sprintf("%d", threadID)
+	}
+
 	return channel.IncomingMessage{
 		Platform:     "telegram",
 		ChannelID:    chatID,
+		ThreadID:     threadIDStr,
 		UserID:       userID,
 		IsCallback:   true,
 		CallbackData: cb.Data,
 		CallbackRef:  origin,
 		IsMention:    true,
-		ReplyCtx:     &replyContext{bot: a.bot, chatID: numericChatID},
+		IsThread:     threadID != 0,
+		ReplyCtx:     &replyContext{bot: a.bot, chatID: numericChatID, threadID: threadID},
 	}
 }
 
@@ -269,8 +335,9 @@ func (a *Adapter) fetchFile(url string) ([]byte, error) {
 }
 
 type replyContext struct {
-	bot    *tgbotapi.BotAPI
-	chatID int64
+	bot      *tgbotapi.BotAPI
+	chatID   int64
+	threadID int64
 }
 
 // SetChatCommands registers a native command menu scoped to this one chat,
@@ -288,9 +355,28 @@ func (rc *replyContext) SetChatCommands(commands []channel.MenuCommand) error {
 }
 
 func (rc *replyContext) SendTyping() error {
-	msg := tgbotapi.NewChatAction(rc.chatID, tgbotapi.ChatTyping)
-	_, err := rc.bot.Request(msg)
+	params := tgbotapi.Params{
+		"chat_id": strconv.FormatInt(rc.chatID, 10),
+		"action":  "typing",
+	}
+	if rc.threadID != 0 {
+		params["message_thread_id"] = strconv.FormatInt(rc.threadID, 10)
+	}
+	_, err := rc.bot.MakeRequest("sendChatAction", params)
 	return err
+}
+
+// baseParams returns the common chat params for outbound messages.
+func (rc *replyContext) baseParams() tgbotapi.Params {
+	params := tgbotapi.Params{
+		"chat_id":                  strconv.FormatInt(rc.chatID, 10),
+		"parse_mode":               "HTML",
+		"disable_web_page_preview": "true",
+	}
+	if rc.threadID != 0 {
+		params["message_thread_id"] = strconv.FormatInt(rc.threadID, 10)
+	}
+	return params
 }
 
 func (rc *replyContext) Send(text string) (channel.MessageRef, error) {
@@ -298,11 +384,9 @@ func (rc *replyContext) Send(text string) (channel.MessageRef, error) {
 	var lastRef channel.MessageRef
 
 	for _, chunk := range chunks {
-		msg := tgbotapi.NewMessage(rc.chatID, chunk)
-		msg.ParseMode = "HTML"
-		msg.DisableWebPagePreview = true
-
-		sent, err := rc.sendWithRetry(msg)
+		params := rc.baseParams()
+		params["text"] = chunk
+		sent, err := rc.request("sendMessage", params)
 		if err != nil {
 			return nil, fmt.Errorf("telegram: send: %w", err)
 		}
@@ -312,11 +396,11 @@ func (rc *replyContext) Send(text string) (channel.MessageRef, error) {
 }
 
 func (rc *replyContext) SendWithButtons(text string, buttons []channel.Button) (channel.MessageRef, error) {
-	msg := tgbotapi.NewMessage(rc.chatID, text)
-	msg.ParseMode = "HTML"
-	msg.ReplyMarkup = inlineKeyboard(buttons)
+	params := rc.baseParams()
+	params["text"] = text
+	params["reply_markup"] = inlineKeyboardJSON(buttons)
 
-	sent, err := rc.sendWithRetry(msg)
+	sent, err := rc.request("sendMessage", params)
 	if err != nil {
 		return nil, fmt.Errorf("telegram: send with buttons: %w", err)
 	}
@@ -327,22 +411,14 @@ func (rc *replyContext) Edit(ref channel.MessageRef, text string) error {
 	msgID := 0
 	fmt.Sscanf(ref.ID(), "%d", &msgID)
 
-	msg := tgbotapi.NewEditMessageText(rc.chatID, msgID, text)
-	msg.ParseMode = "HTML"
-	msg.DisableWebPagePreview = true
-
-	for {
-		_, err := rc.bot.Send(msg)
-		if err == nil {
-			return nil
-		}
-		retryAfter := extractRetryAfter(err)
-		if retryAfter <= 0 {
-			return err
-		}
-		slog.Warn("telegram: edit rate limited, retrying", "retry_after", retryAfter)
-		time.Sleep(time.Duration(retryAfter) * time.Second)
+	params := tgbotapi.Params{
+		"chat_id":                  strconv.FormatInt(rc.chatID, 10),
+		"message_id":               strconv.Itoa(msgID),
+		"text":                     text,
+		"parse_mode":               "HTML",
+		"disable_web_page_preview": "true",
 	}
+	return rc.requestSilent("editMessageText", params)
 }
 
 func (rc *replyContext) EditWithButtons(ref channel.MessageRef, text string, buttons []channel.Button) error {
@@ -352,12 +428,43 @@ func (rc *replyContext) EditWithButtons(ref channel.MessageRef, text string, but
 		return fmt.Errorf("telegram: parse message id %q: %w", refID, err)
 	}
 
-	msg := tgbotapi.NewEditMessageTextAndMarkup(rc.chatID, msgID, text, inlineKeyboard(buttons))
-	msg.ParseMode = "HTML"
-	msg.DisableWebPagePreview = true
+	params := tgbotapi.Params{
+		"chat_id":                  strconv.FormatInt(rc.chatID, 10),
+		"message_id":               strconv.Itoa(msgID),
+		"text":                     text,
+		"parse_mode":               "HTML",
+		"disable_web_page_preview": "true",
+		"reply_markup":             inlineKeyboardJSON(buttons),
+	}
+	return rc.requestSilent("editMessageText", params)
+}
 
+// request calls a bot API method with retry-on-429 backoff and returns the
+// parsed message result.
+func (rc *replyContext) request(method string, params tgbotapi.Params) (tgbotapi.Message, error) {
 	for {
-		_, err := rc.bot.Send(msg)
+		resp, err := rc.bot.MakeRequest(method, params)
+		if err == nil {
+			var msg tgbotapi.Message
+			if err := json.Unmarshal(resp.Result, &msg); err != nil {
+				return msg, fmt.Errorf("telegram: decode %s result: %w", method, err)
+			}
+			return msg, nil
+		}
+		retryAfter := extractRetryAfter(err)
+		if retryAfter <= 0 {
+			return tgbotapi.Message{}, err
+		}
+		slog.Warn("telegram: rate limited, retrying", "method", method, "retry_after", retryAfter)
+		time.Sleep(time.Duration(retryAfter) * time.Second)
+	}
+}
+
+// requestSilent is request for methods whose result carries no message (e.g.
+// edits, where a failed edit is a normal condition, not a stream failure).
+func (rc *replyContext) requestSilent(method string, params tgbotapi.Params) error {
+	for {
+		_, err := rc.bot.MakeRequest(method, params)
 		if err == nil {
 			return nil
 		}
@@ -365,7 +472,7 @@ func (rc *replyContext) EditWithButtons(ref channel.MessageRef, text string, but
 		if retryAfter <= 0 {
 			return err
 		}
-		slog.Warn("telegram: edit rate limited, retrying", "retry_after", retryAfter)
+		slog.Warn("telegram: rate limited, retrying", "method", method, "retry_after", retryAfter)
 		time.Sleep(time.Duration(retryAfter) * time.Second)
 	}
 }
@@ -380,19 +487,12 @@ func inlineKeyboard(buttons []channel.Button) tgbotapi.InlineKeyboardMarkup {
 	return tgbotapi.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
-func (rc *replyContext) sendWithRetry(msg tgbotapi.MessageConfig) (tgbotapi.Message, error) {
-	for {
-		sent, err := rc.bot.Send(msg)
-		if err == nil {
-			return sent, nil
-		}
-		retryAfter := extractRetryAfter(err)
-		if retryAfter <= 0 {
-			return sent, err
-		}
-		slog.Warn("telegram: rate limited, retrying", "retry_after", retryAfter)
-		time.Sleep(time.Duration(retryAfter) * time.Second)
+func inlineKeyboardJSON(buttons []channel.Button) string {
+	data, err := json.Marshal(inlineKeyboard(buttons))
+	if err != nil {
+		return ""
 	}
+	return string(data)
 }
 
 func extractRetryAfter(err error) int {

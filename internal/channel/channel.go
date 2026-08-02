@@ -29,6 +29,7 @@ type IncomingMessage struct {
 	ChannelID              string
 	ParentChannelID        string
 	ChannelScopeUnresolved bool
+	ThreadID               string
 	UserID                 string
 	Text                   string
 	IsMention              bool

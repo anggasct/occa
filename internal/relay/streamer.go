@@ -88,14 +88,30 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 			timeoutTimer.Reset(noEventTimeout)
 
 			switch ev.Type {
-			case "delta":
+			case EventDelta:
 				buf.WriteString(ev.Delta)
 				dirty = true
-			case "done":
+			case EventDone:
+				if buf.Len() == 0 {
+					return nil
+				}
 				return s.finalSync(&refs, &lastChunks, buf.String())
-			case "error":
+			case EventError:
 				s.notice("⚠️ Agent error: " + ev.Delta)
 				return fmt.Errorf("%w: %s", ErrStreamFailed, ev.Delta)
+			case EventSegment:
+				if buf.Len() > 0 {
+					slog.Debug("streaming: segment break", "finalized_len", buf.Len())
+					s.finalizeSegment(&refs, &lastChunks, buf.String())
+					buf.Reset()
+				}
+			case EventTool:
+				slog.Debug("streaming: tool notice")
+				s.notice("⚙️ Tool call")
+				if buf.Len() > 0 {
+					s.finalizeSegment(&refs, &lastChunks, buf.String())
+					buf.Reset()
+				}
 			case "permission_asked":
 				if ev.Permission != nil {
 					if s.permissionHandler != nil {
@@ -187,6 +203,16 @@ func (s *Streamer) syncMessages(refs *[]channel.MessageRef, lastChunks *[]string
 	}
 
 	*lastChunks = chunks
+}
+
+// finalizeSegment seals the current message as a permanent reply and resets
+// the streamer's bookkeeping so the next delta starts a fresh message.
+func (s *Streamer) finalizeSegment(refs *[]channel.MessageRef, lastChunks *[]string, raw string) {
+	if err := s.finalSync(refs, lastChunks, raw); err != nil {
+		slog.Warn("streaming: segment finalize failed", "error", err)
+	}
+	*refs = nil
+	*lastChunks = nil
 }
 
 func (s *Streamer) finalSync(refs *[]channel.MessageRef, lastChunks *[]string, raw string) error {

@@ -195,6 +195,106 @@ func TestReasoningPartDeltaNeverSurfacesAsText(t *testing.T) {
 	}
 }
 
+// TestDecoderPartTransitions: part-type transitions emit segment/tool events
+// and non-text deltas never surface as reply text.
+func TestDecoderPartTransitions(t *testing.T) {
+	updated := func(id, kind string) string {
+		return `{"type":"message.part.updated","properties":{"part":{"id":"` + id + `","type":"` + kind + `"}}}`
+	}
+	delta := func(partID, text string) string {
+		return `{"type":"message.part.delta","properties":{"partID":"` + partID + `","field":"text","delta":"` + text + `"}}`
+	}
+
+	cases := []struct {
+		name     string
+		sequence []string
+		want     []Event
+	}{
+		{
+			name:     "text to tool emits tool event",
+			sequence: []string{updated("p1", "text"), updated("p2", "tool")},
+			want:     []Event{{Type: EventTool}},
+		},
+		{
+			name:     "text to reasoning emits segment",
+			sequence: []string{updated("p1", "text"), updated("p2", "reasoning")},
+			want:     []Event{{Type: EventSegment}},
+		},
+		{
+			name:     "reasoning to text emits segment",
+			sequence: []string{updated("p1", "reasoning"), updated("p2", "text")},
+			want:     []Event{{Type: EventSegment}},
+		},
+		{
+			name:     "tool to text emits segment after the tool event",
+			sequence: []string{updated("p1", "tool"), updated("p2", "text")},
+			want:     []Event{{Type: EventTool}, {Type: EventSegment}},
+		},
+		{
+			name:     "adjacent tool parts each emit a tool event",
+			sequence: []string{updated("p1", "tool"), updated("p2", "tool")},
+			want:     []Event{{Type: EventTool}, {Type: EventTool}},
+		},
+		{
+			name:     "same kind emits nothing",
+			sequence: []string{updated("p1", "text"), updated("p2", "text")},
+			want:     nil,
+		},
+		{
+			name:     "first part emits nothing",
+			sequence: []string{updated("p1", "text")},
+			want:     nil,
+		},
+		{
+			name:     "container part ignored for boundaries",
+			sequence: []string{updated("p0", "message"), updated("p1", "text")},
+			want:     nil,
+		},
+		{
+			name: "full tool round trip",
+			sequence: []string{
+				updated("p1", "text"), delta("p1", "before"),
+				updated("p2", "tool"), delta("p2", "internal tool progress"),
+				updated("p3", "text"), delta("p3", "after"),
+			},
+			want: []Event{
+				{Type: EventDelta, Delta: "before"},
+				{Type: EventTool},
+				{Type: EventSegment},
+				{Type: EventDelta, Delta: "after"},
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			decoder := newEventDecoder()
+			var got []Event
+			for _, data := range c.sequence {
+				if ev, ok := parseSSEEvent(decoder, "", data); ok {
+					got = append(got, ev)
+				}
+			}
+			if len(got) != len(c.want) {
+				t.Fatalf("events = %+v, want %+v", got, c.want)
+			}
+			for i := range got {
+				if got[i].Type != c.want[i].Type || got[i].Delta != c.want[i].Delta {
+					t.Fatalf("event %d = %+v, want %+v (all: %+v)", i, got[i], c.want[i], got)
+				}
+			}
+			reply := ""
+			for _, data := range c.sequence {
+				if ev, ok := parseSSEEvent(decoder, "", data); ok && ev.Type == EventDelta {
+					reply += ev.Delta
+				}
+			}
+			if strings.Contains(reply, "internal tool progress") || strings.Contains(reply, "thinking out loud") {
+				t.Fatalf("non-text delta leaked into reply: %q", reply)
+			}
+		})
+	}
+}
+
 func TestParseLegacyEventsStillWork(t *testing.T) {
 	ev, ok := parseSSEEvent(newEventDecoder(), "message.part.delta", "hello")
 	if !ok || ev.Type != "delta" || ev.Delta != "hello" {

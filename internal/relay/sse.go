@@ -100,18 +100,31 @@ func parseSSEEvent(decoder *eventDecoder, eventType, data string) (Event, bool) 
 // name alone cannot distinguish reasoning (internal) from text (the actual
 // reply) content.
 type eventDecoder struct {
-	partKind map[string]string
+	partKind   map[string]string
+	activeKind string
 }
 
 func newEventDecoder() *eventDecoder {
 	return &eventDecoder{partKind: make(map[string]string)}
 }
 
+// isStreamKind reports whether a part type participates in stream-boundary
+// detection. Container/bookkeeping part types are skipped so they never
+// trigger a spurious segment at stream start.
+func isStreamKind(kind string) bool {
+	switch kind {
+	case "text", "tool", "reasoning":
+		return true
+	}
+	return false
+}
+
 // parseJSON handles the current agent event stream, where the event type
 // lives inside the JSON payload rather than in an SSE event: line.
 // Bookkeeping events (heartbeats, session status) are skipped; text deltas
 // from text-typed parts and the idle transition that marks completion are
-// mapped to relay events.
+// mapped to relay events. Part-type transitions emit segment (text finalized,
+// next delta starts a new message) and tool parts emit a tool notice event.
 func (d *eventDecoder) parseJSON(data string) (Event, bool) {
 	var ev struct {
 		Type       string `json:"type"`
@@ -130,16 +143,31 @@ func (d *eventDecoder) parseJSON(data string) (Event, bool) {
 	}
 	switch {
 	case ev.Type == "message.part.updated":
+		kind := ev.Properties.Part.Type
 		if ev.Properties.Part.ID != "" {
-			d.partKind[ev.Properties.Part.ID] = ev.Properties.Part.Type
+			d.partKind[ev.Properties.Part.ID] = kind
 		}
-		return Event{}, false
+		if !isStreamKind(kind) {
+			return Event{}, false
+		}
+		prev := d.activeKind
+		d.activeKind = kind
+		switch {
+		case kind == "tool":
+			return Event{Type: EventTool}, true
+		case prev == "" || kind == prev:
+			return Event{}, false
+		case prev == "text" || kind == "text":
+			return Event{Type: EventSegment}, true
+		default:
+			return Event{}, false
+		}
 	case ev.Type == "message.part.delta" && ev.Properties.Field == "text" && d.partKind[ev.Properties.PartID] == "text":
-		return Event{Type: "delta", Delta: ev.Properties.Delta}, true
+		return Event{Type: EventDelta, Delta: ev.Properties.Delta}, true
 	case ev.Type == "session.idle":
-		return Event{Type: "done"}, true
+		return Event{Type: EventDone}, true
 	case strings.Contains(ev.Type, "error"):
-		return Event{Type: "error", Delta: data}, true
+		return Event{Type: EventError, Delta: data}, true
 	default:
 		return Event{}, false
 	}

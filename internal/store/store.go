@@ -7,6 +7,8 @@ type Session struct {
 	ChannelID      string
 	Platform       string
 	AgentSessionID string
+	ThreadID       string
+	UserID         string
 	Active         bool
 	CreatedAt      int64
 	UpdatedAt      int64
@@ -18,6 +20,7 @@ type Channel struct {
 	Model      string
 	ListenMode string
 	Workdir    string
+	AutoThread bool
 	CreatedAt  int64
 	UpdatedAt  int64
 }
@@ -33,11 +36,15 @@ type UserOverride struct {
 	UpdatedAt int64
 }
 
+// SessionRepo keys sessions by conversation key (platform, channel_id,
+// thread_id, user_id). Empty thread_id/user_id mean "not applicable" (DM or
+// thread-shared conversation), per the session-key policy.
 type SessionRepo interface {
-	Active(ctx context.Context, platform, channelID string) (string, error)
-	SetActive(ctx context.Context, platform, channelID, sessionID string) error
-	Deactivate(ctx context.Context, platform, channelID string) error
+	Active(ctx context.Context, platform, channelID, threadID, userID string) (string, error)
+	SetActive(ctx context.Context, platform, channelID, threadID, userID, sessionID string) error
+	Deactivate(ctx context.Context, platform, channelID, threadID, userID string) error
 	List(ctx context.Context, platform, channelID string) ([]Session, error)
+	ThreadChannel(ctx context.Context, platform, threadID string) (string, error)
 	Delete(ctx context.Context, id int64) error
 }
 
