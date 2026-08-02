@@ -1318,7 +1318,7 @@ func TestPassthroughSkipsTokenLineWhenGenerationFails(t *testing.T) {
 	if client.rawMsg == "" {
 		t.Fatal("message was not dispatched")
 	}
-	if strings.Contains(client.rawMsg, "OCCA schedule token") {
+	if strings.Contains(client.rawMsg, "<occa:schedule_token>") {
 		t.Fatalf("token line appended despite failure: %q", client.rawMsg)
 	}
 	if strings.Contains(client.rawMsg, "test-token") {
@@ -1335,7 +1335,7 @@ func TestPassthroughAppendsScheduleToken(t *testing.T) {
 	}
 	waitForDispatch(t, client)
 	waitForResponse(t, r)
-	if !strings.Contains(client.rawMsg, "OCCA schedule token: test-token-123") {
+	if !strings.Contains(client.rawMsg, "<occa:schedule_token>test-token-123</occa:schedule_token>") {
 		t.Fatalf("expected schedule token in message, got: %q", client.rawMsg)
 	}
 	if !strings.HasPrefix(client.rawMsg, "hello world") {
