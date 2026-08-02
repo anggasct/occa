@@ -2,6 +2,7 @@ package discord
 
 import (
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -388,5 +389,55 @@ func TestUserThreadNotTreatedAsOwned(t *testing.T) {
 
 	if got.ChannelID != "user-thread" {
 		t.Fatalf("user-created thread must keep its own channel scope, got %q", got.ChannelID)
+	}
+}
+
+// TestOutboundMessagesSuppressMentions covers the allowed-mentions hardening:
+// every outbound call site sends allowed_mentions with the zero-value shape
+// (parse:null, replied_user:false) so Discord pings nothing.
+func TestOutboundMessagesSuppressMentions(t *testing.T) {
+	var bodies []string
+	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
+		body, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(body))
+		return []byte(`{"id":"1"}`), http.StatusOK
+	})
+
+	a := &Adapter{session: session}
+	if err := a.Notify("ch-1", "notify text"); err != nil {
+		t.Fatalf("Notify: %v", err)
+	}
+
+	rc := &replyContext{session: session, channelID: "ch-1"}
+	if _, err := rc.Send("plain send"); err != nil {
+		t.Fatalf("Send channel path: %v", err)
+	}
+	if _, err := rc.SendWithButtons("with buttons", []channel.Button{{Label: "Allow", Value: "allow"}}); err != nil {
+		t.Fatalf("SendWithButtons: %v", err)
+	}
+	if err := rc.Edit(messageRef{id: "msg-1"}, "edited"); err != nil {
+		t.Fatalf("Edit: %v", err)
+	}
+	if err := rc.EditWithButtons(messageRef{id: "msg-1"}, "edited", []channel.Button{{Label: "Allow", Value: "allow"}}); err != nil {
+		t.Fatalf("EditWithButtons: %v", err)
+	}
+
+	interactionRC := &replyContext{
+		session:     session,
+		channelID:   "ch-1",
+		interaction: &discordgo.Interaction{AppID: "app-1", Token: "tok-1"},
+	}
+	if _, err := interactionRC.Send("interaction send"); err != nil {
+		t.Fatalf("Send interaction path: %v", err)
+	}
+
+	if len(bodies) != 6 {
+		t.Fatalf("expected 6 outbound calls, got %d", len(bodies))
+	}
+	want := `"allowed_mentions":{"parse":null,"replied_user":false}`
+	for i, body := range bodies {
+		if !strings.Contains(body, want) {
+			t.Fatalf("call %d body missing allowed_mentions suppression: %s", i, body)
+		}
 	}
 }

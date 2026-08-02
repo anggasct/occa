@@ -352,7 +352,10 @@ func (a *Adapter) Stop() error {
 
 func (a *Adapter) Notify(channelID string, text string) error {
 	for _, chunk := range render.Split(text, 2000) {
-		if _, err := a.session.ChannelMessageSend(channelID, chunk); err != nil {
+		if _, err := a.session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+			Content:         chunk,
+			AllowedMentions: &discordgo.MessageAllowedMentions{},
+		}); err != nil {
 			return fmt.Errorf("discord: notify: %w", err)
 		}
 	}
@@ -565,7 +568,8 @@ func (rc *replyContext) Send(text string) (channel.MessageRef, error) {
 	if rc.interaction != nil {
 		content := text
 		msg, err := rc.session.InteractionResponseEdit(rc.interaction, &discordgo.WebhookEdit{
-			Content: &content,
+			Content:         &content,
+			AllowedMentions: &discordgo.MessageAllowedMentions{},
 		})
 		if err != nil {
 			return nil, fmt.Errorf("discord: interaction response edit: %w", err)
@@ -578,7 +582,10 @@ func (rc *replyContext) Send(text string) (channel.MessageRef, error) {
 	var lastRef channel.MessageRef
 
 	for _, chunk := range chunks {
-		msg, err := rc.session.ChannelMessageSend(rc.channelID, chunk)
+		msg, err := rc.session.ChannelMessageSendComplex(rc.channelID, &discordgo.MessageSend{
+			Content:         chunk,
+			AllowedMentions: &discordgo.MessageAllowedMentions{},
+		})
 		if err != nil {
 			return nil, fmt.Errorf("discord: send: %w", err)
 		}
@@ -589,8 +596,9 @@ func (rc *replyContext) Send(text string) (channel.MessageRef, error) {
 
 func (rc *replyContext) SendWithButtons(text string, buttons []channel.Button) (channel.MessageRef, error) {
 	msg, err := rc.session.ChannelMessageSendComplex(rc.channelID, &discordgo.MessageSend{
-		Content:    text,
-		Components: componentRows(buttons),
+		Content:         text,
+		Components:      componentRows(buttons),
+		AllowedMentions: &discordgo.MessageAllowedMentions{},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("discord: send with buttons: %w", err)
@@ -599,7 +607,12 @@ func (rc *replyContext) SendWithButtons(text string, buttons []channel.Button) (
 }
 
 func (rc *replyContext) Edit(ref channel.MessageRef, text string) error {
-	_, err := rc.session.ChannelMessageEdit(rc.channelID, ref.ID(), text)
+	_, err := rc.session.ChannelMessageEditComplex(&discordgo.MessageEdit{
+		Channel:         rc.channelID,
+		ID:              ref.ID(),
+		Content:         &text,
+		AllowedMentions: &discordgo.MessageAllowedMentions{},
+	})
 	return err
 }
 
@@ -607,10 +620,11 @@ func (rc *replyContext) EditWithButtons(ref channel.MessageRef, text string, but
 	content := text
 	components := componentRows(buttons)
 	_, err := rc.session.ChannelMessageEditComplex(&discordgo.MessageEdit{
-		ID:         ref.ID(),
-		Channel:    rc.channelID,
-		Content:    &content,
-		Components: &components,
+		ID:              ref.ID(),
+		Channel:         rc.channelID,
+		Content:         &content,
+		Components:      &components,
+		AllowedMentions: &discordgo.MessageAllowedMentions{},
 	})
 	return err
 }
