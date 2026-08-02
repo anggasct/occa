@@ -262,3 +262,95 @@ func TestFetchFileSucceeds(t *testing.T) {
 		t.Fatalf("unexpected data: %q", data)
 	}
 }
+
+// TestNormalizeCarriesTopicThreadID: a message with message_thread_id maps
+// to ThreadID and a thread-scoped reply context.
+func TestNormalizeCarriesTopicThreadID(t *testing.T) {
+	bot := fakeTelegramServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"result":{}}`))
+	})
+	a := &Adapter{bot: bot}
+
+	update := tgbotapi.Update{
+		Message: &tgbotapi.Message{
+			Chat: &tgbotapi.Chat{ID: 1001},
+			From: &tgbotapi.User{ID: 42},
+			Text: "hello",
+			Entities: []tgbotapi.MessageEntity{
+				{Type: "mention", Offset: 0, Length: 6},
+			},
+		},
+	}
+	got := a.normalize(update, 555)
+	if got.ThreadID != "555" || !got.IsThread {
+		t.Fatalf("expected topic ThreadID 555, got %+v", got)
+	}
+	rc, ok := got.ReplyCtx.(*replyContext)
+	if !ok || rc.threadID != 555 {
+		t.Fatalf("reply context must target the topic, got %+v", got.ReplyCtx)
+	}
+
+	plain := a.normalize(update, 0)
+	if plain.ThreadID != "" || plain.IsThread {
+		t.Fatalf("expected empty ThreadID outside a topic, got %+v", plain)
+	}
+}
+
+// TestReplyContextSendsIntoTopic: Send and SendTyping include
+// message_thread_id so replies land inside the topic.
+func TestReplyContextSendsIntoTopic(t *testing.T) {
+	var sentBodies []string
+	bot := fakeTelegramServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		sentBodies = append(sentBodies, string(body))
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":7}}`))
+	})
+
+	rc := &replyContext{bot: bot, chatID: 1001, threadID: 555}
+	if _, err := rc.Send("reply text"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if err := rc.SendTyping(); err != nil {
+		t.Fatalf("SendTyping: %v", err)
+	}
+	if err := rc.Edit(messageRef{id: "7"}, "edited"); err != nil {
+		t.Fatalf("Edit: %v", err)
+	}
+
+	foundSend, foundTyping := false, false
+	if len(sentBodies) != 3 {
+		t.Fatalf("expected 3 requests, got %d", len(sentBodies))
+	}
+	for _, body := range sentBodies {
+		if strings.Contains(body, "message_thread_id=555") {
+			foundSend = true
+		}
+		if strings.Contains(body, "action=typing") {
+			foundTyping = true
+		}
+	}
+	if !foundSend || !foundTyping {
+		t.Fatalf("expected message_thread_id on send and typing, bodies: %v", sentBodies)
+	}
+}
+
+// TestReplyContextOutsideTopicOmitsThreadID: without a topic the outbound
+// params must not carry message_thread_id.
+func TestReplyContextOutsideTopicOmitsThreadID(t *testing.T) {
+	var sentBodies []string
+	bot := fakeTelegramServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		sentBodies = append(sentBodies, string(body))
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":7}}`))
+	})
+
+	rc := &replyContext{bot: bot, chatID: 1001}
+	if _, err := rc.Send("reply text"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	for _, body := range sentBodies {
+		if strings.Contains(body, "message_thread_id") {
+			t.Fatalf("unexpected message_thread_id outside topic: %q", body)
+		}
+	}
+}

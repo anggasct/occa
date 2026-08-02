@@ -28,7 +28,7 @@ func TestConcurrentWritersAllSucceed(t *testing.T) {
 				channelID := fmt.Sprintf("chat-%d", w)
 				userID := fmt.Sprintf("user-%d", i)
 
-				err := s.SessionRepo().SetActive(ctx, platform, channelID, "agent-sess")
+				err := s.SessionRepo().SetActive(ctx, platform, channelID, "", "", "agent-sess")
 				errs <- err
 				err = s.ChannelRepo().UpsertModel(ctx, platform, channelID, "gpt-4o")
 				errs <- err
@@ -150,7 +150,7 @@ VALUES ('chat-legacy', 'telegram', 'agent-sess-1', 1, 1, 1);
 	defer func() { _ = s.Close() }()
 	assertVersion(t, s, schemaVersion)
 
-	id, err := s.SessionRepo().Active(context.Background(), "telegram", "chat-legacy")
+	id, err := s.SessionRepo().Active(context.Background(), "telegram", "chat-legacy", "", "")
 	if err != nil {
 		t.Fatalf("adopted row lookup: %v", err)
 	}
@@ -178,10 +178,10 @@ func TestQueriesUseIndexes(t *testing.T) {
 		sql  string
 		args []any
 	}{
-		{"session active", `SELECT agent_session_id FROM session WHERE platform = ? AND channel_id = ? AND active = 1`, []any{"telegram", "chat1"}},
-		{"session list", `SELECT id, channel_id, platform, agent_session_id, active, created_at, updated_at FROM session WHERE platform = ? AND channel_id = ? ORDER BY created_at DESC`, []any{"telegram", "chat1"}},
-		{"session deactivate", `UPDATE session SET active = 0, updated_at = ? WHERE platform = ? AND channel_id = ? AND active = 1`, []any{int64(1), "telegram", "chat1"}},
-		{"channel get", `SELECT channel_id, platform, model, listen_mode, workdir, created_at, updated_at FROM channel WHERE platform = ? AND channel_id = ?`, []any{"telegram", "chat1"}},
+		{"session active", `SELECT agent_session_id FROM session WHERE platform = ? AND channel_id = ? AND thread_id = ? AND user_id = ? AND active = 1`, []any{"telegram", "chat1", "", "user1"}},
+		{"session list", `SELECT id, channel_id, platform, agent_session_id, thread_id, user_id, active, created_at, updated_at FROM session WHERE platform = ? AND channel_id = ? ORDER BY created_at DESC`, []any{"telegram", "chat1"}},
+		{"session deactivate", `UPDATE session SET active = 0, updated_at = ? WHERE platform = ? AND channel_id = ? AND thread_id = ? AND user_id = ? AND active = 1`, []any{int64(1), "telegram", "chat1", "", "user1"}},
+		{"channel get", `SELECT channel_id, platform, model, listen_mode, workdir, auto_thread, created_at, updated_at FROM channel WHERE platform = ? AND channel_id = ?`, []any{"telegram", "chat1"}},
 		{"override get", `SELECT id, channel_id, platform, user_id, role, model, created_at, updated_at FROM user_override WHERE platform = ? AND channel_id = ? AND user_id = ?`, []any{"telegram", "chat1", "user1"}},
 		{"override list", `SELECT id, channel_id, platform, user_id, role, model, created_at, updated_at FROM user_override WHERE platform = ? AND channel_id = ? ORDER BY created_at`, []any{"telegram", "chat1"}},
 		{"schedule list", `SELECT id, channel_id, platform, cron_expression, human_schedule, prompt, enabled, created_at, updated_at FROM schedule WHERE platform = ? AND channel_id = ? AND enabled = 1 ORDER BY id`, []any{"telegram", "chat1"}},

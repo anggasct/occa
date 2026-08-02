@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	schemaVersion    = 1
+	schemaVersion    = 2
 	busyTimeoutMilli = 5000
 )
 
@@ -17,6 +17,28 @@ const (
 // a step cannot be applied twice or out of order.
 var migrations = []func(tx *sql.Tx) error{
 	createInitialSchema,
+	addConversationKeys,
+}
+
+func addConversationKeys(tx *sql.Tx) error {
+	// thread_id/user_id are NOT NULL DEFAULT '' so the partial unique index
+	// works — SQLite treats NULLs as distinct in unique indexes.
+	ddl := `
+ALTER TABLE session ADD COLUMN thread_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE session ADD COLUMN user_id TEXT NOT NULL DEFAULT '';
+
+DROP INDEX IF EXISTS idx_session_lookup;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_session_active_key
+	ON session (platform, channel_id, thread_id, user_id) WHERE active = 1;
+CREATE INDEX IF NOT EXISTS idx_session_lookup
+	ON session (platform, channel_id, thread_id, user_id, active);
+
+ALTER TABLE channel ADD COLUMN auto_thread INTEGER NOT NULL DEFAULT 1;
+`
+	if _, err := tx.Exec(ddl); err != nil {
+		return fmt.Errorf("store: migrate conversation keys: %w", err)
+	}
+	return nil
 }
 
 func createInitialSchema(tx *sql.Tx) error {

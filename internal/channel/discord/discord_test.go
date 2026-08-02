@@ -129,3 +129,194 @@ func TestDownloadAttachmentSucceeds(t *testing.T) {
 		t.Fatalf("unexpected attachments: %+v", atts)
 	}
 }
+
+// fakeDiscordSession builds a discordgo session whose REST calls hit a local
+// httptest server, so adapter behavior can be exercised without a gateway.
+func fakeDiscordSession(t *testing.T, handle func(r *http.Request) ([]byte, int)) *discordgo.Session {
+	t.Helper()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, status := handle(r)
+		w.WriteHeader(status)
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(ts.Close)
+
+	s, err := discordgo.New("Bot fake-token")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
+	direct := &http.Client{}
+	s.Client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		u := *r.URL
+		u.Scheme = "http"
+		u.Host = strings.TrimPrefix(ts.URL, "http://")
+		r.URL = &u
+		return direct.Do(r)
+	})
+	return s
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestAutoThreadCreatesThreadAndRescopesMessage covers the auto-thread flow: an @mention in
+// an auto-thread channel creates a thread from the message, keeps access
+// scope on the parent channel, and routes replies into the thread.
+func TestAutoThreadCreatesThreadAndRescopesMessage(t *testing.T) {
+	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/threads") {
+			return []byte(`{"id":"thread-9","name":"summarize the repo","type":12}`), http.StatusOK
+		}
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/channels/thread-9") {
+			return []byte(`{"id":"thread-9","parent_id":"channel-1","type":12}`), http.StatusOK
+		}
+		return []byte(`{"id":"channel-1","type":0}`), http.StatusOK
+	})
+
+	a := &Adapter{session: session}
+	a.setBotID("bot1")
+	a.SetAutoThreadPolicy(func(channelID string) (bool, error) { return true, nil })
+
+	got := a.normalizeMessage(&discordgo.Message{
+		GuildID:   "guild",
+		ChannelID: "channel-1",
+		ID:        "msg-1",
+		Author:    &discordgo.User{ID: "user-1"},
+		Content:   "<@bot1> summarize the repo",
+		Mentions:  []*discordgo.User{{ID: "bot1"}},
+	})
+
+	if got.ThreadID != "thread-9" || !got.IsThread || got.IsMention != true {
+		t.Fatalf("auto-thread message not re-scoped to the thread: %+v", got)
+	}
+	if got.ChannelID != "channel-1" || got.ParentChannelID != "channel-1" {
+		t.Fatalf("access scope must stay on the parent channel, got channel=%q parent=%q", got.ChannelID, got.ParentChannelID)
+	}
+	rc, ok := got.ReplyCtx.(*replyContext)
+	if !ok || rc.channelID != "thread-9" {
+		t.Fatalf("reply context must target the new thread, got %+v", got.ReplyCtx)
+	}
+}
+
+// TestAutoThreadFollowUpNeedsNoMention covers follow-ups: messages in a
+// thread OCCA created are treated as bot-directed and scoped to the parent
+// channel for authorization.
+func TestAutoThreadFollowUpNeedsNoMention(t *testing.T) {
+	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/channels/thread-9") {
+			return []byte(`{"id":"thread-9","parent_id":"channel-1","type":12}`), http.StatusOK
+		}
+		return []byte(`{"id":"channel-1","type":0}`), http.StatusOK
+	})
+
+	a := &Adapter{session: session}
+	a.setBotID("bot1")
+	a.SetAutoThreadPolicy(func(channelID string) (bool, error) { return true, nil })
+	a.trackThread("thread-9")
+
+	got := a.normalizeMessage(&discordgo.Message{
+		GuildID:   "guild",
+		ChannelID: "thread-9",
+		Author:    &discordgo.User{ID: "user-1"},
+		Content:   "continue please",
+	})
+
+	if !got.IsMention {
+		t.Fatal("follow-up in an auto-created thread must not need a mention")
+	}
+	if got.ThreadID != "thread-9" || !got.IsThread {
+		t.Fatalf("follow-up must stay scoped to the thread: %+v", got)
+	}
+	if got.ChannelID != "channel-1" {
+		t.Fatalf("follow-up access scope must be the parent channel, got %q", got.ChannelID)
+	}
+	rc, ok := got.ReplyCtx.(*replyContext)
+	if !ok || rc.channelID != "thread-9" {
+		t.Fatalf("follow-up reply must land in the thread, got %+v", got.ReplyCtx)
+	}
+}
+
+// TestAutoThreadDisabledRepliesInline covers auto_thread=0: the
+// @mention replies inline in the channel, no thread is created.
+func TestAutoThreadDisabledRepliesInline(t *testing.T) {
+	var threadCalls int
+	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/threads") {
+			threadCalls++
+		}
+		return []byte(`{"id":"channel-1","type":0}`), http.StatusOK
+	})
+
+	a := &Adapter{session: session}
+	a.setBotID("bot1")
+	a.SetAutoThreadPolicy(func(channelID string) (bool, error) { return false, nil })
+
+	got := a.normalizeMessage(&discordgo.Message{
+		GuildID:   "guild",
+		ChannelID: "channel-1",
+		Author:    &discordgo.User{ID: "user-1"},
+		Content:   "<@bot1> hello",
+		Mentions:  []*discordgo.User{{ID: "bot1"}},
+	})
+
+	if threadCalls != 0 {
+		t.Fatalf("expected no thread creation with auto_thread disabled, got %d calls", threadCalls)
+	}
+	if got.ThreadID != "" || got.IsThread {
+		t.Fatalf("expected inline reply without thread scope: %+v", got)
+	}
+	rc, ok := got.ReplyCtx.(*replyContext)
+	if !ok || rc.channelID != "channel-1" {
+		t.Fatalf("reply context must target the channel, got %+v", got.ReplyCtx)
+	}
+}
+
+// TestAutoThreadFailureFallsBackInline: a failed thread creation keeps the
+// message inline in the parent channel.
+func TestAutoThreadFailureFallsBackInline(t *testing.T) {
+	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/threads") {
+			return []byte(`{"message":"missing permissions"}`), http.StatusForbidden
+		}
+		return []byte(`{"id":"channel-1","type":0}`), http.StatusOK
+	})
+
+	a := &Adapter{session: session}
+	a.setBotID("bot1")
+	a.SetAutoThreadPolicy(func(channelID string) (bool, error) { return true, nil })
+
+	got := a.normalizeMessage(&discordgo.Message{
+		GuildID:   "guild",
+		ChannelID: "channel-1",
+		Author:    &discordgo.User{ID: "user-1"},
+		Content:   "<@bot1> hello",
+		Mentions:  []*discordgo.User{{ID: "bot1"}},
+	})
+
+	if got.ThreadID != "" || got.IsThread {
+		t.Fatalf("expected inline fallback after thread failure: %+v", got)
+	}
+	rc, ok := got.ReplyCtx.(*replyContext)
+	if !ok || rc.channelID != "channel-1" {
+		t.Fatalf("reply context must stay on the channel after thread failure, got %+v", got.ReplyCtx)
+	}
+}
+
+func TestThreadNameSanitization(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"<@1234> summarize the repo", "summarize the repo"},
+		{"", "OCCA chat"},
+		{"   ", "OCCA chat"},
+		{"a`b@c#d?e:f*", "abcdef"},
+		{strings.Repeat("x", 120), strings.Repeat("x", 100)},
+	}
+	for _, c := range cases {
+		if got := threadName(c.in); got != c.want {
+			t.Fatalf("threadName(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

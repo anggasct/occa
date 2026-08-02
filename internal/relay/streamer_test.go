@@ -321,6 +321,93 @@ func TestStreamerOnlyLastChunkEdited(t *testing.T) {
 	}
 }
 
+// TestStreamerSegmentsAroundTool: a delta → tool → delta stream finalizes
+// the preview at the tool boundary, emits exactly one tool notice, and
+// delivers the next text block as a fresh message, with the final
+// concatenation equal to the full response.
+func TestStreamerSegmentsAroundTool(t *testing.T) {
+	reply := newFakeReplyContext()
+	renderer := render.New()
+	s := NewStreamer(reply, renderer, render.Telegram)
+
+	events := make(chan Event, 10)
+	events <- Event{Type: EventDelta, Delta: "First block "}
+	events <- Event{Type: EventDelta, Delta: "continues"}
+	events <- Event{Type: EventTool}
+	events <- Event{Type: EventDelta, Delta: "Second block"}
+	events <- Event{Type: EventDone}
+	close(events)
+
+	if err := s.Run(context.Background(), events); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	msgs := reply.finalMessages()
+	var textMsgs []string
+	toolNotices := 0
+	for _, m := range msgs {
+		if m == "⚙️ Tool call" {
+			toolNotices++
+		} else {
+			textMsgs = append(textMsgs, m)
+		}
+	}
+	if toolNotices != 1 {
+		t.Fatalf("tool notices = %d, want exactly 1 (messages: %v)", toolNotices, msgs)
+	}
+	if len(textMsgs) != 2 {
+		t.Fatalf("text messages = %d, want 2 (messages: %v)", len(textMsgs), msgs)
+	}
+	if strings.Join(textMsgs, "") != "First block continuesSecond block" {
+		t.Fatalf("concatenation = %q, want full response", strings.Join(textMsgs, ""))
+	}
+}
+
+// TestStreamerToolOnlyReplySendsNoEmptyMessage: a tool-only stream (no text)
+// leaves only the tool notice, never an empty bubble.
+func TestStreamerToolOnlyReplySendsNoEmptyMessage(t *testing.T) {
+	reply := newFakeReplyContext()
+	renderer := render.New()
+	s := NewStreamer(reply, renderer, render.Telegram)
+
+	events := make(chan Event, 10)
+	events <- Event{Type: EventTool}
+	events <- Event{Type: EventDone}
+	close(events)
+
+	if err := s.Run(context.Background(), events); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	msgs := reply.finalMessages()
+	if len(msgs) != 1 || msgs[0] != "⚙️ Tool call" {
+		t.Fatalf("messages = %v, want exactly the tool notice", msgs)
+	}
+}
+
+// TestStreamerEmptySegmentIsNoOp: a segment event with an empty buffer must
+// not produce an extra message.
+func TestStreamerEmptySegmentIsNoOp(t *testing.T) {
+	reply := newFakeReplyContext()
+	renderer := render.New()
+	s := NewStreamer(reply, renderer, render.Telegram)
+
+	events := make(chan Event, 10)
+	events <- Event{Type: EventSegment}
+	events <- Event{Type: EventDelta, Delta: "after"}
+	events <- Event{Type: EventDone}
+	close(events)
+
+	if err := s.Run(context.Background(), events); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	msgs := reply.finalMessages()
+	if len(msgs) != 1 || msgs[0] != "after" {
+		t.Fatalf("messages = %v, want exactly one 'after'", msgs)
+	}
+}
+
 func TestStreamerFinalEditReconciles(t *testing.T) {
 	reply := newFakeReplyContext()
 	renderer := render.New()

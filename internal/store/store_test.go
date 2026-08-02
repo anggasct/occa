@@ -37,7 +37,7 @@ func TestSessionRoundTrip(t *testing.T) {
 	s := tempStore(t)
 	ctx := context.Background()
 
-	id, err := s.SessionRepo().Active(ctx, "telegram", "chat1")
+	id, err := s.SessionRepo().Active(ctx, "telegram", "chat1", "", "")
 	if err != nil {
 		t.Fatalf("Active: %v", err)
 	}
@@ -45,16 +45,123 @@ func TestSessionRoundTrip(t *testing.T) {
 		t.Fatalf("expected empty, got %q", id)
 	}
 
-	if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", "sess-1"); err != nil {
+	if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "", "sess-1"); err != nil {
 		t.Fatalf("SetActive: %v", err)
 	}
 
-	id, err = s.SessionRepo().Active(ctx, "telegram", "chat1")
+	id, err = s.SessionRepo().Active(ctx, "telegram", "chat1", "", "")
 	if err != nil {
 		t.Fatalf("Active: %v", err)
 	}
 	if id != "sess-1" {
 		t.Fatalf("got %q, want sess-1", id)
+	}
+}
+
+// TestSessionKeyIsolation covers the per-conversation key: two users in the
+// same channel hold separate active sessions, thread participants share one,
+// and switching one key never disturbs another.
+func TestSessionKeyIsolation(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+
+	for _, c := range []struct{ threadID, userID, sessionID string }{
+		{"", "alice", "sess-alice"},
+		{"", "bob", "sess-bob"},
+		{"thread-1", "", "sess-thread"},
+	} {
+		if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", c.threadID, c.userID, c.sessionID); err != nil {
+			t.Fatalf("SetActive(%q,%q): %v", c.threadID, c.userID, err)
+		}
+	}
+
+	got, err := s.SessionRepo().Active(ctx, "telegram", "chat1", "", "alice")
+	if err != nil {
+		t.Fatalf("Active alice: %v", err)
+	}
+	if got != "sess-alice" {
+		t.Fatalf("alice = %q, want sess-alice", got)
+	}
+	got, err = s.SessionRepo().Active(ctx, "telegram", "chat1", "", "bob")
+	if err != nil {
+		t.Fatalf("Active bob: %v", err)
+	}
+	if got != "sess-bob" {
+		t.Fatalf("bob = %q, want sess-bob", got)
+	}
+	got, err = s.SessionRepo().Active(ctx, "telegram", "chat1", "thread-1", "")
+	if err != nil {
+		t.Fatalf("Active thread: %v", err)
+	}
+	if got != "sess-thread" {
+		t.Fatalf("thread = %q, want sess-thread", got)
+	}
+
+	if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "alice", "sess-alice-2"); err != nil {
+		t.Fatalf("SetActive alice second: %v", err)
+	}
+	got, err = s.SessionRepo().Active(ctx, "telegram", "chat1", "", "bob")
+	if err != nil {
+		t.Fatalf("Active bob after alice switch: %v", err)
+	}
+	if got != "sess-bob" {
+		t.Fatalf("bob's session must be untouched by alice's switch, got %q", got)
+	}
+
+	activeCount := 0
+	sessions, err := s.SessionRepo().List(ctx, "telegram", "chat1")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, sess := range sessions {
+		if sess.Active {
+			activeCount++
+		}
+	}
+	if activeCount != 3 {
+		t.Fatalf("expected 3 active sessions (one per conversation key), got %d", activeCount)
+	}
+}
+
+// TestSessionSetActiveReKeysAdoptedRow: activating a session created under a
+// different key (e.g. before key granularity) re-keys it to the current
+// conversation so /occa:session switch keeps old sessions reachable.
+func TestSessionSetActiveReKeysAdoptedRow(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+
+	if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "", "sess-old"); err != nil {
+		t.Fatalf("SetActive old: %v", err)
+	}
+	if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "alice", "sess-old"); err != nil {
+		t.Fatalf("SetActive adopt: %v", err)
+	}
+
+	got, err := s.SessionRepo().Active(ctx, "telegram", "chat1", "", "alice")
+	if err != nil {
+		t.Fatalf("Active adopted: %v", err)
+	}
+	if got != "sess-old" {
+		t.Fatalf("adopted session = %q, want sess-old", got)
+	}
+	if _, err := s.SessionRepo().Active(ctx, "telegram", "chat1", "", ""); err != nil {
+		t.Fatalf("Active old key: %v", err)
+	}
+}
+
+// TestUniqueActiveIndexEnforced: the partial unique index rejects a second
+// active row for the same conversation key.
+func TestUniqueActiveIndexEnforced(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+
+	if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "alice", "sess-1"); err != nil {
+		t.Fatalf("SetActive first: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO session (channel_id, platform, agent_session_id, thread_id, user_id, active, created_at, updated_at)
+		 VALUES ('chat1', 'telegram', 'sess-2', '', 'alice', 1, 1, 1)`); err == nil {
+		t.Fatal("expected duplicate active key rejected by the partial unique index")
 	}
 }
 
@@ -67,7 +174,7 @@ func TestSessionRestartRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if err := s1.SessionRepo().SetActive(ctx, "discord", "ch1", "sess-abc"); err != nil {
+	if err := s1.SessionRepo().SetActive(ctx, "discord", "ch1", "", "", "sess-abc"); err != nil {
 		t.Fatalf("SetActive: %v", err)
 	}
 	s1.Close()
@@ -78,7 +185,7 @@ func TestSessionRestartRoundTrip(t *testing.T) {
 	}
 	defer s2.Close()
 
-	id, err := s2.SessionRepo().Active(ctx, "discord", "ch1")
+	id, err := s2.SessionRepo().Active(ctx, "discord", "ch1", "", "")
 	if err != nil {
 		t.Fatalf("Active after restart: %v", err)
 	}
@@ -91,14 +198,14 @@ func TestSessionSetActiveAtomic(t *testing.T) {
 	s := tempStore(t)
 	ctx := context.Background()
 
-	if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", "sess-1"); err != nil {
+	if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "", "sess-1"); err != nil {
 		t.Fatalf("SetActive: %v", err)
 	}
-	if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", "sess-2"); err != nil {
+	if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "", "sess-2"); err != nil {
 		t.Fatalf("SetActive: %v", err)
 	}
 
-	id, err := s.SessionRepo().Active(ctx, "telegram", "chat1")
+	id, err := s.SessionRepo().Active(ctx, "telegram", "chat1", "", "")
 	if err != nil {
 		t.Fatalf("Active: %v", err)
 	}

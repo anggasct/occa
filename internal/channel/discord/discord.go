@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -18,6 +19,10 @@ import (
 
 const maxDownloadSize = 10 * 1024 * 1024
 
+// ThreadPolicy decides whether a channel auto-creates a thread on @mention.
+// A nil policy disables auto-threading entirely.
+type ThreadPolicy func(channelID string) (bool, error)
+
 type Adapter struct {
 	session        *discordgo.Session
 	token          string
@@ -26,6 +31,10 @@ type Adapter struct {
 	appID          atomic.Value
 	channelLookup  func(string) (*discordgo.Channel, error)
 	downloadClient *http.Client
+	autoThread     ThreadPolicy
+
+	threadsMu sync.Mutex
+	threads   map[string]struct{}
 }
 
 const defaultDownloadTimeout = 60 * time.Second
@@ -35,6 +44,28 @@ func New(token string, menu []channel.MenuCommand) *Adapter {
 }
 
 func (a *Adapter) Name() string { return "discord" }
+
+// SetAutoThreadPolicy configures the per-channel auto-thread decision. When
+// unset (or nil), @mentions never auto-create threads.
+func (a *Adapter) SetAutoThreadPolicy(policy ThreadPolicy) {
+	a.autoThread = policy
+}
+
+func (a *Adapter) trackThread(threadID string) {
+	a.threadsMu.Lock()
+	defer a.threadsMu.Unlock()
+	if a.threads == nil {
+		a.threads = make(map[string]struct{})
+	}
+	a.threads[threadID] = struct{}{}
+}
+
+func (a *Adapter) isTrackedThread(threadID string) bool {
+	a.threadsMu.Lock()
+	defer a.threadsMu.Unlock()
+	_, ok := a.threads[threadID]
+	return ok
+}
 
 func (a *Adapter) setBotID(id string) { a.botID.Store(id) }
 
@@ -112,11 +143,20 @@ func (a *Adapter) configure(s *discordgo.Session, handler func(channel.IncomingM
 			}
 
 			parentChannelID, isThread, scopeUnresolved := a.channelScope(i.Interaction.GuildID, i.ChannelID)
+			msgChannelID := i.ChannelID
+			threadID := ""
+			if isThread {
+				threadID = i.ChannelID
+			}
+			if isThread && a.isTrackedThread(i.ChannelID) && parentChannelID != "" {
+				msgChannelID = parentChannelID
+			}
 			msg := channel.IncomingMessage{
 				Platform:               "discord",
-				ChannelID:              i.ChannelID,
+				ChannelID:              msgChannelID,
 				ParentChannelID:        parentChannelID,
 				ChannelScopeUnresolved: scopeUnresolved,
+				ThreadID:               threadID,
 				UserID:                 userID,
 				IsThread:               isThread,
 				IsCallback:             true,
@@ -160,11 +200,20 @@ func (a *Adapter) handleApplicationCommandInteraction(sess *discordgo.Session, i
 	}
 
 	parentChannelID, isThread, scopeUnresolved := a.channelScope(i.GuildID, i.ChannelID)
+	msgChannelID := i.ChannelID
+	threadID := ""
+	if isThread {
+		threadID = i.ChannelID
+	}
+	if isThread && a.isTrackedThread(i.ChannelID) && parentChannelID != "" {
+		msgChannelID = parentChannelID
+	}
 	msg := channel.IncomingMessage{
 		Platform:               "discord",
-		ChannelID:              i.ChannelID,
+		ChannelID:              msgChannelID,
 		ParentChannelID:        parentChannelID,
 		ChannelScopeUnresolved: scopeUnresolved,
+		ThreadID:               threadID,
 		UserID:                 userID,
 		Text:                   strings.TrimSpace(text),
 		IsMention:              true,
@@ -293,18 +342,91 @@ func (a *Adapter) normalizeMessage(m *discordgo.Message) channel.IncomingMessage
 	}
 
 	parentChannelID, isThread, scopeUnresolved := a.channelScope(m.GuildID, m.ChannelID)
+	threadID := ""
+	if isThread {
+		threadID = m.ChannelID
+	}
+	replyChannelID := m.ChannelID
+
+	// Auto-thread: an @mention in a channel with auto_thread enabled (and not
+	// already inside a thread) spawns a public thread from the message; the
+	// conversation then lives in the thread, so the message is re-scoped to
+	// it. On failure the reply stays inline in the parent channel.
+	if isMention && !isThread && m.GuildID != "" && a.autoThread != nil && a.session != nil {
+		enabled, err := a.autoThread(m.ChannelID)
+		if err != nil {
+			slog.Warn("discord: auto-thread policy lookup failed", "channel_id", m.ChannelID, "error", err)
+		} else if enabled {
+			thread, err := a.session.MessageThreadStart(m.ChannelID, m.ID, threadName(m.Content), 1440)
+			if err != nil {
+				slog.Warn("discord: auto-thread creation failed", "channel_id", m.ChannelID, "error", err)
+			} else {
+				slog.Info("discord: auto-thread created", "channel_id", m.ChannelID, "thread_id", thread.ID, "thread_name", thread.Name)
+				parentChannelID = m.ChannelID
+				threadID = thread.ID
+				replyChannelID = thread.ID
+				isThread = true
+				a.trackThread(thread.ID)
+			}
+		}
+	}
+
+	// Messages inside threads OCCA created need no @mention, and their access
+	// scope is the parent channel the user was originally allowed in.
+	if isThread && threadID != "" && a.isTrackedThread(threadID) {
+		isMention = true
+		if parentChannelID != "" {
+			m.ChannelID = parentChannelID
+		}
+	}
+
 	return channel.IncomingMessage{
 		Platform:               "discord",
 		ChannelID:              m.ChannelID,
 		ParentChannelID:        parentChannelID,
 		ChannelScopeUnresolved: scopeUnresolved,
+		ThreadID:               threadID,
 		UserID:                 m.Author.ID,
 		Text:                   m.Content,
 		IsMention:              isMention,
 		IsThread:               isThread,
 		Attachments:            a.downloadAttachments(m),
-		ReplyCtx:               &replyContext{session: a.session, channelID: m.ChannelID, guildID: m.GuildID, appID: a.appIDValue()},
+		ReplyCtx:               &replyContext{session: a.session, channelID: replyChannelID, guildID: m.GuildID, appID: a.appIDValue()},
 	}
+}
+
+// threadName derives an auto-thread name from the message content: mention
+// and channel tokens (<...>) and Discord-forbidden channel characters are
+// stripped, the result is truncated to Discord's 100-character thread-name
+// limit, and an empty name falls back to a fixed label.
+func threadName(content string) string {
+	var b strings.Builder
+	inToken := false
+	runes := 0
+	for _, r := range strings.TrimSpace(content) {
+		switch {
+		case r == '<':
+			inToken = true
+			continue
+		case r == '>':
+			inToken = false
+			continue
+		case inToken:
+			continue
+		case r == '\n' || strings.ContainsRune("`@#?:*{}|\\\"", r):
+			continue
+		}
+		if runes >= 100 {
+			break
+		}
+		b.WriteRune(r)
+		runes++
+	}
+	name := strings.TrimSpace(b.String())
+	if name == "" {
+		return "OCCA chat"
+	}
+	return name
 }
 
 func (a *Adapter) downloadAttachments(m *discordgo.Message) []channel.Attachment {

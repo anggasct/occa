@@ -57,7 +57,8 @@ func (r *Router) setDir(ctx context.Context, msg channel.IncomingMessage, path s
 
 	// The active session belongs to the old project; clear it so the next
 	// message starts a fresh session in the new working directory.
-	if err := r.store.SessionRepo().Deactivate(ctx, msg.Platform, msg.ChannelID); err != nil {
+	threadID, userID := conversationKey(msg)
+	if err := r.store.SessionRepo().Deactivate(ctx, msg.Platform, msg.ChannelID, threadID, userID); err != nil {
 		return "", fmt.Errorf("dir: reset session: %w", err)
 	}
 

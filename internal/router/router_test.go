@@ -3,9 +3,11 @@ package router
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -36,6 +38,13 @@ type fakeRef struct{ id string }
 
 func (f fakeRef) ID() string { return f.id }
 
+// pendingResponse pairs the event stream and dispatch-completion channel of
+// one in-flight response, so several responses can share one fake client.
+type pendingResponse struct {
+	events       chan relay.Event
+	dispatchDone chan struct{}
+}
+
 type fakeRelayClient struct {
 	sessionID     string
 	lastMsg       string
@@ -46,16 +55,25 @@ type fakeRelayClient struct {
 	lastModel     *relay.ModelRef
 	providerCalls int
 	sendCalls     int
-	events        chan relay.Event
-	dispatchDone  chan struct{}
 	commands      []relay.CommandInfo
 	commandsErr   error
+	blockSend     chan struct{}
+	sessionSeq    int
+
+	mu           sync.Mutex
+	responses    []pendingResponse
+	dispatchDone chan struct{}
 }
 
 func (f *fakeRelayClient) CreateSession(_ context.Context) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sessionID = fmt.Sprintf("sess-%d", f.sessionSeq)
+	f.sessionSeq++
 	return f.sessionID, nil
 }
 func (f *fakeRelayClient) SendMessage(_ context.Context, _, text string, model *relay.ModelRef, _ []relay.Attachment) error {
+	f.mu.Lock()
 	f.sendCalls++
 	f.rawMsg = text
 	if model != nil {
@@ -68,10 +86,25 @@ func (f *fakeRelayClient) SendMessage(_ context.Context, _, text string, model *
 		text = text[:idx]
 	}
 	f.lastMsg = text
-	f.events <- relay.Event{Type: "done"}
-	close(f.events)
-	close(f.dispatchDone)
+	f.mu.Unlock()
+	f.finishResponse()
 	return nil
+}
+
+func (f *fakeRelayClient) finishResponse() {
+	if f.blockSend != nil {
+		<-f.blockSend
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.responses) == 0 {
+		return
+	}
+	resp := f.responses[0]
+	f.responses = f.responses[1:]
+	resp.events <- relay.Event{Type: "done"}
+	close(resp.events)
+	close(resp.dispatchDone)
 }
 func (f *fakeRelayClient) Providers(_ context.Context) (relay.Providers, error) {
 	f.providerCalls++
@@ -85,15 +118,16 @@ func (f *fakeRelayClient) ListCommands(_ context.Context) ([]relay.CommandInfo, 
 }
 func (f *fakeRelayClient) RunCommand(_ context.Context, _, cmd string) error {
 	f.lastCmd = cmd
-	f.events <- relay.Event{Type: "done"}
-	close(f.events)
-	close(f.dispatchDone)
+	f.finishResponse()
 	return nil
 }
 func (f *fakeRelayClient) Events(_ context.Context, _ string) (<-chan relay.Event, error) {
-	f.events = make(chan relay.Event, 1)
-	f.dispatchDone = make(chan struct{})
-	return f.events, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	resp := pendingResponse{events: make(chan relay.Event, 1), dispatchDone: make(chan struct{})}
+	f.responses = append(f.responses, resp)
+	f.dispatchDone = resp.dispatchDone
+	return resp.events, nil
 }
 
 func waitForDispatch(t *testing.T, client *fakeRelayClient) {
@@ -244,24 +278,64 @@ func (f *fakeScheduleRepo) ListAll(_ context.Context) ([]store.Schedule, error) 
 
 type fakeSessionRepo struct {
 	activeID string
+	activeBy map[string]string
 }
 
-func (f *fakeSessionRepo) Active(_ context.Context, platform, channelID string) (string, error) {
-	return f.activeID, nil
+func (f *fakeSessionRepo) sessionKey(platform, channelID, threadID, userID string) string {
+	return platform + ":" + channelID + ":" + threadID + ":" + userID
 }
-func (f *fakeSessionRepo) SetActive(_ context.Context, platform, channelID, sessionID string) error {
-	f.activeID = sessionID
-	return nil
-}
-func (f *fakeSessionRepo) Deactivate(_ context.Context, platform, channelID string) error {
-	f.activeID = ""
-	return nil
-}
-func (f *fakeSessionRepo) List(_ context.Context, platform, channelID string) ([]store.Session, error) {
-	if f.activeID != "" {
-		return []store.Session{{ID: 1, AgentSessionID: f.activeID, Active: true}}, nil
+
+func (f *fakeSessionRepo) Active(_ context.Context, platform, channelID, threadID, userID string) (string, error) {
+	if f.activeBy == nil {
+		return f.activeID, nil
 	}
-	return nil, nil
+	return f.activeBy[f.sessionKey(platform, channelID, threadID, userID)], nil
+}
+
+func (f *fakeSessionRepo) SetActive(_ context.Context, platform, channelID, threadID, userID, sessionID string) error {
+	f.activeID = sessionID
+	if f.activeBy == nil {
+		f.activeBy = make(map[string]string)
+	}
+	f.activeBy[f.sessionKey(platform, channelID, threadID, userID)] = sessionID
+	return nil
+}
+
+func (f *fakeSessionRepo) Deactivate(_ context.Context, platform, channelID, threadID, userID string) error {
+	f.activeID = ""
+	if f.activeBy != nil {
+		delete(f.activeBy, f.sessionKey(platform, channelID, threadID, userID))
+	}
+	return nil
+}
+
+func (f *fakeSessionRepo) List(_ context.Context, platform, channelID string) ([]store.Session, error) {
+	if f.activeBy == nil {
+		if f.activeID != "" {
+			return []store.Session{{ID: 1, AgentSessionID: f.activeID, Active: true}}, nil
+		}
+		return nil, nil
+	}
+	prefix := platform + ":" + channelID + ":"
+	var sessions []store.Session
+	for key, id := range f.activeBy {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		parts := strings.SplitN(strings.TrimPrefix(key, prefix), ":", 2)
+		threadID, userID := "", ""
+		if len(parts) == 2 {
+			threadID, userID = parts[0], parts[1]
+		}
+		sessions = append(sessions, store.Session{
+			ID:             int64(len(sessions) + 1),
+			AgentSessionID: id,
+			Active:         true,
+			ThreadID:       threadID,
+			UserID:         userID,
+		})
+	}
+	return sessions, nil
 }
 func (f *fakeSessionRepo) Delete(_ context.Context, id int64) error { return nil }
 

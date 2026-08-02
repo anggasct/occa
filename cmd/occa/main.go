@@ -93,7 +93,18 @@ func main() {
 		channels = append(channels, telegram.New(telegramToken, menu))
 	}
 	if discordToken != "" {
-		channels = append(channels, discord.New(discordToken, menu))
+		da := discord.New(discordToken, menu)
+		da.SetAutoThreadPolicy(func(channelID string) (bool, error) {
+			ch, err := db.ChannelRepo().Get(context.Background(), "discord", channelID)
+			if err != nil {
+				return false, err
+			}
+			if ch == nil {
+				return true, nil
+			}
+			return ch.AutoThread, nil
+		})
+		channels = append(channels, da)
 	}
 
 	executor := func(ctx context.Context, platform, channelID, prompt string) {
@@ -123,7 +134,7 @@ func main() {
 		defer inst.End()
 
 		resolver := relay.NewSessionResolver(db.SessionRepo(), inst.Client())
-		sessionID, err := resolver.Resolve(ctx, platform, channelID)
+		sessionID, err := resolver.Resolve(ctx, platform, channelID, "", "")
 		if err != nil {
 			notify(adapter, channelID, "⚠️ Scheduled task failed: session error")
 			return
@@ -194,7 +205,7 @@ func main() {
 					defer inst.End()
 
 					resolver := relay.NewSessionResolver(db.SessionRepo(), inst.Client())
-					sessionID, err := resolver.Resolve(ctx, platform, channelID)
+					sessionID, err := resolver.Resolve(ctx, platform, channelID, "", "")
 					if err != nil {
 						send("⚠️ Webhook analysis failed: session error")
 						return

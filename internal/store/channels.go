@@ -14,10 +14,11 @@ type sqliteChannelRepo struct {
 func (r *sqliteChannelRepo) Get(ctx context.Context, platform, channelID string) (*Channel, error) {
 	var ch Channel
 	var model, workdir sql.NullString
+	var autoThread int
 	err := r.db.QueryRowContext(ctx,
-		`SELECT channel_id, platform, model, listen_mode, workdir, created_at, updated_at FROM channel WHERE platform = ? AND channel_id = ?`,
+		`SELECT channel_id, platform, model, listen_mode, workdir, auto_thread, created_at, updated_at FROM channel WHERE platform = ? AND channel_id = ?`,
 		platform, channelID,
-	).Scan(&ch.ChannelID, &ch.Platform, &model, &ch.ListenMode, &workdir, &ch.CreatedAt, &ch.UpdatedAt)
+	).Scan(&ch.ChannelID, &ch.Platform, &model, &ch.ListenMode, &workdir, &autoThread, &ch.CreatedAt, &ch.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -25,6 +26,7 @@ func (r *sqliteChannelRepo) Get(ctx context.Context, platform, channelID string)
 		return nil, fmt.Errorf("store: channel get: %w", err)
 	}
 	ch.Model, ch.Workdir = model.String, workdir.String
+	ch.AutoThread = autoThread == 1
 	return &ch, nil
 }
 

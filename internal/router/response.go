@@ -14,9 +14,15 @@ import (
 
 const busyResponseMessage = "⚠️ A response is already running in this channel. Wait for it to finish or check /occa:status."
 
+// responseKey is the full conversation key: one active task per
+// (platform, channelID, threadID, userID), so different users or threads in
+// the same channel run concurrently while the same conversation stays
+// single-flight.
 type responseKey struct {
 	platform  string
 	channelID string
+	threadID  string
+	userID    string
 }
 
 type responseCoordinator struct {
@@ -67,13 +73,13 @@ func (r *Router) runResponse(
 		sessionID: sessionID,
 		reply:     msg.ReplyCtx,
 	}
-	slog.Info("response started", "platform", key.platform, "channel_id", key.channelID)
+	slog.Info("response started", "platform", key.platform, "channel_id", key.channelID, "thread_id", key.threadID, "user_id", key.userID)
 	defer func() {
 		r.permissions.expireOwner(owner)
 		cancel()
 		inst.End()
 		r.responses.release(key)
-		slog.Info("response finished", "platform", key.platform, "channel_id", key.channelID, "outcome", outcome, "elapsed", time.Since(started).Truncate(time.Millisecond))
+		slog.Info("response finished", "platform", key.platform, "channel_id", key.channelID, "thread_id", key.threadID, "user_id", key.userID, "outcome", outcome, "elapsed", time.Since(started).Truncate(time.Millisecond))
 	}()
 
 	dispatchDone := make(chan error, 1)
@@ -118,7 +124,7 @@ func (r *Router) runResponse(
 	}
 
 	if dispatchErr != nil && !errors.Is(dispatchErr, context.Canceled) {
-		slog.Warn("response dispatch failed", "platform", key.platform, "channel_id", key.channelID, "error", dispatchErr)
+		slog.Warn("response dispatch failed", "platform", key.platform, "channel_id", key.channelID, "thread_id", key.threadID, "user_id", key.userID, "error", dispatchErr)
 		if errors.Is(dispatchErr, relay.ErrAttachmentTooLarge) {
 			r.reply(msg, "⚠️ "+dispatchErr.Error())
 		} else {
@@ -126,6 +132,6 @@ func (r *Router) runResponse(
 		}
 	}
 	if streamErr != nil && !errors.Is(streamErr, context.Canceled) {
-		slog.Warn("response stream ended", "platform", key.platform, "channel_id", key.channelID, "error", streamErr)
+		slog.Warn("response stream ended", "platform", key.platform, "channel_id", key.channelID, "thread_id", key.threadID, "user_id", key.userID, "error", streamErr)
 	}
 }

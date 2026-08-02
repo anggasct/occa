@@ -64,6 +64,15 @@ func (p Providers) HasModel(ref ModelRef) bool {
 	return false
 }
 
+// Relay event types delivered on the stream channel.
+const (
+	EventDelta   = "delta"
+	EventDone    = "done"
+	EventError   = "error"
+	EventSegment = "segment" // tool/part boundary — finalize preview, next delta = new message
+	EventTool    = "tool"    // a tool part started — emit ⚙️ notice once per part, then segment
+)
+
 type Event struct {
 	Type       string
 	Delta      string
