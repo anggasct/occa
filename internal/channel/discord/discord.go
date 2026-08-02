@@ -207,7 +207,7 @@ func (a *Adapter) registerCommands(r *discordgo.Ready) {
 func buildApplicationCommands(menu []channel.MenuCommand) []*discordgo.ApplicationCommand {
 	commands := make([]*discordgo.ApplicationCommand, len(menu))
 	for i, m := range menu {
-		cmd := &discordgo.ApplicationCommand{Name: sanitizeCommandName(m.Alias), Description: m.Description}
+		cmd := &discordgo.ApplicationCommand{Name: sanitizeCommandName(m.Alias), Description: sanitizeDescription(m.Description)}
 		if m.HasArgs {
 			cmd.Options = []*discordgo.ApplicationCommandOption{{
 				Type:        discordgo.ApplicationCommandOptionString,
@@ -238,6 +238,19 @@ func sanitizeCommandName(name string) string {
 		s = s[:32]
 	}
 	return s
+}
+
+// maxCommandDescriptionLen is Discord's ApplicationCommand.Description limit.
+// A bulk overwrite fails atomically if any single description exceeds it, so
+// every description must be capped before sending.
+const maxCommandDescriptionLen = 100
+
+func sanitizeDescription(desc string) string {
+	r := []rune(desc)
+	if len(r) <= maxCommandDescriptionLen {
+		return desc
+	}
+	return string(r[:maxCommandDescriptionLen])
 }
 
 func (a *Adapter) onMessage(m *discordgo.MessageCreate, handler func(channel.IncomingMessage)) {

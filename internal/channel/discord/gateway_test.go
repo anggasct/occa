@@ -181,6 +181,45 @@ func TestSetChatCommandsUsesGuildScope(t *testing.T) {
 	}
 }
 
+func TestSanitizeDescriptionDiscord(t *testing.T) {
+	short := "Show available commands"
+	if got := sanitizeDescription(short); got != short {
+		t.Fatalf("sanitizeDescription(%q) = %q, want unchanged", short, got)
+	}
+
+	long := strings.Repeat("a", 300)
+	got := sanitizeDescription(long)
+	if len([]rune(got)) != 100 {
+		t.Fatalf("sanitizeDescription truncated to %d runes, want 100", len([]rune(got)))
+	}
+}
+
+// TestSetChatCommandsTruncatesLongDescription mirrors the Telegram
+// regression: Discord's ApplicationCommandBulkOverwrite also rejects the
+// whole batch if any single description exceeds its limit, so a long agent
+// command description must be truncated before it reaches the API.
+func TestSetChatCommandsTruncatesLongDescription(t *testing.T) {
+	var gotBody []byte
+	s := newUnconnectedSession(t)
+	s.Client = &http.Client{Transport: fakeRoundTripper{do: func(req *http.Request) (*http.Response, error) {
+		gotBody, _ = io.ReadAll(req.Body)
+		return jsonResponse(200, "[]"), nil
+	}}}
+
+	rc := &replyContext{session: s, guildID: "guild-1", appID: "app-1"}
+	longDescription := strings.Repeat("a", 300)
+	err := rc.SetChatCommands([]channel.MenuCommand{
+		{Alias: "customize-opencode", Description: longDescription},
+	})
+	if err != nil {
+		t.Fatalf("SetChatCommands: %v", err)
+	}
+
+	if strings.Contains(string(gotBody), longDescription) {
+		t.Fatalf("expected description to be truncated, got %q", gotBody)
+	}
+}
+
 func TestSetChatCommandsNoOpsWithoutGuild(t *testing.T) {
 	called := false
 	s := newUnconnectedSession(t)

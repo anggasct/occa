@@ -103,6 +103,45 @@ func TestSetChatCommandsUsesChatScope(t *testing.T) {
 	}
 }
 
+func TestSanitizeDescription(t *testing.T) {
+	short := "Show available commands"
+	if got := sanitizeDescription(short); got != short {
+		t.Fatalf("sanitizeDescription(%q) = %q, want unchanged", short, got)
+	}
+
+	long := strings.Repeat("a", 300)
+	got := sanitizeDescription(long)
+	if utf8.RuneCountInString(got) != 256 {
+		t.Fatalf("sanitizeDescription truncated to %d runes, want 256", utf8.RuneCountInString(got))
+	}
+}
+
+// TestSetChatCommandsTruncatesLongDescription reproduces the production
+// failure where an agent command (e.g. OpenCode's "customize-opencode"
+// skill) has a description over Telegram's 256-character limit: Telegram
+// rejects the whole setMyCommands batch, silently dropping every command in
+// the menu, not just the offending one.
+func TestSetChatCommandsTruncatesLongDescription(t *testing.T) {
+	var gotBody []byte
+	bot := fakeTelegramServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+	})
+
+	rc := &replyContext{bot: bot, chatID: 12345}
+	longDescription := strings.Repeat("a", 300)
+	err := rc.SetChatCommands([]channel.MenuCommand{
+		{Alias: "customize-opencode", Description: longDescription},
+	})
+	if err != nil {
+		t.Fatalf("SetChatCommands: %v", err)
+	}
+
+	if strings.Contains(string(gotBody), longDescription) {
+		t.Fatalf("expected description to be truncated, got %q", gotBody)
+	}
+}
+
 func TestRegisterCommandsSkipsWhenMenuEmpty(t *testing.T) {
 	called := false
 	bot := fakeTelegramServer(t, func(w http.ResponseWriter, r *http.Request) {
