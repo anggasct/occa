@@ -202,6 +202,14 @@ func (c *Client) ReplyPermission(ctx context.Context, requestID string, reply re
 	return fmt.Errorf("cli: permission replies are not supported by the CLI backend")
 }
 
+func (c *Client) AnswerQuestion(ctx context.Context, requestID string, answers [][]string) error {
+	return fmt.Errorf("cli: question replies are not supported by the CLI backend")
+}
+
+func (c *Client) RejectQuestion(ctx context.Context, requestID string) error {
+	return fmt.Errorf("cli: question replies are not supported by the CLI backend")
+}
+
 func (c *Client) closeStream(sessionID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

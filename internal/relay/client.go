@@ -81,6 +81,7 @@ type Event struct {
 	Delta      string
 	Err        error
 	Permission *PermissionRequest
+	Question   *QuestionRequest
 }
 
 type PermissionRequest struct {
@@ -88,6 +89,23 @@ type PermissionRequest struct {
 	SessionID  string
 	Permission string
 	Tool       string
+}
+
+type QuestionOption struct {
+	Label       string
+	Description string
+}
+
+type QuestionInfo struct {
+	Question string
+	Header   string
+	Options  []QuestionOption
+}
+
+type QuestionRequest struct {
+	ID        string
+	SessionID string
+	Questions []QuestionInfo
 }
 
 type PermissionReply string
@@ -105,6 +123,8 @@ type Client interface {
 	RunCommand(ctx context.Context, sessionID, command string) error
 	Events(ctx context.Context, sessionID string) (<-chan Event, error)
 	ReplyPermission(ctx context.Context, requestID string, reply PermissionReply) error
+	AnswerQuestion(ctx context.Context, requestID string, answers [][]string) error
+	RejectQuestion(ctx context.Context, requestID string) error
 	ListCommands(ctx context.Context) ([]CommandInfo, error)
 }
 
@@ -295,6 +315,43 @@ func (c *HTTPClient) RegisterMCP(ctx context.Context, name string, config McpCon
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusAccepted {
 		return fmt.Errorf("relay: register mcp: unexpected status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// AnswerQuestion submits one label per question (empty for unanswered)
+// to an in-flight question request.
+func (c *HTTPClient) AnswerQuestion(ctx context.Context, requestID string, answers [][]string) error {
+	payload := map[string]any{"answers": answers}
+	resp, err := c.post(ctx, "/question/"+requestID+"/reply", payload)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		return fmt.Errorf("relay: answer question: drain body: %w", err)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return ErrNotFound
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("relay: answer question: unexpected status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// RejectQuestion cancels an in-flight question request.
+func (c *HTTPClient) RejectQuestion(ctx context.Context, requestID string) error {
+	resp, err := c.post(ctx, "/question/"+requestID+"/reject", nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		return fmt.Errorf("relay: reject question: drain body: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("relay: reject question: unexpected status %d", resp.StatusCode)
 	}
 	return nil
 }

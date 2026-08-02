@@ -79,6 +79,8 @@ func parseSSEEvent(decoder *eventDecoder, eventType, data string) (Event, bool) 
 		return decoder.parseJSON(data)
 	}
 	switch {
+	case strings.Contains(eventType, "question.asked"):
+		return parseQuestionEvent(data), true
 	case strings.Contains(eventType, "permission.asked") || strings.Contains(eventType, "permission"):
 		return parsePermissionEvent(data), true
 	case strings.Contains(eventType, "delta") || strings.Contains(eventType, "message.part.delta"):
@@ -175,6 +177,35 @@ func (d *eventDecoder) parseJSON(data string) (Event, bool) {
 	default:
 		return Event{}, false
 	}
+}
+
+func parseQuestionEvent(data string) Event {
+	var payload struct {
+		Properties struct {
+			ID        string `json:"id"`
+			SessionID string `json:"sessionID"`
+			Questions []struct {
+				Question string `json:"question"`
+				Header   string `json:"header"`
+				Options  []struct {
+					Label       string `json:"label"`
+					Description string `json:"description"`
+				} `json:"options"`
+			} `json:"questions"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal([]byte(data), &payload); err != nil {
+		return Event{Type: "delta", Delta: data}
+	}
+	req := &QuestionRequest{ID: payload.Properties.ID, SessionID: payload.Properties.SessionID}
+	for _, q := range payload.Properties.Questions {
+		info := QuestionInfo{Question: q.Question, Header: q.Header}
+		for _, o := range q.Options {
+			info.Options = append(info.Options, QuestionOption{Label: o.Label, Description: o.Description})
+		}
+		req.Questions = append(req.Questions, info)
+	}
+	return Event{Type: "question_asked", Question: req}
 }
 
 func parsePermissionEvent(data string) Event {

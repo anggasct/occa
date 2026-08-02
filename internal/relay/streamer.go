@@ -35,6 +35,7 @@ type Streamer struct {
 	renderer          render.Renderer
 	platform          render.Platform
 	permissionHandler PermissionPromptHandler
+	questionHandler   QuestionPromptHandler
 	reactionSetter    channel.ReactionSetter
 	firstRef          channel.MessageRef
 	noEventTimeout    time.Duration
@@ -43,6 +44,10 @@ type Streamer struct {
 
 type PermissionPromptHandler interface {
 	Prompt(ctx context.Context, request PermissionRequest) error
+}
+
+type QuestionPromptHandler interface {
+	Prompt(ctx context.Context, request QuestionRequest) error
 }
 
 func NewStreamer(reply channel.ReplyContext, renderer render.Renderer, platform render.Platform) *Streamer {
@@ -57,6 +62,10 @@ func NewStreamer(reply channel.ReplyContext, renderer render.Renderer, platform 
 
 func (s *Streamer) SetPermissionPromptHandler(handler PermissionPromptHandler) {
 	s.permissionHandler = handler
+}
+
+func (s *Streamer) SetQuestionPromptHandler(handler QuestionPromptHandler) {
+	s.questionHandler = handler
 }
 
 func (s *Streamer) SetReactionSetter(setter channel.ReactionSetter) {
@@ -219,6 +228,16 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 						}
 					} else {
 						slog.Warn("streaming: permission prompt handler unavailable")
+					}
+				}
+			case "question_asked":
+				if ev.Question != nil {
+					if s.questionHandler != nil {
+						if err := s.questionHandler.Prompt(ctx, *ev.Question); err != nil {
+							slog.Warn("streaming: question prompt failed", "error", err)
+						}
+					} else {
+						slog.Warn("streaming: question prompt handler unavailable")
 					}
 				}
 			}

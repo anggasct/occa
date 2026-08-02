@@ -132,6 +132,8 @@ func (f *fakeRelayClient) Providers(_ context.Context) (relay.Providers, error) 
 	f.providerCalls++
 	return f.providers, f.providersErr
 }
+func (f *fakeRelayClient) AnswerQuestion(_ context.Context, _ string, _ [][]string) error { return nil }
+func (f *fakeRelayClient) RejectQuestion(_ context.Context, _ string) error { return nil }
 func (f *fakeRelayClient) ReplyPermission(_ context.Context, _ string, _ relay.PermissionReply) error {
 	return nil
 }

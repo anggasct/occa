@@ -73,6 +73,15 @@ func (r *Router) runResponse(
 		sessionID: sessionID,
 		reply:     msg.ReplyCtx,
 	}
+	questionHandler := &questionPromptHandler{
+		broker:    r.questions,
+		encode:    func(text string) string { return r.inline(msg.Platform, text) },
+		client:    inst.Client(),
+		platform:  key.platform,
+		channelID: key.channelID,
+		sessionID: sessionID,
+		reply:     msg.ReplyCtx,
+	}
 	slog.Info("response started", "platform", key.platform, "channel_id", key.channelID, "thread_id", key.threadID, "user_id", key.userID)
 	defer func() {
 		r.permissions.expireOwner(owner)
@@ -91,6 +100,7 @@ func (r *Router) runResponse(
 	go func() {
 		streamer := relay.NewStreamer(msg.ReplyCtx, r.renderer, render.PlatformFor(msg.Platform))
 		streamer.SetPermissionPromptHandler(permissionHandler)
+		streamer.SetQuestionPromptHandler(questionHandler)
 		if setter, ok := msg.ReplyCtx.(channel.ReactionSetter); ok {
 			streamer.SetReactionSetter(setter)
 		}

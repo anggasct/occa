@@ -139,6 +139,12 @@ func (c *responseClient) Providers(_ context.Context) (relay.Providers, error) {
 func (c *responseClient) ReplyPermission(_ context.Context, _ string, _ relay.PermissionReply) error {
 	return nil
 }
+func (c *responseClient) AnswerQuestion(_ context.Context, _ string, _ [][]string) error {
+	return nil
+}
+func (c *responseClient) RejectQuestion(_ context.Context, _ string) error {
+	return nil
+}
 func (c *responseClient) ListCommands(_ context.Context) ([]relay.CommandInfo, error) {
 	return nil, nil
 }

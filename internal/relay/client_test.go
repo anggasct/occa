@@ -255,3 +255,31 @@ func TestWrapTransportErrPreservesCancel(t *testing.T) {
 		t.Fatalf("canceled request must not be ErrUnreachable")
 	}
 }
+
+// TestAnswerQuestionPostsPayload verifies the reply endpoint and payload.
+func TestAnswerQuestionPostsPayload(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/question/que_1/reply" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := NewHTTPClient(srv.URL)
+	if err := c.AnswerQuestion(context.Background(), "que_1", [][]string{{"A"}, {}}); err != nil {
+		t.Fatalf("AnswerQuestion: %v", err)
+	}
+	var decoded struct {
+		Answers [][]string `json:"answers"`
+	}
+	if err := json.Unmarshal([]byte(gotBody), &decoded); err != nil {
+		t.Fatalf("bad payload %q: %v", gotBody, err)
+	}
+	if len(decoded.Answers) != 2 || decoded.Answers[0][0] != "A" || len(decoded.Answers[1]) != 0 {
+		t.Fatalf("answers = %v", decoded.Answers)
+	}
+}

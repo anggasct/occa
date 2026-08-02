@@ -68,6 +68,7 @@ type Router struct {
 	tokenGen       TokenGenerator
 	responses      *responseCoordinator
 	permissions    *permissionBroker
+	questions      *questionBroker
 	modelBrowser   *modelBrowserBroker
 	renderer       render.Renderer
 }
@@ -99,6 +100,7 @@ func New(instances InstanceProvider, st store.Store, defaultWorkdir string, admi
 		startedAt:      time.Now(),
 		responses:      newResponseCoordinator(),
 		permissions:    newPermissionBroker(),
+		questions:      newQuestionBroker(),
 		modelBrowser:   newModelBrowserBroker(),
 		renderer:       render.New(),
 	}

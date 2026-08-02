@@ -333,3 +333,22 @@ func TestDecodeEmptyTextDeltaDropped(t *testing.T) {
 		t.Fatalf("empty delta produced event %+v", ev)
 	}
 }
+
+// TestDecodeQuestionAsked parses a question.asked event with options.
+func TestDecodeQuestionAsked(t *testing.T) {
+	ev, ok := parseSSEEvent(newEventDecoder(), "question.asked", `{"id":"evt_1","type":"question.asked","properties":{"id":"que_1","sessionID":"ses_1","questions":[{"question":"Pilih?","header":"H","options":[{"label":"A","description":"opsi a"},{"label":"B"}]}],"tool":{"messageID":"msg_1","callID":"call_1"}}}`)
+	if !ok || ev.Type != "question_asked" || ev.Question == nil {
+		t.Fatalf("question event not parsed: %+v", ev)
+	}
+	q := ev.Question
+	if q.ID != "que_1" || q.SessionID != "ses_1" || len(q.Questions) != 1 {
+		t.Fatalf("question meta wrong: %+v", q)
+	}
+	info := q.Questions[0]
+	if info.Question != "Pilih?" || info.Header != "H" || len(info.Options) != 2 {
+		t.Fatalf("question info wrong: %+v", info)
+	}
+	if info.Options[0].Label != "A" || info.Options[0].Description != "opsi a" || info.Options[1].Label != "B" {
+		t.Fatalf("question options wrong: %+v", info.Options)
+	}
+}
