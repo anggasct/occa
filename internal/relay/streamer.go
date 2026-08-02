@@ -12,7 +12,10 @@ import (
 	"github.com/anggasct/occa/internal/render"
 )
 
-const noEventTimeout = 10 * time.Minute
+const (
+	noEventTimeout = 10 * time.Minute
+	typingInterval = 4 * time.Second
+)
 
 var (
 	ErrIncompleteStream = errors.New("response stream ended before completion")
@@ -35,6 +38,7 @@ type Streamer struct {
 	reactionSetter    channel.ReactionSetter
 	firstRef          channel.MessageRef
 	noEventTimeout    time.Duration
+	typingInterval    time.Duration
 }
 
 type PermissionPromptHandler interface {
@@ -47,6 +51,7 @@ func NewStreamer(reply channel.ReplyContext, renderer render.Renderer, platform 
 		renderer:       renderer,
 		platform:       platform,
 		noEventTimeout: noEventTimeout,
+		typingInterval: typingInterval,
 	}
 }
 
@@ -82,12 +87,22 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 	var buf strings.Builder
 	var refs []channel.MessageRef
 	var lastChunks []string
-	// toolBubbles/counts reset per contiguous tool phase (text ends the
-	// phase); bubbleCount/workingShown persist for the whole response.
-	toolBubbles := make(map[string]channel.MessageRef)
-	toolCounts := make(map[string]int)
-	bubbleCount := 0
-	workingShown := false
+	// A tool phase covers consecutive runs of the same tool: repeats edit
+	// the current bubble in place. Any other tool or a text block starts a
+	// new phase. bubbleCount/workingShown persist for the whole response.
+	var (
+		curTool      string
+		curRef       channel.MessageRef
+		curCount     int
+		bubbleCount  int
+		workingShown bool
+	)
+
+	typingTicker := time.NewTicker(s.typingInterval)
+	defer typingTicker.Stop()
+	if err := s.reply.SendTyping(); err != nil {
+		slog.Debug("streaming: initial typing indicator failed", "error", err)
+	}
 
 	intervals := []time.Duration{500 * time.Millisecond, 1 * time.Second, 2 * time.Second, 3 * time.Second}
 	intervalIdx := 0
@@ -104,6 +119,11 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+
+		case <-typingTicker.C:
+			if err := s.reply.SendTyping(); err != nil {
+				slog.Debug("streaming: typing indicator failed", "error", err)
+			}
 
 		case <-timeoutTimer.C:
 			s.notice("⚠️ Task timed out (no events for 10 minutes). It may still be running, check /occa:status")
@@ -125,10 +145,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 
 			switch ev.Type {
 			case EventDelta:
-				if len(toolBubbles) > 0 {
-					toolBubbles = make(map[string]channel.MessageRef)
-					toolCounts = make(map[string]int)
-				}
+				curTool = ""
 				buf.WriteString(ev.Delta)
 				dirty = true
 			case EventDone:
@@ -147,18 +164,19 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				s.setReaction(channel.ReactionError)
 				return fmt.Errorf("%w: %s", ErrStreamFailed, ev.Delta)
 			case EventSegment:
+				curTool = ""
 				if buf.Len() > 0 {
 					slog.Debug("streaming: segment break", "finalized_len", buf.Len())
 					s.finalizeSegment(&refs, &lastChunks, buf.String())
 					buf.Reset()
 				}
 			case EventTool:
-				// Live tool bubbles: the first tool part of a phase finalizes
-				// the current preview, then each tool gets its own bubble —
-				// repeats of the same tool edit it in place with a count.
-				// After 5 distinct bubbles the cap kicks in and a single
-				// working indicator keeps the chat visibly active.
-				if len(toolBubbles) == 0 && buf.Len() > 0 {
+				// Live tool bubbles: the first tool of a phase finalizes the
+				// current preview, then consecutive repeats of the same tool
+				// edit that bubble in place with a count. A different tool
+				// starts a new bubble. After 5 bubbles the cap kicks in and a
+				// single working indicator keeps the chat visibly active.
+				if curTool == "" && buf.Len() > 0 {
 					s.finalizeSegment(&refs, &lastChunks, buf.String())
 					buf.Reset()
 				}
@@ -166,12 +184,12 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				if name == "" {
 					name = "Tool call"
 				}
-				if ref, ok := toolBubbles[name]; ok {
-					toolCounts[name]++
-					if err := s.reply.Edit(ref, formatToolLabel(name, toolCounts[name])); err != nil {
+				if name == curTool {
+					curCount++
+					if err := s.reply.Edit(curRef, formatToolLabel(name, curCount)); err != nil {
 						slog.Warn("streaming: tool notice edit failed", "tool", name, "error", err)
 					}
-					slog.Debug("streaming: tool repeat", "tool", name, "count", toolCounts[name])
+					slog.Debug("streaming: tool repeat", "tool", name, "count", curCount)
 					break
 				}
 				if bubbleCount >= maxToolBubbles {
@@ -187,8 +205,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 					slog.Warn("streaming: tool notice send failed", "tool", name, "error", err)
 					break
 				}
-				toolBubbles[name] = ref
-				toolCounts[name] = 1
+				curTool, curRef, curCount = name, ref, 1
 				bubbleCount++
 				slog.Debug("streaming: tool bubble", "tool", name)
 			case "permission_asked":

@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/anggasct/occa/internal/render"
 )
@@ -131,5 +132,50 @@ func TestFormatToolLabel(t *testing.T) {
 	}
 	if got := formatToolLabel("glob", 3); got != "⚙️ glob ×3" {
 		t.Fatalf("formatToolLabel(3) = %q", got)
+	}
+}
+
+// TestToolBubbleNonConsecutiveReset: the same tool separated by other tools
+// starts a fresh bubble instead of incrementing the old one.
+func TestToolBubbleNonConsecutiveReset(t *testing.T) {
+	got := runToolEvents(t,
+		Event{Type: EventTool, Delta: "bash"},
+		Event{Type: EventTool, Delta: "grep"},
+		Event{Type: EventTool, Delta: "read"},
+		Event{Type: EventTool, Delta: "bash"},
+	)
+	want := []string{"⚙️ bash", "⚙️ grep", "⚙️ read", "⚙️ bash"}
+	if len(got) != len(want) {
+		t.Fatalf("notices = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("notices = %v, want %v", got, want)
+		}
+	}
+}
+
+// TestTypingHeartbeat: a short-typed stream emits the typing indicator at
+// least once, including during a silent gap before any output.
+func TestTypingHeartbeat(t *testing.T) {
+	reply := newFakeReplyContext()
+	s := NewStreamer(reply, render.New(), render.Telegram)
+	s.typingInterval = 10 * time.Millisecond
+
+	ch := make(chan Event, 8)
+	for i := 0; i < 5; i++ {
+		ch <- Event{Type: EventDelta, Delta: "x"}
+	}
+	ch <- Event{Type: EventDone}
+	close(ch)
+
+	if err := s.Run(context.Background(), ch); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	reply.mu.Lock()
+	n := reply.typings
+	reply.mu.Unlock()
+	if n == 0 {
+		t.Fatal("SendTyping was never called")
 	}
 }

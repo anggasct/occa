@@ -18,6 +18,7 @@ type fakeReplyContext struct {
 	sends    []string
 	edits    map[string][]string
 	refCount int
+	typings  int
 }
 
 type fakeRef struct{ id string }
@@ -28,7 +29,12 @@ func newFakeReplyContext() *fakeReplyContext {
 	return &fakeReplyContext{edits: make(map[string][]string)}
 }
 
-func (f *fakeReplyContext) SendTyping() error { return nil }
+func (f *fakeReplyContext) SendTyping() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.typings++
+	return nil
+}
 
 func (f *fakeReplyContext) Send(text string) (channel.MessageRef, error) {
 	f.mu.Lock()
