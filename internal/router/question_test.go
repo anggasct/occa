@@ -159,7 +159,7 @@ func TestQuestionAnswerSubmitsAndCloses(t *testing.T) {
 		CallbackRef:  reply.sends[0].ref,
 		ReplyCtx:     reply,
 	}
-	if err := h.broker.handle(context.Background(), msg); err != nil {
+	if err := h.broker.HandleQuestionCallback(context.Background(), msg); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	client.mu.Lock()
@@ -194,7 +194,7 @@ func TestQuestionRejectSubmits(t *testing.T) {
 		CallbackRef:  reply.sends[0].ref,
 		ReplyCtx:     reply,
 	}
-	if err := h.broker.handle(context.Background(), msg); err != nil {
+	if err := h.broker.HandleQuestionCallback(context.Background(), msg); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	client.mu.Lock()
@@ -225,7 +225,7 @@ func TestQuestionAnswerFailureKeepsPromptOpen(t *testing.T) {
 		CallbackRef:  reply.sends[0].ref,
 		ReplyCtx:     reply,
 	}
-	if err := h.broker.handle(context.Background(), msg); err != nil {
+	if err := h.broker.HandleQuestionCallback(context.Background(), msg); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	last := reply.edits[len(reply.edits)-1]
@@ -253,7 +253,7 @@ func TestQuestionCallbackFromWrongOriginExpires(t *testing.T) {
 		CallbackRef:  permissionRef("other"),
 		ReplyCtx:     reply,
 	}
-	if err := h.broker.handle(context.Background(), msg); err != nil {
+	if err := h.broker.HandleQuestionCallback(context.Background(), msg); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	if last := reply.edits[len(reply.edits)-1]; last.text != questionExpiredMessage {

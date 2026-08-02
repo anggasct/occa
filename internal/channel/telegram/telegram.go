@@ -84,7 +84,6 @@ func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessag
 				threadID = raw[i].threadID()
 			}
 			if u.CallbackQuery != nil {
-				slog.Info("telegram: callback received", "data", u.CallbackQuery.Data, "from", u.CallbackQuery.From.ID)
 				handler(a.normalizeCallback(u, threadID))
 				continue
 			}

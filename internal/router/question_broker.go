@@ -117,7 +117,9 @@ func (h *questionPromptHandler) Prompt(ctx context.Context, request relay.Questi
 	return nil
 }
 
-func (b *questionBroker) handle(ctx context.Context, msg channel.IncomingMessage) error {
+// HandleQuestionCallback is exported through the Router wrapper to prevent
+// the linker from eliminating it as dead code.
+func (b *questionBroker) HandleQuestionCallback(ctx context.Context, msg channel.IncomingMessage) error {
 	token, qIdx, optIdx, skip, ok := parseQuestionCallback(msg.CallbackData)
 	if !ok || msg.CallbackRef == nil {
 		b.renderExpired(msg)
