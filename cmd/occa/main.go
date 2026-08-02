@@ -311,9 +311,15 @@ func runChannel(ctx context.Context, c channel.Channel, rt messageRouter) {
 
 	slog.Info("starting channel", "platform", c.Name())
 	if err := c.Start(ctx, func(msg channel.IncomingMessage) {
-		if err := rt.Route(ctx, msg); err != nil {
-			slog.Error("route error", "platform", msg.Platform, "error", err)
-		}
+		// Route in a goroutine: a long-running response must never block the
+		// adapter's update loop, or callbacks (permission buttons, question
+		// options) would never be fetched while a response is in flight.
+		// Per-conversation serialization is the response coordinator's job.
+		go func() {
+			if err := rt.Route(ctx, msg); err != nil {
+				slog.Error("route error", "platform", msg.Platform, "error", err)
+			}
+		}()
 	}); err != nil {
 		slog.Error("channel error", "platform", c.Name(), "error", err)
 	}
