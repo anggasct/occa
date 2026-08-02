@@ -82,8 +82,12 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 	var buf strings.Builder
 	var refs []channel.MessageRef
 	var lastChunks []string
-	var toolOrder []string
+	// toolBubbles/counts reset per contiguous tool phase (text ends the
+	// phase); bubbleCount/workingShown persist for the whole response.
+	toolBubbles := make(map[string]channel.MessageRef)
 	toolCounts := make(map[string]int)
+	bubbleCount := 0
+	workingShown := false
 
 	intervals := []time.Duration{500 * time.Millisecond, 1 * time.Second, 2 * time.Second, 3 * time.Second}
 	intervalIdx := 0
@@ -102,14 +106,12 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 			return ctx.Err()
 
 		case <-timeoutTimer.C:
-			s.flushToolNotice(toolOrder, toolCounts)
 			s.notice("⚠️ Task timed out (no events for 10 minutes). It may still be running, check /occa:status")
 			s.setReaction(channel.ReactionError)
 			return ErrTimeout
 
 		case ev, ok := <-events:
 			if !ok {
-				s.flushToolNotice(toolOrder, toolCounts)
 				syncErr := s.finalSync(&refs, &lastChunks, buf.String())
 				s.notice(incompleteStreamMessage)
 				s.setReaction(channel.ReactionError)
@@ -123,11 +125,13 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 
 			switch ev.Type {
 			case EventDelta:
-				toolOrder, toolCounts = s.flushToolNotice(toolOrder, toolCounts)
+				if len(toolBubbles) > 0 {
+					toolBubbles = make(map[string]channel.MessageRef)
+					toolCounts = make(map[string]int)
+				}
 				buf.WriteString(ev.Delta)
 				dirty = true
 			case EventDone:
-				s.flushToolNotice(toolOrder, toolCounts)
 				if buf.Len() == 0 {
 					s.setReaction(channel.ReactionSuccess)
 					return nil
@@ -139,22 +143,22 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				s.setReaction(channel.ReactionSuccess)
 				return nil
 			case EventError:
-				s.flushToolNotice(toolOrder, toolCounts)
 				s.notice("⚠️ Agent error: " + ev.Delta)
 				s.setReaction(channel.ReactionError)
 				return fmt.Errorf("%w: %s", ErrStreamFailed, ev.Delta)
 			case EventSegment:
-				toolOrder, toolCounts = s.flushToolNotice(toolOrder, toolCounts)
 				if buf.Len() > 0 {
 					slog.Debug("streaming: segment break", "finalized_len", buf.Len())
 					s.finalizeSegment(&refs, &lastChunks, buf.String())
 					buf.Reset()
 				}
 			case EventTool:
-				// The first tool part of a run finalizes the current preview;
-				// the notice itself is deferred and aggregated until the run
-				// ends (next text, terminal event, or timeout).
-				if len(toolOrder) == 0 && buf.Len() > 0 {
+				// Live tool bubbles: the first tool part of a phase finalizes
+				// the current preview, then each tool gets its own bubble —
+				// repeats of the same tool edit it in place with a count.
+				// After 5 distinct bubbles the cap kicks in and a single
+				// working indicator keeps the chat visibly active.
+				if len(toolBubbles) == 0 && buf.Len() > 0 {
 					s.finalizeSegment(&refs, &lastChunks, buf.String())
 					buf.Reset()
 				}
@@ -162,11 +166,31 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				if name == "" {
 					name = "Tool call"
 				}
-				if toolCounts[name] == 0 {
-					toolOrder = append(toolOrder, name)
+				if ref, ok := toolBubbles[name]; ok {
+					toolCounts[name]++
+					if err := s.reply.Edit(ref, formatToolLabel(name, toolCounts[name])); err != nil {
+						slog.Warn("streaming: tool notice edit failed", "tool", name, "error", err)
+					}
+					slog.Debug("streaming: tool repeat", "tool", name, "count", toolCounts[name])
+					break
 				}
-				toolCounts[name]++
-				slog.Debug("streaming: tool part", "tool", name)
+				if bubbleCount >= maxToolBubbles {
+					if !workingShown {
+						s.notice(workingIndicator)
+						workingShown = true
+					}
+					slog.Debug("streaming: tool bubble cap reached", "tool", name)
+					break
+				}
+				ref, err := s.reply.Send(formatToolLabel(name, 1))
+				if err != nil {
+					slog.Warn("streaming: tool notice send failed", "tool", name, "error", err)
+					break
+				}
+				toolBubbles[name] = ref
+				toolCounts[name] = 1
+				bubbleCount++
+				slog.Debug("streaming: tool bubble", "tool", name)
 			case "permission_asked":
 				if ev.Permission != nil {
 					if s.permissionHandler != nil {
@@ -193,36 +217,19 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 	}
 }
 
-// flushToolNotice sends one aggregated tool notice for a finished tool run,
-// e.g. "⚙️ bash ×2, edit", and returns the reset run state. Every flush site
-// must use the returned state — the decoder emits a segment event between a
-// tool run and the next text, and a flush that did not reset would fire the
-// same notice twice.
-func (s *Streamer) flushToolNotice(order []string, counts map[string]int) ([]string, map[string]int) {
-	if len(order) > 0 {
-		s.notice(formatToolRun(order, counts))
-	}
-	return nil, make(map[string]int)
-}
+// maxToolBubbles bounds the live tool bubbles per response before the
+// working indicator takes over.
+const maxToolBubbles = 5
 
-// formatToolRun renders the aggregated tool line: distinct names in order of
-// first use, each with its count when it ran more than once, capped at 4
-// names to keep the line short.
-func formatToolRun(order []string, counts map[string]int) string {
-	const maxShown = 4
-	var parts []string
-	for i, name := range order {
-		if i == maxShown {
-			parts = append(parts, fmt.Sprintf("… +%d more", len(order)-maxShown))
-			break
-		}
-		if n := counts[name]; n > 1 {
-			parts = append(parts, fmt.Sprintf("%s ×%d", name, n))
-		} else {
-			parts = append(parts, name)
-		}
+const workingIndicator = "🔄 Working…"
+
+// formatToolLabel renders one tool bubble, with its repeat count when it ran
+// more than once in the current phase.
+func formatToolLabel(name string, count int) string {
+	if count > 1 {
+		return fmt.Sprintf("⚙️ %s ×%d", name, count)
 	}
-	return "⚙️ " + strings.Join(parts, ", ")
+	return "⚙️ " + name
 }
 
 // notice sends a status line that did not come from the response buffer. It
