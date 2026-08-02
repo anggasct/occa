@@ -65,9 +65,9 @@ func (m *mockClient) RunCommand(_ context.Context, _, _ string) error { return n
 func (m *mockClient) ReplyPermission(_ context.Context, _ string, _ PermissionReply) error {
 	return nil
 }
-func (m *mockClient) ListCommands(_ context.Context) ([]CommandInfo, error) { return nil, nil }
+func (m *mockClient) ListCommands(_ context.Context) ([]CommandInfo, error)          { return nil, nil }
 func (m *mockClient) AnswerQuestion(_ context.Context, _ string, _ [][]string) error { return nil }
-func (m *mockClient) RejectQuestion(_ context.Context, _ string) error { return nil }
+func (m *mockClient) RejectQuestion(_ context.Context, _ string) error               { return nil }
 func (m *mockClient) Events(_ context.Context, _ string) (<-chan Event, error) {
 	return nil, nil
 }

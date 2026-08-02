@@ -18,14 +18,20 @@ type questionClient struct {
 	fail     error
 }
 
-func (c *questionClient) CreateSession(_ context.Context) (string, error)               { return "ses-1", nil }
+func (c *questionClient) CreateSession(_ context.Context) (string, error) { return "ses-1", nil }
 func (c *questionClient) SendMessage(_ context.Context, _ string, _ string, _ *relay.ModelRef, _ []relay.Attachment) error {
 	return nil
 }
-func (c *questionClient) Providers(_ context.Context) (relay.Providers, error) { return relay.Providers{}, nil }
-func (c *questionClient) RunCommand(_ context.Context, _ string, _ string) error          { return nil }
-func (c *questionClient) ListCommands(_ context.Context) ([]relay.CommandInfo, error)     { return nil, nil }
-func (c *questionClient) Events(_ context.Context, _ string) (<-chan relay.Event, error)  { return nil, nil }
+func (c *questionClient) Providers(_ context.Context) (relay.Providers, error) {
+	return relay.Providers{}, nil
+}
+func (c *questionClient) RunCommand(_ context.Context, _ string, _ string) error { return nil }
+func (c *questionClient) ListCommands(_ context.Context) ([]relay.CommandInfo, error) {
+	return nil, nil
+}
+func (c *questionClient) Events(_ context.Context, _ string) (<-chan relay.Event, error) {
+	return nil, nil
+}
 func (c *questionClient) ReplyPermission(_ context.Context, _ string, _ relay.PermissionReply) error {
 	return nil
 }
