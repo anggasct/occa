@@ -350,8 +350,6 @@ func TestModelBrowserShowsOnlyConnectedProviders(t *testing.T) {
 }
 
 // TestModelBrowserRowLayout: item buttons pair up in two columns (Row i/2+1)
-// and nav buttons share one row.
-// TestModelBrowserRowLayout: item buttons pair up in two columns (Row i/2+1)
 // on Telegram; nav buttons share one row regardless of position.
 func TestModelBrowserRowLayout(t *testing.T) {
 	providers := browseProviders()
