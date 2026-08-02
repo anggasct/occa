@@ -82,6 +82,8 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 	var buf strings.Builder
 	var refs []channel.MessageRef
 	var lastChunks []string
+	var toolOrder []string
+	toolCounts := make(map[string]int)
 
 	intervals := []time.Duration{500 * time.Millisecond, 1 * time.Second, 2 * time.Second, 3 * time.Second}
 	intervalIdx := 0
@@ -100,12 +102,14 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 			return ctx.Err()
 
 		case <-timeoutTimer.C:
+			s.flushToolNotice(toolOrder, toolCounts)
 			s.notice("⚠️ Task timed out (no events for 10 minutes). It may still be running, check /occa:status")
 			s.setReaction(channel.ReactionError)
 			return ErrTimeout
 
 		case ev, ok := <-events:
 			if !ok {
+				s.flushToolNotice(toolOrder, toolCounts)
 				syncErr := s.finalSync(&refs, &lastChunks, buf.String())
 				s.notice(incompleteStreamMessage)
 				s.setReaction(channel.ReactionError)
@@ -119,9 +123,15 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 
 			switch ev.Type {
 			case EventDelta:
+				if len(toolOrder) > 0 {
+					s.flushToolNotice(toolOrder, toolCounts)
+					toolOrder = nil
+					toolCounts = make(map[string]int)
+				}
 				buf.WriteString(ev.Delta)
 				dirty = true
 			case EventDone:
+				s.flushToolNotice(toolOrder, toolCounts)
 				if buf.Len() == 0 {
 					s.setReaction(channel.ReactionSuccess)
 					return nil
@@ -133,22 +143,34 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				s.setReaction(channel.ReactionSuccess)
 				return nil
 			case EventError:
+				s.flushToolNotice(toolOrder, toolCounts)
 				s.notice("⚠️ Agent error: " + ev.Delta)
 				s.setReaction(channel.ReactionError)
 				return fmt.Errorf("%w: %s", ErrStreamFailed, ev.Delta)
 			case EventSegment:
+				s.flushToolNotice(toolOrder, toolCounts)
 				if buf.Len() > 0 {
 					slog.Debug("streaming: segment break", "finalized_len", buf.Len())
 					s.finalizeSegment(&refs, &lastChunks, buf.String())
 					buf.Reset()
 				}
 			case EventTool:
-				slog.Debug("streaming: tool notice")
-				s.notice("⚙️ Tool call")
-				if buf.Len() > 0 {
+				// The first tool part of a run finalizes the current preview;
+				// the notice itself is deferred and aggregated until the run
+				// ends (next text, terminal event, or timeout).
+				if len(toolOrder) == 0 && buf.Len() > 0 {
 					s.finalizeSegment(&refs, &lastChunks, buf.String())
 					buf.Reset()
 				}
+				name := ev.Delta
+				if name == "" {
+					name = "Tool call"
+				}
+				if toolCounts[name] == 0 {
+					toolOrder = append(toolOrder, name)
+				}
+				toolCounts[name]++
+				slog.Debug("streaming: tool part", "tool", name)
 			case "permission_asked":
 				if ev.Permission != nil {
 					if s.permissionHandler != nil {
@@ -173,6 +195,35 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 			timer.Reset(intervals[intervalIdx])
 		}
 	}
+}
+
+// flushToolNotice sends one aggregated tool notice for a finished tool run,
+// e.g. "⚙️ bash ×2, edit". A no-op when nothing ran.
+func (s *Streamer) flushToolNotice(order []string, counts map[string]int) {
+	if len(order) == 0 {
+		return
+	}
+	s.notice(formatToolRun(order, counts))
+}
+
+// formatToolRun renders the aggregated tool line: distinct names in order of
+// first use, each with its count when it ran more than once, capped at 4
+// names to keep the line short.
+func formatToolRun(order []string, counts map[string]int) string {
+	const maxShown = 4
+	var parts []string
+	for i, name := range order {
+		if i == maxShown {
+			parts = append(parts, fmt.Sprintf("… +%d more", len(order)-maxShown))
+			break
+		}
+		if n := counts[name]; n > 1 {
+			parts = append(parts, fmt.Sprintf("%s ×%d", name, n))
+		} else {
+			parts = append(parts, name)
+		}
+	}
+	return "⚙️ " + strings.Join(parts, ", ")
 }
 
 // notice sends a status line that did not come from the response buffer. It

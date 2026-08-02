@@ -305,3 +305,20 @@ func TestParseLegacyEventsStillWork(t *testing.T) {
 		t.Fatalf("legacy done: %+v %v", ev, ok)
 	}
 }
+
+// TestDecoderToolPartCarriesName: a tool part's name reaches the event so
+// the notice can show which tool ran.
+func TestDecoderToolPartCarriesName(t *testing.T) {
+	decoder := newEventDecoder()
+	updated := `{"type":"message.part.updated","properties":{"part":{"id":"prt-t","type":"tool","tool":"bash"}}}`
+	ev, ok := parseSSEEvent(decoder, "", updated)
+	if !ok || ev.Type != EventTool || ev.Delta != "bash" {
+		t.Fatalf("tool event = (%+v, %v), want EventTool with Delta bash", ev, ok)
+	}
+
+	noName := `{"type":"message.part.updated","properties":{"part":{"id":"prt-t2","type":"tool"}}}`
+	ev2, ok2 := parseSSEEvent(decoder, "", noName)
+	if !ok2 || ev2.Type != EventTool || ev2.Delta != "" {
+		t.Fatalf("nameless tool event = (%+v, %v), want empty Delta", ev2, ok2)
+	}
+}

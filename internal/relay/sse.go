@@ -135,6 +135,7 @@ func (d *eventDecoder) parseJSON(data string) (Event, bool) {
 			Part   struct {
 				ID   string `json:"id"`
 				Type string `json:"type"`
+				Tool string `json:"tool"`
 			} `json:"part"`
 		} `json:"properties"`
 	}
@@ -154,7 +155,7 @@ func (d *eventDecoder) parseJSON(data string) (Event, bool) {
 		d.activeKind = kind
 		switch {
 		case kind == "tool":
-			return Event{Type: EventTool}, true
+			return Event{Type: EventTool, Delta: ev.Properties.Part.Tool}, true
 		case prev == "" || kind == prev:
 			return Event{}, false
 		case prev == "text" || kind == "text":
