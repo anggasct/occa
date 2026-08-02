@@ -801,6 +801,77 @@ func TestDirSetAndView(t *testing.T) {
 	}
 }
 
+// fakeChatCommandSetter is a ReplyContext that also implements
+// channel.ChatCommandSetter, so setDir's type-assertion succeeds and its
+// best-effort update path can be exercised and observed.
+type fakeChatCommandSetter struct {
+	*fakeReplyCtx
+	commands []channel.MenuCommand
+	done     chan struct{}
+}
+
+func (f *fakeChatCommandSetter) SetChatCommands(commands []channel.MenuCommand) error {
+	f.commands = commands
+	close(f.done)
+	return nil
+}
+
+func TestDirChangeUpdatesChatCommands(t *testing.T) {
+	r, client, reply := newTestRouter()
+	client.commands = []relay.CommandInfo{{Name: "plan", Description: "Create a plan"}}
+	setter := &fakeChatCommandSetter{fakeReplyCtx: reply, done: make(chan struct{})}
+
+	m := channel.IncomingMessage{
+		Platform:  "telegram",
+		ChannelID: "chat1",
+		UserID:    "user1",
+		Text:      "/occa:dir " + t.TempDir(),
+		IsMention: true,
+		ReplyCtx:  setter,
+	}
+
+	if err := r.Route(context.Background(), m); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if !strings.Contains(reply.sends[0], "✅ Workdir set") {
+		t.Fatalf("expected workdir set confirmation, got %q", reply.sends[0])
+	}
+
+	select {
+	case <-setter.done:
+	case <-time.After(time.Second):
+		t.Fatal("SetChatCommands was not called")
+	}
+
+	var hasOccaAlias, hasAgentCommand bool
+	for _, c := range setter.commands {
+		if c.Alias == "occa_help" {
+			hasOccaAlias = true
+		}
+		if c.Alias == "plan" && c.Description == "Create a plan" {
+			hasAgentCommand = true
+		}
+	}
+	if !hasOccaAlias {
+		t.Fatalf("expected occa_help in the union, got %+v", setter.commands)
+	}
+	if !hasAgentCommand {
+		t.Fatalf("expected the agent's plan command in the union, got %+v", setter.commands)
+	}
+}
+
+func TestDirChangeSkipsCommandUpdateWhenUnsupported(t *testing.T) {
+	// newTestRouter's plain *fakeReplyCtx does not implement
+	// channel.ChatCommandSetter — setDir must behave exactly as before.
+	r, _, reply := newTestRouter()
+	if err := r.Route(context.Background(), msg("/occa:dir "+t.TempDir(), reply)); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if !strings.Contains(reply.sends[0], "✅ Workdir set") {
+		t.Fatalf("expected workdir set confirmation, got %q", reply.sends[0])
+	}
+}
+
 func TestDirSetInvalid(t *testing.T) {
 	r, _, reply := newTestRouter()
 	if err := r.Route(context.Background(), msg("/occa:dir /nonexistent/path/xyz123", reply)); err != nil {

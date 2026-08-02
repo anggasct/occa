@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -59,5 +60,40 @@ func (r *Router) setDir(ctx context.Context, msg channel.IncomingMessage, path s
 	if err := r.store.SessionRepo().Deactivate(ctx, msg.Platform, msg.ChannelID); err != nil {
 		return "", fmt.Errorf("dir: reset session: %w", err)
 	}
+
+	// Best-effort, off the request path: a slow agent/ListCommands call must
+	// never delay this reply. Uses a detached context since ctx may be
+	// canceled once the reply is sent.
+	if setter, ok := msg.ReplyCtx.(channel.ChatCommandSetter); ok {
+		go r.updateChatCommands(context.Background(), msg, setter, dir)
+	}
+
 	return fmt.Sprintf("✅ Workdir set: %s", dir), nil
+}
+
+// updateChatCommands re-registers this chat's (Telegram) or this chat's
+// guild's (Discord) native command menu with OCCA's commands plus the new
+// workdir's agent commands. Any failure is logged and never surfaces to the
+// user — the workdir change itself already succeeded and is not affected.
+func (r *Router) updateChatCommands(ctx context.Context, msg channel.IncomingMessage, setter channel.ChatCommandSetter, workdir string) {
+	commands := r.MenuCommands()
+
+	inst, err := r.instances.Instance(ctx, workdir)
+	if err != nil {
+		slog.Warn("dir: resolve agent instance for command menu failed", "workdir", workdir, "error", err)
+	} else {
+		defer inst.End()
+		agentCommands, err := inst.Client().ListCommands(ctx)
+		if err != nil {
+			slog.Warn("dir: list agent commands failed", "workdir", workdir, "error", err)
+		} else {
+			for _, c := range agentCommands {
+				commands = append(commands, channel.MenuCommand{Alias: c.Name, Description: c.Description})
+			}
+		}
+	}
+
+	if err := setter.SetChatCommands(commands); err != nil {
+		slog.Warn("dir: set chat commands failed", "platform", msg.Platform, "channel_id", msg.ChannelID, "error", err)
+	}
 }

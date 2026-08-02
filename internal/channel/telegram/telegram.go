@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -79,6 +80,25 @@ func (a *Adapter) registerCommands() {
 	if _, err := a.bot.Request(tgbotapi.NewSetMyCommands(commands...)); err != nil {
 		slog.Warn("telegram: set commands failed", "error", err)
 	}
+}
+
+// sanitizeCommandName maps an arbitrary command name (e.g. an agent's own
+// command, which may contain characters Telegram rejects) into Telegram's
+// allowed set: lowercase letters, digits, and underscores, 1-32 characters.
+func sanitizeCommandName(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	s := b.String()
+	if len(s) > 32 {
+		s = s[:32]
+	}
+	return s
 }
 
 func (a *Adapter) Stop() error {
@@ -240,6 +260,20 @@ type replyContext struct {
 	chatID int64
 }
 
+// SetChatCommands registers a native command menu scoped to this one chat,
+// overriding the global menu for it. Telegram's per-chat scope replaces
+// (does not merge with) the default scope, so callers must pass the full
+// desired menu, not just the delta.
+func (rc *replyContext) SetChatCommands(commands []channel.MenuCommand) error {
+	botCommands := make([]tgbotapi.BotCommand, len(commands))
+	for i, m := range commands {
+		botCommands[i] = tgbotapi.BotCommand{Command: sanitizeCommandName(m.Alias), Description: m.Description}
+	}
+	scope := tgbotapi.NewBotCommandScopeChat(rc.chatID)
+	_, err := rc.bot.Request(tgbotapi.NewSetMyCommandsWithScope(scope, botCommands...))
+	return err
+}
+
 func (rc *replyContext) SendTyping() error {
 	msg := tgbotapi.NewChatAction(rc.chatID, tgbotapi.ChatTyping)
 	_, err := rc.bot.Request(msg)
@@ -362,7 +396,8 @@ type messageRef struct {
 func (m messageRef) ID() string { return m.id }
 
 var (
-	_ channel.Channel      = (*Adapter)(nil)
-	_ channel.ReplyContext = (*replyContext)(nil)
-	_ channel.MessageRef   = messageRef{}
+	_ channel.Channel           = (*Adapter)(nil)
+	_ channel.ReplyContext      = (*replyContext)(nil)
+	_ channel.ChatCommandSetter = (*replyContext)(nil)
+	_ channel.MessageRef        = messageRef{}
 )

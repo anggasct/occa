@@ -57,6 +57,52 @@ func TestRegisterCommandsSendsSetMyCommands(t *testing.T) {
 	}
 }
 
+func TestSanitizeCommandName(t *testing.T) {
+	cases := map[string]string{
+		"customize-opencode":    "customize_opencode",
+		"occa_help":             "occa_help",
+		"UPPER":                 "upper",
+		strings.Repeat("a", 40): strings.Repeat("a", 32),
+	}
+	for in, want := range cases {
+		if got := sanitizeCommandName(in); got != want {
+			t.Fatalf("sanitizeCommandName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestSetChatCommandsUsesChatScope(t *testing.T) {
+	var gotPath string
+	var gotBody []byte
+	bot := fakeTelegramServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotBody, _ = io.ReadAll(r.Body)
+		_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+	})
+
+	rc := &replyContext{bot: bot, chatID: 12345}
+	err := rc.SetChatCommands([]channel.MenuCommand{
+		{Alias: "occa_help", Description: "Show available commands"},
+		{Alias: "customize-opencode", Description: "Configure opencode"},
+	})
+	if err != nil {
+		t.Fatalf("SetChatCommands: %v", err)
+	}
+
+	if !strings.Contains(gotPath, "setMyCommands") {
+		t.Fatalf("expected setMyCommands call, got path %q", gotPath)
+	}
+	if !strings.Contains(string(gotBody), "occa_help") {
+		t.Fatalf("expected occa_help in request body, got %q", gotBody)
+	}
+	if !strings.Contains(string(gotBody), "customize_opencode") {
+		t.Fatalf("expected sanitized agent command name, got %q", gotBody)
+	}
+	if strings.Contains(string(gotBody), "customize-opencode") {
+		t.Fatalf("expected hyphenated name to be sanitized away, got %q", gotBody)
+	}
+}
+
 func TestRegisterCommandsSkipsWhenMenuEmpty(t *testing.T) {
 	called := false
 	bot := fakeTelegramServer(t, func(w http.ResponseWriter, r *http.Request) {
