@@ -159,3 +159,34 @@ func TestFormatToolRunCapsNames(t *testing.T) {
 		t.Fatalf("formatToolRun = %q", got)
 	}
 }
+
+// TestToolNoticeSinglePerRunWithSegment: the decoder emits a segment event
+// between a tool run and the next text — the run must produce exactly one
+// notice despite the intervening segment.
+func TestToolNoticeSinglePerRunWithSegment(t *testing.T) {
+	reply := newFakeReplyContext()
+	s := NewStreamer(reply, render.New(), render.Telegram)
+
+	events := make(chan Event, 10)
+	events <- Event{Type: EventTool, Delta: "bash"}
+	events <- Event{Type: EventTool, Delta: "bash"}
+	events <- Event{Type: EventSegment}
+	events <- Event{Type: EventDelta, Delta: "result"}
+	events <- Event{Type: EventDone}
+	close(events)
+
+	if err := s.Run(context.Background(), events); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	msgs := reply.finalMessages()
+	var notices []string
+	for _, m := range msgs {
+		if strings.HasPrefix(m, "⚙️ ") {
+			notices = append(notices, m)
+		}
+	}
+	if len(notices) != 1 || notices[0] != "⚙️ bash ×2" {
+		t.Fatalf("notices = %v, want exactly one '⚙️ bash ×2' (messages: %v)", notices, msgs)
+	}
+}

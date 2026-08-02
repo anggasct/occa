@@ -102,14 +102,14 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 			return ctx.Err()
 
 		case <-timeoutTimer.C:
-			s.flushToolNotice(toolOrder, toolCounts)
+			toolOrder, toolCounts = s.flushToolNotice(toolOrder, toolCounts)
 			s.notice("⚠️ Task timed out (no events for 10 minutes). It may still be running, check /occa:status")
 			s.setReaction(channel.ReactionError)
 			return ErrTimeout
 
 		case ev, ok := <-events:
 			if !ok {
-				s.flushToolNotice(toolOrder, toolCounts)
+				toolOrder, toolCounts = s.flushToolNotice(toolOrder, toolCounts)
 				syncErr := s.finalSync(&refs, &lastChunks, buf.String())
 				s.notice(incompleteStreamMessage)
 				s.setReaction(channel.ReactionError)
@@ -123,15 +123,11 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 
 			switch ev.Type {
 			case EventDelta:
-				if len(toolOrder) > 0 {
-					s.flushToolNotice(toolOrder, toolCounts)
-					toolOrder = nil
-					toolCounts = make(map[string]int)
-				}
+				toolOrder, toolCounts = s.flushToolNotice(toolOrder, toolCounts)
 				buf.WriteString(ev.Delta)
 				dirty = true
 			case EventDone:
-				s.flushToolNotice(toolOrder, toolCounts)
+				toolOrder, toolCounts = s.flushToolNotice(toolOrder, toolCounts)
 				if buf.Len() == 0 {
 					s.setReaction(channel.ReactionSuccess)
 					return nil
@@ -143,12 +139,12 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				s.setReaction(channel.ReactionSuccess)
 				return nil
 			case EventError:
-				s.flushToolNotice(toolOrder, toolCounts)
+				toolOrder, toolCounts = s.flushToolNotice(toolOrder, toolCounts)
 				s.notice("⚠️ Agent error: " + ev.Delta)
 				s.setReaction(channel.ReactionError)
 				return fmt.Errorf("%w: %s", ErrStreamFailed, ev.Delta)
 			case EventSegment:
-				s.flushToolNotice(toolOrder, toolCounts)
+				toolOrder, toolCounts = s.flushToolNotice(toolOrder, toolCounts)
 				if buf.Len() > 0 {
 					slog.Debug("streaming: segment break", "finalized_len", buf.Len())
 					s.finalizeSegment(&refs, &lastChunks, buf.String())
@@ -198,12 +194,15 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 }
 
 // flushToolNotice sends one aggregated tool notice for a finished tool run,
-// e.g. "⚙️ bash ×2, edit". A no-op when nothing ran.
-func (s *Streamer) flushToolNotice(order []string, counts map[string]int) {
-	if len(order) == 0 {
-		return
+// e.g. "⚙️ bash ×2, edit", and returns the reset run state. Every flush site
+// must use the returned state — the decoder emits a segment event between a
+// tool run and the next text, and a flush that did not reset would fire the
+// same notice twice.
+func (s *Streamer) flushToolNotice(order []string, counts map[string]int) ([]string, map[string]int) {
+	if len(order) > 0 {
+		s.notice(formatToolRun(order, counts))
 	}
-	s.notice(formatToolRun(order, counts))
+	return nil, make(map[string]int)
 }
 
 // formatToolRun renders the aggregated tool line: distinct names in order of
