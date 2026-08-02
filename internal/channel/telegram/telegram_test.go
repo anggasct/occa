@@ -354,3 +354,25 @@ func TestReplyContextOutsideTopicOmitsThreadID(t *testing.T) {
 		}
 	}
 }
+
+// TestInlineKeyboardGroupsByRow: buttons sharing a Row hint land in one
+// platform row; Row 0 keeps the legacy one-button-per-row layout.
+func TestInlineKeyboardGroupsByRow(t *testing.T) {
+	markup := inlineKeyboard([]channel.Button{
+		{Label: "a", Value: "1", Row: 1},
+		{Label: "b", Value: "2", Row: 1},
+		{Label: "c", Value: "3", Row: 2},
+		{Label: "d", Value: "4"},
+		{Label: "e", Value: "5"},
+	})
+	rows := markup.InlineKeyboard
+	if len(rows) != 4 {
+		t.Fatalf("rows = %d, want 4 (%+v)", len(rows), rows)
+	}
+	if len(rows[0]) != 2 || len(rows[1]) != 1 || len(rows[2]) != 1 || len(rows[3]) != 1 {
+		t.Fatalf("row sizes = %d/%d/%d/%d, want 2/1/1/1", len(rows[0]), len(rows[1]), len(rows[2]), len(rows[3]))
+	}
+	if rows[0][0].Text != "a" || rows[0][1].Text != "b" {
+		t.Fatalf("grouped row = %+v", rows[0])
+	}
+}

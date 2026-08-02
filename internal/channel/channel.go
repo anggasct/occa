@@ -11,6 +11,7 @@ type Attachment struct {
 type Button struct {
 	Label string
 	Value string
+	Row   int // layout hint: buttons sharing a non-zero Row render in one platform row; 0 = own row
 }
 
 // MenuCommand describes one command for native platform command-menu

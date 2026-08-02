@@ -18,6 +18,7 @@ import (
 )
 
 const (
+	modelBrowserNavRow  = 100
 	modelCallbackPrefix = "model:"
 	modelBrowserCap     = 1000
 	modelBrowserTTL     = 30 * time.Minute
@@ -252,12 +253,12 @@ func (r *Router) modelProvidersView(providers relay.Providers, page int, current
 
 	var buttons []channel.Button
 	if !textOnly {
-		for _, id := range ids[start:end] {
+		for i, id := range ids[start:end] {
 			token, err := r.modelBrowser.register(modelBrowseAction{kind: "models", providerID: id})
 			if err != nil {
 				return "", nil, err
 			}
-			buttons = append(buttons, channel.Button{Label: id, Value: modelCallbackPrefix + token})
+			buttons = append(buttons, channel.Button{Label: id, Value: modelCallbackPrefix + token, Row: i/2 + 1})
 		}
 	}
 	buttons = append(buttons, r.modelNavButtons("providers", "", page, modelTotalPages(len(ids)), textOnly)...)
@@ -278,18 +279,18 @@ func (r *Router) modelModelsView(providers relay.Providers, providerID string, p
 
 	var buttons []channel.Button
 	if !textOnly {
-		for _, id := range ids[start:end] {
+		for i, id := range ids[start:end] {
 			token, err := r.modelBrowser.register(modelBrowseAction{kind: "set", page: page, providerID: providerID, modelID: id})
 			if err != nil {
 				return "", nil, err
 			}
-			buttons = append(buttons, channel.Button{Label: id, Value: modelCallbackPrefix + token})
+			buttons = append(buttons, channel.Button{Label: id, Value: modelCallbackPrefix + token, Row: i/2 + 1})
 		}
 		back, err := r.modelBrowser.register(modelBrowseAction{kind: "providers"})
 		if err != nil {
 			return "", nil, err
 		}
-		buttons = append(buttons, channel.Button{Label: "⬅️ Providers", Value: modelCallbackPrefix + back})
+		buttons = append(buttons, channel.Button{Label: "⬅️ Providers", Value: modelCallbackPrefix + back, Row: modelBrowserNavRow})
 	}
 	buttons = append(buttons, r.modelNavButtons("models", providerID, page, modelTotalPages(len(ids)), textOnly)...)
 	return text, buttons, nil
@@ -303,18 +304,18 @@ func (r *Router) modelNavButtons(kind, providerID string, page, pages int, textO
 	if page > 0 {
 		token, err := r.modelBrowser.register(modelBrowseAction{kind: kind, page: page - 1, providerID: providerID})
 		if err == nil {
-			buttons = append(buttons, channel.Button{Label: "◀️ Prev", Value: modelCallbackPrefix + token})
+			buttons = append(buttons, channel.Button{Label: "◀️ Prev", Value: modelCallbackPrefix + token, Row: modelBrowserNavRow})
 		}
 	}
 	if page < pages-1 {
 		token, err := r.modelBrowser.register(modelBrowseAction{kind: kind, page: page + 1, providerID: providerID})
 		if err == nil {
-			buttons = append(buttons, channel.Button{Label: "Next ▶️", Value: modelCallbackPrefix + token})
+			buttons = append(buttons, channel.Button{Label: "Next ▶️", Value: modelCallbackPrefix + token, Row: modelBrowserNavRow})
 		}
 	}
 	closeToken, err := r.modelBrowser.register(modelBrowseAction{kind: "close", pageKind: kind, page: page, providerID: providerID})
 	if err == nil {
-		buttons = append(buttons, channel.Button{Label: "✖️ Close", Value: modelCallbackPrefix + closeToken})
+		buttons = append(buttons, channel.Button{Label: "✖️ Close", Value: modelCallbackPrefix + closeToken, Row: modelBrowserNavRow})
 	}
 	return buttons
 }

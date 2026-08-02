@@ -665,21 +665,50 @@ func (rc *replyContext) EditWithButtons(ref channel.MessageRef, text string, but
 	return err
 }
 
+// componentRows renders buttons grouped by their Row hint into action rows:
+// buttons sharing a non-zero Row land in one row (Discord caps 5 per row,
+// so larger groups are chunked); Row 0 keeps the legacy layout (all buttons
+// in one row, chunked at 5).
 func componentRows(buttons []channel.Button) []discordgo.MessageComponent {
 	components := make([]discordgo.MessageComponent, 0, 1)
 	if len(buttons) == 0 {
 		return components
 	}
 
-	btns := make([]discordgo.MessageComponent, 0, len(buttons))
+	var legacy []discordgo.MessageComponent
+	grouped := make(map[int][]discordgo.MessageComponent)
+	var order []int
 	for _, b := range buttons {
-		btns = append(btns, discordgo.Button{
+		btn := discordgo.Button{
 			Label:    b.Label,
 			Style:    discordgo.SecondaryButton,
 			CustomID: b.Value,
-		})
+		}
+		if b.Row == 0 {
+			legacy = append(legacy, btn)
+			continue
+		}
+		if _, ok := grouped[b.Row]; !ok {
+			order = append(order, b.Row)
+		}
+		grouped[b.Row] = append(grouped[b.Row], btn)
 	}
-	return append(components, discordgo.ActionsRow{Components: btns})
+	for _, r := range order {
+		row := grouped[r]
+		for len(row) > 5 {
+			components = append(components, discordgo.ActionsRow{Components: row[:5]})
+			row = row[5:]
+		}
+		components = append(components, discordgo.ActionsRow{Components: row})
+	}
+	for len(legacy) > 5 {
+		components = append(components, discordgo.ActionsRow{Components: legacy[:5]})
+		legacy = legacy[5:]
+	}
+	if len(legacy) > 0 {
+		components = append(components, discordgo.ActionsRow{Components: legacy})
+	}
+	return components
 }
 
 type messageRef struct {
