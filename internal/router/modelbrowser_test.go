@@ -351,6 +351,8 @@ func TestModelBrowserShowsOnlyConnectedProviders(t *testing.T) {
 
 // TestModelBrowserRowLayout: item buttons pair up in two columns (Row i/2+1)
 // and nav buttons share one row.
+// TestModelBrowserRowLayout: item buttons pair up in two columns (Row i/2+1)
+// on Telegram; nav buttons share one row regardless of position.
 func TestModelBrowserRowLayout(t *testing.T) {
 	providers := browseProviders()
 	r, client, _ := newTestRouter()
@@ -364,15 +366,71 @@ func TestModelBrowserRowLayout(t *testing.T) {
 	}
 
 	buttons := reply.sendSnapshot()
-	for i, b := range buttons {
-		if b.Label == "✖️ Close" {
+	itemIdx := 0
+	for _, b := range buttons {
+		if modelNavLabel(b.Label) {
 			if b.Row != modelBrowserNavRow {
-				t.Fatalf("nav button row = %d, want %d", b.Row, modelBrowserNavRow)
+				t.Fatalf("nav button %q row = %d, want %d", b.Label, b.Row, modelBrowserNavRow)
 			}
 			continue
 		}
-		if want := i/2 + 1; b.Row != want {
+		if want := itemIdx/2 + 1; b.Row != want {
 			t.Fatalf("item %q row = %d, want %d", b.Label, b.Row, want)
 		}
+		itemIdx++
 	}
+}
+
+// TestModelBrowserRowLayoutDiscord: on Discord a full page packs 5 items per
+// row, so a 10-item page stays at 2 item rows + 1 nav row = 3 action rows
+// (Discord caps messages at 5 action rows).
+func TestModelBrowserRowLayoutDiscord(t *testing.T) {
+	providers := browseProviders()
+	for i := 0; i < 10; i++ {
+		providers.All = append(providers.All, relay.Provider{ID: "provider-" + string(rune('a'+i)), Models: map[string]json.RawMessage{"m": json.RawMessage(`{}`)}})
+	}
+	r, client, _, overrideRepo := newTestRouterWithAccess()
+	overrideRepo.overrides["discord:chat1:user1"] = &store.UserOverride{ChannelID: "chat1", Platform: "discord", UserID: "user1", Role: "admin"}
+	client.providers = providers
+	reply := newBrowseReplyCtx()
+
+	m := channel.IncomingMessage{
+		Platform:  "discord",
+		ChannelID: "chat1",
+		UserID:    "user1",
+		Text:      "/occa:model",
+		IsMention: true,
+		ReplyCtx:  reply,
+	}
+	if err := r.Route(context.Background(), m); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+
+	buttons := reply.sendSnapshot()
+	rows := map[int]int{}
+	itemIdx := 0
+	for _, b := range buttons {
+		rows[b.Row]++
+		if modelNavLabel(b.Label) {
+			continue
+		}
+		if want := itemIdx/5 + 1; b.Row != want {
+			t.Fatalf("item %q row = %d, want %d", b.Label, b.Row, want)
+		}
+		itemIdx++
+	}
+	if len(rows) > 5 {
+		t.Fatalf("discord action rows = %d, want <= 5 (%v)", len(rows), rows)
+	}
+	if rows[modelBrowserNavRow] > 5 {
+		t.Fatalf("nav row has %d buttons, want <= 5", rows[modelBrowserNavRow])
+	}
+}
+
+func modelNavLabel(label string) bool {
+	switch label {
+	case "◀️ Prev", "Next ▶️", "✖️ Close", "⬅️ Providers":
+		return true
+	}
+	return false
 }
