@@ -337,6 +337,19 @@ func (f *fakeSessionRepo) List(_ context.Context, platform, channelID string) ([
 	}
 	return sessions, nil
 }
+func (f *fakeSessionRepo) ThreadChannel(_ context.Context, platform, threadID string) (string, error) {
+	if f.activeBy == nil {
+		return "", nil
+	}
+	for key := range f.activeBy {
+		parts := strings.SplitN(key, ":", 4)
+		if len(parts) == 4 && parts[0] == platform && parts[2] == threadID {
+			return parts[1], nil
+		}
+	}
+	return "", nil
+}
+
 func (f *fakeSessionRepo) Delete(_ context.Context, id int64) error { return nil }
 
 type fakeInstance struct {

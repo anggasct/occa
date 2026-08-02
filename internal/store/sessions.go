@@ -103,6 +103,25 @@ func (r *sqliteSessionRepo) List(ctx context.Context, platform, channelID string
 	return sessions, rows.Err()
 }
 
+// ThreadChannel returns the channel_id of the most recent session row keyed
+// to a thread, or "" when the thread has no sessions. An OCCA-created thread
+// resolves to its parent channel (channel_id != thread_id); a thread the bot
+// only participated in resolves to itself.
+func (r *sqliteSessionRepo) ThreadChannel(ctx context.Context, platform, threadID string) (string, error) {
+	var channelID string
+	err := r.db.QueryRowContext(ctx,
+		`SELECT channel_id FROM session WHERE platform = ? AND thread_id = ? ORDER BY created_at DESC LIMIT 1`,
+		platform, threadID,
+	).Scan(&channelID)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: session thread channel: %w", err)
+	}
+	return channelID, nil
+}
+
 func (r *sqliteSessionRepo) Delete(ctx context.Context, id int64) error {
 	_, err := r.db.ExecContext(ctx, `DELETE FROM session WHERE id = ?`, id)
 	if err != nil {

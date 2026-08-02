@@ -44,6 +44,7 @@ type SessionRepo interface {
 	SetActive(ctx context.Context, platform, channelID, threadID, userID, sessionID string) error
 	Deactivate(ctx context.Context, platform, channelID, threadID, userID string) error
 	List(ctx context.Context, platform, channelID string) ([]Session, error)
+	ThreadChannel(ctx context.Context, platform, threadID string) (string, error)
 	Delete(ctx context.Context, id int64) error
 }
 

@@ -104,6 +104,13 @@ func main() {
 			}
 			return ch.AutoThread, nil
 		})
+		da.SetOwnedThreadCheck(func(threadID string) (bool, error) {
+			channelID, err := db.SessionRepo().ThreadChannel(context.Background(), "discord", threadID)
+			if err != nil {
+				return false, err
+			}
+			return channelID != "" && channelID != threadID, nil
+		})
 		channels = append(channels, da)
 	}
 

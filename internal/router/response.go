@@ -12,7 +12,7 @@ import (
 	"github.com/anggasct/occa/internal/render"
 )
 
-const busyResponseMessage = "⚠️ A response is already running in this channel. Wait for it to finish or check /occa:status."
+const busyResponseMessage = "⚠️ A response is already running in this conversation. Wait for it to finish or check /occa:status."
 
 // responseKey is the full conversation key: one active task per
 // (platform, channelID, threadID, userID), so different users or threads in

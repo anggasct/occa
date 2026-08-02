@@ -452,3 +452,42 @@ func TestOverridePlatformScoping(t *testing.T) {
 		t.Fatalf("expected no cross-platform leak, got: %+v", o)
 	}
 }
+
+// TestSessionThreadChannel: ThreadChannel resolves the parent channel for an
+// OCCA-created thread (channel_id != thread_id) and the thread itself for a
+// self-scoped conversation.
+func TestSessionThreadChannel(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+
+	if err := s.SessionRepo().SetActive(ctx, "discord", "parent-1", "thread-9", "", "sess-1"); err != nil {
+		t.Fatalf("SetActive owned thread: %v", err)
+	}
+	if err := s.SessionRepo().SetActive(ctx, "discord", "user-thread", "user-thread", "", "sess-2"); err != nil {
+		t.Fatalf("SetActive user thread: %v", err)
+	}
+
+	parent, err := s.SessionRepo().ThreadChannel(ctx, "discord", "thread-9")
+	if err != nil {
+		t.Fatalf("ThreadChannel owned: %v", err)
+	}
+	if parent != "parent-1" {
+		t.Fatalf("owned thread parent = %q, want parent-1", parent)
+	}
+
+	self, err := s.SessionRepo().ThreadChannel(ctx, "discord", "user-thread")
+	if err != nil {
+		t.Fatalf("ThreadChannel user thread: %v", err)
+	}
+	if self != "user-thread" {
+		t.Fatalf("user thread channel = %q, want itself", self)
+	}
+
+	none, err := s.SessionRepo().ThreadChannel(ctx, "discord", "no-such-thread")
+	if err != nil {
+		t.Fatalf("ThreadChannel missing: %v", err)
+	}
+	if none != "" {
+		t.Fatalf("missing thread channel = %q, want empty", none)
+	}
+}

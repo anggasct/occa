@@ -23,6 +23,11 @@ const maxDownloadSize = 10 * 1024 * 1024
 // A nil policy disables auto-threading entirely.
 type ThreadPolicy func(channelID string) (bool, error)
 
+// OwnedThreadCheck reports whether a thread was created by OCCA. It backs
+// participation tracking across restarts: a thread OCCA created keeps its
+// session keyed to the parent channel, which is observable from the store.
+type OwnedThreadCheck func(threadID string) (bool, error)
+
 type Adapter struct {
 	session        *discordgo.Session
 	token          string
@@ -32,6 +37,7 @@ type Adapter struct {
 	channelLookup  func(string) (*discordgo.Channel, error)
 	downloadClient *http.Client
 	autoThread     ThreadPolicy
+	ownedThread    OwnedThreadCheck
 
 	threadsMu sync.Mutex
 	threads   map[string]struct{}
@@ -51,6 +57,13 @@ func (a *Adapter) SetAutoThreadPolicy(policy ThreadPolicy) {
 	a.autoThread = policy
 }
 
+// SetOwnedThreadCheck configures the persisted participation lookup, used to
+// recognize threads OCCA created after a restart. When unset, only threads
+// created in this process are recognized.
+func (a *Adapter) SetOwnedThreadCheck(check OwnedThreadCheck) {
+	a.ownedThread = check
+}
+
 func (a *Adapter) trackThread(threadID string) {
 	a.threadsMu.Lock()
 	defer a.threadsMu.Unlock()
@@ -65,6 +78,24 @@ func (a *Adapter) isTrackedThread(threadID string) bool {
 	defer a.threadsMu.Unlock()
 	_, ok := a.threads[threadID]
 	return ok
+}
+
+// isOwnedThread reports whether OCCA created (or owns) the thread: either
+// created in this process or, across restarts, resolvable as an owned thread
+// through the injected check.
+func (a *Adapter) isOwnedThread(threadID string) bool {
+	if a.isTrackedThread(threadID) {
+		return true
+	}
+	if a.ownedThread == nil {
+		return false
+	}
+	owned, err := a.ownedThread(threadID)
+	if err != nil {
+		slog.Warn("discord: owned-thread lookup failed", "thread_id", threadID, "error", err)
+		return false
+	}
+	return owned
 }
 
 func (a *Adapter) setBotID(id string) { a.botID.Store(id) }
@@ -148,7 +179,7 @@ func (a *Adapter) configure(s *discordgo.Session, handler func(channel.IncomingM
 			if isThread {
 				threadID = i.ChannelID
 			}
-			if isThread && a.isTrackedThread(i.ChannelID) && parentChannelID != "" {
+			if isThread && a.isOwnedThread(i.ChannelID) && parentChannelID != "" {
 				msgChannelID = parentChannelID
 			}
 			msg := channel.IncomingMessage{
@@ -205,7 +236,7 @@ func (a *Adapter) handleApplicationCommandInteraction(sess *discordgo.Session, i
 	if isThread {
 		threadID = i.ChannelID
 	}
-	if isThread && a.isTrackedThread(i.ChannelID) && parentChannelID != "" {
+	if isThread && a.isOwnedThread(i.ChannelID) && parentChannelID != "" {
 		msgChannelID = parentChannelID
 	}
 	msg := channel.IncomingMessage{
@@ -371,9 +402,10 @@ func (a *Adapter) normalizeMessage(m *discordgo.Message) channel.IncomingMessage
 		}
 	}
 
-	// Messages inside threads OCCA created need no @mention, and their access
-	// scope is the parent channel the user was originally allowed in.
-	if isThread && threadID != "" && a.isTrackedThread(threadID) {
+	// Messages inside threads OCCA created need no @mention (also across
+	// restarts, via the persisted ownership check), and their access scope is
+	// the parent channel the user was originally allowed in.
+	if isThread && threadID != "" && a.isOwnedThread(threadID) {
 		isMention = true
 		if parentChannelID != "" {
 			m.ChannelID = parentChannelID

@@ -320,3 +320,73 @@ func TestThreadNameSanitization(t *testing.T) {
 		}
 	}
 }
+
+// TestAutoThreadFollowUpSurvivesRestart: after a restart the in-memory
+// participation map is empty, but the persisted ownership check still
+// recognizes an OCCA-created thread (its session key lives in the parent
+// channel), so follow-ups keep working without a mention.
+func TestAutoThreadFollowUpSurvivesRestart(t *testing.T) {
+	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/channels/thread-9") {
+			return []byte(`{"id":"thread-9","parent_id":"channel-1","type":12}`), http.StatusOK
+		}
+		return []byte(`{"id":"channel-1","type":0}`), http.StatusOK
+	})
+
+	a := &Adapter{session: session}
+	a.setBotID("bot1")
+	a.SetAutoThreadPolicy(func(channelID string) (bool, error) { return true, nil })
+	a.SetOwnedThreadCheck(func(threadID string) (bool, error) {
+		return threadID == "thread-9", nil
+	})
+
+	got := a.normalizeMessage(&discordgo.Message{
+		GuildID:   "guild",
+		ChannelID: "thread-9",
+		Author:    &discordgo.User{ID: "user-1"},
+		Content:   "continue please",
+	})
+
+	if !got.IsMention {
+		t.Fatal("follow-up after restart must still not need a mention")
+	}
+	if got.ThreadID != "thread-9" || !got.IsThread {
+		t.Fatalf("follow-up must stay scoped to the thread: %+v", got)
+	}
+	if got.ChannelID != "channel-1" {
+		t.Fatalf("follow-up access scope must be the parent channel after restart, got %q", got.ChannelID)
+	}
+	rc, ok := got.ReplyCtx.(*replyContext)
+	if !ok || rc.channelID != "thread-9" {
+		t.Fatalf("follow-up reply must land in the thread, got %+v", got.ReplyCtx)
+	}
+}
+
+// TestUserThreadNotTreatedAsOwned: a thread whose session keys to itself
+// (user-created thread the bot only participated in) is not re-scoped.
+func TestUserThreadNotTreatedAsOwned(t *testing.T) {
+	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/channels/user-thread") {
+			return []byte(`{"id":"user-thread","parent_id":"channel-1","type":12}`), http.StatusOK
+		}
+		return []byte(`{"id":"channel-1","type":0}`), http.StatusOK
+	})
+
+	a := &Adapter{session: session}
+	a.setBotID("bot1")
+	a.SetOwnedThreadCheck(func(threadID string) (bool, error) {
+		return false, nil
+	})
+
+	got := a.normalizeMessage(&discordgo.Message{
+		GuildID:   "guild",
+		ChannelID: "user-thread",
+		Author:    &discordgo.User{ID: "user-1"},
+		Content:   "hello",
+		Mentions:  []*discordgo.User{{ID: "bot1"}},
+	})
+
+	if got.ChannelID != "user-thread" {
+		t.Fatalf("user-created thread must keep its own channel scope, got %q", got.ChannelID)
+	}
+}

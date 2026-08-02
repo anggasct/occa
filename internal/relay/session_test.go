@@ -40,6 +40,10 @@ func (m *mockSessionRepo) List(_ context.Context, platform, channelID string) ([
 	return nil, nil
 }
 
+func (m *mockSessionRepo) ThreadChannel(_ context.Context, platform, threadID string) (string, error) {
+	return "", nil
+}
+
 func (m *mockSessionRepo) Delete(_ context.Context, id int64) error { return nil }
 
 type mockClient struct {
