@@ -150,7 +150,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				dirty = true
 			case EventDone:
 				if buf.Len() == 0 {
-					s.completedNotice(&refs, bubbleCount > 0)
+					s.completedNotice(&refs)
 					s.setReaction(channel.ReactionSuccess)
 					return nil
 				}
@@ -158,7 +158,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 					s.setReaction(channel.ReactionError)
 					return err
 				}
-				s.completedNotice(&refs, bubbleCount > 0)
+				s.completedNotice(&refs)
 				s.setReaction(channel.ReactionSuccess)
 				return nil
 			case EventError:
@@ -207,6 +207,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 					slog.Warn("streaming: tool notice send failed", "tool", name, "error", err)
 					break
 				}
+				s.trackFirstRef(ref)
 				curTool, curRef, curCount = name, ref, 1
 				bubbleCount++
 				slog.Debug("streaming: tool bubble", "tool", name)
@@ -321,9 +322,9 @@ func (s *Streamer) syncMessages(refs *[]channel.MessageRef, lastChunks *[]string
 }
 
 // completedNotice sends a fallback confirmation when the agent finished
-// without delivering any message or tool-bubble content.
-func (s *Streamer) completedNotice(refs *[]channel.MessageRef, bubblesSent bool) {
-	if len(*refs) == 0 && !bubblesSent {
+// without delivering any text content.
+func (s *Streamer) completedNotice(refs *[]channel.MessageRef) {
+	if len(*refs) == 0 {
 		s.notice("✅ Task completed")
 	}
 }

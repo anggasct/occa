@@ -386,8 +386,9 @@ func TestStreamerToolOnlyReplySendsNoEmptyMessage(t *testing.T) {
 	}
 
 	msgs := reply.finalMessages()
-	if len(msgs) != 1 || msgs[0] != "⚙️ Tool call" {
-		t.Fatalf("messages = %v, want exactly the tool notice", msgs)
+	want := []string{"⚙️ Tool call", "✅ Task completed"}
+	if len(msgs) != len(want) || msgs[0] != want[0] || msgs[1] != want[1] {
+		t.Fatalf("messages = %v, want %v", msgs, want)
 	}
 }
 
