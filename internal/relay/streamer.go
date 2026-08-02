@@ -150,6 +150,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				dirty = true
 			case EventDone:
 				if buf.Len() == 0 {
+					s.completedNotice(&refs, bubbleCount > 0)
 					s.setReaction(channel.ReactionSuccess)
 					return nil
 				}
@@ -157,6 +158,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 					s.setReaction(channel.ReactionError)
 					return err
 				}
+				s.completedNotice(&refs, bubbleCount > 0)
 				s.setReaction(channel.ReactionSuccess)
 				return nil
 			case EventError:
@@ -289,6 +291,7 @@ func (s *Streamer) renderChunks(raw string) []string {
 
 func (s *Streamer) syncMessages(refs *[]channel.MessageRef, lastChunks *[]string, raw string) {
 	chunks := s.renderChunks(raw)
+	chunks = nonEmptyChunks(chunks)
 
 	if len(chunks) > 1 {
 		slog.Debug("streaming: multi-message response", "chunks", len(chunks))
@@ -317,6 +320,26 @@ func (s *Streamer) syncMessages(refs *[]channel.MessageRef, lastChunks *[]string
 	*lastChunks = chunks
 }
 
+// completedNotice sends a fallback confirmation when the agent finished
+// without delivering any message or tool-bubble content.
+func (s *Streamer) completedNotice(refs *[]channel.MessageRef, bubblesSent bool) {
+	if len(*refs) == 0 && !bubblesSent {
+		s.notice("✅ Task completed")
+	}
+}
+
+// nonEmptyChunks drops chunks that render to nothing (whitespace-only or
+// markup that produces no text) so platforms never reject an empty message.
+func nonEmptyChunks(chunks []string) []string {
+	out := make([]string, 0, len(chunks))
+	for _, c := range chunks {
+		if strings.TrimSpace(c) != "" {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // finalizeSegment seals the current message as a permanent reply and resets
 // the streamer's bookkeeping so the next delta starts a fresh message.
 func (s *Streamer) finalizeSegment(refs *[]channel.MessageRef, lastChunks *[]string, raw string) {
@@ -328,7 +351,7 @@ func (s *Streamer) finalizeSegment(refs *[]channel.MessageRef, lastChunks *[]str
 }
 
 func (s *Streamer) finalSync(refs *[]channel.MessageRef, lastChunks *[]string, raw string) error {
-	chunks := s.renderChunks(raw)
+	chunks := nonEmptyChunks(s.renderChunks(raw))
 
 	for i, chunk := range chunks {
 		if i < len(*refs) {

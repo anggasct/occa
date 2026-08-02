@@ -164,6 +164,9 @@ func (d *eventDecoder) parseJSON(data string) (Event, bool) {
 			return Event{}, false
 		}
 	case ev.Type == "message.part.delta" && ev.Properties.Field == "text" && d.partKind[ev.Properties.PartID] == "text":
+		if ev.Properties.Delta == "" {
+			return Event{}, false
+		}
 		return Event{Type: EventDelta, Delta: ev.Properties.Delta}, true
 	case ev.Type == "session.idle":
 		return Event{Type: EventDone}, true

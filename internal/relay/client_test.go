@@ -242,3 +242,16 @@ func TestEvents(t *testing.T) {
 		t.Fatalf("got event %+v, want done", ev)
 	}
 }
+
+// TestWrapTransportErrPreservesCancel: a canceled request keeps the
+// context.Canceled sentinel instead of being mislabeled unreachable.
+func TestWrapTransportErrPreservesCancel(t *testing.T) {
+	c := NewHTTPClient("http://127.0.0.1:1")
+	err := c.wrapTransportErr(context.Canceled)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("want context.Canceled preserved, got %v", err)
+	}
+	if errors.Is(err, ErrUnreachable) {
+		t.Fatalf("canceled request must not be ErrUnreachable")
+	}
+}

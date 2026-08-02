@@ -445,3 +445,24 @@ func TestStreamerFinalEditReconciles(t *testing.T) {
 		t.Fatalf("final message count %d != expected chunk count %d", len(msgs), len(expectedChunks))
 	}
 }
+
+// TestStreamerEmptyStreamShowsCompletionNotice: a stream that delivers
+// nothing (no text, no tool bubbles) still confirms completion.
+func TestStreamerEmptyStreamShowsCompletionNotice(t *testing.T) {
+	reply := newFakeReplyContext()
+	renderer := render.New()
+	s := NewStreamer(reply, renderer, render.Telegram)
+
+	events := make(chan Event, 10)
+	events <- Event{Type: EventDone}
+	close(events)
+
+	if err := s.Run(context.Background(), events); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	msgs := reply.finalMessages()
+	if len(msgs) != 1 || msgs[0] != "✅ Task completed" {
+		t.Fatalf("messages = %v, want completion notice", msgs)
+	}
+}

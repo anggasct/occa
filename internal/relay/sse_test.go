@@ -322,3 +322,14 @@ func TestDecoderToolPartCarriesName(t *testing.T) {
 		t.Fatalf("nameless tool event = (%+v, %v), want empty Delta", ev2, ok2)
 	}
 }
+
+// TestDecodeEmptyTextDeltaDropped: empty text deltas produce no event so the
+// streamer never tries to send an empty message.
+func TestDecodeEmptyTextDeltaDropped(t *testing.T) {
+	d := newEventDecoder()
+	d.parseJSON(`{"type":"message.part.updated","properties":{"part":{"id":"p1","type":"text"}}}`)
+	ev, ok := d.parseJSON(`{"type":"message.part.delta","properties":{"field":"text","partID":"p1","delta":""}}`)
+	if ok {
+		t.Fatalf("empty delta produced event %+v", ev)
+	}
+}

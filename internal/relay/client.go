@@ -369,6 +369,9 @@ func (c *HTTPClient) post(ctx context.Context, path string, payload any) (*http.
 }
 
 func (c *HTTPClient) wrapTransportErr(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return fmt.Errorf("relay: %w", err)
+	}
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return fmt.Errorf("relay: %w: %v", ErrTimeout, err)
