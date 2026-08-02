@@ -75,7 +75,7 @@ func (a *Adapter) registerCommands() {
 	}
 	commands := make([]tgbotapi.BotCommand, len(a.menu))
 	for i, m := range a.menu {
-		commands[i] = tgbotapi.BotCommand{Command: m.Alias, Description: m.Description}
+		commands[i] = tgbotapi.BotCommand{Command: m.Alias, Description: sanitizeDescription(m.Description)}
 	}
 	if _, err := a.bot.Request(tgbotapi.NewSetMyCommands(commands...)); err != nil {
 		slog.Warn("telegram: set commands failed", "error", err)
@@ -99,6 +99,19 @@ func sanitizeCommandName(name string) string {
 		s = s[:32]
 	}
 	return s
+}
+
+// maxCommandDescriptionLen is Telegram's BotCommand.Description limit. A
+// batch setMyCommands call fails atomically if any single description
+// exceeds it, so every description must be capped before sending.
+const maxCommandDescriptionLen = 256
+
+func sanitizeDescription(desc string) string {
+	r := []rune(desc)
+	if len(r) <= maxCommandDescriptionLen {
+		return desc
+	}
+	return string(r[:maxCommandDescriptionLen])
 }
 
 func (a *Adapter) Stop() error {
@@ -267,7 +280,7 @@ type replyContext struct {
 func (rc *replyContext) SetChatCommands(commands []channel.MenuCommand) error {
 	botCommands := make([]tgbotapi.BotCommand, len(commands))
 	for i, m := range commands {
-		botCommands[i] = tgbotapi.BotCommand{Command: sanitizeCommandName(m.Alias), Description: m.Description}
+		botCommands[i] = tgbotapi.BotCommand{Command: sanitizeCommandName(m.Alias), Description: sanitizeDescription(m.Description)}
 	}
 	scope := tgbotapi.NewBotCommandScopeChat(rc.chatID)
 	_, err := rc.bot.Request(tgbotapi.NewSetMyCommandsWithScope(scope, botCommands...))
