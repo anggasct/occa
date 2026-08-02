@@ -30,6 +30,7 @@ var errReplied = errors.New("command already replied")
 
 type modelBrowseAction struct {
 	kind       string // "providers" | "models" | "set" | "close"
+	pageKind   string // view being closed ("providers" | "models"); set on close actions
 	page       int
 	providerID string
 	modelID    string
@@ -204,26 +205,24 @@ func (r *Router) modelBrowserSet(ctx context.Context, msg channel.IncomingMessag
 	return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "✅ Personal model set: "+formatModelRef(ref), nil)
 }
 
+// modelBrowserClose removes the buttons while preserving the current page's
+// text: the close action carries the page kind it was created on.
 func (r *Router) modelBrowserClose(ctx context.Context, msg channel.IncomingMessage, action modelBrowseAction) error {
 	view, err := r.viewModel(ctx, msg)
 	if err != nil {
 		view = "🤖 Model: agent default"
 	}
-	switch action.kind {
+	providers, pErr := r.modelBrowserProviders(ctx, msg)
+	if pErr != nil {
+		return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, view, nil)
+	}
+	switch action.pageKind {
 	case "models":
-		providers, pErr := r.modelBrowserProviders(ctx, msg)
-		if pErr != nil {
-			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, view, nil)
-		}
 		text, _, vErr := r.modelModelsView(providers, action.providerID, action.page, true, "")
 		if vErr == nil {
 			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, text, nil)
 		}
 	case "providers":
-		providers, pErr := r.modelBrowserProviders(ctx, msg)
-		if pErr != nil {
-			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, view, nil)
-		}
 		text, _, vErr := r.modelProvidersView(providers, action.page, view, true)
 		if vErr == nil {
 			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, text, nil)
@@ -313,7 +312,7 @@ func (r *Router) modelNavButtons(kind, providerID string, page, pages int, textO
 			buttons = append(buttons, channel.Button{Label: "Next ▶️", Value: modelCallbackPrefix + token})
 		}
 	}
-	closeToken, err := r.modelBrowser.register(modelBrowseAction{kind: "close", page: page, providerID: providerID})
+	closeToken, err := r.modelBrowser.register(modelBrowseAction{kind: "close", pageKind: kind, page: page, providerID: providerID})
 	if err == nil {
 		buttons = append(buttons, channel.Button{Label: "✖️ Close", Value: modelCallbackPrefix + closeToken})
 	}

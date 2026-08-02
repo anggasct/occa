@@ -274,8 +274,8 @@ func TestModelBrowserCloseAndStale(t *testing.T) {
 	if len(buttons) != 0 {
 		t.Fatalf("close must remove buttons, got %v", labelsOf(buttons))
 	}
-	if text == "" {
-		t.Fatal("close must keep text")
+	if text != "🤖 Model: agent default\n\nSelect provider:" {
+		t.Fatalf("close must keep the page text, got %q", text)
 	}
 
 	staleReply := newBrowseReplyCtx()
