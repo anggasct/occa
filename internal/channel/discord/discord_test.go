@@ -464,3 +464,43 @@ func TestComponentRowsGroupsByRow(t *testing.T) {
 		t.Fatalf("legacy row = %+v", rows[1])
 	}
 }
+
+// TestComponentRowsChunksOversizedRows: a same-Row group larger than
+// Discord's 5-button row cap is chunked into multiple action rows.
+func TestComponentRowsChunksOversizedRows(t *testing.T) {
+	buttons := make([]channel.Button, 6)
+	for i := range buttons {
+		buttons[i] = channel.Button{Label: string(rune('a' + i)), Value: "v", Row: 1}
+	}
+	components := componentRows(buttons)
+	if len(components) != 2 {
+		t.Fatalf("rows = %d, want 2", len(components))
+	}
+	row1, ok1 := components[0].(discordgo.ActionsRow)
+	row2, ok2 := components[1].(discordgo.ActionsRow)
+	if !ok1 || !ok2 || len(row1.Components) != 5 || len(row2.Components) != 1 {
+		t.Fatalf("row sizes = %d/%d, want 5/1", len(row1.Components), len(row2.Components))
+	}
+}
+
+// TestComponentRowsBrowserPageWithinCap: a full 10-item browser page (5+5
+// items plus one nav row) stays within Discord's 5-action-row message cap.
+func TestComponentRowsBrowserPageWithinCap(t *testing.T) {
+	buttons := make([]channel.Button, 0, 14)
+	for i := 0; i < 10; i++ {
+		buttons = append(buttons, channel.Button{Label: string(rune('a' + i)), Value: "v", Row: i/5 + 1})
+	}
+	for _, label := range []string{"⬅️ Providers", "◀️ Prev", "Next ▶️", "✖️ Close"} {
+		buttons = append(buttons, channel.Button{Label: label, Value: "v", Row: 100})
+	}
+	components := componentRows(buttons)
+	if len(components) != 3 {
+		t.Fatalf("action rows = %d, want 3", len(components))
+	}
+	for _, c := range components {
+		row, ok := c.(discordgo.ActionsRow)
+		if !ok || len(row.Components) > 5 {
+			t.Fatalf("row exceeds Discord's 5-button cap: %+v", c)
+		}
+	}
+}

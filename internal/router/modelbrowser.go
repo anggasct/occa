@@ -105,7 +105,7 @@ func (r *Router) openModelBrowser(ctx context.Context, msg channel.IncomingMessa
 	if err != nil {
 		return nil
 	}
-	text, buttons, err := r.modelProvidersView(providers, 0, view, false)
+	text, buttons, err := r.modelProvidersView(msg.Platform, providers, 0, view, false)
 	if err != nil {
 		return err
 	}
@@ -157,7 +157,7 @@ func (r *Router) modelBrowserRenderProviders(ctx context.Context, msg channel.In
 	if err != nil {
 		view = "🤖 Model: agent default"
 	}
-	text, buttons, err := r.modelProvidersView(providers, page, view, false)
+	text, buttons, err := r.modelProvidersView(msg.Platform, providers, page, view, false)
 	if err != nil {
 		return err
 	}
@@ -169,7 +169,7 @@ func (r *Router) modelBrowserRenderModels(ctx context.Context, msg channel.Incom
 	if err != nil {
 		return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "⚠️ Agent unreachable", nil)
 	}
-	text, buttons, err := r.modelModelsView(providers, providerID, page, false, "")
+	text, buttons, err := r.modelModelsView(msg.Platform, providers, providerID, page, false, "")
 	if err != nil {
 		return err
 	}
@@ -188,7 +188,7 @@ func (r *Router) modelBrowserSet(ctx context.Context, msg channel.IncomingMessag
 		if pErr != nil {
 			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "⚠️ Agent unreachable", nil)
 		}
-		text, buttons, vErr := r.modelModelsView(providers, action.providerID, action.page, false, message+"\n")
+		text, buttons, vErr := r.modelModelsView(msg.Platform, providers, action.providerID, action.page, false, message+"\n")
 		if vErr != nil {
 			return vErr
 		}
@@ -219,12 +219,12 @@ func (r *Router) modelBrowserClose(ctx context.Context, msg channel.IncomingMess
 	}
 	switch action.pageKind {
 	case "models":
-		text, _, vErr := r.modelModelsView(providers, action.providerID, action.page, true, "")
+		text, _, vErr := r.modelModelsView(msg.Platform, providers, action.providerID, action.page, true, "")
 		if vErr == nil {
 			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, text, nil)
 		}
 	case "providers":
-		text, _, vErr := r.modelProvidersView(providers, action.page, view, true)
+		text, _, vErr := r.modelProvidersView(msg.Platform, providers, action.page, view, true)
 		if vErr == nil {
 			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, text, nil)
 		}
@@ -241,9 +241,20 @@ func (r *Router) modelBrowserProviders(ctx context.Context, msg channel.Incoming
 	return inst.Client().Providers(ctx)
 }
 
+// modelItemsPerRow keeps the browser within each platform's button-row
+// limits: Telegram renders 2 columns, Discord packs 5 per row so a full
+// 10-item page stays at 2 item rows + 1 nav row (Discord caps messages at
+// 5 action rows).
+func modelItemsPerRow(platform string) int {
+	if platform == "discord" {
+		return 5
+	}
+	return 2
+}
+
 // modelProvidersView renders one provider page. With textOnly the buttons
 // (and their tokens) are omitted.
-func (r *Router) modelProvidersView(providers relay.Providers, page int, current string, textOnly bool) (string, []channel.Button, error) {
+func (r *Router) modelProvidersView(platform string, providers relay.Providers, page int, current string, textOnly bool) (string, []channel.Button, error) {
 	ids := providerIDs(providers)
 	start, end := modelPageBounds(len(ids), page)
 	text := current + "\n\nSelect provider:"
@@ -258,14 +269,14 @@ func (r *Router) modelProvidersView(providers relay.Providers, page int, current
 			if err != nil {
 				return "", nil, err
 			}
-			buttons = append(buttons, channel.Button{Label: id, Value: modelCallbackPrefix + token, Row: i/2 + 1})
+			buttons = append(buttons, channel.Button{Label: id, Value: modelCallbackPrefix + token, Row: i/modelItemsPerRow(platform) + 1})
 		}
 	}
 	buttons = append(buttons, r.modelNavButtons("providers", "", page, modelTotalPages(len(ids)), textOnly)...)
 	return text, buttons, nil
 }
 
-func (r *Router) modelModelsView(providers relay.Providers, providerID string, page int, textOnly bool, prefix string) (string, []channel.Button, error) {
+func (r *Router) modelModelsView(platform string, providers relay.Providers, providerID string, page int, textOnly bool, prefix string) (string, []channel.Button, error) {
 	p, ok := providerByID(providers, providerID)
 	if !ok {
 		return "", nil, fmt.Errorf("model browser: unknown provider %q", providerID)
@@ -284,7 +295,7 @@ func (r *Router) modelModelsView(providers relay.Providers, providerID string, p
 			if err != nil {
 				return "", nil, err
 			}
-			buttons = append(buttons, channel.Button{Label: id, Value: modelCallbackPrefix + token, Row: i/2 + 1})
+			buttons = append(buttons, channel.Button{Label: id, Value: modelCallbackPrefix + token, Row: i/modelItemsPerRow(platform) + 1})
 		}
 		back, err := r.modelBrowser.register(modelBrowseAction{kind: "providers"})
 		if err != nil {

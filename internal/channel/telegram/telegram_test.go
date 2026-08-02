@@ -376,3 +376,20 @@ func TestInlineKeyboardGroupsByRow(t *testing.T) {
 		t.Fatalf("grouped row = %+v", rows[0])
 	}
 }
+
+// TestInlineKeyboardChunksOversizedRows: a same-Row group larger than
+// Telegram's 8-button row cap is chunked into multiple rows.
+func TestInlineKeyboardChunksOversizedRows(t *testing.T) {
+	buttons := make([]channel.Button, 10)
+	for i := range buttons {
+		buttons[i] = channel.Button{Label: string(rune('a' + i)), Value: "v", Row: 1}
+	}
+	markup := inlineKeyboard(buttons)
+	rows := markup.InlineKeyboard
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(rows))
+	}
+	if len(rows[0]) != 8 || len(rows[1]) != 2 {
+		t.Fatalf("row sizes = %d/%d, want 8/2", len(rows[0]), len(rows[1]))
+	}
+}
