@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	schemaVersion    = 2
+	schemaVersion    = 3
 	busyTimeoutMilli = 5000
 )
 
@@ -18,6 +18,12 @@ const (
 var migrations = []func(tx *sql.Tx) error{
 	createInitialSchema,
 	addConversationKeys,
+	addSessionAgentPID,
+}
+
+func addSessionAgentPID(tx *sql.Tx) error {
+	_, err := tx.Exec(`ALTER TABLE session ADD COLUMN agent_pid INTEGER NOT NULL DEFAULT 0;`)
+	return err
 }
 
 func addConversationKeys(tx *sql.Tx) error {

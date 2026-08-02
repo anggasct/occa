@@ -37,19 +37,22 @@ func TestSessionRoundTrip(t *testing.T) {
 	s := tempStore(t)
 	ctx := context.Background()
 
-	id, err := s.SessionRepo().Active(ctx, "telegram", "chat1", "", "")
+	id, pid, err := s.SessionRepo().Active(ctx, "telegram", "chat1", "", "")
 	if err != nil {
 		t.Fatalf("Active: %v", err)
 	}
 	if id != "" {
 		t.Fatalf("expected empty, got %q", id)
 	}
+	if pid != 0 {
+		t.Fatalf("expected pid 0, got %d", pid)
+	}
 
-	if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "", "sess-1"); err != nil {
+	if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "", "sess-1", 100); err != nil {
 		t.Fatalf("SetActive: %v", err)
 	}
 
-	id, err = s.SessionRepo().Active(ctx, "telegram", "chat1", "", "")
+	id, _, err = s.SessionRepo().Active(ctx, "telegram", "chat1", "", "")
 	if err != nil {
 		t.Fatalf("Active: %v", err)
 	}
@@ -70,26 +73,26 @@ func TestSessionKeyIsolation(t *testing.T) {
 		{"", "bob", "sess-bob"},
 		{"thread-1", "", "sess-thread"},
 	} {
-		if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", c.threadID, c.userID, c.sessionID); err != nil {
+		if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", c.threadID, c.userID, c.sessionID, 100); err != nil {
 			t.Fatalf("SetActive(%q,%q): %v", c.threadID, c.userID, err)
 		}
 	}
 
-	got, err := s.SessionRepo().Active(ctx, "telegram", "chat1", "", "alice")
+	got, _, err := s.SessionRepo().Active(ctx, "telegram", "chat1", "", "alice")
 	if err != nil {
 		t.Fatalf("Active alice: %v", err)
 	}
 	if got != "sess-alice" {
 		t.Fatalf("alice = %q, want sess-alice", got)
 	}
-	got, err = s.SessionRepo().Active(ctx, "telegram", "chat1", "", "bob")
+	got, _, err = s.SessionRepo().Active(ctx, "telegram", "chat1", "", "bob")
 	if err != nil {
 		t.Fatalf("Active bob: %v", err)
 	}
 	if got != "sess-bob" {
 		t.Fatalf("bob = %q, want sess-bob", got)
 	}
-	got, err = s.SessionRepo().Active(ctx, "telegram", "chat1", "thread-1", "")
+	got, _, err = s.SessionRepo().Active(ctx, "telegram", "chat1", "thread-1", "")
 	if err != nil {
 		t.Fatalf("Active thread: %v", err)
 	}
@@ -97,10 +100,10 @@ func TestSessionKeyIsolation(t *testing.T) {
 		t.Fatalf("thread = %q, want sess-thread", got)
 	}
 
-	if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "alice", "sess-alice-2"); err != nil {
+	if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "alice", "sess-alice-2", 100); err != nil {
 		t.Fatalf("SetActive alice second: %v", err)
 	}
-	got, err = s.SessionRepo().Active(ctx, "telegram", "chat1", "", "bob")
+	got, _, err = s.SessionRepo().Active(ctx, "telegram", "chat1", "", "bob")
 	if err != nil {
 		t.Fatalf("Active bob after alice switch: %v", err)
 	}
@@ -130,21 +133,21 @@ func TestSessionSetActiveReKeysAdoptedRow(t *testing.T) {
 	s := tempStore(t)
 	ctx := context.Background()
 
-	if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "", "sess-old"); err != nil {
+	if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "", "sess-old", 100); err != nil {
 		t.Fatalf("SetActive old: %v", err)
 	}
-	if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "alice", "sess-old"); err != nil {
+	if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "alice", "sess-old", 100); err != nil {
 		t.Fatalf("SetActive adopt: %v", err)
 	}
 
-	got, err := s.SessionRepo().Active(ctx, "telegram", "chat1", "", "alice")
+	got, _, err := s.SessionRepo().Active(ctx, "telegram", "chat1", "", "alice")
 	if err != nil {
 		t.Fatalf("Active adopted: %v", err)
 	}
 	if got != "sess-old" {
 		t.Fatalf("adopted session = %q, want sess-old", got)
 	}
-	if _, err := s.SessionRepo().Active(ctx, "telegram", "chat1", "", ""); err != nil {
+	if _, _, err := s.SessionRepo().Active(ctx, "telegram", "chat1", "", ""); err != nil {
 		t.Fatalf("Active old key: %v", err)
 	}
 }
@@ -155,7 +158,7 @@ func TestUniqueActiveIndexEnforced(t *testing.T) {
 	s := tempStore(t)
 	ctx := context.Background()
 
-	if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "alice", "sess-1"); err != nil {
+	if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "alice", "sess-1", 100); err != nil {
 		t.Fatalf("SetActive first: %v", err)
 	}
 	if _, err := s.db.ExecContext(ctx,
@@ -174,7 +177,7 @@ func TestSessionRestartRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if err := s1.SessionRepo().SetActive(ctx, "discord", "ch1", "", "", "sess-abc"); err != nil {
+	if err := s1.SessionRepo().SetActive(ctx, "discord", "ch1", "", "", "sess-abc", 100); err != nil {
 		t.Fatalf("SetActive: %v", err)
 	}
 	s1.Close()
@@ -185,7 +188,7 @@ func TestSessionRestartRoundTrip(t *testing.T) {
 	}
 	defer s2.Close()
 
-	id, err := s2.SessionRepo().Active(ctx, "discord", "ch1", "", "")
+	id, _, err := s2.SessionRepo().Active(ctx, "discord", "ch1", "", "")
 	if err != nil {
 		t.Fatalf("Active after restart: %v", err)
 	}
@@ -198,14 +201,14 @@ func TestSessionSetActiveAtomic(t *testing.T) {
 	s := tempStore(t)
 	ctx := context.Background()
 
-	if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "", "sess-1"); err != nil {
+	if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "", "sess-1", 100); err != nil {
 		t.Fatalf("SetActive: %v", err)
 	}
-	if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "", "sess-2"); err != nil {
+	if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "", "sess-2", 100); err != nil {
 		t.Fatalf("SetActive: %v", err)
 	}
 
-	id, err := s.SessionRepo().Active(ctx, "telegram", "chat1", "", "")
+	id, _, err := s.SessionRepo().Active(ctx, "telegram", "chat1", "", "")
 	if err != nil {
 		t.Fatalf("Active: %v", err)
 	}
@@ -460,10 +463,10 @@ func TestSessionThreadChannel(t *testing.T) {
 	s := tempStore(t)
 	ctx := context.Background()
 
-	if err := s.SessionRepo().SetActive(ctx, "discord", "parent-1", "thread-9", "", "sess-1"); err != nil {
+	if err := s.SessionRepo().SetActive(ctx, "discord", "parent-1", "thread-9", "", "sess-1", 100); err != nil {
 		t.Fatalf("SetActive owned thread: %v", err)
 	}
-	if err := s.SessionRepo().SetActive(ctx, "discord", "user-thread", "user-thread", "", "sess-2"); err != nil {
+	if err := s.SessionRepo().SetActive(ctx, "discord", "user-thread", "user-thread", "", "sess-2", 100); err != nil {
 		t.Fatalf("SetActive user thread: %v", err)
 	}
 

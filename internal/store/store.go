@@ -40,8 +40,8 @@ type UserOverride struct {
 // thread_id, user_id). Empty thread_id/user_id mean "not applicable" (DM or
 // thread-shared conversation), per the session-key policy.
 type SessionRepo interface {
-	Active(ctx context.Context, platform, channelID, threadID, userID string) (string, error)
-	SetActive(ctx context.Context, platform, channelID, threadID, userID, sessionID string) error
+	Active(ctx context.Context, platform, channelID, threadID, userID string) (sessionID string, agentPID int, err error)
+	SetActive(ctx context.Context, platform, channelID, threadID, userID, sessionID string, agentPID int) error
 	Deactivate(ctx context.Context, platform, channelID, threadID, userID string) error
 	List(ctx context.Context, platform, channelID string) ([]Session, error)
 	ThreadChannel(ctx context.Context, platform, threadID string) (string, error)

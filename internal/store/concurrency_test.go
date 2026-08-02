@@ -28,7 +28,7 @@ func TestConcurrentWritersAllSucceed(t *testing.T) {
 				channelID := fmt.Sprintf("chat-%d", w)
 				userID := fmt.Sprintf("user-%d", i)
 
-				err := s.SessionRepo().SetActive(ctx, platform, channelID, "", "", "agent-sess")
+				err := s.SessionRepo().SetActive(ctx, platform, channelID, "", "", "agent-sess", 100)
 				errs <- err
 				err = s.ChannelRepo().UpsertModel(ctx, platform, channelID, "gpt-4o")
 				errs <- err
@@ -150,7 +150,7 @@ VALUES ('chat-legacy', 'telegram', 'agent-sess-1', 1, 1, 1);
 	defer func() { _ = s.Close() }()
 	assertVersion(t, s, schemaVersion)
 
-	id, err := s.SessionRepo().Active(context.Background(), "telegram", "chat-legacy", "", "")
+	id, _, err := s.SessionRepo().Active(context.Background(), "telegram", "chat-legacy", "", "")
 	if err != nil {
 		t.Fatalf("adopted row lookup: %v", err)
 	}

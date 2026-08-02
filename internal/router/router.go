@@ -49,6 +49,7 @@ func (r *Router) MenuCommands() []channel.MenuCommand {
 type AgentInstance interface {
 	Client() relay.Client
 	End()
+	PID() int
 }
 
 // InstanceProvider resolves an AgentInstance for a working directory.
@@ -317,7 +318,7 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 	}
 
 	resolver := relay.NewSessionResolver(r.store.SessionRepo(), inst.Client())
-	sessionID, err := resolver.Resolve(ctx, msg.Platform, msg.ChannelID, threadID, userID)
+	sessionID, err := resolver.Resolve(ctx, msg.Platform, msg.ChannelID, threadID, userID, inst.PID())
 	if err != nil {
 		inst.End()
 		r.responses.release(key)
@@ -474,7 +475,7 @@ func (r *Router) handleStatus(ctx context.Context, msg channel.IncomingMessage, 
 	start := time.Now()
 	resolver := relay.NewSessionResolver(r.store.SessionRepo(), inst.Client())
 	threadID, userID := conversationKey(msg)
-	sessionID, err := resolver.Resolve(ctx, msg.Platform, msg.ChannelID, threadID, userID)
+	sessionID, err := resolver.Resolve(ctx, msg.Platform, msg.ChannelID, threadID, userID, inst.PID())
 	if err != nil {
 		return "⚠️ Agent unreachable", nil
 	}
@@ -525,7 +526,7 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 			return "⚠️ Agent unreachable", nil
 		}
 		threadID, userID := conversationKey(msg)
-		if err := r.store.SessionRepo().SetActive(ctx, msg.Platform, msg.ChannelID, threadID, userID, sessionID); err != nil {
+		if err := r.store.SessionRepo().SetActive(ctx, msg.Platform, msg.ChannelID, threadID, userID, sessionID, inst.PID()); err != nil {
 			return "", fmt.Errorf("session new: %w", err)
 		}
 		return fmt.Sprintf("✅ New session: %s", sessionID), nil
@@ -550,7 +551,7 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 			return "Session not found.", nil
 		}
 		threadID, userID := conversationKey(msg)
-		if err := r.store.SessionRepo().SetActive(ctx, msg.Platform, msg.ChannelID, threadID, userID, target); err != nil {
+		if err := r.store.SessionRepo().SetActive(ctx, msg.Platform, msg.ChannelID, threadID, userID, target, 0); err != nil {
 			return "", fmt.Errorf("session switch: %w", err)
 		}
 		return fmt.Sprintf("✅ Switched to: %s", target), nil
@@ -591,7 +592,7 @@ func (r *Router) handleReset(ctx context.Context, msg channel.IncomingMessage, _
 		return "⚠️ Agent unreachable", nil
 	}
 	threadID, userID := conversationKey(msg)
-	if err := r.store.SessionRepo().SetActive(ctx, msg.Platform, msg.ChannelID, threadID, userID, sessionID); err != nil {
+	if err := r.store.SessionRepo().SetActive(ctx, msg.Platform, msg.ChannelID, threadID, userID, sessionID, inst.PID()); err != nil {
 		return "", fmt.Errorf("reset: %w", err)
 	}
 	return fmt.Sprintf("✅ Session reset. New session: %s", sessionID), nil

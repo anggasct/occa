@@ -130,6 +130,8 @@ func (r *Router) runResponse(
 		slog.Warn("response dispatch failed", "platform", key.platform, "channel_id", key.channelID, "thread_id", key.threadID, "user_id", key.userID, "error", dispatchErr)
 		if errors.Is(dispatchErr, relay.ErrAttachmentTooLarge) {
 			r.reply(msg, "⚠️ "+dispatchErr.Error())
+		} else if errors.Is(dispatchErr, relay.ErrTimeout) {
+			r.reply(msg, "⚠️ Agent request timed out. The task may still be running; check /occa:status")
 		} else {
 			r.reply(msg, "⚠️ Agent unreachable")
 		}

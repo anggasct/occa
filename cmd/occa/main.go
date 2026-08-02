@@ -141,7 +141,7 @@ func main() {
 		defer inst.End()
 
 		resolver := relay.NewSessionResolver(db.SessionRepo(), inst.Client())
-		sessionID, err := resolver.Resolve(ctx, platform, channelID, "", "")
+		sessionID, err := resolver.Resolve(ctx, platform, channelID, "", "", inst.PID())
 		if err != nil {
 			notify(adapter, channelID, "⚠️ Scheduled task failed: session error")
 			return
@@ -212,7 +212,7 @@ func main() {
 					defer inst.End()
 
 					resolver := relay.NewSessionResolver(db.SessionRepo(), inst.Client())
-					sessionID, err := resolver.Resolve(ctx, platform, channelID, "", "")
+					sessionID, err := resolver.Resolve(ctx, platform, channelID, "", "", inst.PID())
 					if err != nil {
 						send("⚠️ Webhook analysis failed: session error")
 						return

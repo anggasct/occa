@@ -11,22 +11,23 @@ type sqliteSessionRepo struct {
 	db *sql.DB
 }
 
-func (r *sqliteSessionRepo) Active(ctx context.Context, platform, channelID, threadID, userID string) (string, error) {
+func (r *sqliteSessionRepo) Active(ctx context.Context, platform, channelID, threadID, userID string) (string, int, error) {
 	var sessionID string
+	var agentPID int
 	err := r.db.QueryRowContext(ctx,
-		`SELECT agent_session_id FROM session WHERE platform = ? AND channel_id = ? AND thread_id = ? AND user_id = ? AND active = 1`,
+		`SELECT agent_session_id, agent_pid FROM session WHERE platform = ? AND channel_id = ? AND thread_id = ? AND user_id = ? AND active = 1`,
 		platform, channelID, threadID, userID,
-	).Scan(&sessionID)
+	).Scan(&sessionID, &agentPID)
 	if err == sql.ErrNoRows {
-		return "", nil
+		return "", 0, nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("store: session active: %w", err)
+		return "", 0, fmt.Errorf("store: session active: %w", err)
 	}
-	return sessionID, nil
+	return sessionID, agentPID, nil
 }
 
-func (r *sqliteSessionRepo) SetActive(ctx context.Context, platform, channelID, threadID, userID, sessionID string) error {
+func (r *sqliteSessionRepo) SetActive(ctx context.Context, platform, channelID, threadID, userID, sessionID string, agentPID int) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("store: session set active: begin: %w", err)
@@ -46,8 +47,8 @@ func (r *sqliteSessionRepo) SetActive(ctx context.Context, platform, channelID, 
 	// before key granularity (or in another conversation) is adopted by the
 	// current one on /occa:session switch.
 	res, err := tx.ExecContext(ctx,
-		`UPDATE session SET active = 1, thread_id = ?, user_id = ?, updated_at = ? WHERE platform = ? AND channel_id = ? AND agent_session_id = ?`,
-		threadID, userID, now, platform, channelID, sessionID,
+		`UPDATE session SET active = 1, thread_id = ?, user_id = ?, agent_pid = ?, updated_at = ? WHERE platform = ? AND channel_id = ? AND agent_session_id = ?`,
+		threadID, userID, agentPID, now, platform, channelID, sessionID,
 	)
 	if err != nil {
 		return fmt.Errorf("store: session set active: activate: %w", err)
@@ -59,8 +60,8 @@ func (r *sqliteSessionRepo) SetActive(ctx context.Context, platform, channelID, 
 	}
 	if rows == 0 {
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO session (channel_id, platform, agent_session_id, thread_id, user_id, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
-			channelID, platform, sessionID, threadID, userID, now, now,
+			`INSERT INTO session (channel_id, platform, agent_session_id, thread_id, user_id, agent_pid, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+			channelID, platform, sessionID, threadID, userID, agentPID, now, now,
 		); err != nil {
 			return fmt.Errorf("store: session set active: insert: %w", err)
 		}

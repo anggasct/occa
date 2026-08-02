@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	noEventTimeout = 10 * time.Minute
+	noEventTimeout = 15 * time.Minute
 	typingInterval = 4 * time.Second
 )
 
@@ -126,7 +126,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 			}
 
 		case <-timeoutTimer.C:
-			s.notice("⚠️ Task timed out (no events for 10 minutes). It may still be running, check /occa:status")
+			s.notice("⚠️ Task timed out (no events for 15 minutes). It may still be running, check /occa:status")
 			s.setReaction(channel.ReactionError)
 			return ErrTimeout
 

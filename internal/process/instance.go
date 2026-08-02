@@ -30,6 +30,7 @@ type Instance struct {
 	workdir  string
 	addr     string
 	port     int
+	pid      int
 	client   relay.Client
 	lastUsed atomic.Int64
 	inflight atomic.Int32
@@ -40,6 +41,7 @@ type Instance struct {
 func (i *Instance) Client() relay.Client { return i.client }
 func (i *Instance) Addr() string         { return i.addr }
 func (i *Instance) Workdir() string      { return i.workdir }
+func (i *Instance) PID() int             { return i.pid }
 
 // Touch marks the instance as recently used (reaper / eviction input).
 func (i *Instance) Touch() { i.lastUsed.Store(time.Now().Unix()) }
@@ -74,6 +76,7 @@ func productionFactory(binary string, readinessTimeout, stopGrace time.Duration)
 			workdir: workdir,
 			addr:    addr,
 			port:    port,
+			pid:     cmd.Process.Pid,
 			client:  relay.NewHTTPClient(addr),
 			stop: func() {
 				if cmd.Process == nil {

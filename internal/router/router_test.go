@@ -307,14 +307,14 @@ func (f *fakeSessionRepo) sessionKey(platform, channelID, threadID, userID strin
 	return platform + ":" + channelID + ":" + threadID + ":" + userID
 }
 
-func (f *fakeSessionRepo) Active(_ context.Context, platform, channelID, threadID, userID string) (string, error) {
+func (f *fakeSessionRepo) Active(_ context.Context, platform, channelID, threadID, userID string) (string, int, error) {
 	if f.activeBy == nil {
-		return f.activeID, nil
+		return f.activeID, 0, nil
 	}
-	return f.activeBy[f.sessionKey(platform, channelID, threadID, userID)], nil
+	return f.activeBy[f.sessionKey(platform, channelID, threadID, userID)], 0, nil
 }
 
-func (f *fakeSessionRepo) SetActive(_ context.Context, platform, channelID, threadID, userID, sessionID string) error {
+func (f *fakeSessionRepo) SetActive(_ context.Context, platform, channelID, threadID, userID, sessionID string, _ int) error {
 	f.activeID = sessionID
 	if f.activeBy == nil {
 		f.activeBy = make(map[string]string)
@@ -376,10 +376,12 @@ func (f *fakeSessionRepo) Delete(_ context.Context, id int64) error { return nil
 
 type fakeInstance struct {
 	client relay.Client
+	pid    int
 }
 
 func (f *fakeInstance) Client() relay.Client { return f.client }
 func (f *fakeInstance) End()                 {}
+func (f *fakeInstance) PID() int             { return f.pid }
 
 type fakeInstanceProvider struct {
 	client relay.Client
