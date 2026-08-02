@@ -141,33 +141,66 @@ func TestEventsLargeLineThroughHTTPServer(t *testing.T) {
 }
 
 func TestParseJSONEvents(t *testing.T) {
+	textPartUpdated := `{"type":"message.part.updated","properties":{"part":{"id":"prt-1","type":"text"}}}`
 	cases := []struct {
-		name string
-		data string
-		want Event
-		ok   bool
+		name  string
+		setup []string // prior events fed to the same decoder, e.g. the part.updated that announces a part's type
+		data  string
+		want  Event
+		ok    bool
 	}{
-		{"text delta", `{"type":"message.part.delta","properties":{"field":"text","delta":"Hi"}}`, Event{Type: "delta", Delta: "Hi"}, true},
-		{"non-text delta skipped", `{"type":"message.part.delta","properties":{"field":"reasoning","delta":"thinking"}}`, Event{}, false},
-		{"idle is done", `{"type":"session.idle","properties":{}}`, Event{Type: "done"}, true},
-		{"heartbeat skipped", `{"type":"server.heartbeat","properties":{}}`, Event{}, false},
-		{"session status skipped", `{"type":"session.status","properties":{"status":{"type":"busy"}}}`, Event{}, false},
-		{"error surfaced", `{"type":"session.error","properties":{}}`, Event{Type: "error", Delta: `{"type":"session.error","properties":{}}`}, true},
+		{"text delta", []string{textPartUpdated}, `{"type":"message.part.delta","properties":{"partID":"prt-1","field":"text","delta":"Hi"}}`, Event{Type: "delta", Delta: "Hi"}, true},
+		{"delta for unannounced part skipped", nil, `{"type":"message.part.delta","properties":{"partID":"prt-1","field":"text","delta":"Hi"}}`, Event{}, false},
+		{"idle is done", nil, `{"type":"session.idle","properties":{}}`, Event{Type: "done"}, true},
+		{"heartbeat skipped", nil, `{"type":"server.heartbeat","properties":{}}`, Event{}, false},
+		{"session status skipped", nil, `{"type":"session.status","properties":{"status":{"type":"busy"}}}`, Event{}, false},
+		{"error surfaced", nil, `{"type":"session.error","properties":{}}`, Event{Type: "error", Delta: `{"type":"session.error","properties":{}}`}, true},
 	}
 	for _, c := range cases {
-		got, ok := parseSSEEvent("", c.data)
+		decoder := newEventDecoder()
+		for _, setup := range c.setup {
+			parseSSEEvent(decoder, "", setup)
+		}
+		got, ok := parseSSEEvent(decoder, "", c.data)
 		if ok != c.ok || got.Type != c.want.Type || got.Delta != c.want.Delta {
 			t.Fatalf("%s: got (%+v, %v), want (%+v, %v)", c.name, got, ok, c.want, c.ok)
 		}
 	}
 }
 
+// TestReasoningPartDeltaNeverSurfacesAsText reproduces a live-server bug:
+// a ReasoningPart's own content field is also named "text" (same as
+// TextPart), so its message.part.delta events carry field:"text" too.
+// Filtering on field name alone let reasoning content leak into the actual
+// chat reply. The decoder must track each part's announced type and only
+// forward deltas for parts explicitly typed "text".
+func TestReasoningPartDeltaNeverSurfacesAsText(t *testing.T) {
+	decoder := newEventDecoder()
+
+	reasoningUpdated := `{"type":"message.part.updated","properties":{"part":{"id":"prt-reasoning","type":"reasoning"}}}`
+	reasoningDelta := `{"type":"message.part.delta","properties":{"partID":"prt-reasoning","field":"text","delta":"thinking out loud"}}`
+	textUpdated := `{"type":"message.part.updated","properties":{"part":{"id":"prt-text","type":"text"}}}`
+	textDelta := `{"type":"message.part.delta","properties":{"partID":"prt-text","field":"text","delta":"the actual reply"}}`
+
+	for _, data := range []string{reasoningUpdated, reasoningDelta} {
+		if _, ok := parseSSEEvent(decoder, "", data); ok {
+			t.Fatalf("reasoning-part event must never surface, got event for %q", data)
+		}
+	}
+
+	parseSSEEvent(decoder, "", textUpdated)
+	got, ok := parseSSEEvent(decoder, "", textDelta)
+	if !ok || got.Type != "delta" || got.Delta != "the actual reply" {
+		t.Fatalf("expected text-part delta to pass through, got (%+v, %v)", got, ok)
+	}
+}
+
 func TestParseLegacyEventsStillWork(t *testing.T) {
-	ev, ok := parseSSEEvent("message.part.delta", "hello")
+	ev, ok := parseSSEEvent(newEventDecoder(), "message.part.delta", "hello")
 	if !ok || ev.Type != "delta" || ev.Delta != "hello" {
 		t.Fatalf("legacy delta: %+v %v", ev, ok)
 	}
-	ev, ok = parseSSEEvent("done", "")
+	ev, ok = parseSSEEvent(newEventDecoder(), "done", "")
 	if !ok || ev.Type != "done" {
 		t.Fatalf("legacy done: %+v %v", ev, ok)
 	}
