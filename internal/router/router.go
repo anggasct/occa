@@ -307,7 +307,9 @@ func conversationKey(msg channel.IncomingMessage) (threadID, userID string) {
 func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) error {
 	threadID, userID := conversationKey(msg)
 	key := responseKey{platform: msg.Platform, channelID: msg.ChannelID, threadID: threadID, userID: userID}
-	if !r.responses.acquire(key) {
+	taskCtx, cancel := context.WithCancel(ctx)
+	if !r.responses.acquire(key, cancel) {
+		cancel()
 		r.reply(msg, busyResponseMessage)
 		return nil
 	}
@@ -356,7 +358,6 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 	}
 
 	msg.ReplyCtx.SendTyping()
-	taskCtx, cancel := context.WithCancel(ctx)
 	events, err := inst.Client().Events(taskCtx, sessionID)
 	if err != nil || events == nil {
 		cancel()
@@ -518,6 +519,9 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 		return strings.TrimRight(sb.String(), "\n"), nil
 
 	case "new":
+		threadID, userID := conversationKey(msg)
+		r.responses.cancelResponse(responseKey{platform: msg.Platform, channelID: msg.ChannelID, threadID: threadID, userID: userID})
+
 		inst, err := r.clientFor(ctx, msg)
 		if err != nil {
 			return "⚠️ Agent unreachable", nil
@@ -527,7 +531,6 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 		if err != nil {
 			return "⚠️ Agent unreachable", nil
 		}
-		threadID, userID := conversationKey(msg)
 		if err := r.store.SessionRepo().SetActive(ctx, msg.Platform, msg.ChannelID, threadID, userID, sessionID, inst.PID()); err != nil {
 			return "", fmt.Errorf("session new: %w", err)
 		}
@@ -583,6 +586,9 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 }
 
 func (r *Router) handleReset(ctx context.Context, msg channel.IncomingMessage, _ string) (string, error) {
+	threadID, userID := conversationKey(msg)
+	r.responses.cancelResponse(responseKey{platform: msg.Platform, channelID: msg.ChannelID, threadID: threadID, userID: userID})
+
 	inst, err := r.clientFor(ctx, msg)
 	if err != nil {
 		return "⚠️ Agent unreachable", nil
@@ -593,7 +599,6 @@ func (r *Router) handleReset(ctx context.Context, msg channel.IncomingMessage, _
 	if err != nil {
 		return "⚠️ Agent unreachable", nil
 	}
-	threadID, userID := conversationKey(msg)
 	if err := r.store.SessionRepo().SetActive(ctx, msg.Platform, msg.ChannelID, threadID, userID, sessionID, inst.PID()); err != nil {
 		return "", fmt.Errorf("reset: %w", err)
 	}

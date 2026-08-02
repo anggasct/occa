@@ -27,20 +27,20 @@ type responseKey struct {
 
 type responseCoordinator struct {
 	mu     sync.Mutex
-	active map[responseKey]struct{}
+	active map[responseKey]context.CancelFunc
 }
 
 func newResponseCoordinator() *responseCoordinator {
-	return &responseCoordinator{active: make(map[responseKey]struct{})}
+	return &responseCoordinator{active: make(map[responseKey]context.CancelFunc)}
 }
 
-func (c *responseCoordinator) acquire(key responseKey) bool {
+func (c *responseCoordinator) acquire(key responseKey, cancel context.CancelFunc) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if _, ok := c.active[key]; ok {
 		return false
 	}
-	c.active[key] = struct{}{}
+	c.active[key] = cancel
 	return true
 }
 
@@ -48,6 +48,18 @@ func (c *responseCoordinator) release(key responseKey) {
 	c.mu.Lock()
 	delete(c.active, key)
 	c.mu.Unlock()
+}
+
+// cancelResponse cancels the in-flight response for a conversation key,
+// used by /occa:reset and /occa:session new to stop a running response.
+func (c *responseCoordinator) cancelResponse(key responseKey) {
+	c.mu.Lock()
+	cancel := c.active[key]
+	delete(c.active, key)
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 func (r *Router) runResponse(
