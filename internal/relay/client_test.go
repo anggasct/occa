@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -147,10 +148,13 @@ func TestListCommandsUnreachable(t *testing.T) {
 }
 
 func TestRunCommand(t *testing.T) {
+	var gotBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/session/s1/command" {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -159,6 +163,27 @@ func TestRunCommand(t *testing.T) {
 	err := c.RunCommand(context.Background(), "s1", "/plan build a thing")
 	if err != nil {
 		t.Fatalf("RunCommand: %v", err)
+	}
+	if gotBody != `{"arguments":"build a thing","command":"plan"}` {
+		t.Fatalf("payload = %s, want command/arguments split", gotBody)
+	}
+}
+
+func TestRunCommandNoArgs(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := NewHTTPClient(srv.URL)
+	if err := c.RunCommand(context.Background(), "s1", "/review"); err != nil {
+		t.Fatalf("RunCommand: %v", err)
+	}
+	if gotBody != `{"arguments":"","command":"review"}` {
+		t.Fatalf("payload = %s, want empty arguments", gotBody)
 	}
 }
 
