@@ -137,6 +137,67 @@ func TestRegisterCommandsSendsBulkOverwrite(t *testing.T) {
 	}
 }
 
+func TestSanitizeCommandNameDiscord(t *testing.T) {
+	cases := map[string]string{
+		"customize-opencode":    "customize-opencode",
+		"occa_help":             "occa_help",
+		"UPPER":                 "upper",
+		strings.Repeat("a", 40): strings.Repeat("a", 32),
+	}
+	for in, want := range cases {
+		if got := sanitizeCommandName(in); got != want {
+			t.Fatalf("sanitizeCommandName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestSetChatCommandsUsesGuildScope(t *testing.T) {
+	var gotPath, gotMethod string
+	var gotBody []byte
+	s := newUnconnectedSession(t)
+	s.Client = &http.Client{Transport: fakeRoundTripper{do: func(req *http.Request) (*http.Response, error) {
+		gotPath = req.URL.Path
+		gotMethod = req.Method
+		gotBody, _ = io.ReadAll(req.Body)
+		return jsonResponse(200, "[]"), nil
+	}}}
+
+	rc := &replyContext{session: s, guildID: "guild-1", appID: "app-1"}
+	err := rc.SetChatCommands([]channel.MenuCommand{
+		{Alias: "occa_help", Description: "Show available commands"},
+	})
+	if err != nil {
+		t.Fatalf("SetChatCommands: %v", err)
+	}
+
+	if gotMethod != http.MethodPut {
+		t.Fatalf("expected PUT, got %q", gotMethod)
+	}
+	if !strings.Contains(gotPath, "applications/app-1/guilds/guild-1/commands") {
+		t.Fatalf("expected guild-scoped path, got %q", gotPath)
+	}
+	if !strings.Contains(string(gotBody), "occa_help") {
+		t.Fatalf("expected occa_help in request body, got %q", gotBody)
+	}
+}
+
+func TestSetChatCommandsNoOpsWithoutGuild(t *testing.T) {
+	called := false
+	s := newUnconnectedSession(t)
+	s.Client = &http.Client{Transport: fakeRoundTripper{do: func(req *http.Request) (*http.Response, error) {
+		called = true
+		return jsonResponse(200, "[]"), nil
+	}}}
+
+	rc := &replyContext{session: s, appID: "app-1"}
+	if err := rc.SetChatCommands([]channel.MenuCommand{{Alias: "occa_help", Description: "x"}}); err != nil {
+		t.Fatalf("SetChatCommands: %v", err)
+	}
+	if called {
+		t.Fatal("expected no HTTP call for a DM (no guild)")
+	}
+}
+
 func TestRegisterCommandsSkipsWhenMenuEmpty(t *testing.T) {
 	called := false
 	s := newUnconnectedSession(t)

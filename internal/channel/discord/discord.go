@@ -23,6 +23,7 @@ type Adapter struct {
 	token          string
 	menu           []channel.MenuCommand
 	botID          atomic.Value
+	appID          atomic.Value
 	channelLookup  func(string) (*discordgo.Channel, error)
 	downloadClient *http.Client
 }
@@ -36,6 +37,15 @@ func New(token string, menu []channel.MenuCommand) *Adapter {
 func (a *Adapter) Name() string { return "discord" }
 
 func (a *Adapter) setBotID(id string) { a.botID.Store(id) }
+
+func (a *Adapter) setAppID(id string) { a.appID.Store(id) }
+
+// appIDValue is empty until the gateway delivers READY. Callers must treat
+// an empty result as "app ID not known yet."
+func (a *Adapter) appIDValue() string {
+	id, _ := a.appID.Load().(string)
+	return id
+}
 
 // selfID is empty until the gateway delivers READY. Callers must treat an
 // empty result as "not this bot" rather than as a match.
@@ -113,7 +123,7 @@ func (a *Adapter) configure(s *discordgo.Session, handler func(channel.IncomingM
 				CallbackData:           data.CustomID,
 				CallbackRef:            origin,
 				IsMention:              true,
-				ReplyCtx:               &replyContext{session: sess, channelID: i.ChannelID, interaction: i.Interaction},
+				ReplyCtx:               &replyContext{session: sess, channelID: i.ChannelID, guildID: i.GuildID, appID: a.appIDValue(), interaction: i.Interaction},
 			}
 			handler(msg)
 
@@ -159,7 +169,7 @@ func (a *Adapter) handleApplicationCommandInteraction(sess *discordgo.Session, i
 		Text:                   strings.TrimSpace(text),
 		IsMention:              true,
 		IsThread:               isThread,
-		ReplyCtx:               &replyContext{session: sess, channelID: i.ChannelID, interaction: i.Interaction},
+		ReplyCtx:               &replyContext{session: sess, channelID: i.ChannelID, guildID: i.GuildID, appID: a.appIDValue(), interaction: i.Interaction},
 	}
 	handler(msg)
 }
@@ -170,6 +180,9 @@ func (a *Adapter) onReady(r *discordgo.Ready) {
 		return
 	}
 	a.setBotID(r.User.ID)
+	if r.Application != nil {
+		a.setAppID(r.Application.ID)
+	}
 	slog.Info("discord adapter connected", "bot_id", r.User.ID)
 	a.registerCommands(r)
 }
@@ -186,9 +199,15 @@ func (a *Adapter) registerCommands(r *discordgo.Ready) {
 		return
 	}
 
-	commands := make([]*discordgo.ApplicationCommand, len(a.menu))
-	for i, m := range a.menu {
-		cmd := &discordgo.ApplicationCommand{Name: m.Alias, Description: m.Description}
+	if _, err := a.session.ApplicationCommandBulkOverwrite(r.Application.ID, "", buildApplicationCommands(a.menu)); err != nil {
+		slog.Warn("discord: set commands failed", "error", err)
+	}
+}
+
+func buildApplicationCommands(menu []channel.MenuCommand) []*discordgo.ApplicationCommand {
+	commands := make([]*discordgo.ApplicationCommand, len(menu))
+	for i, m := range menu {
+		cmd := &discordgo.ApplicationCommand{Name: sanitizeCommandName(m.Alias), Description: m.Description}
 		if m.HasArgs {
 			cmd.Options = []*discordgo.ApplicationCommandOption{{
 				Type:        discordgo.ApplicationCommandOptionString,
@@ -198,10 +217,27 @@ func (a *Adapter) registerCommands(r *discordgo.Ready) {
 		}
 		commands[i] = cmd
 	}
+	return commands
+}
 
-	if _, err := a.session.ApplicationCommandBulkOverwrite(r.Application.ID, "", commands); err != nil {
-		slog.Warn("discord: set commands failed", "error", err)
+// sanitizeCommandName maps an arbitrary command name (e.g. an agent's own
+// command, which may contain characters Discord rejects) into Discord's
+// allowed set: lowercase letters, digits, underscores, and hyphens, 1-32
+// characters.
+func sanitizeCommandName(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
 	}
+	s := b.String()
+	if len(s) > 32 {
+		s = s[:32]
+	}
+	return s
 }
 
 func (a *Adapter) onMessage(m *discordgo.MessageCreate, handler func(channel.IncomingMessage)) {
@@ -254,7 +290,7 @@ func (a *Adapter) normalizeMessage(m *discordgo.Message) channel.IncomingMessage
 		IsMention:              isMention,
 		IsThread:               isThread,
 		Attachments:            a.downloadAttachments(m),
-		ReplyCtx:               &replyContext{session: a.session, channelID: m.ChannelID},
+		ReplyCtx:               &replyContext{session: a.session, channelID: m.ChannelID, guildID: m.GuildID, appID: a.appIDValue()},
 	}
 }
 
@@ -336,11 +372,26 @@ func isThreadType(channelType discordgo.ChannelType) bool {
 type replyContext struct {
 	session     *discordgo.Session
 	channelID   string
+	guildID     string
+	appID       string
 	interaction *discordgo.Interaction
 }
 
 func (rc *replyContext) SendTyping() error {
 	return rc.session.ChannelTyping(rc.channelID)
+}
+
+// SetChatCommands registers a native command menu scoped to this chat's
+// guild — Discord's ApplicationCommandBulkOverwrite has no per-channel scope,
+// only per-guild, so this affects every channel in the guild, not just this
+// one. A DM (no guild) is a no-op: Discord has no per-DM-channel slash
+// command scope to target.
+func (rc *replyContext) SetChatCommands(commands []channel.MenuCommand) error {
+	if rc.guildID == "" || rc.appID == "" {
+		return nil
+	}
+	_, err := rc.session.ApplicationCommandBulkOverwrite(rc.appID, rc.guildID, buildApplicationCommands(commands))
+	return err
 }
 
 func (rc *replyContext) Send(text string) (channel.MessageRef, error) {
@@ -421,7 +472,8 @@ type messageRef struct {
 func (m messageRef) ID() string { return m.id }
 
 var (
-	_ channel.Channel      = (*Adapter)(nil)
-	_ channel.ReplyContext = (*replyContext)(nil)
-	_ channel.MessageRef   = messageRef{}
+	_ channel.Channel           = (*Adapter)(nil)
+	_ channel.ReplyContext      = (*replyContext)(nil)
+	_ channel.ChatCommandSetter = (*replyContext)(nil)
+	_ channel.MessageRef        = messageRef{}
 )

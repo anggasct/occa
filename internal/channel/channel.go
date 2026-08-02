@@ -48,6 +48,14 @@ type ReplyContext interface {
 	EditWithButtons(ref MessageRef, text string, buttons []Button) error
 }
 
+// ChatCommandSetter is implemented by ReplyContexts that support per-chat
+// native command-menu registration. Not every ReplyContext does (e.g. a
+// Discord DM has no guild to scope to) — callers must type-assert and treat
+// a missing implementation as "skip silently."
+type ChatCommandSetter interface {
+	SetChatCommands(commands []MenuCommand) error
+}
+
 type MessageRef interface {
 	ID() string
 }
