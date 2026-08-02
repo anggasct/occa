@@ -222,8 +222,21 @@ func (c *HTTPClient) ListCommands(ctx context.Context) ([]CommandInfo, error) {
 	return commands, nil
 }
 
+// splitCommand separates a forwarded "/name args" text into the agent's
+// command name (without the leading slash) and its arguments.
+func splitCommand(command string) (name, args string) {
+	text := strings.TrimPrefix(command, "/")
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
+		return text, ""
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(text, fields[0]))
+	return fields[0], rest
+}
+
 func (c *HTTPClient) RunCommand(ctx context.Context, sessionID, command string) error {
-	payload := map[string]string{"command": command}
+	name, args := splitCommand(command)
+	payload := map[string]string{"command": name, "arguments": args}
 	resp, err := c.post(ctx, "/session/"+sessionID+"/command", payload)
 	if err != nil {
 		return err
