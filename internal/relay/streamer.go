@@ -102,14 +102,14 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 			return ctx.Err()
 
 		case <-timeoutTimer.C:
-			toolOrder, toolCounts = s.flushToolNotice(toolOrder, toolCounts)
+			s.flushToolNotice(toolOrder, toolCounts)
 			s.notice("⚠️ Task timed out (no events for 10 minutes). It may still be running, check /occa:status")
 			s.setReaction(channel.ReactionError)
 			return ErrTimeout
 
 		case ev, ok := <-events:
 			if !ok {
-				toolOrder, toolCounts = s.flushToolNotice(toolOrder, toolCounts)
+				s.flushToolNotice(toolOrder, toolCounts)
 				syncErr := s.finalSync(&refs, &lastChunks, buf.String())
 				s.notice(incompleteStreamMessage)
 				s.setReaction(channel.ReactionError)
@@ -127,7 +127,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				buf.WriteString(ev.Delta)
 				dirty = true
 			case EventDone:
-				toolOrder, toolCounts = s.flushToolNotice(toolOrder, toolCounts)
+				s.flushToolNotice(toolOrder, toolCounts)
 				if buf.Len() == 0 {
 					s.setReaction(channel.ReactionSuccess)
 					return nil
@@ -139,7 +139,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				s.setReaction(channel.ReactionSuccess)
 				return nil
 			case EventError:
-				toolOrder, toolCounts = s.flushToolNotice(toolOrder, toolCounts)
+				s.flushToolNotice(toolOrder, toolCounts)
 				s.notice("⚠️ Agent error: " + ev.Delta)
 				s.setReaction(channel.ReactionError)
 				return fmt.Errorf("%w: %s", ErrStreamFailed, ev.Delta)
