@@ -67,6 +67,7 @@ type Router struct {
 	tokenGen       TokenGenerator
 	responses      *responseCoordinator
 	permissions    *permissionBroker
+	modelBrowser   *modelBrowserBroker
 	renderer       render.Renderer
 }
 
@@ -97,6 +98,7 @@ func New(instances InstanceProvider, st store.Store, defaultWorkdir string, admi
 		startedAt:      time.Now(),
 		responses:      newResponseCoordinator(),
 		permissions:    newPermissionBroker(),
+		modelBrowser:   newModelBrowserBroker(),
 		renderer:       render.New(),
 	}
 	r.registerDefaults()
@@ -264,6 +266,9 @@ func (r *Router) handleCommand(ctx context.Context, msg channel.IncomingMessage)
 
 	reply, err := cmd.Handler(ctx, msg, args)
 	if err != nil {
+		if errors.Is(err, errReplied) {
+			return nil
+		}
 		var replyErr *replyError
 		if !errors.As(err, &replyErr) || replyErr.cause != nil {
 			slog.Error("command failed", "command", name, "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID, "error", err)
