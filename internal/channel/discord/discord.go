@@ -540,15 +540,51 @@ func isThreadType(channelType discordgo.ChannelType) bool {
 }
 
 type replyContext struct {
-	session     *discordgo.Session
-	channelID   string
-	guildID     string
-	appID       string
-	interaction *discordgo.Interaction
+	session         *discordgo.Session
+	channelID       string
+	guildID         string
+	appID           string
+	interaction     *discordgo.Interaction
+	currentReaction map[string]string
 }
 
 func (rc *replyContext) SendTyping() error {
 	return rc.session.ChannelTyping(rc.channelID)
+}
+
+// SetReaction surfaces a reply message's lifecycle as a reaction (👀/✅/❌).
+// The previous state's emoji is removed before the new one is added; a
+// same-state repeat is a no-op. Single-goroutine per stream.
+func (rc *replyContext) SetReaction(ref channel.MessageRef, state channel.ReactionState) error {
+	emoji := reactionEmoji(state)
+	if rc.currentReaction == nil {
+		rc.currentReaction = make(map[string]string)
+	}
+	if prev, ok := rc.currentReaction[ref.ID()]; ok {
+		if prev == emoji {
+			return nil
+		}
+		if err := rc.session.MessageReactionRemove(rc.channelID, ref.ID(), prev, "@me"); err != nil {
+			return fmt.Errorf("discord: remove reaction %s: %w", prev, err)
+		}
+	}
+	if err := rc.session.MessageReactionAdd(rc.channelID, ref.ID(), emoji); err != nil {
+		return fmt.Errorf("discord: add reaction %s: %w", emoji, err)
+	}
+	rc.currentReaction[ref.ID()] = emoji
+	return nil
+}
+
+func reactionEmoji(state channel.ReactionState) string {
+	switch state {
+	case channel.ReactionProcessing:
+		return "👀"
+	case channel.ReactionSuccess:
+		return "✅"
+	case channel.ReactionError:
+		return "❌"
+	}
+	return ""
 }
 
 // SetChatCommands registers a native command menu scoped to this chat's
@@ -656,5 +692,6 @@ var (
 	_ channel.Channel           = (*Adapter)(nil)
 	_ channel.ReplyContext      = (*replyContext)(nil)
 	_ channel.ChatCommandSetter = (*replyContext)(nil)
+	_ channel.ReactionSetter    = (*replyContext)(nil)
 	_ channel.MessageRef        = messageRef{}
 )

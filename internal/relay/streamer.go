@@ -32,6 +32,9 @@ type Streamer struct {
 	renderer          render.Renderer
 	platform          render.Platform
 	permissionHandler PermissionPromptHandler
+	reactionSetter    channel.ReactionSetter
+	firstRef          channel.MessageRef
+	noEventTimeout    time.Duration
 }
 
 type PermissionPromptHandler interface {
@@ -40,14 +43,39 @@ type PermissionPromptHandler interface {
 
 func NewStreamer(reply channel.ReplyContext, renderer render.Renderer, platform render.Platform) *Streamer {
 	return &Streamer{
-		reply:    reply,
-		renderer: renderer,
-		platform: platform,
+		reply:          reply,
+		renderer:       renderer,
+		platform:       platform,
+		noEventTimeout: noEventTimeout,
 	}
 }
 
 func (s *Streamer) SetPermissionPromptHandler(handler PermissionPromptHandler) {
 	s.permissionHandler = handler
+}
+
+func (s *Streamer) SetReactionSetter(setter channel.ReactionSetter) {
+	s.reactionSetter = setter
+}
+
+// setReaction drives the reply's status reaction. Failures are logged and
+// never fail the stream; a missing setter is a silent no-op.
+func (s *Streamer) setReaction(state channel.ReactionState) {
+	if s.reactionSetter == nil || s.firstRef == nil {
+		return
+	}
+	if err := s.reactionSetter.SetReaction(s.firstRef, state); err != nil {
+		slog.Warn("streaming: reaction failed", "state", state, "error", err)
+	}
+}
+
+// trackFirstRef records the first reply message once it exists so status
+// reactions can attach to it.
+func (s *Streamer) trackFirstRef(ref channel.MessageRef) {
+	if s.firstRef == nil && ref != nil {
+		s.firstRef = ref
+		s.setReaction(channel.ReactionProcessing)
+	}
 }
 
 func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
@@ -61,7 +89,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 	timer := time.NewTimer(intervals[0])
 	defer timer.Stop()
 
-	timeoutTimer := time.NewTimer(noEventTimeout)
+	timeoutTimer := time.NewTimer(s.noEventTimeout)
 	defer timeoutTimer.Stop()
 
 	dirty := false
@@ -73,19 +101,21 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 
 		case <-timeoutTimer.C:
 			s.notice("⚠️ Task timed out (no events for 10 minutes). It may still be running, check /occa:status")
+			s.setReaction(channel.ReactionError)
 			return ErrTimeout
 
 		case ev, ok := <-events:
 			if !ok {
 				syncErr := s.finalSync(&refs, &lastChunks, buf.String())
 				s.notice(incompleteStreamMessage)
+				s.setReaction(channel.ReactionError)
 				if syncErr != nil {
 					return fmt.Errorf("%w: final sync: %v", ErrIncompleteStream, syncErr)
 				}
 				return ErrIncompleteStream
 			}
 
-			timeoutTimer.Reset(noEventTimeout)
+			timeoutTimer.Reset(s.noEventTimeout)
 
 			switch ev.Type {
 			case EventDelta:
@@ -93,11 +123,18 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				dirty = true
 			case EventDone:
 				if buf.Len() == 0 {
+					s.setReaction(channel.ReactionSuccess)
 					return nil
 				}
-				return s.finalSync(&refs, &lastChunks, buf.String())
+				if err := s.finalSync(&refs, &lastChunks, buf.String()); err != nil {
+					s.setReaction(channel.ReactionError)
+					return err
+				}
+				s.setReaction(channel.ReactionSuccess)
+				return nil
 			case EventError:
 				s.notice("⚠️ Agent error: " + ev.Delta)
+				s.setReaction(channel.ReactionError)
 				return fmt.Errorf("%w: %s", ErrStreamFailed, ev.Delta)
 			case EventSegment:
 				if buf.Len() > 0 {
@@ -199,6 +236,7 @@ func (s *Streamer) syncMessages(refs *[]channel.MessageRef, lastChunks *[]string
 				break
 			}
 			*refs = append(*refs, ref)
+			s.trackFirstRef(ref)
 		}
 	}
 
@@ -231,6 +269,7 @@ func (s *Streamer) finalSync(refs *[]channel.MessageRef, lastChunks *[]string, r
 				return err
 			}
 			*refs = append(*refs, ref)
+			s.trackFirstRef(ref)
 		}
 	}
 

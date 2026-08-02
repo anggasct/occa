@@ -46,19 +46,20 @@ type pendingResponse struct {
 }
 
 type fakeRelayClient struct {
-	sessionID     string
-	lastMsg       string
-	rawMsg        string
-	lastCmd       string
-	providers     relay.Providers
-	providersErr  error
-	lastModel     *relay.ModelRef
-	providerCalls int
-	sendCalls     int
-	commands      []relay.CommandInfo
-	commandsErr   error
-	blockSend     chan struct{}
-	sessionSeq    int
+	sessionID       string
+	lastMsg         string
+	rawMsg          string
+	lastCmd         string
+	providers       relay.Providers
+	providersErr    error
+	lastModel       *relay.ModelRef
+	providerCalls   int
+	sendCalls       int
+	commands        []relay.CommandInfo
+	commandsErr     error
+	blockSend       chan struct{}
+	sessionSeq      int
+	deltaBeforeDone string
 
 	mu           sync.Mutex
 	responses    []pendingResponse
@@ -87,8 +88,29 @@ func (f *fakeRelayClient) SendMessage(_ context.Context, _, text string, model *
 	}
 	f.lastMsg = text
 	f.mu.Unlock()
-	f.finishResponse()
+	if f.deltaBeforeDone != "" {
+		f.finishResponseWithDelta(f.deltaBeforeDone)
+	} else {
+		f.finishResponse()
+	}
 	return nil
+}
+
+func (f *fakeRelayClient) finishResponseWithDelta(delta string) {
+	if f.blockSend != nil {
+		<-f.blockSend
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.responses) == 0 {
+		return
+	}
+	resp := f.responses[0]
+	f.responses = f.responses[1:]
+	resp.events <- relay.Event{Type: relay.EventDelta, Delta: delta}
+	resp.events <- relay.Event{Type: "done"}
+	close(resp.events)
+	close(resp.dispatchDone)
 }
 
 func (f *fakeRelayClient) finishResponse() {

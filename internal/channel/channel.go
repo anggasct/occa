@@ -57,6 +57,22 @@ type ChatCommandSetter interface {
 	SetChatCommands(commands []MenuCommand) error
 }
 
+// ReactionState is the lifecycle status of a reply message.
+type ReactionState int
+
+const (
+	ReactionProcessing ReactionState = iota // 👀
+	ReactionSuccess                         // ✅
+	ReactionError                           // ❌
+)
+
+// ReactionSetter is implemented by ReplyContexts that surface a reply
+// message's lifecycle as a reaction. Not every ReplyContext does — callers
+// type-assert and treat a missing implementation as "skip silently."
+type ReactionSetter interface {
+	SetReaction(ref MessageRef, state ReactionState) error
+}
+
 type MessageRef interface {
 	ID() string
 }
