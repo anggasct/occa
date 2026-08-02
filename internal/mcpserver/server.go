@@ -49,7 +49,7 @@ func (s *Server) handleScheduleTask(ctx context.Context, req *mcp.CallToolReques
 	platform, channelID, ok := s.tokens.Lookup(input.ScheduleToken)
 	if !ok {
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "Error: invalid or expired schedule token. Include the schedule_token from the OCCA context line at the end of the user's message."}},
+			Content: []mcp.Content{&mcp.TextContent{Text: "Error: invalid or expired schedule token. Include the schedule_token from the <occa:schedule_token> tag in the OCCA internal metadata line at the end of the user's message."}},
 			IsError: true,
 		}, input, nil
 	}
