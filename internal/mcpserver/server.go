@@ -31,7 +31,7 @@ func New(sched *scheduler.Scheduler, tokens *TokenStore) *Server {
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
 		Name:        "schedule_task",
-		Description: "Schedule a recurring background task. The prompt will be executed automatically at the specified cron schedule and results pushed to the chat. The schedule_token is provided in the OCCA context line at the end of the user's message — include it verbatim.",
+		Description: "Schedule a recurring background task. The prompt will be executed automatically at the specified cron schedule and results pushed to the chat. The schedule_token is provided in the <occa:schedule_token> tag of the OCCA internal metadata line at the end of the user's message — include it verbatim.",
 	}, s.handleScheduleTask)
 
 	s.mcpServer = mcpServer
@@ -39,7 +39,7 @@ func New(sched *scheduler.Scheduler, tokens *TokenStore) *Server {
 }
 
 type scheduleTaskInput struct {
-	ScheduleToken  string `json:"schedule_token" jsonschema:"the token from the OCCA context line at the end of the user's message"`
+	ScheduleToken  string `json:"schedule_token" jsonschema:"the token from the <occa:schedule_token> tag in the OCCA internal metadata line at the end of the user's message"`
 	CronExpression string `json:"cron_expression" jsonschema:"the 5-field cron expression (e.g. '0 9 * * 1-5' for weekdays at 9 AM)"`
 	Prompt         string `json:"prompt" jsonschema:"the prompt or instruction to execute at each scheduled run"`
 	HumanSchedule  string `json:"human_schedule" jsonschema:"human-readable description of the schedule (e.g. 'every weekday at 9 AM')"`
@@ -49,7 +49,7 @@ func (s *Server) handleScheduleTask(ctx context.Context, req *mcp.CallToolReques
 	platform, channelID, ok := s.tokens.Lookup(input.ScheduleToken)
 	if !ok {
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "Error: invalid or expired schedule token. Include the schedule_token from the OCCA context line at the end of the user's message."}},
+			Content: []mcp.Content{&mcp.TextContent{Text: "Error: invalid or expired schedule token. Include the schedule_token from the <occa:schedule_token> tag in the OCCA internal metadata line at the end of the user's message."}},
 			IsError: true,
 		}, input, nil
 	}

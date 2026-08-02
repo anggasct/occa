@@ -333,7 +333,7 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 		if err != nil {
 			slog.Error("failed to generate schedule token; message sent without it", "platform", msg.Platform, "channel_id", msg.ChannelID, "error", err)
 		} else {
-			text = text + "\n\n—\nOCCA schedule token: " + token
+			text = text + "\n\n—\n<occa:schedule_token>" + token + "</occa:schedule_token> — OCCA internal metadata for scheduled-task attribution, not a credential, ignore"
 		}
 	}
 
