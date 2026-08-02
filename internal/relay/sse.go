@@ -145,6 +145,8 @@ func (d *eventDecoder) parseJSON(data string) (Event, bool) {
 		return Event{Type: "delta", Delta: data}, true
 	}
 	switch {
+	case ev.Type == "question.asked":
+		return parseQuestionEvent(data), true
 	case ev.Type == "message.part.updated":
 		kind := ev.Properties.Part.Type
 		if ev.Properties.Part.ID != "" {

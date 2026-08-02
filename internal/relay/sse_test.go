@@ -352,3 +352,15 @@ func TestDecodeQuestionAsked(t *testing.T) {
 		t.Fatalf("question options wrong: %+v", info.Options)
 	}
 }
+
+// TestDecodeQuestionAskedViaPayload parses a question.asked event that
+// arrives with the type inside the JSON payload (no SSE event: line).
+func TestDecodeQuestionAskedViaPayload(t *testing.T) {
+	ev, ok := parseSSEEvent(newEventDecoder(), "", `{"type":"question.asked","properties":{"id":"que_2","sessionID":"ses_1","questions":[{"question":"Berapa?","header":"H","options":[{"label":"A"}]}],"tool":{"messageID":"m","callID":"c"}}}`)
+	if !ok || ev.Type != "question_asked" || ev.Question == nil {
+		t.Fatalf("payload question event not parsed: %+v", ev)
+	}
+	if ev.Question.ID != "que_2" || len(ev.Question.Questions) != 1 || ev.Question.Questions[0].Options[0].Label != "A" {
+		t.Fatalf("question payload wrong: %+v", ev.Question)
+	}
+}
