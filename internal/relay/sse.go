@@ -19,6 +19,7 @@ const MaxEventLineBytes = 1024*1024 + 64*1024
 func readSSE(ctx context.Context, r io.Reader, ch chan<- Event) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), MaxEventLineBytes+1)
+	decoder := newEventDecoder()
 	var eventType, data string
 	var hasFields bool
 
@@ -33,7 +34,7 @@ func readSSE(ctx context.Context, r io.Reader, ch chan<- Event) error {
 
 		if line == "" {
 			if hasFields {
-				if event, ok := parseSSEEvent(eventType, data); ok {
+				if event, ok := parseSSEEvent(decoder, eventType, data); ok {
 					select {
 					case ch <- event:
 					case <-ctx.Done():
@@ -73,9 +74,9 @@ func readSSE(ctx context.Context, r io.Reader, ch chan<- Event) error {
 	return nil
 }
 
-func parseSSEEvent(eventType, data string) (Event, bool) {
+func parseSSEEvent(decoder *eventDecoder, eventType, data string) (Event, bool) {
 	if eventType == "" {
-		return parseJSONEvent(data)
+		return decoder.parseJSON(data)
 	}
 	switch {
 	case strings.Contains(eventType, "permission.asked") || strings.Contains(eventType, "permission"):
@@ -91,23 +92,49 @@ func parseSSEEvent(eventType, data string) (Event, bool) {
 	}
 }
 
-// parseJSONEvent handles the current agent event stream, where the event
-// type lives inside the JSON payload rather than in an SSE event: line.
+// eventDecoder tracks each message part's type (as announced by
+// message.part.updated) so message.part.delta events can be attributed to
+// the right part. This is required because a part's own content field is
+// always named "text" regardless of the part's type — a ReasoningPart's
+// text and a TextPart's text both stream as field:"text" deltas, so field
+// name alone cannot distinguish reasoning (internal) from text (the actual
+// reply) content.
+type eventDecoder struct {
+	partKind map[string]string
+}
+
+func newEventDecoder() *eventDecoder {
+	return &eventDecoder{partKind: make(map[string]string)}
+}
+
+// parseJSON handles the current agent event stream, where the event type
+// lives inside the JSON payload rather than in an SSE event: line.
 // Bookkeeping events (heartbeats, session status) are skipped; text deltas
-// and the idle transition that marks completion are mapped to relay events.
-func parseJSONEvent(data string) (Event, bool) {
+// from text-typed parts and the idle transition that marks completion are
+// mapped to relay events.
+func (d *eventDecoder) parseJSON(data string) (Event, bool) {
 	var ev struct {
 		Type       string `json:"type"`
 		Properties struct {
-			Field string `json:"field"`
-			Delta string `json:"delta"`
+			Field  string `json:"field"`
+			Delta  string `json:"delta"`
+			PartID string `json:"partID"`
+			Part   struct {
+				ID   string `json:"id"`
+				Type string `json:"type"`
+			} `json:"part"`
 		} `json:"properties"`
 	}
 	if err := json.Unmarshal([]byte(data), &ev); err != nil {
 		return Event{Type: "delta", Delta: data}, true
 	}
 	switch {
-	case ev.Type == "message.part.delta" && ev.Properties.Field == "text":
+	case ev.Type == "message.part.updated":
+		if ev.Properties.Part.ID != "" {
+			d.partKind[ev.Properties.Part.ID] = ev.Properties.Part.Type
+		}
+		return Event{}, false
+	case ev.Type == "message.part.delta" && ev.Properties.Field == "text" && d.partKind[ev.Properties.PartID] == "text":
 		return Event{Type: "delta", Delta: ev.Properties.Delta}, true
 	case ev.Type == "session.idle":
 		return Event{Type: "done"}, true
