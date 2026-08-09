@@ -393,3 +393,36 @@ func TestCloseIdempotent(t *testing.T) {
 		t.Fatalf("second Close: %v", err)
 	}
 }
+
+func TestForceStop(t *testing.T) {
+	sp := newFakeSpawner()
+	m := newTestManager(t, testConfig(5, "4096-4100", time.Minute), sp)
+
+	inst1, err := m.Instance(context.Background(), "/repo/stop")
+	if err != nil {
+		t.Fatalf("Instance: %v", err)
+	}
+	inst1.End()
+
+	m.ForceStop("/repo/stop")
+
+	if sp.stopCount("/repo/stop") != 1 {
+		t.Fatalf("stopCount = %d, want 1", sp.stopCount("/repo/stop"))
+	}
+
+	inst2, err := m.Instance(context.Background(), "/repo/stop")
+	if err != nil {
+		t.Fatalf("Instance after ForceStop: %v", err)
+	}
+	inst2.End()
+
+	if inst1 == inst2 {
+		t.Fatal("ForceStop should cause next Instance call to spawn a new instance")
+	}
+	if sp.spawnCount() != 2 {
+		t.Fatalf("spawns = %d, want 2", sp.spawnCount())
+	}
+
+	// Calling ForceStop on non-existent workdir is a no-op.
+	m.ForceStop("/repo/unknown")
+}

@@ -50,6 +50,13 @@ type ReplyContext interface {
 	EditWithButtons(ref MessageRef, text string, buttons []Button) error
 }
 
+// MessageRemover is implemented by ReplyContexts that can delete a
+// previously sent message. Not every ReplyContext does — callers must
+// type-assert and skip silently.
+type MessageRemover interface {
+	Delete(ref MessageRef) error
+}
+
 // ChatCommandSetter is implemented by ReplyContexts that support per-chat
 // native command-menu registration. Not every ReplyContext does (e.g. a
 // Discord DM has no guild to scope to) — callers must type-assert and treat

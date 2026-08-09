@@ -2,12 +2,15 @@ package router
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/relay"
@@ -30,18 +33,19 @@ const (
 )
 
 type questionRecord struct {
-	token     string
-	client    relay.Client
-	platform  string
-	channelID string
-	sessionID string
-	requestID string
-	questions []relay.QuestionInfo
-	reply     channel.ReplyContext
-	origin    channel.MessageRef
-	state     questionState
-	createdAt time.Time
-	expiresAt time.Time
+	token         string
+	client        relay.Client
+	platform      string
+	channelID     string
+	sessionID     string
+	requestID     string
+	questions     []relay.QuestionInfo
+	reply         channel.ReplyContext
+	origin        channel.MessageRef
+	state         questionState
+	lastRetryText string
+	createdAt     time.Time
+	expiresAt     time.Time
 }
 
 type questionBroker struct {
@@ -148,12 +152,12 @@ func (b *questionBroker) HandleQuestionCallback(ctx context.Context, msg channel
 		if err := record.client.RejectQuestion(ctx, record.requestID); err != nil {
 			slog.Warn("question: reject failed", "platform", record.platform, "channel_id", record.channelID, "error", err)
 			b.resetPending(record)
-			return b.retry(record, msg, reply)
+			return b.retry(record, err)
 		}
 	} else {
 		if qIdx >= len(record.questions) || optIdx >= len(record.questions[qIdx].Options) {
 			b.resetPending(record)
-			return b.retry(record, msg, reply)
+			return b.retry(record, nil)
 		}
 		label := record.questions[qIdx].Options[optIdx].Label
 		// Build one answer entry per question. Unanswered questions must be
@@ -168,9 +172,19 @@ func (b *questionBroker) HandleQuestionCallback(ctx context.Context, msg channel
 		if err := record.client.AnswerQuestion(ctx, record.requestID, answers); err != nil {
 			slog.Warn("question: answer failed", "platform", record.platform, "channel_id", record.channelID, "error", err)
 			b.resetPending(record)
-			return b.retry(record, msg, reply)
+			return b.retry(record, err)
 		}
-		terminal = questionAnsweredLabel + ": " + label
+		if len(record.questions) > 1 {
+			var skipped []string
+			for i := range record.questions {
+				if i != qIdx {
+					skipped = append(skipped, strconv.Itoa(i+1))
+				}
+			}
+			terminal = fmt.Sprintf("✅ Soal %d: %s — soal %s dilewati (ketuk opsi buat menjawab, atau Skip).", qIdx+1, label, strings.Join(skipped, ", "))
+		} else {
+			terminal = questionAnsweredLabel + ": " + label
+		}
 	}
 
 	b.resolve(record)
@@ -182,18 +196,92 @@ func (b *questionBroker) HandleQuestionCallback(ctx context.Context, msg channel
 	return nil
 }
 
-func (b *questionBroker) retry(record *questionRecord, msg channel.IncomingMessage, reply channel.ReplyContext) error {
+func (b *questionBroker) retry(record *questionRecord, err error) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if record.state == questionHandling {
 		record.state = questionPending
 	}
-	if reply != nil && record.origin != nil {
-		if err := reply.EditWithButtons(record.origin, "⚠️ Could not submit the answer. Try again.", questionButtons(record.token, record.questions)); err != nil {
-			slog.Warn("question: retry view failed", "platform", record.platform, "channel_id", record.channelID, "error", err)
+	retryText := formatQuestionRetryMessage(err)
+	if record.lastRetryText == retryText {
+		return nil
+	}
+	if record.reply != nil && record.origin != nil {
+		if editErr := record.reply.EditWithButtons(record.origin, retryText, questionButtons(record.token, record.questions)); editErr != nil {
+			slog.Warn("question: retry view failed", "platform", record.platform, "channel_id", record.channelID, "error", editErr)
+			return nil
 		}
 	}
+	record.lastRetryText = retryText
 	return nil
+}
+
+func formatQuestionRetryMessage(err error) string {
+	const fallback = "⚠️ Could not submit the answer. Try again."
+	if err == nil {
+		return fallback
+	}
+
+	var reason string
+	switch {
+	case errors.Is(err, relay.ErrNotFound):
+		reason = "agent resource not found"
+	case errors.Is(err, relay.ErrTimeout):
+		reason = "agent request timed out"
+	case errors.Is(err, relay.ErrUnreachable):
+		reason = "agent unreachable"
+	default:
+		reason = err.Error()
+		reason = strings.TrimPrefix(reason, "relay: answer question: ")
+		reason = strings.TrimPrefix(reason, "relay: reject question: ")
+		reason = strings.TrimPrefix(reason, "relay: ")
+		reason = strings.TrimSpace(reason)
+	}
+
+	if reason == "" {
+		return fallback
+	}
+
+	if idx := strings.Index(reason, "{"); idx >= 0 {
+		var js struct {
+			Message string `json:"message"`
+			Error   string `json:"error"`
+			Detail  string `json:"detail"`
+		}
+		if jsonErr := json.Unmarshal([]byte(reason[idx:]), &js); jsonErr == nil {
+			if js.Message != "" {
+				reason = js.Message
+			} else if js.Error != "" {
+				reason = js.Error
+			} else if js.Detail != "" {
+				reason = js.Detail
+			} else {
+				return fallback
+			}
+		} else {
+			return fallback
+		}
+	}
+
+	reason = truncateRunes(reason, 100)
+
+	return fmt.Sprintf("⚠️ Gagal kirim jawaban — %s. Coba lagi atau ketuk Skip.", reason)
+}
+
+func truncateRunes(s string, max int) string {
+	if utf8.RuneCountInString(s) <= max {
+		return s
+	}
+	var count int
+	var byteIdx int
+	for idx := range s {
+		if count == max {
+			byteIdx = idx
+			break
+		}
+		count++
+	}
+	return s[:byteIdx] + "…"
 }
 
 func (b *questionBroker) resetPending(record *questionRecord) {

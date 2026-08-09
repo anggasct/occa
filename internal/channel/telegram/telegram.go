@@ -531,9 +531,24 @@ type messageRef struct {
 
 func (m messageRef) ID() string { return m.id }
 
+func (rc *replyContext) Delete(ref channel.MessageRef) error {
+	msgID := 0
+	refID := ref.ID()
+	if _, err := fmt.Sscanf(refID, "%d", &msgID); err != nil {
+		return fmt.Errorf("telegram: parse message id %q: %w", refID, err)
+	}
+
+	params := tgbotapi.Params{
+		"chat_id":    strconv.FormatInt(rc.chatID, 10),
+		"message_id": strconv.Itoa(msgID),
+	}
+	return rc.requestSilent("deleteMessage", params)
+}
+
 var (
 	_ channel.Channel           = (*Adapter)(nil)
 	_ channel.ReplyContext      = (*replyContext)(nil)
+	_ channel.MessageRemover    = (*replyContext)(nil)
 	_ channel.ChatCommandSetter = (*replyContext)(nil)
 	_ channel.MessageRef        = messageRef{}
 )

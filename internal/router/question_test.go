@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/relay"
@@ -61,10 +62,11 @@ func (c *questionClient) RejectQuestion(_ context.Context, requestID string) err
 }
 
 type questionReply struct {
-	mu     sync.Mutex
-	nextID int
-	sends  []permissionView
-	edits  []permissionView
+	mu       sync.Mutex
+	nextID   int
+	sends    []permissionView
+	edits    []permissionView
+	editFail error
 }
 
 func (r *questionReply) SendTyping() error { return nil }
@@ -90,6 +92,9 @@ func (r *questionReply) Edit(_ channel.MessageRef, text string) error {
 func (r *questionReply) EditWithButtons(_ channel.MessageRef, text string, buttons []channel.Button) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.editFail != nil {
+		return r.editFail
+	}
 	r.edits = append(r.edits, permissionView{ref: nil, text: text, buttons: buttons})
 	return nil
 }
@@ -233,11 +238,45 @@ func TestQuestionAnswerFailureKeepsPromptOpen(t *testing.T) {
 		t.Fatalf("handle: %v", err)
 	}
 	last := reply.edits[len(reply.edits)-1]
-	if !strings.Contains(last.text, "Try again") {
+	if !strings.Contains(last.text, "Gagal kirim jawaban") {
 		t.Fatalf("expected retry view, got %q", last.text)
 	}
 	if len(last.buttons) != 3 {
 		t.Fatalf("retry view must restore buttons")
+	}
+}
+
+func TestQuestionRetryGuardNoDuplicateEdits(t *testing.T) {
+	client := &questionClient{fail: errors.New("agent down")}
+	reply := &questionReply{}
+	h := newQuestionTestHandler(client, reply)
+
+	if err := h.Prompt(context.Background(), questionRequest()); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	token := strings.Split(reply.sends[0].buttons[0].Value, ":")[1]
+	msg := channel.IncomingMessage{
+		Platform:     "telegram",
+		ChannelID:    "chat-1",
+		IsCallback:   true,
+		CallbackData: "question:" + token + ":0:0",
+		CallbackRef:  reply.sends[0].ref,
+		ReplyCtx:     reply,
+	}
+
+	// 3 taps on the same failed state
+	for i := 0; i < 3; i++ {
+		if err := h.broker.HandleQuestionCallback(context.Background(), msg); err != nil {
+			t.Fatalf("handle tap %d: %v", i, err)
+		}
+	}
+
+	reply.mu.Lock()
+	editCount := len(reply.edits)
+	reply.mu.Unlock()
+
+	if editCount != 1 {
+		t.Fatalf("expected EditWithButtons called at most once per failure state, got %d edits", editCount)
 	}
 }
 
@@ -323,4 +362,156 @@ func TestQuestionAnswerMultipleQuestionsNoNilEntries(t *testing.T) {
 	if len(answers[1]) != 0 {
 		t.Fatalf("answers[1] = %v, want empty (unanswered)", answers[1])
 	}
+}
+
+func TestQuestionMultiQuestionTerminalText(t *testing.T) {
+	client := &questionClient{}
+	reply := &questionReply{}
+	h := newQuestionTestHandler(client, reply)
+
+	req := questionRequest()
+	req.Questions = append(req.Questions, relay.QuestionInfo{
+		Question: "Pilih database?",
+		Header:   "Database",
+		Options: []relay.QuestionOption{
+			{Label: "X"},
+			{Label: "Y"},
+		},
+	})
+	if err := h.Prompt(context.Background(), req); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	token := strings.Split(reply.sends[0].buttons[0].Value, ":")[1]
+	msg := channel.IncomingMessage{
+		Platform:     "telegram",
+		ChannelID:    "chat-1",
+		IsCallback:   true,
+		CallbackData: "question:" + token + ":0:1",
+		CallbackRef:  reply.sends[0].ref,
+		ReplyCtx:     reply,
+	}
+	if err := h.broker.HandleQuestionCallback(context.Background(), msg); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+
+	last := reply.edits[len(reply.edits)-1]
+	want := "✅ Soal 1: B — soal 2 dilewati (ketuk opsi buat menjawab, atau Skip)."
+	if last.text != want {
+		t.Fatalf("multi-question terminal text = %q, want %q", last.text, want)
+	}
+}
+
+func TestQuestionSingleQuestionTerminalTextUnchanged(t *testing.T) {
+	client := &questionClient{}
+	reply := &questionReply{}
+	h := newQuestionTestHandler(client, reply)
+
+	if err := h.Prompt(context.Background(), questionRequest()); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	token := strings.Split(reply.sends[0].buttons[0].Value, ":")[1]
+	msg := channel.IncomingMessage{
+		Platform:     "telegram",
+		ChannelID:    "chat-1",
+		IsCallback:   true,
+		CallbackData: "question:" + token + ":0:1",
+		CallbackRef:  reply.sends[0].ref,
+		ReplyCtx:     reply,
+	}
+	if err := h.broker.HandleQuestionCallback(context.Background(), msg); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+
+	last := reply.edits[len(reply.edits)-1]
+	want := "✅ Answered: B"
+	if last.text != want {
+		t.Fatalf("single-question terminal text = %q, want %q", last.text, want)
+	}
+}
+
+func TestFormatQuestionRetryMessageJSONParsing(t *testing.T) {
+	err := errors.New(`relay: answer question: unexpected status 400: {"message":"Expected a string starting with que, got x"}`)
+	got := formatQuestionRetryMessage(err)
+	want := "⚠️ Gagal kirim jawaban — Expected a string starting with que, got x. Coba lagi atau ketuk Skip."
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestTruncateRunes(t *testing.T) {
+	longString := strings.Repeat("🚀", 120)
+	result := truncateRunes(longString, 100)
+	if !utf8.ValidString(result) {
+		t.Fatalf("result is not valid UTF-8: %q", result)
+	}
+	if !strings.HasSuffix(result, "…") {
+		t.Fatalf("expected truncated string to end with '…', got %q", result)
+	}
+	if runeCount := utf8.RuneCountInString(result); runeCount != 101 {
+		t.Fatalf("rune count = %d, want 101", runeCount)
+	}
+}
+
+func TestFormatQuestionRetryMessageTruncatesRunes(t *testing.T) {
+	longErrMsg := errors.New("relay: answer question: unexpected status 400: " + strings.Repeat("🎉", 120))
+	got := formatQuestionRetryMessage(longErrMsg)
+	if !utf8.ValidString(got) {
+		t.Fatalf("formatted retry message is not valid UTF-8: %q", got)
+	}
+}
+
+func TestQuestionRetryGuardEditFailureRetries(t *testing.T) {
+	client := &questionClient{fail: errors.New("agent down")}
+	reply := &questionReply{editFail: errors.New("edit failed")}
+	h := newQuestionTestHandler(client, reply)
+
+	if err := h.Prompt(context.Background(), questionRequest()); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	token := strings.Split(reply.sends[0].buttons[0].Value, ":")[1]
+	msg := channel.IncomingMessage{
+		Platform:     "telegram",
+		ChannelID:    "chat-1",
+		IsCallback:   true,
+		CallbackData: "question:" + token + ":0:0",
+		CallbackRef:  reply.sends[0].ref,
+		ReplyCtx:     reply,
+	}
+
+	// 1st tap: edit fails, guard should NOT be set
+	if err := h.broker.HandleQuestionCallback(context.Background(), msg); err != nil {
+		t.Fatalf("handle tap 1: %v", err)
+	}
+	reply.mu.Lock()
+	if len(reply.edits) != 0 {
+		t.Fatalf("expected 0 successful edits, got %d", len(reply.edits))
+	}
+	reply.mu.Unlock()
+
+	// Clear edit failure so next attempt succeeds
+	reply.mu.Lock()
+	reply.editFail = nil
+	reply.mu.Unlock()
+
+	// 2nd tap: edit succeeds, guard IS set
+	if err := h.broker.HandleQuestionCallback(context.Background(), msg); err != nil {
+		t.Fatalf("handle tap 2: %v", err)
+	}
+	reply.mu.Lock()
+	if len(reply.edits) != 1 {
+		t.Fatalf("expected 1 successful edit after tap 2, got %d", len(reply.edits))
+	}
+	reply.mu.Unlock()
+
+	// 3rd tap: guard prevents duplicate edit
+	if err := h.broker.HandleQuestionCallback(context.Background(), msg); err != nil {
+		t.Fatalf("handle tap 3: %v", err)
+	}
+	reply.mu.Lock()
+	if len(reply.edits) != 1 {
+		t.Fatalf("expected guard to prevent tap 3 edit, got %d edits", len(reply.edits))
+	}
+	reply.mu.Unlock()
 }

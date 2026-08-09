@@ -7,7 +7,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 )
 
 func TestCreateSession(t *testing.T) {
@@ -281,5 +284,57 @@ func TestAnswerQuestionPostsPayload(t *testing.T) {
 	}
 	if len(decoded.Answers) != 2 || decoded.Answers[0][0] != "A" || len(decoded.Answers[1]) != 0 {
 		t.Fatalf("answers = %v", decoded.Answers)
+	}
+}
+
+func TestNewHTTPClientTimeout(t *testing.T) {
+	c := NewHTTPClient("http://localhost:8080")
+	if c.http.Timeout != 3*time.Minute {
+		t.Fatalf("timeout = %v, want 3m", c.http.Timeout)
+	}
+}
+
+func TestAnswerQuestionErrorBodyReturned(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"message":"Expected a string starting with que, got x"}`))
+	}))
+	defer srv.Close()
+
+	c := NewHTTPClient(srv.URL)
+	err := c.AnswerQuestion(context.Background(), "que_1", [][]string{{"A"}})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "Expected a string starting with que") {
+		t.Fatalf("expected error to contain body details, got %q", err.Error())
+	}
+}
+
+func TestRejectQuestionErrorBodyReturned(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"message":"Question already resolved"}`))
+	}))
+	defer srv.Close()
+
+	c := NewHTTPClient(srv.URL)
+	err := c.RejectQuestion(context.Background(), "que_1")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "Question already resolved") {
+		t.Fatalf("expected error to contain body details, got %q", err.Error())
+	}
+}
+
+func TestTruncateBodyRuneSafe(t *testing.T) {
+	longBody := []byte(strings.Repeat("🌍", 600))
+	truncated := truncateBody(longBody)
+	if !utf8.ValidString(truncated) {
+		t.Fatalf("truncated string is invalid UTF-8")
+	}
+	if !strings.Contains(truncated, "… (2400 bytes total)") {
+		t.Fatalf("expected byte count note in truncated string, got %q", truncated)
 	}
 }

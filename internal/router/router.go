@@ -50,11 +50,13 @@ type AgentInstance interface {
 	Client() relay.Client
 	End()
 	PID() int
+	Workdir() string
 }
 
 // InstanceProvider resolves an AgentInstance for a working directory.
 type InstanceProvider interface {
 	Instance(ctx context.Context, workdir string) (AgentInstance, error)
+	ForceStop(workdir string)
 }
 
 type Router struct {
