@@ -194,12 +194,25 @@ func progressNotice(seconds int64) string {
 	return fmt.Sprintf("⏳ masih ngerjain... (%dm)", minutes)
 }
 
+var progressTickerInterval = 60 * time.Second
+
 func startProgressTicker(ctx context.Context, reply channel.ReplyContext, stopCh <-chan struct{}) {
-	ticker := time.NewTicker(60 * time.Second)
+	ticker := time.NewTicker(progressTickerInterval)
 	defer ticker.Stop()
 
 	var elapsed int64
 	var noticeRef channel.MessageRef
+	var removed bool
+
+	removeNotice := func() {
+		if !removed && noticeRef != nil {
+			removed = true
+			if remover, ok := reply.(channel.MessageRemover); ok {
+				_ = remover.Delete(noticeRef)
+			}
+		}
+	}
+	defer removeNotice()
 
 	for {
 		select {

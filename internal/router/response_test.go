@@ -506,3 +506,57 @@ func TestResponseCoordinatorAllowsDifferentChannels(t *testing.T) {
 		t.Fatalf("send calls = first %d, second %d", firstCalls, secondCalls)
 	}
 }
+
+type removerReply struct {
+	*responseReply
+	deleted []channel.MessageRef
+}
+
+func (r *removerReply) Delete(ref channel.MessageRef) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.deleted = append(r.deleted, ref)
+	return nil
+}
+
+var _ channel.MessageRemover = (*removerReply)(nil)
+
+func TestProgressTickerDeletesNoticeOnStop(t *testing.T) {
+	origInterval := progressTickerInterval
+	progressTickerInterval = 5 * time.Millisecond
+	defer func() { progressTickerInterval = origInterval }()
+
+	reply := &removerReply{responseReply: newResponseReply()}
+	stopCh := make(chan struct{})
+
+	go startProgressTicker(context.Background(), reply, stopCh)
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		reply.mu.Lock()
+		sends := len(reply.sends)
+		reply.mu.Unlock()
+		if sends > 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	reply.mu.Lock()
+	if len(reply.sends) == 0 {
+		reply.mu.Unlock()
+		t.Fatal("ticker did not send progress notice")
+	}
+	reply.mu.Unlock()
+
+	close(stopCh)
+	time.Sleep(20 * time.Millisecond)
+
+	reply.mu.Lock()
+	deletedCount := len(reply.deleted)
+	reply.mu.Unlock()
+
+	if deletedCount != 1 {
+		t.Fatalf("expected Delete called once, got %d", deletedCount)
+	}
+}

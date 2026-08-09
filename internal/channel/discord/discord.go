@@ -717,9 +717,14 @@ type messageRef struct {
 
 func (m messageRef) ID() string { return m.id }
 
+func (rc *replyContext) Delete(ref channel.MessageRef) error {
+	return rc.session.ChannelMessageDelete(rc.channelID, ref.ID())
+}
+
 var (
 	_ channel.Channel           = (*Adapter)(nil)
 	_ channel.ReplyContext      = (*replyContext)(nil)
+	_ channel.MessageRemover    = (*replyContext)(nil)
 	_ channel.ChatCommandSetter = (*replyContext)(nil)
 	_ channel.ReactionSetter    = (*replyContext)(nil)
 	_ channel.MessageRef        = messageRef{}

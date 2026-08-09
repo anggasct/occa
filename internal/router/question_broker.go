@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/relay"
@@ -205,12 +206,13 @@ func (b *questionBroker) retry(record *questionRecord, err error) error {
 	if record.lastRetryText == retryText {
 		return nil
 	}
-	record.lastRetryText = retryText
 	if record.reply != nil && record.origin != nil {
 		if editErr := record.reply.EditWithButtons(record.origin, retryText, questionButtons(record.token, record.questions)); editErr != nil {
 			slog.Warn("question: retry view failed", "platform", record.platform, "channel_id", record.channelID, "error", editErr)
+			return nil
 		}
 	}
+	record.lastRetryText = retryText
 	return nil
 }
 
@@ -240,13 +242,13 @@ func formatQuestionRetryMessage(err error) string {
 		return fallback
 	}
 
-	if strings.HasPrefix(reason, "{") || strings.Contains(reason, "{\"") {
+	if idx := strings.Index(reason, "{"); idx >= 0 {
 		var js struct {
 			Message string `json:"message"`
 			Error   string `json:"error"`
 			Detail  string `json:"detail"`
 		}
-		if jsonErr := json.Unmarshal([]byte(reason), &js); jsonErr == nil {
+		if jsonErr := json.Unmarshal([]byte(reason[idx:]), &js); jsonErr == nil {
 			if js.Message != "" {
 				reason = js.Message
 			} else if js.Error != "" {
@@ -261,11 +263,25 @@ func formatQuestionRetryMessage(err error) string {
 		}
 	}
 
-	if len(reason) > 100 {
-		reason = reason[:100] + "…"
-	}
+	reason = truncateRunes(reason, 100)
 
 	return fmt.Sprintf("⚠️ Gagal kirim jawaban — %s. Coba lagi atau ketuk Skip.", reason)
+}
+
+func truncateRunes(s string, max int) string {
+	if utf8.RuneCountInString(s) <= max {
+		return s
+	}
+	var count int
+	var byteIdx int
+	for idx := range s {
+		if count == max {
+			byteIdx = idx
+			break
+		}
+		count++
+	}
+	return s[:byteIdx] + "…"
 }
 
 func (b *questionBroker) resetPending(record *questionRecord) {

@@ -343,7 +343,7 @@ func (c *HTTPClient) AnswerQuestion(ctx context.Context, requestID string, answe
 		// details (e.g. "Expected a string starting with que") are the only
 		// way to diagnose why the agent rejects a reply.
 		slog.Warn("relay: answer question rejected", "request_id", requestID, "status", resp.StatusCode, "body", truncateBody(body))
-		return fmt.Errorf("relay: answer question: unexpected status %d", resp.StatusCode)
+		return fmt.Errorf("relay: answer question: unexpected status %d: %s", resp.StatusCode, truncateBody(body))
 	}
 	return nil
 }
@@ -358,7 +358,7 @@ func (c *HTTPClient) RejectQuestion(ctx context.Context, requestID string) error
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		slog.Warn("relay: reject question rejected", "request_id", requestID, "status", resp.StatusCode, "body", truncateBody(body))
-		return fmt.Errorf("relay: reject question: unexpected status %d", resp.StatusCode)
+		return fmt.Errorf("relay: reject question: unexpected status %d: %s", resp.StatusCode, truncateBody(body))
 	}
 	return nil
 }
@@ -367,10 +367,20 @@ func (c *HTTPClient) RejectQuestion(ctx context.Context, requestID string) error
 // response cannot flood the log.
 func truncateBody(b []byte) string {
 	const max = 512
-	if len(b) <= max {
-		return string(b)
+	s := string(b)
+	if utf8.RuneCountInString(s) <= max {
+		return s
 	}
-	return string(b[:max]) + fmt.Sprintf("… (%d bytes total)", len(b))
+	var count int
+	var byteIdx int
+	for idx := range s {
+		if count == max {
+			byteIdx = idx
+			break
+		}
+		count++
+	}
+	return s[:byteIdx] + fmt.Sprintf("… (%d bytes total)", len(b))
 }
 
 func (c *HTTPClient) Events(ctx context.Context, sessionID string) (<-chan Event, error) {
