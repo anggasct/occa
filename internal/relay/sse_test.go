@@ -455,6 +455,57 @@ func TestDecoderToolContextExtraction(t *testing.T) {
 	}
 }
 
+func TestDecoderToolSamePartDedupe(t *testing.T) {
+	// opencode streams several message.part.updated events per tool part
+	// (pending → running → completed). The first event may arrive without
+	// state.input; when the input arrives later for the same part, the decoder
+	// must emit exactly one follow-up tool notice marked ToolSamePart so the
+	// streamer updates the existing bubble instead of starting a new one.
+	updated := func(partID, tool, stateInput string) string {
+		if stateInput != "" {
+			return `{"type":"message.part.updated","properties":{"part":{"id":"` + partID + `","type":"tool","tool":"` + tool + `","state":{"input":` + stateInput + `}}}}`
+		}
+		return `{"type":"message.part.updated","properties":{"part":{"id":"` + partID + `","type":"tool","tool":"` + tool + `"}}}`
+	}
+
+	decoder := newEventDecoder()
+
+	// 1st event for part p1: pending, no input yet → bubble "⚙️ bash".
+	ev, ok := parseSSEEvent(decoder, "", updated("p1", "bash", ""))
+	if !ok || ev.Type != EventTool {
+		t.Fatalf("first event: got ok=%v type=%v, want tool event", ok, ev.Type)
+	}
+	if ev.ToolSamePart {
+		t.Fatalf("first event must not be same-part")
+	}
+
+	// 2nd event for p1: running, command arrived → update-in-place signal.
+	ev, ok = parseSSEEvent(decoder, "", updated("p1", "bash", `{"command":"go test ./..."}`))
+	if !ok || ev.Type != EventTool {
+		t.Fatalf("second event: got ok=%v type=%v, want tool event", ok, ev.Type)
+	}
+	if !ev.ToolSamePart {
+		t.Fatalf("second event must be same-part update")
+	}
+	if ev.ToolContext != "go test ./..." {
+		t.Fatalf("ToolContext = %q, want %q", ev.ToolContext, "go test ./...")
+	}
+
+	// 3rd event for p1: completed with identical input → dedupe, no event.
+	if ev, ok = parseSSEEvent(decoder, "", updated("p1", "bash", `{"command":"go test ./..."}`)); ok {
+		t.Fatalf("duplicate identical event for same part must be dropped, got type=%v", ev.Type)
+	}
+
+	// A different part with the same tool must be a fresh (non-same-part) event.
+	ev, ok = parseSSEEvent(decoder, "", updated("p2", "bash", `{"command":"go vet ./..."}`))
+	if !ok || ev.Type != EventTool {
+		t.Fatalf("new part event: got ok=%v type=%v, want tool event", ok, ev.Type)
+	}
+	if ev.ToolSamePart {
+		t.Fatalf("new part must not be same-part update")
+	}
+}
+
 func TestNonToolEventsNeverLeakToolContext(t *testing.T) {
 	decoder := newEventDecoder()
 	parseSSEEvent(decoder, "", `{"type":"message.part.updated","properties":{"part":{"id":"p1","type":"text"}}}`)

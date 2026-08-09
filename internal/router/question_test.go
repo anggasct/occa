@@ -16,6 +16,9 @@ type questionClient struct {
 	answered []string
 	rejected []string
 	fail     error
+	// lastAnswers captures the full answers slice passed to AnswerQuestion
+	// so tests can assert no nil/empty entry is ever sent.
+	lastAnswers [][]string
 }
 
 func (c *questionClient) CreateSession(_ context.Context) (string, error) { return "ses-1", nil }
@@ -43,6 +46,7 @@ func (c *questionClient) AnswerQuestion(_ context.Context, requestID string, ans
 		return c.fail
 	}
 	c.answered = append(c.answered, requestID+"|"+strings.Join(answers[0], ","))
+	c.lastAnswers = append([][]string(nil), answers...)
 	return nil
 }
 
@@ -263,5 +267,60 @@ func TestQuestionCallbackFromWrongOriginExpires(t *testing.T) {
 	defer client.mu.Unlock()
 	if len(client.answered)+len(client.rejected) != 0 {
 		t.Fatalf("no answer should be submitted for a bad token")
+	}
+}
+
+func TestQuestionAnswerMultipleQuestionsNoNilEntries(t *testing.T) {
+	// Regression: with more than one question, unanswered questions used to be
+	// left as nil in the answers slice. nil marshals to JSON null and opencode
+	// rejects it with HTTP 400 ("Expected QuestionAnswer, got null"), which
+	// made option taps fail. Every entry must be a non-nil (possibly empty)
+	// string slice.
+	client := &questionClient{}
+	reply := &questionReply{}
+	h := newQuestionTestHandler(client, reply)
+
+	req := questionRequest()
+	req.Questions = append(req.Questions, relay.QuestionInfo{
+		Question: "Pilih database?",
+		Header:   "Database",
+		Options: []relay.QuestionOption{
+			{Label: "X"},
+			{Label: "Y"},
+		},
+	})
+	if err := h.Prompt(context.Background(), req); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	// Answer the first question (qIdx=0, optIdx=1 → label B).
+	token := strings.Split(reply.sends[0].buttons[0].Value, ":")[1]
+	msg := channel.IncomingMessage{
+		Platform:     "telegram",
+		ChannelID:    "chat-1",
+		IsCallback:   true,
+		CallbackData: "question:" + token + ":0:1",
+		CallbackRef:  reply.sends[0].ref,
+		ReplyCtx:     reply,
+	}
+	if err := h.broker.HandleQuestionCallback(context.Background(), msg); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+
+	client.mu.Lock()
+	answers := append([][]string(nil), client.lastAnswers...)
+	client.mu.Unlock()
+	if len(answers) != 2 {
+		t.Fatalf("answers len = %d, want 2 (one per question)", len(answers))
+	}
+	for i, a := range answers {
+		if a == nil {
+			t.Fatalf("answers[%d] is nil — would marshal to JSON null and cause HTTP 400", i)
+		}
+	}
+	if len(answers[0]) != 1 || answers[0][0] != "B" {
+		t.Fatalf("answers[0] = %v, want [B]", answers[0])
+	}
+	if len(answers[1]) != 0 {
+		t.Fatalf("answers[1] = %v, want empty (unanswered)", answers[1])
 	}
 }
