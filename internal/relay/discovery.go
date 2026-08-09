@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"time"
 )
 
@@ -22,6 +23,14 @@ var requiredEndpoints = []string{
 	"/session/{id}/message",
 	"/session/{id}/command",
 	"/event",
+}
+
+var pathParamRegexp = regexp.MustCompile(`\{[^}]+\}`)
+
+// normalizePath replaces path parameter placeholders (e.g. {id}, {sessionID})
+// with a canonical placeholder ({}) to enable parameter-name-agnostic path matching.
+func normalizePath(p string) string {
+	return pathParamRegexp.ReplaceAllString(p, "{}")
 }
 
 func Discover(ctx context.Context, baseURL string) (*OpenAPIDoc, error) {
@@ -49,9 +58,14 @@ func Discover(ctx context.Context, baseURL string) (*OpenAPIDoc, error) {
 }
 
 func (d *OpenAPIDoc) MissingEndpoints() []string {
+	docPaths := make(map[string]struct{}, len(d.Paths))
+	for p := range d.Paths {
+		docPaths[normalizePath(p)] = struct{}{}
+	}
+
 	var missing []string
 	for _, ep := range requiredEndpoints {
-		if _, ok := d.Paths[ep]; !ok {
+		if _, ok := docPaths[normalizePath(ep)]; !ok {
 			missing = append(missing, ep)
 		}
 	}
