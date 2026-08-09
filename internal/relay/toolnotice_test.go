@@ -127,12 +127,89 @@ func TestToolBubblesPersistAfterDone(t *testing.T) {
 
 // TestFormatToolLabel: counts render only above one.
 func TestFormatToolLabel(t *testing.T) {
-	if got := formatToolLabel("glob", 1); got != "⚙️ glob" {
+	if got := formatToolLabel("glob", "", 1); got != "⚙️ glob" {
 		t.Fatalf("formatToolLabel(1) = %q", got)
 	}
-	if got := formatToolLabel("glob", 3); got != "⚙️ glob ×3" {
+	if got := formatToolLabel("glob", "", 3); got != "⚙️ glob ×3" {
 		t.Fatalf("formatToolLabel(3) = %q", got)
 	}
+}
+
+func TestNormalizeToolContext(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"empty", "", ""},
+		{"whitespace only", "   \n\t  ", ""},
+		{"normal text", "internal/relay/streamer.go", "internal/relay/streamer.go"},
+		{"collapse whitespace and newlines", "  go   test\n\t ./...  ", "go test ./..."},
+		{"exact 40 runes", "1234567890123456789012345678901234567890", "1234567890123456789012345678901234567890"},
+		{"over 40 runes truncated to 40 with ellipsis", "12345678901234567890123456789012345678901", "123456789012345678901234567890123456789…"},
+		{"unicode multi-byte runes over 40 truncated", "αβγδεζηθικλμνξοπρστυφχψωαβγδεζηθικλμνξοπρστυφχψω", "αβγδεζηθικλμνξοπρστυφχψωαβγδεζηθικλμνξο…"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := normalizeToolContext(c.raw)
+			if got != c.want {
+				t.Fatalf("normalizeToolContext(%q) = %q, want %q", c.raw, got, c.want)
+			}
+			if runeCount := len([]rune(got)); runeCount > maxToolContextRunes {
+				t.Fatalf("rune count = %d, exceeds max %d", runeCount, maxToolContextRunes)
+			}
+		})
+	}
+}
+
+func TestFormatToolLabelWithContext(t *testing.T) {
+	if got := formatToolLabel("glob", "", 1); got != "⚙️ glob" {
+		t.Fatalf("formatToolLabel(glob, empty, 1) = %q", got)
+	}
+	if got := formatToolLabel("glob", "", 3); got != "⚙️ glob ×3" {
+		t.Fatalf("formatToolLabel(glob, empty, 3) = %q", got)
+	}
+	if got := formatToolLabel("read", "main.go", 1); got != "⚙️ read: main.go" {
+		t.Fatalf("formatToolLabel(read, main.go, 1) = %q", got)
+	}
+	if got := formatToolLabel("read", "main.go", 3); got != "⚙️ read: main.go ×3" {
+		t.Fatalf("formatToolLabel(read, main.go, 3) = %q", got)
+	}
+}
+
+func TestToolBubbleWithContext(t *testing.T) {
+	t.Run("same tool and context edits in place", func(t *testing.T) {
+		got := runToolEvents(t,
+			Event{Type: EventTool, Delta: "read", ToolContext: "main.go"},
+			Event{Type: EventTool, Delta: "read", ToolContext: "main.go"},
+		)
+		want := []string{"⚙️ read: main.go ×2"}
+		if len(got) != 1 || got[0] != want[0] {
+			t.Fatalf("notices = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("same tool with different context starts new bubble", func(t *testing.T) {
+		got := runToolEvents(t,
+			Event{Type: EventTool, Delta: "read", ToolContext: "file1.go"},
+			Event{Type: EventTool, Delta: "read", ToolContext: "file2.go"},
+		)
+		want := []string{"⚙️ read: file1.go", "⚙️ read: file2.go"}
+		if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+			t.Fatalf("notices = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("unnormalized context whitespace collapse matches same bubble", func(t *testing.T) {
+		got := runToolEvents(t,
+			Event{Type: EventTool, Delta: "read", ToolContext: " main.go \n"},
+			Event{Type: EventTool, Delta: "read", ToolContext: "main.go"},
+		)
+		want := []string{"⚙️ read: main.go ×2"}
+		if len(got) != 1 || got[0] != want[0] {
+			t.Fatalf("notices = %v, want %v", got, want)
+		}
+	})
 }
 
 // TestToolBubbleNonConsecutiveReset: the same tool separated by other tools

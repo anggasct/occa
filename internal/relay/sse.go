@@ -121,6 +121,24 @@ func isStreamKind(kind string) bool {
 	return false
 }
 
+func extractToolContext(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var input map[string]any
+	if err := json.Unmarshal(raw, &input); err != nil {
+		return ""
+	}
+	for _, key := range []string{"filePath", "command", "path"} {
+		if val, ok := input[key]; ok {
+			if s, ok := val.(string); ok && strings.TrimSpace(s) != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
 // parseJSON handles the current agent event stream, where the event type
 // lives inside the JSON payload rather than in an SSE event: line.
 // Bookkeeping events (heartbeats, session status) are skipped; text deltas
@@ -135,9 +153,12 @@ func (d *eventDecoder) parseJSON(data string) (Event, bool) {
 			Delta  string `json:"delta"`
 			PartID string `json:"partID"`
 			Part   struct {
-				ID   string `json:"id"`
-				Type string `json:"type"`
-				Tool string `json:"tool"`
+				ID    string `json:"id"`
+				Type  string `json:"type"`
+				Tool  string `json:"tool"`
+				State struct {
+					Input json.RawMessage `json:"input"`
+				} `json:"state"`
 			} `json:"part"`
 		} `json:"properties"`
 	}
@@ -159,7 +180,8 @@ func (d *eventDecoder) parseJSON(data string) (Event, bool) {
 		d.activeKind = kind
 		switch {
 		case kind == "tool":
-			return Event{Type: EventTool, Delta: ev.Properties.Part.Tool}, true
+			toolCtx := extractToolContext(ev.Properties.Part.State.Input)
+			return Event{Type: EventTool, Delta: ev.Properties.Part.Tool, ToolContext: toolCtx}, true
 		case prev == "" || kind == prev:
 			return Event{}, false
 		case prev == "text" || kind == "text":

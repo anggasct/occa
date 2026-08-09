@@ -101,6 +101,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 	// new phase. bubbleCount/workingShown persist for the whole response.
 	var (
 		curTool      string
+		curContext   string
 		curRef       channel.MessageRef
 		curCount     int
 		bubbleCount  int
@@ -155,6 +156,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 			switch ev.Type {
 			case EventDelta:
 				curTool = ""
+				curContext = ""
 				buf.WriteString(ev.Delta)
 				dirty = true
 			case EventDone:
@@ -176,6 +178,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				return fmt.Errorf("%w: %s", ErrStreamFailed, ev.Delta)
 			case EventSegment:
 				curTool = ""
+				curContext = ""
 				if buf.Len() > 0 {
 					slog.Debug("streaming: segment break", "finalized_len", buf.Len())
 					s.finalizeSegment(&refs, &lastChunks, buf.String())
@@ -184,9 +187,10 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 			case EventTool:
 				// Live tool bubbles: the first tool of a phase finalizes the
 				// current preview, then consecutive repeats of the same tool
-				// edit that bubble in place with a count. A different tool
-				// starts a new bubble. After 5 bubbles the cap kicks in and a
-				// single working indicator keeps the chat visibly active.
+				// with the same context edit that bubble in place with a count.
+				// A different tool or context starts a new bubble. After 5
+				// bubbles the cap kicks in and a single working indicator keeps
+				// the chat visibly active.
 				if curTool == "" && buf.Len() > 0 {
 					s.finalizeSegment(&refs, &lastChunks, buf.String())
 					buf.Reset()
@@ -195,12 +199,17 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				if name == "" {
 					name = "Tool call"
 				}
-				if name == curTool {
+				ctxStr := normalizeToolContext(ev.ToolContext)
+				if name == curTool && ctxStr == curContext {
 					curCount++
-					if err := s.reply.Edit(curRef, formatToolLabel(name, curCount)); err != nil {
+					if err := s.reply.Edit(curRef, formatToolLabel(name, ctxStr, curCount)); err != nil {
 						slog.Warn("streaming: tool notice edit failed", "tool", name, "error", err)
 					}
-					slog.Debug("streaming: tool repeat", "tool", name, "count", curCount)
+					if ctxStr != "" {
+						slog.Debug("streaming: tool repeat", "tool", name, "context", ctxStr, "count", curCount)
+					} else {
+						slog.Debug("streaming: tool repeat", "tool", name, "count", curCount)
+					}
 					break
 				}
 				if bubbleCount >= maxToolBubbles {
@@ -211,15 +220,19 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 					slog.Debug("streaming: tool bubble cap reached", "tool", name)
 					break
 				}
-				ref, err := s.reply.Send(formatToolLabel(name, 1))
+				ref, err := s.reply.Send(formatToolLabel(name, ctxStr, 1))
 				if err != nil {
 					slog.Warn("streaming: tool notice send failed", "tool", name, "error", err)
 					break
 				}
 				s.trackFirstRef(ref)
-				curTool, curRef, curCount = name, ref, 1
+				curTool, curContext, curRef, curCount = name, ctxStr, ref, 1
 				bubbleCount++
-				slog.Debug("streaming: tool bubble", "tool", name)
+				if ctxStr != "" {
+					slog.Debug("streaming: tool bubble", "tool", name, "context", ctxStr)
+				} else {
+					slog.Debug("streaming: tool bubble", "tool", name)
+				}
 			case "permission_asked":
 				if ev.Permission != nil {
 					if s.permissionHandler != nil {
@@ -262,9 +275,31 @@ const maxToolBubbles = 5
 
 const workingIndicator = "🔄 Working…"
 
-// formatToolLabel renders one tool bubble, with its repeat count when it ran
-// more than once in the current phase.
-func formatToolLabel(name string, count int) string {
+const maxToolContextRunes = 40
+
+func normalizeToolContext(raw string) string {
+	fields := strings.Fields(raw)
+	if len(fields) == 0 {
+		return ""
+	}
+	s := strings.Join(fields, " ")
+	runes := []rune(s)
+	if len(runes) > maxToolContextRunes {
+		return string(runes[:maxToolContextRunes-1]) + "…"
+	}
+	return s
+}
+
+// formatToolLabel renders one tool bubble, with its context and repeat count when
+// it ran more than once in the current phase.
+func formatToolLabel(name, context string, count int) string {
+	ctx := normalizeToolContext(context)
+	if ctx != "" {
+		if count > 1 {
+			return fmt.Sprintf("⚙️ %s: %s ×%d", name, ctx, count)
+		}
+		return fmt.Sprintf("⚙️ %s: %s", name, ctx)
+	}
 	if count > 1 {
 		return fmt.Sprintf("⚙️ %s ×%d", name, count)
 	}
