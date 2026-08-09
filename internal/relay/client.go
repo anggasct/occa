@@ -77,11 +77,12 @@ const (
 )
 
 type Event struct {
-	Type       string
-	Delta      string
-	Err        error
-	Permission *PermissionRequest
-	Question   *QuestionRequest
+	Type        string
+	Delta       string
+	ToolContext string // file or command being executed (empty when none)
+	Err         error
+	Permission  *PermissionRequest
+	Question    *QuestionRequest
 }
 
 type PermissionRequest struct {

@@ -364,3 +364,108 @@ func TestDecodeQuestionAskedViaPayload(t *testing.T) {
 		t.Fatalf("question payload wrong: %+v", ev.Question)
 	}
 }
+
+func TestDecoderToolContextExtraction(t *testing.T) {
+	updated := func(partID, tool, stateInput string) string {
+		if stateInput != "" {
+			return `{"type":"message.part.updated","properties":{"part":{"id":"` + partID + `","type":"tool","tool":"` + tool + `","state":{"input":` + stateInput + `}}}}`
+		}
+		return `{"type":"message.part.updated","properties":{"part":{"id":"` + partID + `","type":"tool","tool":"` + tool + `"}}}`
+	}
+
+	cases := []struct {
+		name        string
+		payload     string
+		wantTool    string
+		wantContext string
+	}{
+		{
+			name:        "filePath prioritized",
+			payload:     updated("p1", "read", `{"filePath":"internal/relay/sse.go","command":"ls","path":"internal"}`),
+			wantTool:    "read",
+			wantContext: "internal/relay/sse.go",
+		},
+		{
+			name:        "command used when filePath absent",
+			payload:     updated("p2", "bash", `{"command":"go test ./...","path":"internal"}`),
+			wantTool:    "bash",
+			wantContext: "go test ./...",
+		},
+		{
+			name:        "path used when filePath and command absent",
+			payload:     updated("p3", "grep", `{"path":"internal/relay"}`),
+			wantTool:    "grep",
+			wantContext: "internal/relay",
+		},
+		{
+			name:        "empty filePath falls back to command",
+			payload:     updated("p4", "bash", `{"filePath":"","command":"git status"}`),
+			wantTool:    "bash",
+			wantContext: "git status",
+		},
+		{
+			name:        "non-string value for priority key skipped",
+			payload:     updated("p5", "list", `{"filePath":123,"path":"pkg/relay"}`),
+			wantTool:    "list",
+			wantContext: "pkg/relay",
+		},
+		{
+			name:        "empty input object yields empty context",
+			payload:     updated("p6", "read", `{}`),
+			wantTool:    "read",
+			wantContext: "",
+		},
+		{
+			name:        "unknown keys only yields empty context",
+			payload:     updated("p7", "custom", `{"foo":"bar"}`),
+			wantTool:    "custom",
+			wantContext: "",
+		},
+		{
+			name:        "missing state input yields empty context",
+			payload:     updated("p8", "read", ""),
+			wantTool:    "read",
+			wantContext: "",
+		},
+		{
+			name:        "malformed input yields empty context defensively",
+			payload:     updated("p9", "read", `"not an object"`),
+			wantTool:    "read",
+			wantContext: "",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			decoder := newEventDecoder()
+			ev, ok := parseSSEEvent(decoder, "", c.payload)
+			if !ok {
+				t.Fatalf("expected event, got none")
+			}
+			if ev.Type != EventTool {
+				t.Fatalf("event type = %q, want %q", ev.Type, EventTool)
+			}
+			if ev.Delta != c.wantTool {
+				t.Fatalf("tool delta = %q, want %q", ev.Delta, c.wantTool)
+			}
+			if ev.ToolContext != c.wantContext {
+				t.Fatalf("ToolContext = %q, want %q", ev.ToolContext, c.wantContext)
+			}
+		})
+	}
+}
+
+func TestNonToolEventsNeverLeakToolContext(t *testing.T) {
+	decoder := newEventDecoder()
+	parseSSEEvent(decoder, "", `{"type":"message.part.updated","properties":{"part":{"id":"p1","type":"text"}}}`)
+
+	deltaEv, ok := parseSSEEvent(decoder, "", `{"type":"message.part.delta","properties":{"partID":"p1","field":"text","delta":"hi"}}`)
+	if !ok || deltaEv.ToolContext != "" {
+		t.Fatalf("delta event ToolContext = %q, want empty", deltaEv.ToolContext)
+	}
+
+	doneEv, ok := parseSSEEvent(decoder, "", `{"type":"session.idle","properties":{}}`)
+	if !ok || doneEv.ToolContext != "" {
+		t.Fatalf("done event ToolContext = %q, want empty", doneEv.ToolContext)
+	}
+}
