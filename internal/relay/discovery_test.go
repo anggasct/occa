@@ -45,7 +45,9 @@ func TestDiscoverSuccess(t *testing.T) {
 					t.Fatalf("unexpected path: %s", r.URL.Path)
 				}
 				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(doc)
+				if err := json.NewEncoder(w).Encode(doc); err != nil {
+					t.Fatalf("encode doc: %v", err)
+				}
 			}))
 			defer srv.Close()
 
