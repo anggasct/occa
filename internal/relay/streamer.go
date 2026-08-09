@@ -204,8 +204,10 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 					// Follow-up update for the tool part we are already
 					// showing: the command/file input arrived after the
 					// initial pending event. Update the existing bubble in
-					// place instead of starting a new one.
-					if curTool != "" && curRef != nil {
+					// place instead of starting a new one. Guard on the tool
+					// name so a follow-up for a capped/bailed-out tool never
+					// relabels a previous tool's bubble.
+					if curTool != "" && curTool == name && curRef != nil {
 						if err := s.reply.Edit(curRef, formatToolLabel(name, ctxStr, curCount)); err != nil {
 							slog.Warn("streaming: tool notice context edit failed", "tool", name, "error", err)
 						}
