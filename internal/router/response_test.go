@@ -416,7 +416,53 @@ func (p *responseProvider) Instance(_ context.Context, workdir string) (AgentIns
 	if client == nil {
 		return nil, errors.New("missing response client")
 	}
-	return &fakeInstance{client: client}, nil
+	return &fakeInstance{client: client, workdir: workdir}, nil
+}
+
+func (p *responseProvider) ForceStop(_ string) {}
+
+func TestProgressNoticeText(t *testing.T) {
+	if got := progressNotice(60); got != "⏳ masih ngerjain... (1m)" {
+		t.Fatalf("progressNotice(60) = %q, want %q", got, "⏳ masih ngerjain... (1m)")
+	}
+	if got := progressNotice(120); got != "⏳ masih ngerjain... (2m)" {
+		t.Fatalf("progressNotice(120) = %q, want %q", got, "⏳ masih ngerjain... (2m)")
+	}
+	if got := progressNotice(180); got != "⏳ masih ngerjain... (3m)" {
+		t.Fatalf("progressNotice(180) = %q, want %q", got, "⏳ masih ngerjain... (3m)")
+	}
+}
+
+func TestResponseTimeoutForceStopsAndReplies(t *testing.T) {
+	client := newResponseClient(func(ctx context.Context, events chan<- relay.Event) error {
+		return relay.ErrTimeout
+	})
+	provider := &fakeInstanceProvider{client: client}
+	overrides := newFakeOverrideRepo()
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+		Platform: "telegram", ChannelID: "chat1", UserID: "user1", Role: "allow",
+	}
+	st := &fakeStore{
+		sessionRepo:  &fakeSessionRepo{},
+		channelRepo:  newFakeChannelRepo(),
+		overrideRepo: overrides,
+		scheduleRepo: &fakeScheduleRepo{},
+	}
+	r := New(provider, st, "/default-workdir", "")
+	reply := newResponseReply()
+
+	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "hello", reply)); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	waitForReply(t, reply, "Agent-nya macet")
+	waitForResponse(t, r)
+
+	if provider.stopped != "/default-workdir" {
+		t.Fatalf("stopped = %q, want /default-workdir", provider.stopped)
+	}
+	if !reply.contains("⚠️ Agent-nya macet (nggak ngerespon 3 menit). Gw udah restart — coba kirim ulang pesan lo ya.") {
+		t.Fatalf("unexpected reply text: %v", reply.texts())
+	}
 }
 
 func TestResponseCoordinatorAllowsDifferentChannels(t *testing.T) {

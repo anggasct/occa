@@ -377,26 +377,33 @@ func (f *fakeSessionRepo) ThreadChannel(_ context.Context, platform, threadID st
 func (f *fakeSessionRepo) Delete(_ context.Context, id int64) error { return nil }
 
 type fakeInstance struct {
-	client relay.Client
-	pid    int
+	client  relay.Client
+	pid     int
+	workdir string
 }
 
 func (f *fakeInstance) Client() relay.Client { return f.client }
 func (f *fakeInstance) End()                 {}
 func (f *fakeInstance) PID() int             { return f.pid }
+func (f *fakeInstance) Workdir() string      { return f.workdir }
 
 type fakeInstanceProvider struct {
-	client relay.Client
-	err    error
-	calls  int
+	client  relay.Client
+	err     error
+	calls   int
+	stopped string
 }
 
-func (p *fakeInstanceProvider) Instance(_ context.Context, _ string) (AgentInstance, error) {
+func (p *fakeInstanceProvider) Instance(_ context.Context, workdir string) (AgentInstance, error) {
 	p.calls++
 	if p.err != nil {
 		return nil, p.err
 	}
-	return &fakeInstance{client: p.client}, nil
+	return &fakeInstance{client: p.client, workdir: workdir}, nil
+}
+
+func (p *fakeInstanceProvider) ForceStop(workdir string) {
+	p.stopped = workdir
 }
 
 func newTestRouterWithAccess() (*Router, *fakeRelayClient, *fakeReplyCtx, *fakeOverrideRepo) {

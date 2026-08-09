@@ -166,6 +166,28 @@ func (m *Manager) discardLocked(workdir string, e *entry) {
 	delete(m.pool, workdir)
 }
 
+// ForceStop stops and removes the pool entry for workdir if a ready instance
+// exists, forcing the hung agent process down so the next Instance call spawns
+// a fresh one.
+func (m *Manager) ForceStop(workdir string) {
+	workdir = NormalizeWorkdir(workdir)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.pool[workdir]
+	if !ok {
+		return
+	}
+	select {
+	case <-e.ready:
+		if e.inst != nil {
+			e.inst.stop()
+			m.ports.Release(e.inst.port)
+		}
+		delete(m.pool, workdir)
+	default:
+	}
+}
+
 // evictLRULocked stops the least-recently-used idle instance to free a slot.
 // Returns false if no idle instance can be evicted.
 func (m *Manager) evictLRULocked() bool {

@@ -35,6 +35,10 @@ func (p managerProvider) Instance(ctx context.Context, workdir string) (router.A
 	return p.m.Instance(ctx, workdir)
 }
 
+func (p managerProvider) ForceStop(workdir string) {
+	p.m.ForceStop(workdir)
+}
+
 func main() {
 	var configPath string
 	flag.StringVar(&configPath, "config", "", "path to config file (default ~/.occa/config.yaml)")

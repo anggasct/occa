@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -103,6 +104,30 @@ func (r *Router) runResponse(
 		slog.Info("response finished", "platform", key.platform, "channel_id", key.channelID, "thread_id", key.threadID, "user_id", key.userID, "outcome", outcome, "elapsed", time.Since(started).Truncate(time.Millisecond))
 	}()
 
+	progressStopCh := make(chan struct{})
+	var progressStopOnce sync.Once
+	stopProgress := func() {
+		progressStopOnce.Do(func() {
+			close(progressStopCh)
+		})
+	}
+	defer stopProgress()
+
+	go startProgressTicker(ctx, msg.ReplyCtx, progressStopCh)
+
+	observedEvents := make(chan relay.Event, 64)
+	go func() {
+		defer close(observedEvents)
+		for ev := range events {
+			stopProgress()
+			select {
+			case observedEvents <- ev:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	dispatchDone := make(chan error, 1)
 	streamDone := make(chan error, 1)
 
@@ -116,7 +141,7 @@ func (r *Router) runResponse(
 		if setter, ok := msg.ReplyCtx.(channel.ReactionSetter); ok {
 			streamer.SetReactionSetter(setter)
 		}
-		streamDone <- streamer.Run(ctx, events)
+		streamDone <- streamer.Run(ctx, observedEvents)
 	}()
 
 	var dispatchErr, streamErr error
@@ -153,12 +178,46 @@ func (r *Router) runResponse(
 		if errors.Is(dispatchErr, relay.ErrAttachmentTooLarge) {
 			r.reply(msg, "⚠️ "+dispatchErr.Error())
 		} else if errors.Is(dispatchErr, relay.ErrTimeout) {
-			r.reply(msg, "⚠️ Agent request timed out. The task may still be running; check /occa:status")
+			r.instances.ForceStop(inst.Workdir())
+			r.reply(msg, "⚠️ Agent-nya macet (nggak ngerespon 3 menit). Gw udah restart — coba kirim ulang pesan lo ya.")
 		} else {
 			r.reply(msg, "⚠️ Agent unreachable")
 		}
 	}
 	if streamErr != nil && !errors.Is(streamErr, context.Canceled) {
 		slog.Warn("response stream ended", "platform", key.platform, "channel_id", key.channelID, "thread_id", key.threadID, "user_id", key.userID, "error", streamErr)
+	}
+}
+
+func progressNotice(seconds int64) string {
+	minutes := seconds / 60
+	return fmt.Sprintf("⏳ masih ngerjain... (%dm)", minutes)
+}
+
+func startProgressTicker(ctx context.Context, reply channel.ReplyContext, stopCh <-chan struct{}) {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+
+	var elapsed int64
+	var noticeRef channel.MessageRef
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-stopCh:
+			return
+		case <-ticker.C:
+			elapsed += 60
+			text := progressNotice(elapsed)
+			if noticeRef == nil {
+				ref, err := reply.Send(text)
+				if err == nil {
+					noticeRef = ref
+				}
+			} else {
+				_ = reply.Edit(noticeRef, text)
+			}
+		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestCreateSession(t *testing.T) {
@@ -281,5 +282,12 @@ func TestAnswerQuestionPostsPayload(t *testing.T) {
 	}
 	if len(decoded.Answers) != 2 || decoded.Answers[0][0] != "A" || len(decoded.Answers[1]) != 0 {
 		t.Fatalf("answers = %v", decoded.Answers)
+	}
+}
+
+func TestNewHTTPClientTimeout(t *testing.T) {
+	c := NewHTTPClient("http://localhost:8080")
+	if c.http.Timeout != 3*time.Minute {
+		t.Fatalf("timeout = %v, want 3m", c.http.Timeout)
 	}
 }
