@@ -80,9 +80,14 @@ type Event struct {
 	Type        string
 	Delta       string
 	ToolContext string // file or command being executed (empty when none)
-	Err         error
-	Permission  *PermissionRequest
-	Question    *QuestionRequest
+	// ToolSamePart reports that this tool notice is a follow-up update for a
+	// tool part already rendered (e.g. the command/file input arrived on a
+	// later message.part.updated for the same part). The streamer updates the
+	// existing bubble in place instead of starting a new one.
+	ToolSamePart bool
+	Err          error
+	Permission   *PermissionRequest
+	Question     *QuestionRequest
 }
 
 type PermissionRequest struct {
@@ -329,13 +334,15 @@ func (c *HTTPClient) AnswerQuestion(ctx context.Context, requestID string, answe
 		return err
 	}
 	defer resp.Body.Close()
-	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-		return fmt.Errorf("relay: answer question: drain body: %w", err)
-	}
+	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode == http.StatusNotFound {
 		return ErrNotFound
 	}
 	if resp.StatusCode != http.StatusOK {
+		// Log the agent's error body instead of discarding it: the 400
+		// details (e.g. "Expected a string starting with que") are the only
+		// way to diagnose why the agent rejects a reply.
+		slog.Warn("relay: answer question rejected", "request_id", requestID, "status", resp.StatusCode, "body", truncateBody(body))
 		return fmt.Errorf("relay: answer question: unexpected status %d", resp.StatusCode)
 	}
 	return nil
@@ -348,13 +355,22 @@ func (c *HTTPClient) RejectQuestion(ctx context.Context, requestID string) error
 		return err
 	}
 	defer resp.Body.Close()
-	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-		return fmt.Errorf("relay: reject question: drain body: %w", err)
-	}
+	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
+		slog.Warn("relay: reject question rejected", "request_id", requestID, "status", resp.StatusCode, "body", truncateBody(body))
 		return fmt.Errorf("relay: reject question: unexpected status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// truncateBody caps an agent error body for logging so a pathological
+// response cannot flood the log.
+func truncateBody(b []byte) string {
+	const max = 512
+	if len(b) <= max {
+		return string(b)
+	}
+	return string(b[:max]) + fmt.Sprintf("… (%d bytes total)", len(b))
 }
 
 func (c *HTTPClient) Events(ctx context.Context, sessionID string) (<-chan Event, error) {

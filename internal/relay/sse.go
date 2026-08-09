@@ -104,10 +104,18 @@ func parseSSEEvent(decoder *eventDecoder, eventType, data string) (Event, bool) 
 type eventDecoder struct {
 	partKind   map[string]string
 	activeKind string
+	// toolContext tracks, per tool part id, the last tool context emitted so
+	// a single tool part that streams several message.part.updated events
+	// (pending → running → completed) only produces one tool notice. The
+	// first event of a part often arrives with an empty state.input; when the
+	// input (command/file) arrives on a later event for the same part, a
+	// follow-up tool notice is emitted with ToolSamePart set so the streamer
+	// can update the existing bubble in place instead of starting a new one.
+	toolContext map[string]string
 }
 
 func newEventDecoder() *eventDecoder {
-	return &eventDecoder{partKind: make(map[string]string)}
+	return &eventDecoder{partKind: make(map[string]string), toolContext: make(map[string]string)}
 }
 
 // isStreamKind reports whether a part type participates in stream-boundary
@@ -181,7 +189,22 @@ func (d *eventDecoder) parseJSON(data string) (Event, bool) {
 		switch {
 		case kind == "tool":
 			toolCtx := extractToolContext(ev.Properties.Part.State.Input)
-			return Event{Type: EventTool, Delta: ev.Properties.Part.Tool, ToolContext: toolCtx}, true
+			partID := ev.Properties.Part.ID
+			prevCtx, seen := d.toolContext[partID]
+			if seen && prevCtx == toolCtx {
+				// Same tool part re-emitted with identical input (e.g.
+				// pending → completed). Skip to avoid duplicate bubbles.
+				return Event{}, false
+			}
+			if partID != "" {
+				d.toolContext[partID] = toolCtx
+			}
+			// A context arriving on a later event for the same part means the
+			// streamer should update the existing bubble in place rather than
+			// start a new one (fixes double bubbles: "⚙️ bash" then
+			// "⚙️ bash: <cmd>" for one tool call).
+			samePart := partID != "" && seen
+			return Event{Type: EventTool, Delta: ev.Properties.Part.Tool, ToolContext: toolCtx, ToolSamePart: samePart}, true
 		case prev == "" || kind == prev:
 			return Event{}, false
 		case prev == "text" || kind == "text":

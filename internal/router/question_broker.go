@@ -156,7 +156,14 @@ func (b *questionBroker) HandleQuestionCallback(ctx context.Context, msg channel
 			return b.retry(record, msg, reply)
 		}
 		label := record.questions[qIdx].Options[optIdx].Label
+		// Build one answer entry per question. Unanswered questions must be
+		// an empty array, never nil: nil marshals to JSON null, and opencode
+		// rejects any null entry in answers with HTTP 400
+		// ("Expected QuestionAnswer, got null at [answers][i]").
 		answers := make([][]string, len(record.questions))
+		for i := range answers {
+			answers[i] = []string{}
+		}
 		answers[qIdx] = []string{label}
 		if err := record.client.AnswerQuestion(ctx, record.requestID, answers); err != nil {
 			slog.Warn("question: answer failed", "platform", record.platform, "channel_id", record.channelID, "error", err)
