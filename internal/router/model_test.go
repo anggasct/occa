@@ -17,6 +17,13 @@ func modelTestProviders() relay.Providers {
 	return relay.Providers{All: []relay.Provider{
 		{ID: "openai", Models: map[string]json.RawMessage{"gpt-4o": nil}},
 		{ID: "anthropic", Models: map[string]json.RawMessage{"claude-3": nil}},
+		{
+			ID: "zai-coding-plan",
+			Models: map[string]json.RawMessage{
+				"glm-5.2": json.RawMessage(`{"variants":{"high":{"reasoningEffort":"high"},"max":{"reasoningEffort":"high"},"low":{"reasoningEffort":"low"}}}`),
+				"no-var":  json.RawMessage(`{"name":"no-var"}`),
+			},
+		},
 	}}
 }
 
@@ -571,6 +578,138 @@ func TestValidateModelVariant(t *testing.T) {
 		ref := relay.ModelRef{ProviderID: "zai-coding-plan", ID: "bad-json", Variant: "any"}
 		if err := r.validateModel(context.Background(), msg("", &fakeReplyCtx{}), ref); err != nil {
 			t.Fatalf("expected pass for unparseable variants field, got %v", err)
+		}
+	})
+}
+
+func TestVariantsCommand(t *testing.T) {
+	t.Run("no active model", func(t *testing.T) {
+		r, client, reply, overrides := newTestRouterWithAccess()
+		client.providers = modelTestProviders()
+		overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+			ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+		}
+
+		if err := r.Route(context.Background(), msg("/variants", reply)); err != nil {
+			t.Fatalf("Route: %v", err)
+		}
+		if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], "No active model. Usage: /variants <provider>/<model-id>") {
+			t.Fatalf("unexpected reply: %v", reply.sends)
+		}
+	})
+
+	t.Run("no arg resolves current effective model", func(t *testing.T) {
+		r, client, _, overrides := newTestRouterWithAccess()
+		client.providers = modelTestProviders()
+		overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+			ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow", Model: "zai-coding-plan/glm-5.2",
+		}
+		reply := newBrowseReplyCtx()
+
+		m := msg("/variants", reply.fakeReplyCtx)
+		m.ReplyCtx = reply
+		if err := r.Route(context.Background(), m); err != nil {
+			t.Fatalf("Route: %v", err)
+		}
+
+		buttons := reply.sendSnapshot()
+		labels := labelsOf(buttons)
+		want := []string{"Set @high", "Set @low", "Set @max", "⬅️ Close"}
+		if len(labels) != len(want) {
+			t.Fatalf("buttons = %v, want %v", labels, want)
+		}
+		for i := range want {
+			if labels[i] != want[i] {
+				t.Fatalf("buttons[%d] = %q, want %q", i, labels[i], want[i])
+			}
+		}
+		if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "⚙️ Variants: zai-coding-plan/glm-5.2") {
+			t.Fatalf("unexpected text: %v", reply.sends)
+		}
+		if !strings.Contains(reply.sends[0], "[max]   Reasoning effort: high") {
+			t.Fatalf("text missing formatted variant details: %q", reply.sends[0])
+		}
+	})
+
+	t.Run("with arg lists variants", func(t *testing.T) {
+		r, client, _, overrides := newTestRouterWithAccess()
+		client.providers = modelTestProviders()
+		overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+			ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+		}
+		reply := newBrowseReplyCtx()
+
+		m := msg("/variants zai-coding-plan/glm-5.2", reply.fakeReplyCtx)
+		m.ReplyCtx = reply
+		if err := r.Route(context.Background(), m); err != nil {
+			t.Fatalf("Route: %v", err)
+		}
+
+		buttons := reply.sendSnapshot()
+		labels := labelsOf(buttons)
+		want := []string{"Set @high", "Set @low", "Set @max", "⬅️ Close"}
+		if len(labels) != len(want) {
+			t.Fatalf("buttons = %v, want %v", labels, want)
+		}
+		for i := range want {
+			if labels[i] != want[i] {
+				t.Fatalf("buttons[%d] = %q, want %q", i, labels[i], want[i])
+			}
+		}
+	})
+
+	t.Run("model without variants", func(t *testing.T) {
+		r, client, _, overrides := newTestRouterWithAccess()
+		client.providers = modelTestProviders()
+		overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+			ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+		}
+
+		bReply := newBrowseReplyCtx()
+		m := msg("/variants zai-coding-plan/no-var", bReply.fakeReplyCtx)
+		m.ReplyCtx = bReply
+		if err := r.Route(context.Background(), m); err != nil {
+			t.Fatalf("Route: %v", err)
+		}
+
+		if len(bReply.sends) == 0 || !strings.Contains(bReply.sends[0], "No variants for zai-coding-plan/no-var") {
+			t.Fatalf("unexpected reply: %v", bReply.sends)
+		}
+	})
+
+	t.Run("set variant button callback sets personal override", func(t *testing.T) {
+		r, client, _, overrideRepo := newTestRouterWithAccess()
+		client.providers = modelTestProviders()
+		overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{
+			ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+		}
+		reply := newBrowseReplyCtx()
+
+		m := msg("/variants zai-coding-plan/glm-5.2", reply.fakeReplyCtx)
+		m.ReplyCtx = reply
+		if err := r.Route(context.Background(), m); err != nil {
+			t.Fatalf("Route: %v", err)
+		}
+
+		buttons := reply.sendSnapshot()
+		setToken := buttonValue(buttons, "Set @max")
+		if setToken == "" {
+			t.Fatalf("missing Set @max button in %v", labelsOf(buttons))
+		}
+
+		setReply := newBrowseReplyCtx()
+		if err := r.Route(context.Background(), callbackMsg("user1", setToken, setReply)); err != nil {
+			t.Fatalf("Route callback: %v", err)
+		}
+
+		text, _ := setReply.editSnapshot()
+		if text != "✅ Personal model set: zai-coding-plan/glm-5.2@max" {
+			t.Fatalf("text = %q, want ✅ Personal model set: zai-coding-plan/glm-5.2@max", text)
+		}
+
+		o := overrideRepo.overrides["telegram:chat1:user1"]
+		if o == nil || o.Model != "zai-coding-plan/glm-5.2@max" {
+			t.Fatalf("user1 stored model = %+v, want zai-coding-plan/glm-5.2@max", o)
 		}
 	})
 }

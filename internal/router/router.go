@@ -41,6 +41,7 @@ func (r *Router) MenuCommands() []channel.MenuCommand {
 		{Alias: "admin", Description: "Grant a user admin access", HasArgs: true},
 		{Alias: "channel", Description: "View or set listen mode (mention, all, thread)", HasArgs: true},
 		{Alias: "model", Description: "View or set the active model", HasArgs: true},
+		{Alias: "variants", Description: "List and set model reasoning variants", HasArgs: true},
 		{Alias: "schedules", Description: "View or delete scheduled tasks", HasArgs: true},
 	}
 }
@@ -441,6 +442,10 @@ func (r *Router) registerDefaults() {
 		Name:    "model",
 		Handler: r.handleModel,
 	}
+	r.commands["variants"] = Command{
+		Name:    "variants",
+		Handler: r.handleVariants,
+	}
 	r.commands["schedules"] = Command{
 		Name:    "schedules",
 		Admin:   true,
@@ -480,6 +485,7 @@ func (r *Router) helpText() string {
 		"• /dir [path] — view or set this channel's working directory\n" +
 		"• /channel [mention|all|thread] — view or set listen mode\n" +
 		"• /model [channel] [provider/model-id[@variant]] — view or set model\n" +
+		"• /variants [provider/model-id] — list and set model reasoning variants\n" +
 		"• /schedules [delete <id>] — view or delete scheduled tasks\n" +
 		"• /reset — clear current session and start fresh\n\n" +
 		"(Legacy /occa: command aliases are also supported.)\n\n" +
