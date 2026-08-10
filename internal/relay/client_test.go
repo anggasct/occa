@@ -338,3 +338,56 @@ func TestTruncateBodyRuneSafe(t *testing.T) {
 		t.Fatalf("expected byte count note in truncated string, got %q", truncated)
 	}
 }
+
+func TestSessionExists(t *testing.T) {
+	t.Run("found 200", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet || r.URL.Path != "/session/sess-123" {
+				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			}
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		exists, err := c.SessionExists(context.Background(), "sess-123")
+		if err != nil {
+			t.Fatalf("SessionExists: %v", err)
+		}
+		if !exists {
+			t.Fatalf("got exists = false, want true")
+		}
+	})
+
+	t.Run("not found 404", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet || r.URL.Path != "/session/sess-404" {
+				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		exists, err := c.SessionExists(context.Background(), "sess-404")
+		if err != nil {
+			t.Fatalf("SessionExists: %v", err)
+		}
+		if exists {
+			t.Fatalf("got exists = true, want false")
+		}
+	})
+
+	t.Run("unexpected status", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		_, err := c.SessionExists(context.Background(), "sess-500")
+		if err == nil {
+			t.Fatal("expected error for status 500, got nil")
+		}
+	})
+}

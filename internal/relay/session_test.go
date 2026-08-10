@@ -50,11 +50,20 @@ func (m *mockSessionRepo) ThreadChannel(_ context.Context, platform, threadID st
 func (m *mockSessionRepo) Delete(_ context.Context, id int64) error { return nil }
 
 type mockClient struct {
-	sessionID string
+	sessionID     string
+	sessionExists bool
+	existsErr     error
 }
 
 func (m *mockClient) CreateSession(_ context.Context) (string, error) {
 	return m.sessionID, nil
+}
+
+func (m *mockClient) SessionExists(_ context.Context, _ string) (bool, error) {
+	if m.existsErr != nil {
+		return false, m.existsErr
+	}
+	return m.sessionExists, nil
 }
 
 func (m *mockClient) SendMessage(_ context.Context, _, _ string, _ *ModelRef, _ []Attachment) error {
@@ -137,23 +146,51 @@ func TestResolveKeysByConversation(t *testing.T) {
 	}
 }
 
-// TestResolveStaleSessionRecreates: a session owned by a dead agent process
-// (PID mismatch) is replaced with a fresh one instead of being reused.
+// TestResolveStaleSessionRecreates checks how a session owned by a replaced
+// agent process (PID mismatch) is handled: reused if still present on the agent,
+// or replaced with a fresh session if gone.
 func TestResolveStaleSessionRecreates(t *testing.T) {
-	repo := &mockSessionRepo{activeID: "stale-session", ownerPID: 999}
-	client := &mockClient{sessionID: "fresh-session"}
-	resolver := NewSessionResolver(repo, client)
+	t.Run("stale session exists on new agent", func(t *testing.T) {
+		repo := &mockSessionRepo{activeID: "stale-session", ownerPID: 999}
+		client := &mockClient{sessionID: "fresh-session", sessionExists: true}
+		resolver := NewSessionResolver(repo, client)
 
-	id, err := resolver.Resolve(context.Background(), "telegram", "123", "", "user-1", 100)
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	if id != "fresh-session" {
-		t.Fatalf("got %q, want %q", id, "fresh-session")
-	}
-	if len(repo.setCalls) != 1 || repo.setCalls[0].agentPID != 100 {
-		t.Fatalf("expected SetActive with new PID, got %+v", repo.setCalls)
-	}
+		id, err := resolver.Resolve(context.Background(), "telegram", "123", "", "user-1", 100)
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if id != "stale-session" {
+			t.Fatalf("got %q, want %q", id, "stale-session")
+		}
+		if len(repo.setCalls) != 1 {
+			t.Fatalf("expected 1 SetActive call, got %d", len(repo.setCalls))
+		}
+		call := repo.setCalls[0]
+		if call.sessionID != "stale-session" || call.agentPID != 100 {
+			t.Fatalf("unexpected SetActive call: %+v", call)
+		}
+	})
+
+	t.Run("stale session gone on new agent", func(t *testing.T) {
+		repo := &mockSessionRepo{activeID: "stale-session", ownerPID: 999}
+		client := &mockClient{sessionID: "fresh-session", sessionExists: false}
+		resolver := NewSessionResolver(repo, client)
+
+		id, err := resolver.Resolve(context.Background(), "telegram", "123", "", "user-1", 100)
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if id != "fresh-session" {
+			t.Fatalf("got %q, want %q", id, "fresh-session")
+		}
+		if len(repo.setCalls) != 1 {
+			t.Fatalf("expected 1 SetActive call, got %d", len(repo.setCalls))
+		}
+		call := repo.setCalls[0]
+		if call.sessionID != "fresh-session" || call.agentPID != 100 {
+			t.Fatalf("unexpected SetActive call: %+v", call)
+		}
+	})
 }
 
 // TestResolveUnknownOwnerReuses: legacy rows without an owner PID are reused.

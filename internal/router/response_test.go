@@ -102,6 +102,10 @@ func newResponseClient(dispatch func(context.Context, chan<- relay.Event) error)
 
 func (c *responseClient) CreateSession(_ context.Context) (string, error) { return "session", nil }
 
+func (c *responseClient) SessionExists(_ context.Context, _ string) (bool, error) {
+	return true, nil
+}
+
 func (c *responseClient) SendMessage(ctx context.Context, _ string, _ string, _ *relay.ModelRef, _ []relay.Attachment) error {
 	c.mu.Lock()
 	c.sendCalls++
