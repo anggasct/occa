@@ -95,7 +95,7 @@ type PermissionRequest struct {
 	SessionID  string
 	Permission string
 	Tool       string
-	Patterns   []string `json:"patterns,omitempty"`
+	Patterns   []string
 }
 
 type QuestionOption struct {
