@@ -1,7 +1,7 @@
 # OCCA
 
 A chat adapter for [OpenCode](https://opencode.ai). OCCA bridges your chat
-platform to OpenCode: it answers only its own `/occa:*` command namespace and
+platform to OpenCode: it answers short-form commands (with legacy `/occa:*` aliases) and
 forwards everything else to OpenCode unchanged, so you can drive an OpenCode
 agent from Telegram or Discord.
 
@@ -15,7 +15,7 @@ of that.
   responses as progressive edits, render markdown per platform (HTML for
   Telegram, native for Discord), inline permission prompts with buttons, file
   and voice attachments.
-- **Transparent passthrough** — anything that is not an `/occa:*` command goes
+- **Transparent passthrough** — anything that is not one of OCCA's commands goes
   to OpenCode verbatim, so new OpenCode commands work without changes.
 - **Streaming responses** — OpenCode's event stream is buffered into
   incremental chat edits, with multi-message overflow and continuation markers
@@ -111,7 +111,7 @@ Describe a recurring task in plain language:
 > every morning at 9am, summarize my GitHub issues
 
 OCCA registers a cron job and pushes each run's result back to the chat.
-`/occa:schedules` lists active jobs; `/occa:schedules delete <id>` removes one.
+`/schedules` lists active jobs; `/schedules delete <id>` removes one.
 
 ## How it works
 
@@ -124,8 +124,8 @@ chat platform ──► channel adapter ──► router ──► opencode
 - **Adapters** own the platform SDKs (Telegram, Discord) and normalize every
   incoming message into one generic shape.
 - **Router** authorizes everything at the ingress, classifies input as a
-  callback, an `/occa:*` command, or an ordinary message, and enforces the
-  command namespace and listen-mode policy.
+  callback, an OCCA command (short form or legacy alias), or an ordinary
+  message, and enforces the command namespace and listen-mode policy.
 - **Relay** speaks to OpenCode — sessions, messages, commands, and its SSE
   event stream — over `opencode serve`'s HTTP interface.
 - **Process manager** supervises one OpenCode instance per working directory:
