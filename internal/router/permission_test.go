@@ -141,6 +141,19 @@ func (c *permissionClient) callSnapshot() []permissionCall {
 	return append([]permissionCall(nil), c.calls...)
 }
 
+func waitForSends(reply *permissionReply) {
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		reply.mu.Lock()
+		n := len(reply.sends)
+		reply.mu.Unlock()
+		if n > 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func newPermissionPrompt(t *testing.T, client relay.Client) (*permissionBroker, *permissionOwner, *permissionReply, string, channel.MessageRef) {
 	t.Helper()
 	broker := newPermissionBroker()
@@ -163,6 +176,8 @@ func newPermissionPrompt(t *testing.T, client relay.Client) (*permissionBroker, 
 	}); err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
+
+	waitForSends(reply)
 
 	if len(reply.sends) != 1 || len(reply.sends[0].buttons) != 3 {
 		t.Fatalf("prompt view = %+v", reply.sends)
@@ -238,6 +253,7 @@ func TestRoutePermissionCallbackUsesGenericCapturedClient(t *testing.T) {
 	if err := handler.Prompt(context.Background(), relay.PermissionRequest{ID: "request-1", Permission: "bash"}); err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
+	waitForSends(reply)
 	token, _, ok := parsePermissionCallback(reply.sends[0].buttons[0].Value)
 	if !ok {
 		t.Fatal("prompt token did not parse")
@@ -419,10 +435,10 @@ func TestCallbackNotSerializedBehindBlockedBackend(t *testing.T) {
 		blockFirstCall: true,
 	}
 	broker := newPermissionBroker()
-	owner := &permissionOwner{}
 
 	newPrompt := func(requestID string) (channel.MessageRef, string, channel.ReplyContext) {
 		reply := &permissionReply{}
+		owner := &permissionOwner{}
 		handler := &permissionPromptHandler{
 			broker:    broker,
 			owner:     owner,
@@ -440,6 +456,7 @@ func TestCallbackNotSerializedBehindBlockedBackend(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("Prompt: %v", err)
 		}
+		waitForSends(reply)
 		token, _, ok := parsePermissionCallback(reply.sends[0].buttons[0].Value)
 		if !ok {
 			t.Fatalf("invalid callback value: %q", reply.sends[0].buttons[0].Value)
@@ -481,5 +498,292 @@ func TestPermissionPromptTextWithPatterns(t *testing.T) {
 	want := "🔐 Permission requested: external_directory (bash)\nPath: /tmp/*"
 	if got != want {
 		t.Fatalf("permissionPromptText = %q, want %q", got, want)
+	}
+}
+
+func TestPermissionBatchingTwoRequestsWithinWindow(t *testing.T) {
+	client := &permissionClient{}
+	broker := newPermissionBroker()
+	owner := &permissionOwner{}
+	reply := &permissionReply{}
+	handler := &permissionPromptHandler{
+		broker:    broker,
+		owner:     owner,
+		client:    client,
+		platform:  "telegram",
+		channelID: "chat1",
+		sessionID: "session-1",
+		reply:     reply,
+	}
+
+	req1 := relay.PermissionRequest{
+		ID:         "request-1",
+		SessionID:  "session-1",
+		Permission: "external_directory",
+		Tool:       "bash",
+		Patterns:   []string{"/path/api/*"},
+	}
+	req2 := relay.PermissionRequest{
+		ID:         "request-2",
+		SessionID:  "session-1",
+		Permission: "external_directory",
+		Tool:       "bash",
+		Patterns:   []string{"/path/database/*"},
+	}
+
+	if err := handler.Prompt(context.Background(), req1); err != nil {
+		t.Fatalf("Prompt 1: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if err := handler.Prompt(context.Background(), req2); err != nil {
+		t.Fatalf("Prompt 2: %v", err)
+	}
+
+	waitForSends(reply)
+
+	reply.mu.Lock()
+	sendsCount := len(reply.sends)
+	var view permissionView
+	if sendsCount == 1 {
+		view = reply.sends[0]
+	}
+	reply.mu.Unlock()
+
+	if sendsCount != 1 {
+		t.Fatalf("send count = %d, want 1", sendsCount)
+	}
+
+	if !strings.Contains(view.text, "/path/api/*") || !strings.Contains(view.text, "/path/database/*") {
+		t.Fatalf("prompt text does not contain both paths: %q", view.text)
+	}
+
+	if len(view.buttons) != 3 {
+		t.Fatalf("button count = %d, want 3", len(view.buttons))
+	}
+
+	token, decision, ok := parsePermissionCallback(view.buttons[0].Value)
+	if !ok {
+		t.Fatalf("invalid callback value: %q", view.buttons[0].Value)
+	}
+
+	// Verify resolving the single token replies to BOTH request IDs
+	callback := permissionCallback(token, view.ref, reply)
+	if err := broker.handle(context.Background(), callback); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+
+	calls := client.callSnapshot()
+	if len(calls) != 2 {
+		t.Fatalf("client calls count = %d, want 2", len(calls))
+	}
+	if calls[0].requestID != "request-1" || calls[0].decision != decision {
+		t.Errorf("call 0 = %+v, want request-1", calls[0])
+	}
+	if calls[1].requestID != "request-2" || calls[1].decision != decision {
+		t.Errorf("call 1 = %+v, want request-2", calls[1])
+	}
+}
+
+func TestPermissionBatchingRequestsSeparatedBeyondWindow(t *testing.T) {
+	client := &permissionClient{}
+	broker := newPermissionBroker()
+	owner := &permissionOwner{}
+	reply := &permissionReply{}
+	handler := &permissionPromptHandler{
+		broker:    broker,
+		owner:     owner,
+		client:    client,
+		platform:  "telegram",
+		channelID: "chat1",
+		sessionID: "session-1",
+		reply:     reply,
+	}
+
+	req1 := relay.PermissionRequest{
+		ID:         "request-1",
+		Permission: "external_directory",
+		Patterns:   []string{"/path/1/*"},
+	}
+	req2 := relay.PermissionRequest{
+		ID:         "request-2",
+		Permission: "external_directory",
+		Patterns:   []string{"/path/2/*"},
+	}
+
+	if err := handler.Prompt(context.Background(), req1); err != nil {
+		t.Fatalf("Prompt 1: %v", err)
+	}
+
+	waitForSends(reply)
+
+	reply.mu.Lock()
+	count1 := len(reply.sends)
+	reply.mu.Unlock()
+	if count1 != 1 {
+		t.Fatalf("sends after req1 = %d, want 1", count1)
+	}
+
+	if err := handler.Prompt(context.Background(), req2); err != nil {
+		t.Fatalf("Prompt 2: %v", err)
+	}
+
+	// Wait for second batch window
+	time.Sleep(1600 * time.Millisecond)
+
+	reply.mu.Lock()
+	count2 := len(reply.sends)
+	reply.mu.Unlock()
+	if count2 != 2 {
+		t.Fatalf("sends after req2 = %d, want 2", count2)
+	}
+}
+
+func TestPermissionBatchingExpireBeforeWindowElapses(t *testing.T) {
+	client := &permissionClient{}
+	broker := newPermissionBroker()
+	owner := &permissionOwner{}
+	reply := &permissionReply{}
+	handler := &permissionPromptHandler{
+		broker:    broker,
+		owner:     owner,
+		client:    client,
+		platform:  "telegram",
+		channelID: "chat1",
+		sessionID: "session-1",
+		reply:     reply,
+	}
+
+	req := relay.PermissionRequest{
+		ID:         "request-1",
+		Permission: "external_directory",
+		Patterns:   []string{"/path/1/*"},
+	}
+
+	if err := handler.Prompt(context.Background(), req); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	// Sleep briefly while batch is pending
+	time.Sleep(200 * time.Millisecond)
+
+	broker.expireOwner(owner)
+
+	// Sleep past the batch window
+	time.Sleep(1600 * time.Millisecond)
+
+	reply.mu.Lock()
+	count := len(reply.sends)
+	reply.mu.Unlock()
+
+	if count != 0 {
+		t.Fatalf("sends after expire = %d, want 0 (prompt should not have been sent)", count)
+	}
+}
+
+func TestPermissionBrokerBatchRetryOnlyUnresolvedIDs(t *testing.T) {
+	client := &permissionClient{
+		errors: []error{nil, errors.New("backend error 2nd id")},
+	}
+	broker := newPermissionBroker()
+	owner := &permissionOwner{}
+	reply := &permissionReply{}
+	handler := &permissionPromptHandler{
+		broker:    broker,
+		owner:     owner,
+		client:    client,
+		platform:  "telegram",
+		channelID: "chat1",
+		sessionID: "session-1",
+		reply:     reply,
+	}
+
+	req1 := relay.PermissionRequest{
+		ID:         "request-1",
+		SessionID:  "session-1",
+		Permission: "external_directory",
+		Tool:       "bash",
+		Patterns:   []string{"/path/1/*"},
+	}
+	req2 := relay.PermissionRequest{
+		ID:         "request-2",
+		SessionID:  "session-1",
+		Permission: "external_directory",
+		Tool:       "bash",
+		Patterns:   []string{"/path/2/*"},
+	}
+
+	if err := handler.Prompt(context.Background(), req1); err != nil {
+		t.Fatalf("Prompt 1: %v", err)
+	}
+	if err := handler.Prompt(context.Background(), req2); err != nil {
+		t.Fatalf("Prompt 2: %v", err)
+	}
+
+	waitForSends(reply)
+
+	reply.mu.Lock()
+	if len(reply.sends) != 1 {
+		reply.mu.Unlock()
+		t.Fatalf("send count = %d, want 1", len(reply.sends))
+	}
+	view := reply.sends[0]
+	reply.mu.Unlock()
+
+	token, decision, ok := parsePermissionCallback(view.buttons[0].Value)
+	if !ok {
+		t.Fatalf("invalid callback value: %q", view.buttons[0].Value)
+	}
+
+	callback := permissionCallback(token, view.ref, reply)
+
+	// First click: request-1 succeeds, request-2 fails.
+	if err := broker.handle(context.Background(), callback); err != nil {
+		t.Fatalf("first handle: %v", err)
+	}
+
+	callsAfterFirst := client.callSnapshot()
+	if len(callsAfterFirst) != 2 {
+		t.Fatalf("calls after first attempt = %d, want 2", len(callsAfterFirst))
+	}
+	if callsAfterFirst[0].requestID != "request-1" || callsAfterFirst[1].requestID != "request-2" {
+		t.Fatalf("calls after first attempt = %+v", callsAfterFirst)
+	}
+
+	failedView := reply.lastEdit()
+	if failedView.text != permissionRetryMessage || len(failedView.buttons) != 3 {
+		t.Fatalf("retry view after partial failure = %+v", failedView)
+	}
+
+	// Second click (retry): only request-2 should be attempted (request-1 must NOT be re-replied).
+	if err := broker.handle(context.Background(), callback); err != nil {
+		t.Fatalf("retry handle: %v", err)
+	}
+
+	allCalls := client.callSnapshot()
+	if len(allCalls) != 3 {
+		t.Fatalf("total calls = %d, want 3: %+v", len(allCalls), allCalls)
+	}
+
+	req1Count := 0
+	req2Count := 0
+	for _, call := range allCalls {
+		switch call.requestID {
+		case "request-1":
+			req1Count++
+		case "request-2":
+			req2Count++
+		}
+	}
+
+	if req1Count != 1 {
+		t.Errorf("request-1 call count = %d, want 1 (must not be re-replied on retry)", req1Count)
+	}
+	if req2Count != 2 {
+		t.Errorf("request-2 call count = %d, want 2", req2Count)
+	}
+
+	resolvedView := reply.lastEdit()
+	if resolvedView.text != permissionTerminalLabel(decision) || len(resolvedView.buttons) != 0 {
+		t.Fatalf("resolved view = %+v", resolvedView)
 	}
 }
