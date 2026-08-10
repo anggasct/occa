@@ -1391,8 +1391,8 @@ func TestShortFormCommandsAndLegacyAliases(t *testing.T) {
 	}
 
 	tests := []struct {
-		input       string
-		wantSend    string
+		input        string
+		wantSend     string
 		wantPassthru string
 	}{
 		{input: "/help", wantSend: "OCCA commands:"},

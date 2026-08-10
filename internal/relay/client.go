@@ -34,6 +34,7 @@ type Attachment struct {
 type ModelRef struct {
 	ProviderID string `json:"providerID"`
 	ID         string `json:"modelID"`
+	Variant    string `json:"variant,omitempty"`
 }
 
 type Provider struct {
@@ -65,6 +66,29 @@ func (p Providers) HasModel(ref ModelRef) bool {
 		}
 	}
 	return false
+}
+
+func (p Providers) HasVariant(ref ModelRef) bool {
+	if ref.Variant == "" {
+		return true
+	}
+	for _, provider := range p.All {
+		if provider.ID == ref.ProviderID {
+			raw, ok := provider.Models[ref.ID]
+			if !ok || len(raw) == 0 {
+				return true
+			}
+			var cfg struct {
+				Variants map[string]json.RawMessage `json:"variants"`
+			}
+			if err := json.Unmarshal(raw, &cfg); err != nil || cfg.Variants == nil {
+				return true
+			}
+			_, ok = cfg.Variants[ref.Variant]
+			return ok
+		}
+	}
+	return true
 }
 
 // Relay event types delivered on the stream channel.

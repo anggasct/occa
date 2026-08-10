@@ -479,7 +479,7 @@ func (r *Router) helpText() string {
 		"• /session [list|new|switch <id>|delete <id>] — manage sessions\n" +
 		"• /dir [path] — view or set this channel's working directory\n" +
 		"• /channel [mention|all|thread] — view or set listen mode\n" +
-		"• /model [channel] [provider/model-id] — view or set model\n" +
+		"• /model [channel] [provider/model-id[@variant]] — view or set model\n" +
 		"• /schedules [delete <id>] — view or delete scheduled tasks\n" +
 		"• /reset — clear current session and start fresh\n\n" +
 		"(Legacy /occa: command aliases are also supported.)\n\n" +

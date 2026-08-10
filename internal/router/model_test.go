@@ -478,3 +478,99 @@ func TestUnresolvedChannelScopeDoesNotReadWriteOrSendModel(t *testing.T) {
 		t.Fatalf("unexpected message response: %v", messageReply.sends)
 	}
 }
+
+func TestParseModelRefVariant(t *testing.T) {
+	t.Run("with variant", func(t *testing.T) {
+		ref, err := parseModelRef("zai-coding-plan/glm-5.2@max")
+		if err != nil {
+			t.Fatalf("parseModelRef: %v", err)
+		}
+		want := relay.ModelRef{ProviderID: "zai-coding-plan", ID: "glm-5.2", Variant: "max"}
+		if ref != want {
+			t.Fatalf("got %+v, want %+v", ref, want)
+		}
+	})
+
+	t.Run("without variant", func(t *testing.T) {
+		ref, err := parseModelRef("zai-coding-plan/glm-5.2")
+		if err != nil {
+			t.Fatalf("parseModelRef: %v", err)
+		}
+		want := relay.ModelRef{ProviderID: "zai-coding-plan", ID: "glm-5.2", Variant: ""}
+		if ref != want {
+			t.Fatalf("got %+v, want %+v", ref, want)
+		}
+	})
+
+	t.Run("empty variant error", func(t *testing.T) {
+		_, err := parseModelRef("a/b@")
+		if err == nil {
+			t.Fatal("expected error for a/b@, got nil")
+		}
+		if !strings.Contains(err.Error(), "invalid variant") {
+			t.Fatalf("expected error to contain 'invalid variant', got %q", err.Error())
+		}
+	})
+}
+
+func TestFormatModelRefVariant(t *testing.T) {
+	t.Run("with variant", func(t *testing.T) {
+		ref := relay.ModelRef{ProviderID: "zai-coding-plan", ID: "glm-5.2", Variant: "max"}
+		if got := formatModelRef(ref); got != "zai-coding-plan/glm-5.2@max" {
+			t.Fatalf("got %q, want zai-coding-plan/glm-5.2@max", got)
+		}
+	})
+
+	t.Run("without variant", func(t *testing.T) {
+		ref := relay.ModelRef{ProviderID: "zai-coding-plan", ID: "glm-5.2"}
+		if got := formatModelRef(ref); got != "zai-coding-plan/glm-5.2" {
+			t.Fatalf("got %q, want zai-coding-plan/glm-5.2", got)
+		}
+	})
+}
+
+func TestValidateModelVariant(t *testing.T) {
+	r, client, _, _ := newTestRouterWithAccess()
+	client.providers = relay.Providers{All: []relay.Provider{
+		{
+			ID: "zai-coding-plan",
+			Models: map[string]json.RawMessage{
+				"glm-5.2":  json.RawMessage(`{"variants":{"high":{},"max":{},"low":{}}}`),
+				"no-var":   json.RawMessage(`{"name":"no-var"}`),
+				"bad-json": json.RawMessage(`invalid`),
+			},
+		},
+	}}
+
+	t.Run("variant exists", func(t *testing.T) {
+		ref := relay.ModelRef{ProviderID: "zai-coding-plan", ID: "glm-5.2", Variant: "max"}
+		if err := r.validateModel(context.Background(), msg("", &fakeReplyCtx{}), ref); err != nil {
+			t.Fatalf("validateModel: %v", err)
+		}
+	})
+
+	t.Run("variant missing from variants map", func(t *testing.T) {
+		ref := relay.ModelRef{ProviderID: "zai-coding-plan", ID: "glm-5.2", Variant: "max_unknown"}
+		err := r.validateModel(context.Background(), msg("", &fakeReplyCtx{}), ref)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !strings.Contains(err.Error(), "unknown variant: max_unknown for zai-coding-plan/glm-5.2") {
+			t.Fatalf("unexpected error message: %q", err.Error())
+		}
+	})
+
+	t.Run("variants field missing", func(t *testing.T) {
+		ref := relay.ModelRef{ProviderID: "zai-coding-plan", ID: "no-var", Variant: "any"}
+		if err := r.validateModel(context.Background(), msg("", &fakeReplyCtx{}), ref); err != nil {
+			t.Fatalf("expected pass for missing variants field, got %v", err)
+		}
+	})
+
+	t.Run("variants field unparseable", func(t *testing.T) {
+		ref := relay.ModelRef{ProviderID: "zai-coding-plan", ID: "bad-json", Variant: "any"}
+		if err := r.validateModel(context.Background(), msg("", &fakeReplyCtx{}), ref); err != nil {
+			t.Fatalf("expected pass for unparseable variants field, got %v", err)
+		}
+	})
+}

@@ -93,7 +93,7 @@ appears in the chat:
 | `/occa:session [list\|new\|switch <id>\|delete <id>]` | Manage sessions |
 | `/occa:dir [path]` | View or set this channel's working directory |
 | `/occa:channel [mention\|all\|thread]` | View or set listen mode |
-| `/occa:model [channel] [provider/model-id]` | View or set the model |
+| `/model [channel] [provider/model-id[@variant]]` | View or set the model |
 | `/occa:admin <user_id>` | Grant or revoke admin |
 | `/occa:allow <user_id>` / `/occa:deny <user_id>` | Grant or revoke access |
 | `/occa:reset` | Clear the current session and start fresh |
