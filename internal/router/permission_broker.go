@@ -327,6 +327,9 @@ func permissionPromptText(request relay.PermissionRequest) string {
 	if request.Tool != "" {
 		text += fmt.Sprintf(" (%s)", request.Tool)
 	}
+	if len(request.Patterns) > 0 {
+		text += fmt.Sprintf("\nPath: %s", strings.Join(request.Patterns, ", "))
+	}
 	return text
 }
 
