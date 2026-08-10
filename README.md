@@ -88,16 +88,18 @@ appears in the chat:
 
 | Command | Purpose |
 |---------|---------|
-| `/occa:help` | List commands |
-| `/occa:status` | Agent health and session info |
-| `/occa:session [list\|new\|switch <id>\|delete <id>]` | Manage sessions |
-| `/occa:dir [path]` | View or set this channel's working directory |
-| `/occa:channel [mention\|all\|thread]` | View or set listen mode |
+| `/help` | List commands |
+| `/status` | Agent health and session info |
+| `/session [list\|new\|switch <id>\|delete <id>]` | Manage sessions |
+| `/dir [path]` | View or set this channel's working directory |
+| `/channel [mention\|all\|thread]` | View or set listen mode |
 | `/model [channel] [provider/model-id[@variant]]` | View or set the model |
-| `/occa:admin <user_id>` | Grant or revoke admin |
-| `/occa:allow <user_id>` / `/occa:deny <user_id>` | Grant or revoke access |
-| `/occa:reset` | Clear the current session and start fresh |
-| `/occa:schedules [delete <id>]` | View or delete scheduled tasks |
+| `/admin <user_id>` | Grant or revoke admin |
+| `/allow <user_id>` / `/deny <user_id>` | Grant or revoke access |
+| `/reset` | Clear the current session and start fresh |
+| `/schedules [delete <id>]` | View or delete scheduled tasks |
+
+Legacy `/occa:*` and `/occa_*` forms still work as aliases.
 
 Everything else — including other `/`-prefixed commands — is passed through to
 OpenCode untouched.
