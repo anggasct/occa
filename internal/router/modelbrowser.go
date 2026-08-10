@@ -192,7 +192,21 @@ func (r *Router) modelBrowserRenderVariants(ctx context.Context, msg channel.Inc
 }
 
 func (r *Router) modelBrowserSet(ctx context.Context, msg channel.IncomingMessage, action modelBrowseAction) error {
-	ref := relay.ModelRef{ProviderID: action.providerID, ID: action.modelID}
+	if action.variant == "" {
+		providers, pErr := r.modelBrowserProviders(ctx, msg)
+		if pErr != nil {
+			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "⚠️ Agent unreachable", nil)
+		}
+		if variants, ok := providers.Variants(action.providerID, action.modelID); ok && len(variants) > 0 {
+			text, buttons, vErr := r.modelVariantsView(msg.Platform, providers, action.providerID, action.modelID, action.page, false, true, "")
+			if vErr != nil {
+				return vErr
+			}
+			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, text, buttons)
+		}
+	}
+
+	ref := relay.ModelRef{ProviderID: action.providerID, ID: action.modelID, Variant: action.variant}
 	if err := r.validateModel(ctx, msg, ref); err != nil {
 		var replyErr *replyError
 		message := "⚠️ Model unavailable. Try again."
@@ -454,7 +468,7 @@ func (r *Router) modelVariantsView(platform string, providers relay.Providers, p
 	if prefix != "" {
 		sb.WriteString(prefix)
 	}
-	sb.WriteString(fmt.Sprintf("⚙️ Variants: %s/%s\n", providerID, modelID))
+	fmt.Fprintf(&sb, "⚙️ Variants: %s/%s\n", providerID, modelID)
 
 	for _, name := range names {
 		var vc variantConfig
@@ -474,9 +488,9 @@ func (r *Router) modelVariantsView(platform string, providers relay.Providers, p
 
 		bracket := fmt.Sprintf("[%s]", name)
 		if detail != "" {
-			sb.WriteString(fmt.Sprintf("%-*s%s\n", maxBracketLen+2, bracket, detail))
+			fmt.Fprintf(&sb, "%-*s%s\n", maxBracketLen+2, bracket, detail)
 		} else {
-			sb.WriteString(fmt.Sprintf("%s\n", bracket))
+			fmt.Fprintf(&sb, "%s\n", bracket)
 		}
 	}
 	text := strings.TrimRight(sb.String(), "\n")

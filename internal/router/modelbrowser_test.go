@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 
@@ -77,11 +78,13 @@ func browseProviders() relay.Providers {
 		}
 		return m
 	}
-	return relay.Providers{All: []relay.Provider{
+	p := relay.Providers{All: []relay.Provider{
 		{ID: "anthropic", Models: models("claude-3", "claude-4")},
 		{ID: "openai", Models: models("gpt-4o", "gpt-4-turbo")},
 		{ID: "zai", Models: models("glm-5")},
 	}}
+	p.All[2].Models["glm-5.2"] = json.RawMessage(`{"variants":{"high":{"reasoningEffort":"high"},"max":{"reasoningEffort":"high"},"low":{"reasoningEffort":"low"}}}`)
+	return p
 }
 
 func callbackMsg(userID, data string, reply *browseReplyCtx) channel.IncomingMessage {
@@ -427,8 +430,101 @@ func TestModelBrowserRowLayoutDiscord(t *testing.T) {
 
 func modelNavLabel(label string) bool {
 	switch label {
-	case "◀️ Prev", "Next ▶️", "✖️ Close", "⬅️ Providers":
+	case "◀️ Prev", "Next ▶️", "✖️ Close", "⬅️ Close", "⬅️ Providers", "⬅️ Models":
 		return true
 	}
 	return false
+}
+
+func TestModelBrowserVariantSelection(t *testing.T) {
+	r, client, _, overrideRepo := newTestRouterWithAccess()
+	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin"}
+	client.providers = browseProviders()
+	reply := newBrowseReplyCtx()
+
+	m := msg("/model", reply.fakeReplyCtx)
+	m.ReplyCtx = reply
+	if err := r.Route(context.Background(), m); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+
+	zaiToken := buttonValue(reply.sendSnapshot(), "zai")
+	if zaiToken == "" {
+		t.Fatal("missing zai provider button")
+	}
+
+	modelsReply := newBrowseReplyCtx()
+	if err := r.Route(context.Background(), callbackMsg("user1", zaiToken, modelsReply)); err != nil {
+		t.Fatalf("Route models: %v", err)
+	}
+	_, modelButtons := modelsReply.editSnapshot()
+
+	t.Run("model with variants renders variants view and sets variant", func(t *testing.T) {
+		glm52Token := buttonValue(modelButtons, "glm-5.2")
+		if glm52Token == "" {
+			t.Fatalf("missing glm-5.2 button in %v", labelsOf(modelButtons))
+		}
+
+		variantsReply := newBrowseReplyCtx()
+		if err := r.Route(context.Background(), callbackMsg("user1", glm52Token, variantsReply)); err != nil {
+			t.Fatalf("Route glm-5.2: %v", err)
+		}
+
+		text, variantButtons := variantsReply.editSnapshot()
+		if !strings.Contains(text, "⚙️ Variants: zai/glm-5.2") {
+			t.Fatalf("text = %q, want variants header", text)
+		}
+
+		labels := labelsOf(variantButtons)
+		want := []string{"Set @high", "Set @low", "Set @max", "⬅️ Models", "⬅️ Close"}
+		if len(labels) != len(want) {
+			t.Fatalf("variant buttons = %v, want %v", labels, want)
+		}
+
+		// Test back to models button
+		backToken := buttonValue(variantButtons, "⬅️ Models")
+		backReply := newBrowseReplyCtx()
+		if err := r.Route(context.Background(), callbackMsg("user1", backToken, backReply)); err != nil {
+			t.Fatalf("Route back: %v", err)
+		}
+		backText, _ := backReply.editSnapshot()
+		if backText != "Provider: zai — select model:" {
+			t.Fatalf("back text = %q, want models view", backText)
+		}
+
+		// Now set variant
+		setHighToken := buttonValue(variantButtons, "Set @high")
+		setReply := newBrowseReplyCtx()
+		if err := r.Route(context.Background(), callbackMsg("user1", setHighToken, setReply)); err != nil {
+			t.Fatalf("Route set high: %v", err)
+		}
+
+		setText, _ := setReply.editSnapshot()
+		if setText != "✅ Personal model set: zai/glm-5.2@high" {
+			t.Fatalf("setText = %q", setText)
+		}
+		if o := overrideRepo.overrides["telegram:chat1:user1"]; o == nil || o.Model != "zai/glm-5.2@high" {
+			t.Fatalf("user1 stored model = %+v, want zai/glm-5.2@high", o)
+		}
+	})
+
+	t.Run("model without variants sets model directly", func(t *testing.T) {
+		glm5Token := buttonValue(modelButtons, "glm-5")
+		if glm5Token == "" {
+			t.Fatalf("missing glm-5 button in %v", labelsOf(modelButtons))
+		}
+
+		setReply := newBrowseReplyCtx()
+		if err := r.Route(context.Background(), callbackMsg("user1", glm5Token, setReply)); err != nil {
+			t.Fatalf("Route glm-5 set: %v", err)
+		}
+
+		setText, _ := setReply.editSnapshot()
+		if setText != "✅ Personal model set: zai/glm-5" {
+			t.Fatalf("setText = %q", setText)
+		}
+		if o := overrideRepo.overrides["telegram:chat1:user1"]; o == nil || o.Model != "zai/glm-5" {
+			t.Fatalf("user1 stored model = %+v, want zai/glm-5", o)
+		}
+	})
 }

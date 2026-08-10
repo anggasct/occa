@@ -593,7 +593,7 @@ func TestVariantsCommand(t *testing.T) {
 		if err := r.Route(context.Background(), msg("/variants", reply)); err != nil {
 			t.Fatalf("Route: %v", err)
 		}
-		if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], "No active model. Usage: /variants <provider>/<model-id>") {
+		if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], "No active model. Usage: /variants &lt;provider&gt;/&lt;model-id&gt;") {
 			t.Fatalf("unexpected reply: %v", reply.sends)
 		}
 	})
