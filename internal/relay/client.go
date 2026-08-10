@@ -68,27 +68,35 @@ func (p Providers) HasModel(ref ModelRef) bool {
 	return false
 }
 
-func (p Providers) HasVariant(ref ModelRef) bool {
-	if ref.Variant == "" {
-		return true
-	}
+func (p Providers) Variants(providerID, modelID string) (map[string]json.RawMessage, bool) {
 	for _, provider := range p.All {
-		if provider.ID == ref.ProviderID {
-			raw, ok := provider.Models[ref.ID]
+		if provider.ID == providerID {
+			raw, ok := provider.Models[modelID]
 			if !ok || len(raw) == 0 {
-				return true
+				return nil, false
 			}
 			var cfg struct {
 				Variants map[string]json.RawMessage `json:"variants"`
 			}
 			if err := json.Unmarshal(raw, &cfg); err != nil || cfg.Variants == nil {
-				return true
+				return nil, false
 			}
-			_, ok = cfg.Variants[ref.Variant]
-			return ok
+			return cfg.Variants, true
 		}
 	}
-	return true
+	return nil, false
+}
+
+func (p Providers) HasVariant(ref ModelRef) bool {
+	if ref.Variant == "" {
+		return true
+	}
+	variants, ok := p.Variants(ref.ProviderID, ref.ID)
+	if !ok || variants == nil {
+		return true
+	}
+	_, has := variants[ref.Variant]
+	return has
 }
 
 // Relay event types delivered on the stream channel.

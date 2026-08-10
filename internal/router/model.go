@@ -183,3 +183,51 @@ func formatModelRef(ref relay.ModelRef) string {
 	}
 	return ref.ProviderID + "/" + ref.ID
 }
+
+func (r *Router) handleVariants(ctx context.Context, msg channel.IncomingMessage, args string) (string, error) {
+	parts := strings.Fields(args)
+	var providerID, modelID string
+	if len(parts) == 0 {
+		modelRef, err := r.effectiveModel(ctx, msg)
+		if err != nil {
+			return "", err
+		}
+		if modelRef == nil {
+			return "No active model. Usage: /variants [provider/model-id]", nil
+		}
+		providerID = modelRef.ProviderID
+		modelID = modelRef.ID
+	} else if len(parts) == 1 {
+		ref, err := parseModelRef(parts[0])
+		if err != nil {
+			return "", err
+		}
+		providerID = ref.ProviderID
+		modelID = ref.ID
+	} else {
+		return "Usage: /variants [provider/model-id]", nil
+	}
+
+	baseRef := relay.ModelRef{ProviderID: providerID, ID: modelID}
+	if err := r.validateModel(ctx, msg, baseRef); err != nil {
+		return "", err
+	}
+
+	providers, err := r.modelBrowserProviders(ctx, msg)
+	if err != nil {
+		return "", safeReplyError("Agent unreachable", fmt.Errorf("variants: list providers: %w", err))
+	}
+
+	text, buttons, err := r.modelVariantsView(msg.Platform, providers, providerID, modelID, 0, false, false, "")
+	if err != nil {
+		return "", err
+	}
+
+	if len(buttons) > 0 {
+		if _, err := msg.ReplyCtx.SendWithButtons(text, buttons); err != nil {
+			return "", err
+		}
+		return "", errReplied
+	}
+	return text, nil
+}

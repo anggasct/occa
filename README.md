@@ -94,6 +94,7 @@ appears in the chat:
 | `/dir [path]` | View or set this channel's working directory |
 | `/channel [mention\|all\|thread]` | View or set listen mode |
 | `/model [channel] [provider/model-id[@variant]]` | View or set the model |
+| `/variants [provider/model-id]` | List/set model reasoning variants |
 | `/admin <user_id>` | Grant or revoke admin |
 | `/allow <user_id>` / `/deny <user_id>` | Grant or revoke access |
 | `/reset` | Clear the current session and start fresh |

@@ -30,11 +30,12 @@ const (
 var errReplied = errors.New("command already replied")
 
 type modelBrowseAction struct {
-	kind       string // "providers" | "models" | "set" | "close"
-	pageKind   string // view being closed ("providers" | "models"); set on close actions
+	kind       string // "providers" | "models" | "set" | "close" | "variants"
+	pageKind   string // view being closed ("providers" | "models" | "variants"); set on close actions
 	page       int
 	providerID string
 	modelID    string
+	variant    string
 	createdAt  time.Time
 }
 
@@ -130,6 +131,8 @@ func (r *Router) handleModelCallback(ctx context.Context, msg channel.IncomingMe
 		return r.modelBrowserRenderProviders(ctx, msg, action.page)
 	case "models":
 		return r.modelBrowserRenderModels(ctx, msg, action.providerID, action.page)
+	case "variants":
+		return r.modelBrowserRenderVariants(ctx, msg, action.providerID, action.modelID, action.page)
 	case "set":
 		return r.modelBrowserSet(ctx, msg, action)
 	case "close":
@@ -176,8 +179,34 @@ func (r *Router) modelBrowserRenderModels(ctx context.Context, msg channel.Incom
 	return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, text, buttons)
 }
 
+func (r *Router) modelBrowserRenderVariants(ctx context.Context, msg channel.IncomingMessage, providerID, modelID string, page int) error {
+	providers, err := r.modelBrowserProviders(ctx, msg)
+	if err != nil {
+		return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "⚠️ Agent unreachable", nil)
+	}
+	text, buttons, err := r.modelVariantsView(msg.Platform, providers, providerID, modelID, page, false, true, "")
+	if err != nil {
+		return err
+	}
+	return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, text, buttons)
+}
+
 func (r *Router) modelBrowserSet(ctx context.Context, msg channel.IncomingMessage, action modelBrowseAction) error {
-	ref := relay.ModelRef{ProviderID: action.providerID, ID: action.modelID}
+	if action.variant == "" {
+		providers, pErr := r.modelBrowserProviders(ctx, msg)
+		if pErr != nil {
+			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "⚠️ Agent unreachable", nil)
+		}
+		if variants, ok := providers.Variants(action.providerID, action.modelID); ok && len(variants) > 0 {
+			text, buttons, vErr := r.modelVariantsView(msg.Platform, providers, action.providerID, action.modelID, action.page, false, true, "")
+			if vErr != nil {
+				return vErr
+			}
+			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, text, buttons)
+		}
+	}
+
+	ref := relay.ModelRef{ProviderID: action.providerID, ID: action.modelID, Variant: action.variant}
 	if err := r.validateModel(ctx, msg, ref); err != nil {
 		var replyErr *replyError
 		message := "⚠️ Model unavailable. Try again."
@@ -218,6 +247,11 @@ func (r *Router) modelBrowserClose(ctx context.Context, msg channel.IncomingMess
 		return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, view, nil)
 	}
 	switch action.pageKind {
+	case "variants":
+		text, _, vErr := r.modelVariantsView(msg.Platform, providers, action.providerID, action.modelID, action.page, true, false, "")
+		if vErr == nil {
+			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, text, nil)
+		}
 	case "models":
 		text, _, vErr := r.modelModelsView(msg.Platform, providers, action.providerID, action.page, true, "")
 		if vErr == nil {
@@ -386,4 +420,120 @@ func sortedModelIDs(models map[string]json.RawMessage) []string {
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+func (r *Router) modelVariantsView(platform string, providers relay.Providers, providerID, modelID string, page int, textOnly bool, fromBrowser bool, prefix string) (string, []channel.Button, error) {
+	variants, ok := providers.Variants(providerID, modelID)
+	if !ok || len(variants) == 0 {
+		text := prefix + fmt.Sprintf("No variants for %s/%s", providerID, modelID)
+		var buttons []channel.Button
+		if !textOnly {
+			if fromBrowser {
+				back, err := r.modelBrowser.register(modelBrowseAction{kind: "models", providerID: providerID, page: page})
+				if err != nil {
+					return "", nil, err
+				}
+				buttons = append(buttons, channel.Button{Label: "⬅️ Models", Value: modelCallbackPrefix + back, Row: modelBrowserNavRow})
+			}
+			closeToken, err := r.modelBrowser.register(modelBrowseAction{kind: "close", pageKind: "variants", providerID: providerID, modelID: modelID, page: page})
+			if err != nil {
+				return "", nil, err
+			}
+			buttons = append(buttons, channel.Button{Label: "⬅️ Close", Value: modelCallbackPrefix + closeToken, Row: modelBrowserNavRow})
+		}
+		return text, buttons, nil
+	}
+
+	names := make([]string, 0, len(variants))
+	for name := range variants {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	type variantConfig struct {
+		ReasoningEffort      string `json:"reasoningEffort"`
+		ReasoningEffortSnake string `json:"reasoning_effort"`
+		Description          string `json:"description"`
+	}
+
+	maxBracketLen := 0
+	for _, name := range names {
+		bracketLen := len(name) + 2
+		if bracketLen > maxBracketLen {
+			maxBracketLen = bracketLen
+		}
+	}
+
+	var sb strings.Builder
+	if prefix != "" {
+		sb.WriteString(prefix)
+	}
+	fmt.Fprintf(&sb, "⚙️ Variants: %s/%s\n", providerID, modelID)
+
+	for _, name := range names {
+		var vc variantConfig
+		if raw, ok := variants[name]; ok && len(raw) > 0 {
+			_ = json.Unmarshal(raw, &vc)
+		}
+		effort := vc.ReasoningEffort
+		if effort == "" {
+			effort = vc.ReasoningEffortSnake
+		}
+		detail := ""
+		if effort != "" {
+			detail = "Reasoning effort: " + effort
+		} else if vc.Description != "" {
+			detail = vc.Description
+		}
+
+		bracket := fmt.Sprintf("[%s]", name)
+		if detail != "" {
+			fmt.Fprintf(&sb, "%-*s%s\n", maxBracketLen+2, bracket, detail)
+		} else {
+			fmt.Fprintf(&sb, "%s\n", bracket)
+		}
+	}
+	text := strings.TrimRight(sb.String(), "\n")
+
+	var buttons []channel.Button
+	if !textOnly {
+		for i, name := range names {
+			token, err := r.modelBrowser.register(modelBrowseAction{
+				kind:       "set",
+				page:       page,
+				providerID: providerID,
+				modelID:    modelID,
+				variant:    name,
+			})
+			if err != nil {
+				return "", nil, err
+			}
+			buttons = append(buttons, channel.Button{
+				Label: fmt.Sprintf("Set @%s", name),
+				Value: modelCallbackPrefix + token,
+				Row:   i/modelItemsPerRow(platform) + 1,
+			})
+		}
+
+		if fromBrowser {
+			back, err := r.modelBrowser.register(modelBrowseAction{kind: "models", providerID: providerID, page: page})
+			if err != nil {
+				return "", nil, err
+			}
+			buttons = append(buttons, channel.Button{Label: "⬅️ Models", Value: modelCallbackPrefix + back, Row: modelBrowserNavRow})
+		}
+		closeToken, err := r.modelBrowser.register(modelBrowseAction{
+			kind:       "close",
+			pageKind:   "variants",
+			providerID: providerID,
+			modelID:    modelID,
+			page:       page,
+		})
+		if err != nil {
+			return "", nil, err
+		}
+		buttons = append(buttons, channel.Button{Label: "⬅️ Close", Value: modelCallbackPrefix + closeToken, Row: modelBrowserNavRow})
+	}
+
+	return text, buttons, nil
 }
