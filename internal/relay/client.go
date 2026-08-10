@@ -183,7 +183,7 @@ func (c *HTTPClient) SessionExists(ctx context.Context, sessionID string) (bool,
 	if err != nil {
 		return false, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
 		return false, fmt.Errorf("relay: session exists: drain body: %w", err)
 	}
