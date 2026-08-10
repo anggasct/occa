@@ -44,15 +44,15 @@ func TestRegisterCommandsSendsSetMyCommands(t *testing.T) {
 	})
 
 	a := &Adapter{bot: bot, menu: []channel.MenuCommand{
-		{Alias: "occa_help", Description: "Show available commands"},
-		{Alias: "occa_session", Description: "Manage sessions", HasArgs: true},
+		{Alias: "help", Description: "Show available commands"},
+		{Alias: "session", Description: "Manage sessions", HasArgs: true},
 	}}
 	a.registerCommands()
 
 	if !strings.Contains(gotPath, "setMyCommands") {
 		t.Fatalf("expected setMyCommands call, got path %q", gotPath)
 	}
-	if !strings.Contains(string(gotBody), "occa_help") || !strings.Contains(string(gotBody), "occa_session") {
+	if !strings.Contains(string(gotBody), "help") || !strings.Contains(string(gotBody), "session") {
 		t.Fatalf("expected both commands in request body, got %q", gotBody)
 	}
 }
@@ -60,7 +60,7 @@ func TestRegisterCommandsSendsSetMyCommands(t *testing.T) {
 func TestSanitizeCommandName(t *testing.T) {
 	cases := map[string]string{
 		"customize-opencode":    "customize_opencode",
-		"occa_help":             "occa_help",
+		"help":                  "help",
 		"UPPER":                 "upper",
 		strings.Repeat("a", 40): strings.Repeat("a", 32),
 	}
@@ -82,7 +82,7 @@ func TestSetChatCommandsUsesChatScope(t *testing.T) {
 
 	rc := &replyContext{bot: bot, chatID: 12345}
 	err := rc.SetChatCommands([]channel.MenuCommand{
-		{Alias: "occa_help", Description: "Show available commands"},
+		{Alias: "help", Description: "Show available commands"},
 		{Alias: "customize-opencode", Description: "Configure opencode"},
 	})
 	if err != nil {
@@ -92,8 +92,8 @@ func TestSetChatCommandsUsesChatScope(t *testing.T) {
 	if !strings.Contains(gotPath, "setMyCommands") {
 		t.Fatalf("expected setMyCommands call, got path %q", gotPath)
 	}
-	if !strings.Contains(string(gotBody), "occa_help") {
-		t.Fatalf("expected occa_help in request body, got %q", gotBody)
+	if !strings.Contains(string(gotBody), "help") {
+		t.Fatalf("expected help in request body, got %q", gotBody)
 	}
 	if !strings.Contains(string(gotBody), "customize_opencode") {
 		t.Fatalf("expected sanitized agent command name, got %q", gotBody)
@@ -163,7 +163,7 @@ func TestRegisterCommandsFailureDoesNotPanic(t *testing.T) {
 		_, _ = w.Write([]byte(`{"ok":false,"description":"boom"}`))
 	})
 
-	a := &Adapter{bot: bot, menu: []channel.MenuCommand{{Alias: "occa_help", Description: "x"}}}
+	a := &Adapter{bot: bot, menu: []channel.MenuCommand{{Alias: "help", Description: "x"}}}
 	a.registerCommands() // must not panic despite the failed request
 }
 

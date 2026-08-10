@@ -207,9 +207,9 @@ func (a *Adapter) configure(s *discordgo.Session, handler func(channel.IncomingM
 // handleApplicationCommandInteraction reconstructs a slash-command
 // interaction into the same "/name arg" text the message-content path
 // produces, so both reach the router identically. The registered command
-// name is whatever native-menu alias was registered (e.g. "occa_session");
-// Router.normalizeCommandAlias reconciles it back to the canonical
-// "/occa:session" form before dispatch.
+// name is the menu alias (e.g. "session");
+// Router.normalizeCommandAlias reconciles legacy aliases back to the short
+// "/session" form before dispatch.
 func (a *Adapter) handleApplicationCommandInteraction(sess *discordgo.Session, i *discordgo.InteractionCreate, handler func(channel.IncomingMessage)) {
 	data := i.ApplicationCommandData()
 	text := "/" + data.Name

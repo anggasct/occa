@@ -26,7 +26,7 @@ func (r *Router) handleModel(ctx context.Context, msg channel.IncomingMessage, a
 
 	if parts[0] == "channel" {
 		if len(parts) != 2 {
-			return "Usage: /occa:model channel <provider>/<model-id>", nil
+			return "Usage: /model channel <provider>/<model-id>", nil
 		}
 		if !r.isAdmin(ctx, msg) {
 			return "⚠️ Admin access required.", nil
@@ -50,7 +50,7 @@ func (r *Router) handleModel(ctx context.Context, msg channel.IncomingMessage, a
 	}
 
 	if len(parts) != 1 {
-		return "Usage: /occa:model [channel] [provider/model-id]", nil
+		return "Usage: /model [channel] [provider/model-id]", nil
 	}
 	ref, err := parseModelRef(parts[0])
 	if err != nil {

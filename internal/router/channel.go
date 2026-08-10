@@ -32,7 +32,7 @@ func (r *Router) viewChannel(ctx context.Context, msg channel.IncomingMessage) (
 
 func (r *Router) setChannel(ctx context.Context, msg channel.IncomingMessage, mode string) (string, error) {
 	if !validListenModes[mode] {
-		return "Usage: /occa:channel [mention|all|thread]", nil
+		return "Usage: /channel [mention|all|thread]", nil
 	}
 
 	if err := r.store.ChannelRepo().UpsertListenMode(ctx, msg.Platform, msg.ChannelID, mode); err != nil {

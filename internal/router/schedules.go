@@ -16,11 +16,11 @@ func (r *Router) handleSchedules(ctx context.Context, msg channel.IncomingMessag
 	parts := strings.Fields(args)
 	if len(parts) > 0 && parts[0] == "delete" {
 		if len(parts) < 2 {
-			return "Usage: /occa:schedules delete <id>", nil
+			return "Usage: /schedules delete <id>", nil
 		}
 		var id int64
 		if _, err := fmt.Sscanf(parts[1], "%d", &id); err != nil || id <= 0 {
-			return "⚠️ Invalid schedule ID. Usage: /occa:schedules delete <id>", nil
+			return "⚠️ Invalid schedule ID. Usage: /schedules delete <id>", nil
 		}
 		if err := r.sched.RemoveSchedule(ctx, msg.Platform, msg.ChannelID, id); err != nil {
 			return "", fmt.Errorf("schedules delete: %w", err)

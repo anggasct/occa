@@ -60,11 +60,11 @@ func TestBootstrapAdminStaysAuthorizedAcrossMessagesAgainstRealStore(t *testing.
 
 	for i := range 3 {
 		reply.sends = nil
-		if err := r.Route(ctx, msgFrom("admin1", "/occa:help", reply)); err != nil {
+		if err := r.Route(ctx, msgFrom("admin1", "/help", reply)); err != nil {
 			t.Fatalf("Route message %d: %v", i+1, err)
 		}
 		assertNotRefused(t, reply.sends)
-		if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], "/occa:status") {
+		if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], "/status") {
 			t.Fatalf("message %d: unexpected reply %v", i+1, reply.sends)
 		}
 	}
@@ -78,7 +78,7 @@ func TestLastAdminGuardWithRoleOnlyRowAgainstRealStore(t *testing.T) {
 		t.Fatalf("UpsertRole: %v", err)
 	}
 
-	if err := r.Route(ctx, msg("/occa:deny user1", reply)); err != nil {
+	if err := r.Route(ctx, msg("/deny user1", reply)); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
 	if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], "Cannot deny the last admin") {
