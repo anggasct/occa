@@ -73,6 +73,9 @@ func (f *fakeRelayClient) CreateSession(_ context.Context) (string, error) {
 	f.sessionSeq++
 	return f.sessionID, nil
 }
+func (f *fakeRelayClient) SessionExists(_ context.Context, _ string) (bool, error) {
+	return true, nil
+}
 func (f *fakeRelayClient) SendMessage(_ context.Context, _, text string, model *relay.ModelRef, _ []relay.Attachment) error {
 	f.mu.Lock()
 	f.sendCalls++

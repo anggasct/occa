@@ -87,6 +87,9 @@ type permissionClient struct {
 }
 
 func (c *permissionClient) CreateSession(_ context.Context) (string, error) { return "session", nil }
+func (c *permissionClient) SessionExists(_ context.Context, _ string) (bool, error) {
+	return true, nil
+}
 func (c *permissionClient) SendMessage(_ context.Context, _ string, _ string, _ *relay.ModelRef, _ []relay.Attachment) error {
 	return nil
 }

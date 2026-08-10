@@ -124,6 +124,7 @@ const (
 
 type Client interface {
 	CreateSession(ctx context.Context) (string, error)
+	SessionExists(ctx context.Context, sessionID string) (bool, error)
 	SendMessage(ctx context.Context, sessionID, text string, model *ModelRef, attachments []Attachment) error
 	Providers(ctx context.Context) (Providers, error)
 	RunCommand(ctx context.Context, sessionID, command string) error
@@ -175,6 +176,25 @@ func (c *HTTPClient) CreateSession(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("relay: create session: decode response: %w", err)
 	}
 	return body.ID, nil
+}
+
+func (c *HTTPClient) SessionExists(ctx context.Context, sessionID string) (bool, error) {
+	resp, err := c.get(ctx, "/session/"+sessionID)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		return false, fmt.Errorf("relay: session exists: drain body: %w", err)
+	}
+
+	if resp.StatusCode == http.StatusOK {
+		return true, nil
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
+	return false, fmt.Errorf("relay: session exists: unexpected status %d", resp.StatusCode)
 }
 
 func (c *HTTPClient) SendMessage(ctx context.Context, sessionID, text string, model *ModelRef, attachments []Attachment) error {
