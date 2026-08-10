@@ -260,11 +260,11 @@ func parseQuestionEvent(data string) Event {
 func parsePermissionEvent(data string) Event {
 	var payload struct {
 		Properties struct {
-			ID         string   `json:"id"`
-			SessionID  string   `json:"sessionID"`
-			Permission string   `json:"permission"`
-			Tool       string   `json:"tool"`
-			Patterns   []string `json:"patterns"`
+			ID         string          `json:"id"`
+			SessionID  string          `json:"sessionID"`
+			Permission string          `json:"permission"`
+			Tool       json.RawMessage `json:"tool"`
+			Patterns   []string        `json:"patterns"`
 		} `json:"properties"`
 	}
 	if err := json.Unmarshal([]byte(data), &payload); err != nil {
@@ -276,8 +276,25 @@ func parsePermissionEvent(data string) Event {
 			ID:         payload.Properties.ID,
 			SessionID:  payload.Properties.SessionID,
 			Permission: payload.Properties.Permission,
-			Tool:       payload.Properties.Tool,
+			Tool:       parseToolField(payload.Properties.Tool),
 			Patterns:   payload.Properties.Patterns,
 		},
 	}
+}
+
+func parseToolField(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var obj struct {
+		CallID string `json:"callID"`
+	}
+	if err := json.Unmarshal(raw, &obj); err == nil && obj.CallID != "" {
+		return obj.CallID
+	}
+	return ""
 }

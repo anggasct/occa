@@ -78,6 +78,35 @@ func TestParsePermissionAskedJSONStreamEvent(t *testing.T) {
 	}
 }
 
+func TestParsePermissionAskedToolObject(t *testing.T) {
+	payload := `{"type":"permission.asked","properties":{"id":"per_abc","sessionID":"ses_xyz","permission":"external_directory","patterns":["/path/*"],"tool":{"messageID":"msg_123","callID":"call_456"}}}`
+	ev, ok := parseSSEEvent(newEventDecoder(), "", payload)
+	if !ok {
+		t.Fatal("expected event to be parsed")
+	}
+	if ev.Type != "permission_asked" {
+		t.Fatalf("expected permission_asked, got %q", ev.Type)
+	}
+	if ev.Permission == nil {
+		t.Fatal("expected Permission to be set")
+	}
+	if ev.Permission.ID != "per_abc" {
+		t.Fatalf("ID = %q, want per_abc", ev.Permission.ID)
+	}
+	if ev.Permission.SessionID != "ses_xyz" {
+		t.Fatalf("SessionID = %q, want ses_xyz", ev.Permission.SessionID)
+	}
+	if ev.Permission.Permission != "external_directory" {
+		t.Fatalf("Permission = %q, want external_directory", ev.Permission.Permission)
+	}
+	if ev.Permission.Tool != "call_456" {
+		t.Fatalf("Tool = %q, want call_456", ev.Permission.Tool)
+	}
+	if len(ev.Permission.Patterns) != 1 || ev.Permission.Patterns[0] != "/path/*" {
+		t.Fatalf("Patterns = %v, want [/path/*]", ev.Permission.Patterns)
+	}
+}
+
 func TestParsePermissionAskedInvalidJSON(t *testing.T) {
 	ev, _ := parseSSEEvent(newEventDecoder(), "permission.asked", "not json")
 	if ev.Type != "delta" {
