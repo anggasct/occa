@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -16,6 +15,7 @@ import (
 )
 
 const (
+	permissionBatchWindow    = 1500 * time.Millisecond
 	permissionTombstoneTTL   = 10 * time.Minute
 	permissionRetryMessage   = "⚠️ Could not submit the permission choice. Try again."
 	permissionExpiredMessage = "⌛ Permission request expired."
@@ -33,26 +33,34 @@ const (
 )
 
 type permissionRecord struct {
-	token     string
-	owner     *permissionOwner
-	client    relay.Client
-	platform  string
-	channelID string
-	sessionID string
-	requestID string
-	reply     channel.ReplyContext
-	origin    channel.MessageRef
-	buttons   []channel.Button
-	state     permissionState
-	terminal  string
-	createdAt time.Time
-	expiresAt time.Time
-	attempt   uint64
+	token      string
+	owner      *permissionOwner
+	client     relay.Client
+	platform   string
+	channelID  string
+	sessionID  string
+	requestIDs []string
+	reply      channel.ReplyContext
+	origin     channel.MessageRef
+	buttons    []channel.Button
+	state      permissionState
+	terminal   string
+	createdAt  time.Time
+	expiresAt  time.Time
+	attempt    uint64
+}
+
+type pendingBatch struct {
+	owner    *permissionOwner
+	handler  *permissionPromptHandler
+	requests []relay.PermissionRequest
+	timer    *time.Timer
 }
 
 type permissionBroker struct {
 	mu      sync.Mutex
 	records map[string]*permissionRecord
+	batches map[*permissionOwner]*pendingBatch
 }
 
 type permissionPromptHandler struct {
@@ -67,62 +75,113 @@ type permissionPromptHandler struct {
 }
 
 func newPermissionBroker() *permissionBroker {
-	return &permissionBroker{records: make(map[string]*permissionRecord)}
+	return &permissionBroker{
+		records: make(map[string]*permissionRecord),
+		batches: make(map[*permissionOwner]*pendingBatch),
+	}
 }
 
 func (h *permissionPromptHandler) Prompt(ctx context.Context, request relay.PermissionRequest) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
+	h.broker.mu.Lock()
+	batch, exists := h.broker.batches[h.owner]
+	if exists {
+		batch.requests = append(batch.requests, request)
+		h.broker.mu.Unlock()
+		return nil
+	}
+
+	batch = &pendingBatch{
+		owner:    h.owner,
+		handler:  h,
+		requests: []relay.PermissionRequest{request},
+	}
+	batch.timer = time.AfterFunc(permissionBatchWindow, func() {
+		h.broker.flushBatch(batch)
+	})
+	h.broker.batches[h.owner] = batch
+	h.broker.mu.Unlock()
+
+	return nil
+}
+
+func (b *permissionBroker) flushBatch(batch *pendingBatch) {
+	b.mu.Lock()
+	current, exists := b.batches[batch.owner]
+	if !exists || current != batch {
+		b.mu.Unlock()
+		return
+	}
+	delete(b.batches, batch.owner)
+	b.mu.Unlock()
+
+	h := batch.handler
+	requests := batch.requests
+	if len(requests) == 0 {
+		return
+	}
+
 	token, err := permissionToken()
 	if err != nil {
-		return fmt.Errorf("permission: generate token: %w", err)
+		slog.Error("permission: generate token failed", "error", err)
+		return
 	}
-	sessionID := request.SessionID
+
+	sessionID := requests[0].SessionID
 	if sessionID == "" {
 		sessionID = h.sessionID
 	}
-	record := &permissionRecord{
-		token:     token,
-		owner:     h.owner,
-		client:    h.client,
-		platform:  h.platform,
-		channelID: h.channelID,
-		sessionID: sessionID,
-		requestID: request.ID,
-		reply:     h.reply,
-		buttons:   permissionButtons(token),
-		state:     permissionPending,
-		createdAt: time.Now(),
+
+	requestIDs := make([]string, len(requests))
+	for i, req := range requests {
+		requestIDs[i] = req.ID
 	}
 
-	h.broker.mu.Lock()
-	h.broker.cleanupLocked(time.Now())
-	h.broker.records[token] = record
-	h.broker.mu.Unlock()
+	record := &permissionRecord{
+		token:      token,
+		owner:      h.owner,
+		client:     h.client,
+		platform:   h.platform,
+		channelID:  h.channelID,
+		sessionID:  sessionID,
+		requestIDs: requestIDs,
+		reply:      h.reply,
+		buttons:    permissionButtons(token),
+		state:      permissionPending,
+		createdAt:  time.Now(),
+	}
 
-	ref, err := h.reply.SendWithButtons(h.promptText(request), record.buttons)
+	b.mu.Lock()
+	b.cleanupLocked(time.Now())
+	b.records[token] = record
+	b.mu.Unlock()
+
+	ref, err := h.reply.SendWithButtons(h.promptText(requests...), record.buttons)
 	if err != nil {
-		h.broker.removePending(record)
-		return fmt.Errorf("permission: send prompt: %w", err)
+		b.removePending(record)
+		slog.Warn("permission: send prompt failed", "error", err)
+		return
 	}
 	if ref == nil || ref.ID() == "" {
-		h.broker.removePending(record)
-		return errors.New("permission: prompt has no origin reference")
+		b.removePending(record)
+		slog.Warn("permission: prompt has no origin reference")
+		return
 	}
 
-	h.broker.mu.Lock()
+	b.mu.Lock()
 	if record.state == permissionPending {
 		record.origin = ref
-		h.broker.mu.Unlock()
+		b.mu.Unlock()
 	} else {
 		record.origin = ref
-		h.broker.mu.Unlock()
+		b.mu.Unlock()
 		_ = h.reply.EditWithButtons(ref, permissionExpiredMessage, nil)
 	}
 
-	slog.Info("permission prompt registered", "platform", record.platform, "channel_id", record.channelID)
-	return nil
+	slog.Info("permission prompt registered", "platform", record.platform, "channel_id", record.channelID, "count", len(requestIDs))
 }
 
 func (b *permissionBroker) handle(ctx context.Context, msg channel.IncomingMessage) error {
@@ -172,16 +231,23 @@ func (b *permissionBroker) handle(ctx context.Context, msg channel.IncomingMessa
 	record.attempt++
 	attempt := record.attempt
 	client := record.client
-	requestID := record.requestID
+	requestIDs := append([]string(nil), record.requestIDs...)
 	reply := record.reply
 	origin := record.origin
 	buttons := append([]channel.Button(nil), record.buttons...)
 	b.mu.Unlock()
 
-	err := client.ReplyPermission(ctx, requestID, decision)
-	if err != nil {
+	var firstErr error
+	for _, reqID := range requestIDs {
+		if err := client.ReplyPermission(ctx, reqID, decision); err != nil {
+			firstErr = err
+			break
+		}
+	}
+
+	if firstErr != nil {
 		if b.retry(record, attempt) {
-			slog.Warn("permission callback retryable failure", "platform", msg.Platform, "channel_id", msg.ChannelID, "error", err)
+			slog.Warn("permission callback retryable failure", "platform", msg.Platform, "channel_id", msg.ChannelID, "error", firstErr)
 			if updateErr := reply.EditWithButtons(origin, permissionRetryMessage, buttons); updateErr != nil {
 				slog.Warn("permission: retry view update failed", "platform", msg.Platform, "channel_id", msg.ChannelID, "error", updateErr)
 			}
@@ -207,6 +273,14 @@ func (b *permissionBroker) expireOwner(owner *permissionOwner) {
 	var origins []channel.MessageRef
 	b.mu.Lock()
 	b.cleanupLocked(now)
+
+	if batch, ok := b.batches[owner]; ok {
+		delete(b.batches, owner)
+		if batch.timer != nil {
+			batch.timer.Stop()
+		}
+	}
+
 	for _, record := range b.records {
 		if record.owner != owner || (record.state != permissionPending && record.state != permissionHandling) {
 			continue
@@ -314,23 +388,27 @@ func permissionButtons(token string) []channel.Button {
 
 // promptText escapes through the platform renderer: the permission name and
 // tool come from the agent and can contain markup characters.
-func (h *permissionPromptHandler) promptText(request relay.PermissionRequest) string {
-	text := permissionPromptText(request)
+func (h *permissionPromptHandler) promptText(requests ...relay.PermissionRequest) string {
+	text := permissionPromptText(requests...)
 	if h.encode == nil {
 		return text
 	}
 	return h.encode(text)
 }
 
-func permissionPromptText(request relay.PermissionRequest) string {
-	text := fmt.Sprintf("🔐 Permission requested: %s", request.Permission)
-	if request.Tool != "" {
-		text += fmt.Sprintf(" (%s)", request.Tool)
+func permissionPromptText(requests ...relay.PermissionRequest) string {
+	var blocks []string
+	for _, req := range requests {
+		text := fmt.Sprintf("🔐 Permission requested: %s", req.Permission)
+		if req.Tool != "" {
+			text += fmt.Sprintf(" (%s)", req.Tool)
+		}
+		if len(req.Patterns) > 0 {
+			text += fmt.Sprintf("\nPath: %s", strings.Join(req.Patterns, ", "))
+		}
+		blocks = append(blocks, text)
 	}
-	if len(request.Patterns) > 0 {
-		text += fmt.Sprintf("\nPath: %s", strings.Join(request.Patterns, ", "))
-	}
-	return text
+	return strings.Join(blocks, "\n")
 }
 
 func permissionTerminalLabel(decision relay.PermissionReply) string {
