@@ -470,3 +470,16 @@ func TestCallbackNotSerializedBehindBlockedBackend(t *testing.T) {
 		t.Fatalf("first handle: %v", err)
 	}
 }
+
+func TestPermissionPromptTextWithPatterns(t *testing.T) {
+	req := relay.PermissionRequest{
+		Permission: "external_directory",
+		Tool:       "bash",
+		Patterns:   []string{"/tmp/*"},
+	}
+	got := permissionPromptText(req)
+	want := "🔐 Permission requested: external_directory (bash)\nPath: /tmp/*"
+	if got != want {
+		t.Fatalf("permissionPromptText = %q, want %q", got, want)
+	}
+}

@@ -26,7 +26,7 @@ func (h testPermissionPromptHandler) Prompt(_ context.Context, request Permissio
 }
 
 func TestParsePermissionAskedEvent(t *testing.T) {
-	payload := `{"properties":{"id":"per-123","sessionID":"sess-1","permission":"external_directory","tool":"bash"}}`
+	payload := `{"properties":{"id":"per-123","sessionID":"sess-1","permission":"external_directory","tool":"bash","patterns":["/tmp/*"]}}`
 	ev, _ := parseSSEEvent(newEventDecoder(), "permission.asked", payload)
 
 	if ev.Type != "permission_asked" {
@@ -43,6 +43,38 @@ func TestParsePermissionAskedEvent(t *testing.T) {
 	}
 	if ev.Permission.Tool != "bash" {
 		t.Fatalf("Tool = %q, want bash", ev.Permission.Tool)
+	}
+	if len(ev.Permission.Patterns) != 1 || ev.Permission.Patterns[0] != "/tmp/*" {
+		t.Fatalf("Patterns = %v, want [/tmp/*]", ev.Permission.Patterns)
+	}
+}
+
+func TestParsePermissionAskedJSONStreamEvent(t *testing.T) {
+	payload := `{"type":"permission.asked","properties":{"id":"per_123","sessionID":"ses_123","permission":"external_directory","tool":"bash","patterns":["/tmp/*"]}}`
+	ev, ok := parseSSEEvent(newEventDecoder(), "", payload)
+	if !ok {
+		t.Fatal("expected event to be parsed")
+	}
+	if ev.Type != "permission_asked" {
+		t.Fatalf("expected permission_asked, got %q", ev.Type)
+	}
+	if ev.Permission == nil {
+		t.Fatal("expected Permission to be set")
+	}
+	if ev.Permission.ID != "per_123" {
+		t.Fatalf("ID = %q, want per_123", ev.Permission.ID)
+	}
+	if ev.Permission.SessionID != "ses_123" {
+		t.Fatalf("SessionID = %q, want ses_123", ev.Permission.SessionID)
+	}
+	if ev.Permission.Permission != "external_directory" {
+		t.Fatalf("Permission = %q, want external_directory", ev.Permission.Permission)
+	}
+	if ev.Permission.Tool != "bash" {
+		t.Fatalf("Tool = %q, want bash", ev.Permission.Tool)
+	}
+	if len(ev.Permission.Patterns) != 1 || ev.Permission.Patterns[0] != "/tmp/*" {
+		t.Fatalf("Patterns = %v, want [/tmp/*]", ev.Permission.Patterns)
 	}
 }
 

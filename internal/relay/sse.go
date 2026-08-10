@@ -176,6 +176,8 @@ func (d *eventDecoder) parseJSON(data string) (Event, bool) {
 	switch {
 	case ev.Type == "question.asked":
 		return parseQuestionEvent(data), true
+	case ev.Type == "permission.asked":
+		return parsePermissionEvent(data), true
 	case ev.Type == "message.part.updated":
 		kind := ev.Properties.Part.Type
 		if ev.Properties.Part.ID != "" {
@@ -258,10 +260,11 @@ func parseQuestionEvent(data string) Event {
 func parsePermissionEvent(data string) Event {
 	var payload struct {
 		Properties struct {
-			ID         string `json:"id"`
-			SessionID  string `json:"sessionID"`
-			Permission string `json:"permission"`
-			Tool       string `json:"tool"`
+			ID         string   `json:"id"`
+			SessionID  string   `json:"sessionID"`
+			Permission string   `json:"permission"`
+			Tool       string   `json:"tool"`
+			Patterns   []string `json:"patterns"`
 		} `json:"properties"`
 	}
 	if err := json.Unmarshal([]byte(data), &payload); err != nil {
@@ -274,6 +277,7 @@ func parsePermissionEvent(data string) Event {
 			SessionID:  payload.Properties.SessionID,
 			Permission: payload.Properties.Permission,
 			Tool:       payload.Properties.Tool,
+			Patterns:   payload.Properties.Patterns,
 		},
 	}
 }
