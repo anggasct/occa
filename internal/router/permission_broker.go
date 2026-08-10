@@ -238,15 +238,17 @@ func (b *permissionBroker) handle(ctx context.Context, msg channel.IncomingMessa
 	b.mu.Unlock()
 
 	var firstErr error
+	var succeededCount int
 	for _, reqID := range requestIDs {
 		if err := client.ReplyPermission(ctx, reqID, decision); err != nil {
 			firstErr = err
 			break
 		}
+		succeededCount++
 	}
 
 	if firstErr != nil {
-		if b.retry(record, attempt) {
+		if b.retry(record, attempt, requestIDs[succeededCount:]) {
 			slog.Warn("permission callback retryable failure", "platform", msg.Platform, "channel_id", msg.ChannelID, "error", firstErr)
 			if updateErr := reply.EditWithButtons(origin, permissionRetryMessage, buttons); updateErr != nil {
 				slog.Warn("permission: retry view update failed", "platform", msg.Platform, "channel_id", msg.ChannelID, "error", updateErr)
@@ -312,13 +314,14 @@ func (b *permissionBroker) removePending(record *permissionRecord) {
 	}
 }
 
-func (b *permissionBroker) retry(record *permissionRecord, attempt uint64) bool {
+func (b *permissionBroker) retry(record *permissionRecord, attempt uint64, remainingIDs []string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if record.state != permissionHandling || record.attempt != attempt {
 		return false
 	}
 	record.state = permissionPending
+	record.requestIDs = append([]string(nil), remainingIDs...)
 	record.expiresAt = time.Time{}
 	return true
 }

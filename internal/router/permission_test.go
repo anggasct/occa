@@ -679,3 +679,111 @@ func TestPermissionBatchingExpireBeforeWindowElapses(t *testing.T) {
 		t.Fatalf("sends after expire = %d, want 0 (prompt should not have been sent)", count)
 	}
 }
+
+func TestPermissionBrokerBatchRetryOnlyUnresolvedIDs(t *testing.T) {
+	client := &permissionClient{
+		errors: []error{nil, errors.New("backend error 2nd id")},
+	}
+	broker := newPermissionBroker()
+	owner := &permissionOwner{}
+	reply := &permissionReply{}
+	handler := &permissionPromptHandler{
+		broker:    broker,
+		owner:     owner,
+		client:    client,
+		platform:  "telegram",
+		channelID: "chat1",
+		sessionID: "session-1",
+		reply:     reply,
+	}
+
+	req1 := relay.PermissionRequest{
+		ID:         "request-1",
+		SessionID:  "session-1",
+		Permission: "external_directory",
+		Tool:       "bash",
+		Patterns:   []string{"/path/1/*"},
+	}
+	req2 := relay.PermissionRequest{
+		ID:         "request-2",
+		SessionID:  "session-1",
+		Permission: "external_directory",
+		Tool:       "bash",
+		Patterns:   []string{"/path/2/*"},
+	}
+
+	if err := handler.Prompt(context.Background(), req1); err != nil {
+		t.Fatalf("Prompt 1: %v", err)
+	}
+	if err := handler.Prompt(context.Background(), req2); err != nil {
+		t.Fatalf("Prompt 2: %v", err)
+	}
+
+	waitForSends(reply)
+
+	reply.mu.Lock()
+	if len(reply.sends) != 1 {
+		reply.mu.Unlock()
+		t.Fatalf("send count = %d, want 1", len(reply.sends))
+	}
+	view := reply.sends[0]
+	reply.mu.Unlock()
+
+	token, decision, ok := parsePermissionCallback(view.buttons[0].Value)
+	if !ok {
+		t.Fatalf("invalid callback value: %q", view.buttons[0].Value)
+	}
+
+	callback := permissionCallback(token, view.ref, reply)
+
+	// First click: request-1 succeeds, request-2 fails.
+	if err := broker.handle(context.Background(), callback); err != nil {
+		t.Fatalf("first handle: %v", err)
+	}
+
+	callsAfterFirst := client.callSnapshot()
+	if len(callsAfterFirst) != 2 {
+		t.Fatalf("calls after first attempt = %d, want 2", len(callsAfterFirst))
+	}
+	if callsAfterFirst[0].requestID != "request-1" || callsAfterFirst[1].requestID != "request-2" {
+		t.Fatalf("calls after first attempt = %+v", callsAfterFirst)
+	}
+
+	failedView := reply.lastEdit()
+	if failedView.text != permissionRetryMessage || len(failedView.buttons) != 3 {
+		t.Fatalf("retry view after partial failure = %+v", failedView)
+	}
+
+	// Second click (retry): only request-2 should be attempted (request-1 must NOT be re-replied).
+	if err := broker.handle(context.Background(), callback); err != nil {
+		t.Fatalf("retry handle: %v", err)
+	}
+
+	allCalls := client.callSnapshot()
+	if len(allCalls) != 3 {
+		t.Fatalf("total calls = %d, want 3: %+v", len(allCalls), allCalls)
+	}
+
+	req1Count := 0
+	req2Count := 0
+	for _, call := range allCalls {
+		switch call.requestID {
+		case "request-1":
+			req1Count++
+		case "request-2":
+			req2Count++
+		}
+	}
+
+	if req1Count != 1 {
+		t.Errorf("request-1 call count = %d, want 1 (must not be re-replied on retry)", req1Count)
+	}
+	if req2Count != 2 {
+		t.Errorf("request-2 call count = %d, want 2", req2Count)
+	}
+
+	resolvedView := reply.lastEdit()
+	if resolvedView.text != permissionTerminalLabel(decision) || len(resolvedView.buttons) != 0 {
+		t.Fatalf("resolved view = %+v", resolvedView)
+	}
+}
