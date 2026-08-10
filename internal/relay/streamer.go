@@ -23,7 +23,7 @@ var (
 	ErrStreamRead       = errors.New("response stream read failed")
 )
 
-const incompleteStreamMessage = "⚠️ Response stream ended before completion. The task may still be running; check /occa:status."
+const incompleteStreamMessage = "⚠️ Response stream ended before completion. The task may still be running; check /status."
 
 const (
 	continuationReserve = 64
@@ -136,7 +136,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 			}
 
 		case <-timeoutTimer.C:
-			s.notice("⚠️ Task timed out (no events for 15 minutes). It may still be running, check /occa:status")
+			s.notice("⚠️ Task timed out (no events for 15 minutes). It may still be running, check /status")
 			s.setReaction(channel.ReactionError)
 			return ErrTimeout
 

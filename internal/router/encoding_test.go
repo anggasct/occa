@@ -27,7 +27,7 @@ func TestCommandReplyEscapesMarkup(t *testing.T) {
 		ChannelID: "chat1", Platform: "telegram", Workdir: "/tmp/a<b&c",
 	}
 
-	if err := r.Route(context.Background(), msg("/occa:dir", reply)); err != nil {
+	if err := r.Route(context.Background(), msg("/dir", reply)); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
 
@@ -40,7 +40,7 @@ func TestCommandReplyEscapesMarkup(t *testing.T) {
 func TestCommandErrorReplyEscapesMarkup(t *testing.T) {
 	r, _, reply := newTestRouter()
 
-	if err := r.Route(context.Background(), msg("/occa:model pro<vider", reply)); err != nil {
+	if err := r.Route(context.Background(), msg("/model pro<vider", reply)); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
 

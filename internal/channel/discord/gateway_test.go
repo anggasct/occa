@@ -118,8 +118,8 @@ func TestRegisterCommandsSendsBulkOverwrite(t *testing.T) {
 	}}}
 
 	a := &Adapter{session: s, menu: []channel.MenuCommand{
-		{Alias: "occa_help", Description: "Show available commands"},
-		{Alias: "occa_session", Description: "Manage sessions", HasArgs: true},
+		{Alias: "help", Description: "Show available commands"},
+		{Alias: "session", Description: "Manage sessions", HasArgs: true},
 	}}
 	a.registerCommands(&discordgo.Ready{Application: &discordgo.Application{ID: "app-1"}})
 
@@ -129,18 +129,18 @@ func TestRegisterCommandsSendsBulkOverwrite(t *testing.T) {
 	if !strings.Contains(gotPath, "applications/app-1/commands") {
 		t.Fatalf("expected bulk-overwrite path, got %q", gotPath)
 	}
-	if !strings.Contains(string(gotBody), "occa_help") || !strings.Contains(string(gotBody), "occa_session") {
+	if !strings.Contains(string(gotBody), "help") || !strings.Contains(string(gotBody), "session") {
 		t.Fatalf("expected both commands in request body, got %q", gotBody)
 	}
 	if !strings.Contains(string(gotBody), `"name":"args"`) {
-		t.Fatalf("expected args option for occa_session, got %q", gotBody)
+		t.Fatalf("expected args option for session, got %q", gotBody)
 	}
 }
 
 func TestSanitizeCommandNameDiscord(t *testing.T) {
 	cases := map[string]string{
 		"customize-opencode":    "customize-opencode",
-		"occa_help":             "occa_help",
+		"help":                  "help",
 		"UPPER":                 "upper",
 		strings.Repeat("a", 40): strings.Repeat("a", 32),
 	}
@@ -164,7 +164,7 @@ func TestSetChatCommandsUsesGuildScope(t *testing.T) {
 
 	rc := &replyContext{session: s, guildID: "guild-1", appID: "app-1"}
 	err := rc.SetChatCommands([]channel.MenuCommand{
-		{Alias: "occa_help", Description: "Show available commands"},
+		{Alias: "help", Description: "Show available commands"},
 	})
 	if err != nil {
 		t.Fatalf("SetChatCommands: %v", err)
@@ -176,8 +176,8 @@ func TestSetChatCommandsUsesGuildScope(t *testing.T) {
 	if !strings.Contains(gotPath, "applications/app-1/guilds/guild-1/commands") {
 		t.Fatalf("expected guild-scoped path, got %q", gotPath)
 	}
-	if !strings.Contains(string(gotBody), "occa_help") {
-		t.Fatalf("expected occa_help in request body, got %q", gotBody)
+	if !strings.Contains(string(gotBody), "help") {
+		t.Fatalf("expected help in request body, got %q", gotBody)
 	}
 }
 
@@ -229,7 +229,7 @@ func TestSetChatCommandsNoOpsWithoutGuild(t *testing.T) {
 	}}}
 
 	rc := &replyContext{session: s, appID: "app-1"}
-	if err := rc.SetChatCommands([]channel.MenuCommand{{Alias: "occa_help", Description: "x"}}); err != nil {
+	if err := rc.SetChatCommands([]channel.MenuCommand{{Alias: "help", Description: "x"}}); err != nil {
 		t.Fatalf("SetChatCommands: %v", err)
 	}
 	if called {
@@ -261,7 +261,7 @@ func TestRegisterCommandsSkipsWhenApplicationIDMissing(t *testing.T) {
 		return jsonResponse(200, "[]"), nil
 	}}}
 
-	a := &Adapter{session: s, menu: []channel.MenuCommand{{Alias: "occa_help", Description: "x"}}}
+	a := &Adapter{session: s, menu: []channel.MenuCommand{{Alias: "help", Description: "x"}}}
 	a.registerCommands(&discordgo.Ready{})
 
 	if called {
@@ -275,19 +275,14 @@ func TestRegisterCommandsFailureDoesNotPanic(t *testing.T) {
 		return jsonResponse(500, `{"message":"boom"}`), nil
 	}}}
 
-	a := &Adapter{session: s, menu: []channel.MenuCommand{{Alias: "occa_help", Description: "x"}}}
+	a := &Adapter{session: s, menu: []channel.MenuCommand{{Alias: "help", Description: "x"}}}
 	a.registerCommands(&discordgo.Ready{Application: &discordgo.Application{ID: "app-1"}}) // must not panic
 }
 
 // TestApplicationCommandInteractionReconstructsAliasedText covers the
 // discord-side half of the round trip: a slash-command interaction using a
-// registered alias (e.g. "occa_session") reconstructs to "/occa_session
-// list" the same way the pre-existing message-content path would. The
-// router-side half — that normalizeCommandAlias maps this exact text to
-// "/occa:session list" before dispatch — is covered by
-// TestNormalizeCommandAlias in internal/router; together the two tests
-// verify the full round trip without an import-cycle-inducing cross-package
-// dependency here.
+// registered alias (e.g. "session") reconstructs to "/session
+// list" the same way the pre-existing message-content path would.
 func TestApplicationCommandInteractionReconstructsAliasedText(t *testing.T) {
 	s := newUnconnectedSession(t)
 	s.Client = &http.Client{Transport: fakeRoundTripper{do: func(req *http.Request) (*http.Response, error) {
@@ -301,7 +296,7 @@ func TestApplicationCommandInteractionReconstructsAliasedText(t *testing.T) {
 		Type:      discordgo.InteractionApplicationCommand,
 		ChannelID: "chan-1",
 		Data: discordgo.ApplicationCommandInteractionData{
-			Name: "occa_session",
+			Name: "session",
 			Options: []*discordgo.ApplicationCommandInteractionDataOption{
 				{Name: "args", Value: "list"},
 			},
@@ -312,8 +307,8 @@ func TestApplicationCommandInteractionReconstructsAliasedText(t *testing.T) {
 	var got channel.IncomingMessage
 	a.handleApplicationCommandInteraction(s, interaction, func(m channel.IncomingMessage) { got = m })
 
-	if got.Text != "/occa_session list" {
-		t.Fatalf("reconstructed text = %q, want %q", got.Text, "/occa_session list")
+	if got.Text != "/session list" {
+		t.Fatalf("reconstructed text = %q, want %q", got.Text, "/session list")
 	}
 	if got.Platform != "discord" || got.UserID != "user-1" || got.ChannelID != "chan-1" {
 		t.Fatalf("unexpected message fields: %+v", got)

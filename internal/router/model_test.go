@@ -31,7 +31,7 @@ func TestModelViewUsesPersonalThenChannelThenDefault(t *testing.T) {
 		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin", Model: "openai/gpt-4o",
 	}
 
-	if err := r.Route(context.Background(), msg("/occa:model", reply)); err != nil {
+	if err := r.Route(context.Background(), msg("/model", reply)); err != nil {
 		t.Fatalf("Route personal model view: %v", err)
 	}
 	if !strings.Contains(reply.sends[0], "openai/gpt-4o") {
@@ -42,7 +42,7 @@ func TestModelViewUsesPersonalThenChannelThenDefault(t *testing.T) {
 	o.Model = ""
 	o.Role = "allow"
 	reply2 := &fakeReplyCtx{}
-	if err := r.Route(context.Background(), msg("/occa:model", reply2)); err != nil {
+	if err := r.Route(context.Background(), msg("/model", reply2)); err != nil {
 		t.Fatalf("Route channel model view: %v", err)
 	}
 	if !strings.Contains(reply2.sends[0], "anthropic/claude-3") {
@@ -51,7 +51,7 @@ func TestModelViewUsesPersonalThenChannelThenDefault(t *testing.T) {
 
 	delete(st.channelRepo.channels, "telegram:chat1")
 	reply3 := &fakeReplyCtx{}
-	if err := r.Route(context.Background(), msg("/occa:model", reply3)); err != nil {
+	if err := r.Route(context.Background(), msg("/model", reply3)); err != nil {
 		t.Fatalf("Route default model view: %v", err)
 	}
 	if !strings.Contains(reply3.sends[0], "agent default") {
@@ -66,7 +66,7 @@ func TestModelSetPersonalOverride(t *testing.T) {
 		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
 	}
 
-	if err := r.Route(context.Background(), msg("/occa:model openai/gpt-4o", reply)); err != nil {
+	if err := r.Route(context.Background(), msg("/model openai/gpt-4o", reply)); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
 	o := overrides.overrides["telegram:chat1:user1"]
@@ -90,8 +90,8 @@ func TestModelCommandRequiresAllowedUser(t *testing.T) {
 		name string
 		text string
 	}{
-		{name: "view", text: "/occa:model"},
-		{name: "set personal", text: "/occa:model openai/gpt-4o"},
+		{name: "view", text: "/model"},
+		{name: "set personal", text: "/model openai/gpt-4o"},
 	}
 
 	for _, role := range roles {
@@ -129,7 +129,7 @@ func TestModelSetChannelDefaultRequiresAdmin(t *testing.T) {
 		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
 	}
 
-	if err := r.Route(context.Background(), msg("/occa:model channel openai/gpt-4o", reply)); err != nil {
+	if err := r.Route(context.Background(), msg("/model channel openai/gpt-4o", reply)); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
 	if !strings.Contains(reply.sends[0], "Admin access required") {
@@ -146,10 +146,10 @@ func TestModelChannelUsageRequiresModelID(t *testing.T) {
 		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
 	}
 
-	if err := r.Route(context.Background(), msg("/occa:model channel", reply)); err != nil {
+	if err := r.Route(context.Background(), msg("/model channel", reply)); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
-	if !strings.Contains(reply.sends[0], "Usage: /occa:model channel") {
+	if !strings.Contains(reply.sends[0], "Usage: /model channel") {
 		t.Fatalf("unexpected response: %q", reply.sends[0])
 	}
 }
@@ -165,7 +165,7 @@ func TestModelSetChannelDefaultPreservesChannelSettings(t *testing.T) {
 		ChannelID: "chat1", Platform: "telegram", ListenMode: "all", Workdir: "/repo",
 	}
 
-	if err := r.Route(context.Background(), msg("/occa:model channel openai/gpt-4o", reply)); err != nil {
+	if err := r.Route(context.Background(), msg("/model channel openai/gpt-4o", reply)); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
 	ch := st.channelRepo.channels["telegram:chat1"]
@@ -192,7 +192,7 @@ func TestModelValidationRejectsMalformedAndUnknownValues(t *testing.T) {
 				ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
 			}
 
-			if err := r.Route(context.Background(), msg("/occa:model "+tt.arg, reply)); err != nil {
+			if err := r.Route(context.Background(), msg("/model "+tt.arg, reply)); err != nil {
 				t.Fatalf("Route: %v", err)
 			}
 			if !strings.Contains(reply.sends[0], tt.want) {
@@ -223,7 +223,7 @@ func TestModelProviderErrorsUseSafeReplies(t *testing.T) {
 				ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
 			}
 
-			if err := r.Route(context.Background(), msg("/occa:model openai/gpt-4o", reply)); err != nil {
+			if err := r.Route(context.Background(), msg("/model openai/gpt-4o", reply)); err != nil {
 				t.Fatalf("Route: %v", err)
 			}
 			if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], tt.want) {
@@ -243,7 +243,7 @@ func TestModelInstanceErrorUsesSafeReply(t *testing.T) {
 		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
 	}
 
-	if err := r.Route(context.Background(), msg("/occa:model openai/gpt-4o", reply)); err != nil {
+	if err := r.Route(context.Background(), msg("/model openai/gpt-4o", reply)); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
 	if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], "Agent unreachable") {
@@ -264,7 +264,7 @@ func TestModelCommandHidesRepositoryError(t *testing.T) {
 	}
 	r.store.(*fakeStore).channelRepo.getErr = errors.New("private database detail")
 
-	if err := r.Route(context.Background(), msg("/occa:model", reply)); err != nil {
+	if err := r.Route(context.Background(), msg("/model", reply)); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
 	if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], "Command failed") {
@@ -362,7 +362,7 @@ func TestThreadModelUsesParentChannelScope(t *testing.T) {
 		ChannelID:       "thread",
 		ParentChannelID: "parent",
 		UserID:          "user1",
-		Text:            "/occa:model",
+		Text:            "/model",
 		IsThread:        true,
 		ReplyCtx:        reply,
 	}
@@ -373,7 +373,7 @@ func TestThreadModelUsesParentChannelScope(t *testing.T) {
 		t.Fatalf("expected parent model, got %q", reply.sends[0])
 	}
 
-	threadMsg.Text = "/occa:model channel anthropic/claude-3"
+	threadMsg.Text = "/model channel anthropic/claude-3"
 	if err := r.Route(context.Background(), threadMsg); err != nil {
 		t.Fatalf("Route set: %v", err)
 	}
@@ -447,7 +447,7 @@ func TestUnresolvedChannelScopeDoesNotReadWriteOrSendModel(t *testing.T) {
 		ChannelID:              "thread",
 		ChannelScopeUnresolved: true,
 		UserID:                 "user1",
-		Text:                   "/occa:model channel openai/gpt-4o",
+		Text:                   "/model channel openai/gpt-4o",
 		IsMention:              true,
 		ReplyCtx:               commandReply,
 	}
@@ -477,4 +477,100 @@ func TestUnresolvedChannelScopeDoesNotReadWriteOrSendModel(t *testing.T) {
 	if len(messageReply.sends) != 1 || !strings.Contains(messageReply.sends[0], "Message not sent") {
 		t.Fatalf("unexpected message response: %v", messageReply.sends)
 	}
+}
+
+func TestParseModelRefVariant(t *testing.T) {
+	t.Run("with variant", func(t *testing.T) {
+		ref, err := parseModelRef("zai-coding-plan/glm-5.2@max")
+		if err != nil {
+			t.Fatalf("parseModelRef: %v", err)
+		}
+		want := relay.ModelRef{ProviderID: "zai-coding-plan", ID: "glm-5.2", Variant: "max"}
+		if ref != want {
+			t.Fatalf("got %+v, want %+v", ref, want)
+		}
+	})
+
+	t.Run("without variant", func(t *testing.T) {
+		ref, err := parseModelRef("zai-coding-plan/glm-5.2")
+		if err != nil {
+			t.Fatalf("parseModelRef: %v", err)
+		}
+		want := relay.ModelRef{ProviderID: "zai-coding-plan", ID: "glm-5.2", Variant: ""}
+		if ref != want {
+			t.Fatalf("got %+v, want %+v", ref, want)
+		}
+	})
+
+	t.Run("empty variant error", func(t *testing.T) {
+		_, err := parseModelRef("a/b@")
+		if err == nil {
+			t.Fatal("expected error for a/b@, got nil")
+		}
+		if !strings.Contains(err.Error(), "invalid variant") {
+			t.Fatalf("expected error to contain 'invalid variant', got %q", err.Error())
+		}
+	})
+}
+
+func TestFormatModelRefVariant(t *testing.T) {
+	t.Run("with variant", func(t *testing.T) {
+		ref := relay.ModelRef{ProviderID: "zai-coding-plan", ID: "glm-5.2", Variant: "max"}
+		if got := formatModelRef(ref); got != "zai-coding-plan/glm-5.2@max" {
+			t.Fatalf("got %q, want zai-coding-plan/glm-5.2@max", got)
+		}
+	})
+
+	t.Run("without variant", func(t *testing.T) {
+		ref := relay.ModelRef{ProviderID: "zai-coding-plan", ID: "glm-5.2"}
+		if got := formatModelRef(ref); got != "zai-coding-plan/glm-5.2" {
+			t.Fatalf("got %q, want zai-coding-plan/glm-5.2", got)
+		}
+	})
+}
+
+func TestValidateModelVariant(t *testing.T) {
+	r, client, _, _ := newTestRouterWithAccess()
+	client.providers = relay.Providers{All: []relay.Provider{
+		{
+			ID: "zai-coding-plan",
+			Models: map[string]json.RawMessage{
+				"glm-5.2":  json.RawMessage(`{"variants":{"high":{},"max":{},"low":{}}}`),
+				"no-var":   json.RawMessage(`{"name":"no-var"}`),
+				"bad-json": json.RawMessage(`invalid`),
+			},
+		},
+	}}
+
+	t.Run("variant exists", func(t *testing.T) {
+		ref := relay.ModelRef{ProviderID: "zai-coding-plan", ID: "glm-5.2", Variant: "max"}
+		if err := r.validateModel(context.Background(), msg("", &fakeReplyCtx{}), ref); err != nil {
+			t.Fatalf("validateModel: %v", err)
+		}
+	})
+
+	t.Run("variant missing from variants map", func(t *testing.T) {
+		ref := relay.ModelRef{ProviderID: "zai-coding-plan", ID: "glm-5.2", Variant: "max_unknown"}
+		err := r.validateModel(context.Background(), msg("", &fakeReplyCtx{}), ref)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !strings.Contains(err.Error(), "unknown variant: max_unknown for zai-coding-plan/glm-5.2") {
+			t.Fatalf("unexpected error message: %q", err.Error())
+		}
+	})
+
+	t.Run("variants field missing", func(t *testing.T) {
+		ref := relay.ModelRef{ProviderID: "zai-coding-plan", ID: "no-var", Variant: "any"}
+		if err := r.validateModel(context.Background(), msg("", &fakeReplyCtx{}), ref); err != nil {
+			t.Fatalf("expected pass for missing variants field, got %v", err)
+		}
+	})
+
+	t.Run("variants field unparseable", func(t *testing.T) {
+		ref := relay.ModelRef{ProviderID: "zai-coding-plan", ID: "bad-json", Variant: "any"}
+		if err := r.validateModel(context.Background(), msg("", &fakeReplyCtx{}), ref); err != nil {
+			t.Fatalf("expected pass for unparseable variants field, got %v", err)
+		}
+	})
 }

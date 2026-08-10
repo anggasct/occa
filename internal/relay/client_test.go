@@ -391,3 +391,83 @@ func TestSessionExists(t *testing.T) {
 		}
 	})
 }
+
+func TestBuildMessagePayloadModelVariant(t *testing.T) {
+	t.Run("with variant", func(t *testing.T) {
+		payload := buildMessagePayload("hello", &ModelRef{ProviderID: "zai-coding-plan", ID: "glm-5.2", Variant: "max"}, nil)
+		data, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		var decoded struct {
+			Model struct {
+				ProviderID string `json:"providerID"`
+				ModelID    string `json:"modelID"`
+				Variant    string `json:"variant"`
+			} `json:"model"`
+		}
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatalf("Unmarshal: %v", err)
+		}
+		if decoded.Model.Variant != "max" {
+			t.Fatalf("variant = %q, want max", decoded.Model.Variant)
+		}
+	})
+
+	t.Run("without variant", func(t *testing.T) {
+		payload := buildMessagePayload("hello", &ModelRef{ProviderID: "zai-coding-plan", ID: "glm-5.2"}, nil)
+		data, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		var rawMap map[string]any
+		if err := json.Unmarshal(data, &rawMap); err != nil {
+			t.Fatalf("Unmarshal: %v", err)
+		}
+		modelMap := rawMap["model"].(map[string]any)
+		if _, ok := modelMap["variant"]; ok {
+			t.Fatalf("expected variant key to be omitted, got %v", modelMap["variant"])
+		}
+	})
+}
+
+func TestProvidersHasVariant(t *testing.T) {
+	providers := Providers{All: []Provider{
+		{
+			ID: "zai-coding-plan",
+			Models: map[string]json.RawMessage{
+				"glm-5.2":  json.RawMessage(`{"variants":{"high":{},"max":{},"low":{}}}`),
+				"no-var":   json.RawMessage(`{"name":"no-var"}`),
+				"bad-json": json.RawMessage(`invalid`),
+			},
+		},
+	}}
+
+	t.Run("variant exists", func(t *testing.T) {
+		ref := ModelRef{ProviderID: "zai-coding-plan", ID: "glm-5.2", Variant: "max"}
+		if !providers.HasVariant(ref) {
+			t.Fatal("expected HasVariant to return true for existing variant")
+		}
+	})
+
+	t.Run("variant missing from variants map", func(t *testing.T) {
+		ref := ModelRef{ProviderID: "zai-coding-plan", ID: "glm-5.2", Variant: "unknown"}
+		if providers.HasVariant(ref) {
+			t.Fatal("expected HasVariant to return false for missing variant")
+		}
+	})
+
+	t.Run("variants field missing", func(t *testing.T) {
+		ref := ModelRef{ProviderID: "zai-coding-plan", ID: "no-var", Variant: "any"}
+		if !providers.HasVariant(ref) {
+			t.Fatal("expected HasVariant to return true when variants field is missing")
+		}
+	})
+
+	t.Run("variants field unparseable", func(t *testing.T) {
+		ref := ModelRef{ProviderID: "zai-coding-plan", ID: "bad-json", Variant: "any"}
+		if !providers.HasVariant(ref) {
+			t.Fatal("expected HasVariant to return true when JSON is unparseable")
+		}
+	})
+}

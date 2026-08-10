@@ -496,25 +496,26 @@ func TestRoutePassthroughCommand(t *testing.T) {
 
 func TestRouteHelp(t *testing.T) {
 	r, _, reply := newTestRouter()
-	err := r.Route(context.Background(), msg("/occa:help", reply))
+	err := r.Route(context.Background(), msg("/help", reply))
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
 	if len(reply.sends) == 0 {
 		t.Fatal("expected help response")
 	}
-	if !strings.Contains(reply.sends[0], "/occa:help") {
+	if !strings.Contains(reply.sends[0], "/help") {
 		t.Fatalf("unexpected help: %q", reply.sends[0])
 	}
 }
 
 func TestNormalizeCommandAlias(t *testing.T) {
 	cases := map[string]string{
-		"/occa_help":         "/occa:help",
-		"/occa_session list": "/occa:session list",
-		"/occa:help":         "/occa:help",
+		"/occa_help":         "/help",
+		"/occa_session list": "/session list",
+		"/occa:help":         "/help",
 		"hello world":        "hello world",
-		"/occa_status extra": "/occa:status extra",
+		"/occa_status extra": "/status extra",
+		"/occa:model x":      "/model x",
 	}
 	for in, want := range cases {
 		if got := normalizeCommandAlias(in); got != want {
@@ -532,7 +533,7 @@ func TestRouteAcceptsUnderscoreAlias(t *testing.T) {
 	if len(reply.sends) == 0 {
 		t.Fatal("expected help response")
 	}
-	if !strings.Contains(reply.sends[0], "/occa:help") {
+	if !strings.Contains(reply.sends[0], "/help") {
 		t.Fatalf("unexpected help via alias: %q", reply.sends[0])
 	}
 }
@@ -551,12 +552,28 @@ func TestRouteAcceptsUnderscoreAliasWithArgs(t *testing.T) {
 	}
 }
 
+func TestRouteLegacyColonAlias(t *testing.T) {
+	r, client, reply, overrides := newTestRouterWithAccess()
+	client.providers = modelTestProviders()
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
+	}
+
+	err := r.Route(context.Background(), msg("/occa:model openai/gpt-4o", reply))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Personal model set: openai/gpt-4o") {
+		t.Fatalf("expected model set via legacy colon alias, got %v", reply.sends)
+	}
+}
+
 func TestHelpListsAgentCommands(t *testing.T) {
 	r, client, reply := newTestRouter()
 	client.commands = []relay.CommandInfo{
 		{Name: "plan", Description: "Create a plan", Source: "command"},
 	}
-	err := r.Route(context.Background(), msg("/occa:help", reply))
+	err := r.Route(context.Background(), msg("/help", reply))
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
@@ -574,7 +591,7 @@ func TestHelpListsAgentCommands(t *testing.T) {
 func TestHelpOmitsAgentCommandsOnError(t *testing.T) {
 	r, client, reply := newTestRouter()
 	client.commandsErr = errors.New("agent unreachable")
-	err := r.Route(context.Background(), msg("/occa:help", reply))
+	err := r.Route(context.Background(), msg("/help", reply))
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
@@ -584,7 +601,7 @@ func TestHelpOmitsAgentCommandsOnError(t *testing.T) {
 	if strings.Contains(reply.sends[0], "Agent commands:") {
 		t.Fatalf("expected no agent commands section on error, got: %q", reply.sends[0])
 	}
-	if !strings.Contains(reply.sends[0], "/occa:help") {
+	if !strings.Contains(reply.sends[0], "/help") {
 		t.Fatalf("expected base help text still present, got: %q", reply.sends[0])
 	}
 }
@@ -592,7 +609,7 @@ func TestHelpOmitsAgentCommandsOnError(t *testing.T) {
 func TestHelpOmitsAgentCommandsWhenEmpty(t *testing.T) {
 	r, client, reply := newTestRouter()
 	client.commands = nil
-	err := r.Route(context.Background(), msg("/occa:help", reply))
+	err := r.Route(context.Background(), msg("/help", reply))
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
@@ -611,17 +628,26 @@ func TestMenuCommandsCoversRegisteredCommands(t *testing.T) {
 		t.Fatalf("MenuCommands has %d entries, registered commands has %d", len(menu), len(r.commands))
 	}
 	for _, m := range menu {
-		if !strings.HasPrefix(m.Alias, "occa_") {
-			t.Fatalf("alias %q missing occa_ prefix", m.Alias)
-		}
-		name := strings.TrimPrefix(m.Alias, "occa_")
-		if _, ok := r.commands[name]; !ok {
-			t.Fatalf("alias %q has no matching registered command %q", m.Alias, name)
+		if _, ok := r.commands[m.Alias]; !ok {
+			t.Fatalf("alias %q has no matching registered command", m.Alias)
 		}
 	}
 }
 
-func TestRouteUnknownCommand(t *testing.T) {
+func TestRouteUnknownCommandPassthrough(t *testing.T) {
+	r, client, reply := newTestRouter()
+	err := r.Route(context.Background(), msg("/xyz arg1", reply))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	waitForDispatch(t, client)
+	waitForResponse(t, r)
+	if client.lastCmd != "/xyz arg1" {
+		t.Fatalf("expected unknown command passthrough to agent, got %q", client.lastCmd)
+	}
+}
+
+func TestRouteLegacyUnknownCommandShowsHelp(t *testing.T) {
 	r, _, reply := newTestRouter()
 	err := r.Route(context.Background(), msg("/occa:foo", reply))
 	if err != nil {
@@ -630,14 +656,14 @@ func TestRouteUnknownCommand(t *testing.T) {
 	if len(reply.sends) == 0 {
 		t.Fatal("expected help fallback")
 	}
-	if !strings.Contains(reply.sends[0], "/occa:help") {
-		t.Fatalf("expected help text for unknown command, got: %q", reply.sends[0])
+	if !strings.Contains(reply.sends[0], "/help") {
+		t.Fatalf("expected help text for unknown legacy command, got: %q", reply.sends[0])
 	}
 }
 
 func TestRouteStatus(t *testing.T) {
 	r, _, reply := newTestRouter()
-	err := r.Route(context.Background(), msg("/occa:status", reply))
+	err := r.Route(context.Background(), msg("/status", reply))
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
@@ -651,7 +677,7 @@ func TestRouteStatus(t *testing.T) {
 
 func TestRouteReset(t *testing.T) {
 	r, _, reply := newTestRouter()
-	err := r.Route(context.Background(), msg("/occa:reset", reply))
+	err := r.Route(context.Background(), msg("/reset", reply))
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
@@ -665,7 +691,7 @@ func TestRouteReset(t *testing.T) {
 
 func TestRouteSessionList(t *testing.T) {
 	r, _, reply := newTestRouter()
-	err := r.Route(context.Background(), msg("/occa:session list", reply))
+	err := r.Route(context.Background(), msg("/session list", reply))
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
@@ -706,8 +732,8 @@ func TestIngressAuthorizationMatrix(t *testing.T) {
 		callback bool
 	}{
 		{name: "ordinary", text: "hello"},
-		{name: "non-admin command", text: "/occa:help"},
-		{name: "admin command", text: "/occa:allow user2"},
+		{name: "non-admin command", text: "/help"},
+		{name: "admin command", text: "/allow user2"},
 		{name: "permission callback", callback: true, text: "permission:req-1:once"},
 	}
 
@@ -766,7 +792,7 @@ func TestIngressAuthorizationMatrix(t *testing.T) {
 						t.Fatalf("ordinary message = %q, want hello", client.lastMsg)
 					}
 				case action.name == "non-admin command":
-					if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "/occa:help") {
+					if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "/help") {
 						t.Fatalf("non-admin command response = %v", reply.sends)
 					}
 				case action.name == "admin command":
@@ -807,7 +833,7 @@ func TestAccessAllowedAfterAllow(t *testing.T) {
 	r, client, reply, overrideRepo := newTestRouterWithAccess()
 	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin"}
 
-	err := r.Route(context.Background(), msg("/occa:allow user2", reply))
+	err := r.Route(context.Background(), msg("/allow user2", reply))
 	if err != nil {
 		t.Fatalf("Route allow: %v", err)
 	}
@@ -829,7 +855,7 @@ func TestAccessDeniedAfterDeny(t *testing.T) {
 	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin"}
 	overrideRepo.overrides["telegram:chat1:user2"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "user2", Role: "allow"}
 
-	err := r.Route(context.Background(), msg("/occa:deny user2", reply))
+	err := r.Route(context.Background(), msg("/deny user2", reply))
 	if err != nil {
 		t.Fatalf("Route deny: %v", err)
 	}
@@ -848,7 +874,7 @@ func TestNonAdminCannotAllow(t *testing.T) {
 	r, _, reply, overrideRepo := newTestRouterWithAccess()
 	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow"}
 
-	err := r.Route(context.Background(), msg("/occa:allow user2", reply))
+	err := r.Route(context.Background(), msg("/allow user2", reply))
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
@@ -861,7 +887,7 @@ func TestLastAdminCannotBeDenied(t *testing.T) {
 	r, _, reply, overrideRepo := newTestRouterWithAccess()
 	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin"}
 
-	err := r.Route(context.Background(), msg("/occa:deny user1", reply))
+	err := r.Route(context.Background(), msg("/deny user1", reply))
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
@@ -895,7 +921,7 @@ func TestNonAdminCannotSetDir(t *testing.T) {
 	r, _, reply, overrideRepo := newTestRouterWithAccess()
 	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow"}
 
-	err := r.Route(context.Background(), msg("/occa:dir "+t.TempDir(), reply))
+	err := r.Route(context.Background(), msg("/dir "+t.TempDir(), reply))
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
@@ -908,7 +934,7 @@ func TestDirSetAndView(t *testing.T) {
 	r, _, reply := newTestRouter()
 	dir := t.TempDir()
 
-	if err := r.Route(context.Background(), msg("/occa:dir "+dir, reply)); err != nil {
+	if err := r.Route(context.Background(), msg("/dir "+dir, reply)); err != nil {
 		t.Fatalf("Route dir set: %v", err)
 	}
 	if !strings.Contains(reply.sends[0], "✅ Workdir set") {
@@ -916,7 +942,7 @@ func TestDirSetAndView(t *testing.T) {
 	}
 
 	reply2 := &fakeReplyCtx{}
-	if err := r.Route(context.Background(), msg("/occa:dir", reply2)); err != nil {
+	if err := r.Route(context.Background(), msg("/dir", reply2)); err != nil {
 		t.Fatalf("Route dir view: %v", err)
 	}
 	if !strings.Contains(reply2.sends[0], dir) || !strings.Contains(reply2.sends[0], "(exists)") {
@@ -948,7 +974,7 @@ func TestDirChangeUpdatesChatCommands(t *testing.T) {
 		Platform:  "telegram",
 		ChannelID: "chat1",
 		UserID:    "user1",
-		Text:      "/occa:dir " + t.TempDir(),
+		Text:      "/dir " + t.TempDir(),
 		IsMention: true,
 		ReplyCtx:  setter,
 	}
@@ -966,17 +992,17 @@ func TestDirChangeUpdatesChatCommands(t *testing.T) {
 		t.Fatal("SetChatCommands was not called")
 	}
 
-	var hasOccaAlias, hasAgentCommand bool
+	var hasHelpAlias, hasAgentCommand bool
 	for _, c := range setter.commands {
-		if c.Alias == "occa_help" {
-			hasOccaAlias = true
+		if c.Alias == "help" {
+			hasHelpAlias = true
 		}
 		if c.Alias == "plan" && c.Description == "Create a plan" {
 			hasAgentCommand = true
 		}
 	}
-	if !hasOccaAlias {
-		t.Fatalf("expected occa_help in the union, got %+v", setter.commands)
+	if !hasHelpAlias {
+		t.Fatalf("expected help in the union, got %+v", setter.commands)
 	}
 	if !hasAgentCommand {
 		t.Fatalf("expected the agent's plan command in the union, got %+v", setter.commands)
@@ -987,7 +1013,7 @@ func TestDirChangeSkipsCommandUpdateWhenUnsupported(t *testing.T) {
 	// newTestRouter's plain *fakeReplyCtx does not implement
 	// channel.ChatCommandSetter — setDir must behave exactly as before.
 	r, _, reply := newTestRouter()
-	if err := r.Route(context.Background(), msg("/occa:dir "+t.TempDir(), reply)); err != nil {
+	if err := r.Route(context.Background(), msg("/dir "+t.TempDir(), reply)); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
 	if !strings.Contains(reply.sends[0], "✅ Workdir set") {
@@ -997,7 +1023,7 @@ func TestDirChangeSkipsCommandUpdateWhenUnsupported(t *testing.T) {
 
 func TestDirSetInvalid(t *testing.T) {
 	r, _, reply := newTestRouter()
-	if err := r.Route(context.Background(), msg("/occa:dir /nonexistent/path/xyz123", reply)); err != nil {
+	if err := r.Route(context.Background(), msg("/dir /nonexistent/path/xyz123", reply)); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
 	if !strings.Contains(reply.sends[0], "Directory not found") {
@@ -1011,7 +1037,7 @@ func TestDirSetNotADirectory(t *testing.T) {
 	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
-	if err := r.Route(context.Background(), msg("/occa:dir "+file, reply)); err != nil {
+	if err := r.Route(context.Background(), msg("/dir "+file, reply)); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
 	if !strings.Contains(reply.sends[0], "Not a directory") {
@@ -1029,7 +1055,7 @@ func TestDirThreadIsolation(t *testing.T) {
 	st.overrideRepo.overrides["telegram:thread1:user1"] = &store.UserOverride{ChannelID: "thread1", Platform: "telegram", UserID: "user1", Role: "admin"}
 
 	reply := &fakeReplyCtx{}
-	if err := r.Route(context.Background(), msgIn("thread1", "/occa:dir "+dir, reply)); err != nil {
+	if err := r.Route(context.Background(), msgIn("thread1", "/dir "+dir, reply)); err != nil {
 		t.Fatalf("Route thread dir: %v", err)
 	}
 
@@ -1049,7 +1075,7 @@ func TestDirChangeResetsSession(t *testing.T) {
 	dir := t.TempDir()
 
 	reply := &fakeReplyCtx{}
-	if err := r.Route(context.Background(), msg("/occa:dir "+dir, reply)); err != nil {
+	if err := r.Route(context.Background(), msg("/dir "+dir, reply)); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
 	if st.sessionRepo.activeID != "" {
@@ -1123,7 +1149,7 @@ func TestBootstrapAdminCanRunCommandsImmediately(t *testing.T) {
 	r := New(provider, st, "/default-workdir", "admin123")
 	reply := &fakeReplyCtx{}
 
-	err := r.Route(context.Background(), msgFrom("admin123", "/occa:allow user2", reply))
+	err := r.Route(context.Background(), msgFrom("admin123", "/allow user2", reply))
 	if err != nil {
 		t.Fatalf("Route command: %v", err)
 	}
@@ -1201,7 +1227,7 @@ func TestListenModeEnforcement(t *testing.T) {
 
 			text := "hello"
 			if tt.isCommand {
-				text = "/occa:help"
+				text = "/help"
 			}
 
 			m := channel.IncomingMessage{
@@ -1239,7 +1265,7 @@ func TestListenModeEnforcement(t *testing.T) {
 
 func TestChannelViewDefault(t *testing.T) {
 	r, _, reply := newTestRouter()
-	err := r.Route(context.Background(), msg("/occa:channel", reply))
+	err := r.Route(context.Background(), msg("/channel", reply))
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
@@ -1251,7 +1277,7 @@ func TestChannelViewDefault(t *testing.T) {
 func TestChannelViewSet(t *testing.T) {
 	r, _, reply := newTestRouter()
 
-	err := r.Route(context.Background(), msg("/occa:channel all", reply))
+	err := r.Route(context.Background(), msg("/channel all", reply))
 	if err != nil {
 		t.Fatalf("Route set: %v", err)
 	}
@@ -1260,7 +1286,7 @@ func TestChannelViewSet(t *testing.T) {
 	}
 
 	reply2 := &fakeReplyCtx{}
-	err = r.Route(context.Background(), msg("/occa:channel", reply2))
+	err = r.Route(context.Background(), msg("/channel", reply2))
 	if err != nil {
 		t.Fatalf("Route view: %v", err)
 	}
@@ -1271,7 +1297,7 @@ func TestChannelViewSet(t *testing.T) {
 
 func TestChannelInvalidMode(t *testing.T) {
 	r, _, reply := newTestRouter()
-	err := r.Route(context.Background(), msg("/occa:channel banana", reply))
+	err := r.Route(context.Background(), msg("/channel banana", reply))
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
@@ -1284,7 +1310,7 @@ func TestChannelNonAdminDenied(t *testing.T) {
 	r, _, reply, overrideRepo := newTestRouterWithAccess()
 	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow"}
 
-	err := r.Route(context.Background(), msg("/occa:channel all", reply))
+	err := r.Route(context.Background(), msg("/channel all", reply))
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
@@ -1299,7 +1325,7 @@ func TestChannelThreadIsolation(t *testing.T) {
 	st.overrideRepo.overrides["telegram:thread1:user1"] = &store.UserOverride{ChannelID: "thread1", Platform: "telegram", UserID: "user1", Role: "admin"}
 
 	reply := &fakeReplyCtx{}
-	if err := r.Route(context.Background(), msgIn("thread1", "/occa:channel thread", reply)); err != nil {
+	if err := r.Route(context.Background(), msgIn("thread1", "/channel thread", reply)); err != nil {
 		t.Fatalf("Route thread channel: %v", err)
 	}
 
@@ -1354,5 +1380,61 @@ func TestPassthroughAppendsScheduleToken(t *testing.T) {
 	}
 	if !strings.HasPrefix(client.rawMsg, "hello world") {
 		t.Fatalf("original text should be preserved, got: %q", client.rawMsg)
+	}
+}
+
+func TestShortFormCommandsAndLegacyAliases(t *testing.T) {
+	r, client, reply, overrideRepo := newTestRouterWithAccess()
+	client.providers = modelTestProviders()
+	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
+	}
+
+	tests := []struct {
+		input        string
+		wantSend     string
+		wantPassthru string
+	}{
+		{input: "/help", wantSend: "OCCA commands:"},
+		{input: "/occa:help", wantSend: "OCCA commands:"},
+		{input: "/occa_help", wantSend: "OCCA commands:"},
+		{input: "/status", wantSend: "Agent connected"},
+		{input: "/session list", wantSend: "Sessions:"},
+		{input: "/occa_session list", wantSend: "Sessions:"},
+		{input: "/occa:session list", wantSend: "Sessions:"},
+		{input: "/reset", wantSend: "Session reset"},
+		{input: "/dir", wantSend: "Workdir:"},
+		{input: "/allow user2", wantSend: "Allowed user: user2"},
+		{input: "/deny user2", wantSend: "Denied user: user2"},
+		{input: "/admin user2", wantSend: "Granted admin: user2"},
+		{input: "/channel all", wantSend: "Listen mode set: all"},
+		{input: "/model openai/gpt-4o", wantSend: "Personal model set: openai/gpt-4o"},
+		{input: "/occa:model openai/gpt-4o", wantSend: "Personal model set: openai/gpt-4o"},
+		{input: "/occa_model openai/gpt-4o", wantSend: "Personal model set: openai/gpt-4o"},
+		{input: "/schedules", wantSend: "Scheduler not available"},
+		{input: "/unknown_cmd arg", wantPassthru: "/unknown_cmd arg"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			reply.sends = nil
+			client.lastCmd = ""
+			err := r.Route(context.Background(), msg(tt.input, reply))
+			if err != nil {
+				t.Fatalf("Route(%q): %v", tt.input, err)
+			}
+			if tt.wantSend != "" {
+				if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], tt.wantSend) {
+					t.Fatalf("Route(%q) response = %v, want substring %q", tt.input, reply.sends, tt.wantSend)
+				}
+			}
+			if tt.wantPassthru != "" {
+				waitForDispatch(t, client)
+				waitForResponse(t, r)
+				if client.lastCmd != tt.wantPassthru {
+					t.Fatalf("Route(%q) lastCmd = %q, want %q", tt.input, client.lastCmd, tt.wantPassthru)
+				}
+			}
+		})
 	}
 }

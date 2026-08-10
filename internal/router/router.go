@@ -17,7 +17,7 @@ import (
 var ErrDenied = errors.New("access denied")
 
 const (
-	accessDeniedMessage = "⚠️ Access denied. Ask an admin to /occa:allow you."
+	accessDeniedMessage = "⚠️ Access denied. Ask an admin to /allow you."
 	accessVerifyMessage = "⚠️ Unable to verify access. Try again."
 )
 
@@ -31,17 +31,17 @@ type Command struct {
 // registration on both platforms.
 func (r *Router) MenuCommands() []channel.MenuCommand {
 	return []channel.MenuCommand{
-		{Alias: "occa_help", Description: "Show available commands"},
-		{Alias: "occa_status", Description: "Agent health and session info"},
-		{Alias: "occa_session", Description: "Manage sessions: list, new, switch, or delete", HasArgs: true},
-		{Alias: "occa_reset", Description: "Clear current session and start fresh"},
-		{Alias: "occa_dir", Description: "View or set this channel's working directory", HasArgs: true},
-		{Alias: "occa_allow", Description: "Allow a user to use this bot", HasArgs: true},
-		{Alias: "occa_deny", Description: "Revoke a user's access to this bot", HasArgs: true},
-		{Alias: "occa_admin", Description: "Grant a user admin access", HasArgs: true},
-		{Alias: "occa_channel", Description: "View or set listen mode (mention, all, thread)", HasArgs: true},
-		{Alias: "occa_model", Description: "View or set the active model", HasArgs: true},
-		{Alias: "occa_schedules", Description: "View or delete scheduled tasks", HasArgs: true},
+		{Alias: "help", Description: "Show available commands"},
+		{Alias: "status", Description: "Agent health and session info"},
+		{Alias: "session", Description: "Manage sessions: list, new, switch, or delete", HasArgs: true},
+		{Alias: "reset", Description: "Clear current session and start fresh"},
+		{Alias: "dir", Description: "View or set this channel's working directory", HasArgs: true},
+		{Alias: "allow", Description: "Allow a user to use this bot", HasArgs: true},
+		{Alias: "deny", Description: "Revoke a user's access to this bot", HasArgs: true},
+		{Alias: "admin", Description: "Grant a user admin access", HasArgs: true},
+		{Alias: "channel", Description: "View or set listen mode (mention, all, thread)", HasArgs: true},
+		{Alias: "model", Description: "View or set the active model", HasArgs: true},
+		{Alias: "schedules", Description: "View or delete scheduled tasks", HasArgs: true},
 	}
 }
 
@@ -111,8 +111,9 @@ func New(instances InstanceProvider, st store.Store, defaultWorkdir string, admi
 }
 
 func (r *Router) Route(ctx context.Context, msg channel.IncomingMessage) error {
+	isOcca := r.isOccaCommand(msg.Text)
 	msg.Text = normalizeCommandAlias(msg.Text)
-	inputKind := routeInputKind(msg)
+	inputKind := r.routeInputKind(msg, isOcca)
 	if err := r.authorize(ctx, msg); err != nil {
 		if errors.Is(err, ErrDenied) {
 			slog.Info("access denied", "platform", msg.Platform, "channel_id", msg.ChannelID, "thread_id", msg.ThreadID, "user_id", msg.UserID, "input_kind", inputKind, "outcome", "denied")
@@ -129,7 +130,7 @@ func (r *Router) Route(ctx context.Context, msg channel.IncomingMessage) error {
 		return r.handleCallback(ctx, msg)
 	}
 
-	if strings.HasPrefix(msg.Text, "/occa:") {
+	if isOcca {
 		return r.handleCommand(ctx, msg)
 	}
 
@@ -140,23 +141,37 @@ func (r *Router) Route(ctx context.Context, msg channel.IncomingMessage) error {
 	return r.passthrough(ctx, msg)
 }
 
-// normalizeCommandAlias rewrites the "/occa_name" alias to the canonical
-// "/occa:name" form. Telegram and Discord command-menu registration forbids
-// ':' in a command name, so the native menu registers underscore aliases;
-// this is the one place that reconciles them back to the form the rest of
-// the router already understands.
+// normalizeCommandAlias rewrites legacy "/occa_name" and "/occa:name" aliases
+// to the short canonical form "/name".
 func normalizeCommandAlias(text string) string {
+	if strings.HasPrefix(text, "/occa:") {
+		return "/" + strings.TrimPrefix(text, "/occa:")
+	}
 	if strings.HasPrefix(text, "/occa_") {
-		return "/occa:" + strings.TrimPrefix(text, "/occa_")
+		return "/" + strings.TrimPrefix(text, "/occa_")
 	}
 	return text
 }
 
-func routeInputKind(msg channel.IncomingMessage) string {
+func (r *Router) isOccaCommand(text string) bool {
+	if strings.HasPrefix(text, "/occa:") || strings.HasPrefix(text, "/occa_") {
+		return true
+	}
+	if !strings.HasPrefix(text, "/") {
+		return false
+	}
+	trimmed := strings.TrimPrefix(text, "/")
+	parts := strings.SplitN(trimmed, " ", 2)
+	name := parts[0]
+	_, ok := r.commands[name]
+	return ok
+}
+
+func (r *Router) routeInputKind(msg channel.IncomingMessage, isOcca bool) string {
 	if msg.IsCallback {
 		return "callback"
 	}
-	if strings.HasPrefix(msg.Text, "/occa:") {
+	if isOcca {
 		return "occa_command"
 	}
 	return "message"
@@ -250,7 +265,7 @@ func (r *Router) isAdmin(ctx context.Context, msg channel.IncomingMessage) bool 
 }
 
 func (r *Router) handleCommand(ctx context.Context, msg channel.IncomingMessage) error {
-	trimmed := strings.TrimPrefix(msg.Text, "/occa:")
+	trimmed := strings.TrimPrefix(msg.Text, "/")
 	parts := strings.SplitN(trimmed, " ", 2)
 	name := parts[0]
 	args := ""
@@ -459,14 +474,15 @@ func (r *Router) handleHelp(ctx context.Context, msg channel.IncomingMessage, _ 
 
 func (r *Router) helpText() string {
 	return "OCCA commands:\n" +
-		"• /occa:help — show this message\n" +
-		"• /occa:status — agent health + session info\n" +
-		"• /occa:session [list|new|switch <id>|delete <id>] — manage sessions\n" +
-		"• /occa:dir [path] — view or set this channel's working directory\n" +
-		"• /occa:channel [mention|all|thread] — view or set listen mode\n" +
-		"• /occa:model [channel] [provider/model-id] — view or set model\n" +
-		"• /occa:schedules [delete <id>] — view or delete scheduled tasks\n" +
-		"• /occa:reset — clear current session and start fresh\n\n" +
+		"• /help — show this message\n" +
+		"• /status — agent health + session info\n" +
+		"• /session [list|new|switch <id>|delete <id>] — manage sessions\n" +
+		"• /dir [path] — view or set this channel's working directory\n" +
+		"• /channel [mention|all|thread] — view or set listen mode\n" +
+		"• /model [channel] [provider/model-id[@variant]] — view or set model\n" +
+		"• /schedules [delete <id>] — view or delete scheduled tasks\n" +
+		"• /reset — clear current session and start fresh\n\n" +
+		"(Legacy /occa: command aliases are also supported.)\n\n" +
 		"All other messages and /commands are forwarded to the agent."
 }
 
@@ -540,7 +556,7 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 
 	case "switch":
 		if len(parts) < 2 {
-			return "Usage: /occa:session switch <id>", nil
+			return "Usage: /session switch <id>", nil
 		}
 		target := parts[1]
 		sessions, err := r.store.SessionRepo().List(ctx, msg.Platform, msg.ChannelID)
@@ -565,7 +581,7 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 
 	case "delete":
 		if len(parts) < 2 {
-			return "Usage: /occa:session delete <id>", nil
+			return "Usage: /session delete <id>", nil
 		}
 		target := parts[1]
 		sessions, err := r.store.SessionRepo().List(ctx, msg.Platform, msg.ChannelID)
@@ -583,7 +599,7 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 		return "Session not found.", nil
 
 	default:
-		return "Usage: /occa:session [list|new|switch <id>|delete <id>]", nil
+		return "Usage: /session [list|new|switch <id>|delete <id>]", nil
 	}
 }
 
@@ -610,7 +626,7 @@ func (r *Router) handleReset(ctx context.Context, msg channel.IncomingMessage, _
 func (r *Router) handleAllow(ctx context.Context, msg channel.IncomingMessage, args string) (string, error) {
 	userID := strings.TrimSpace(args)
 	if userID == "" {
-		return "Usage: /occa:allow <user_id>", nil
+		return "Usage: /allow <user_id>", nil
 	}
 	err := r.store.OverrideRepo().UpsertRole(ctx, msg.Platform, msg.ChannelID, userID, "allow")
 	if err != nil {
@@ -622,7 +638,7 @@ func (r *Router) handleAllow(ctx context.Context, msg channel.IncomingMessage, a
 func (r *Router) handleDeny(ctx context.Context, msg channel.IncomingMessage, args string) (string, error) {
 	userID := strings.TrimSpace(args)
 	if userID == "" {
-		return "Usage: /occa:deny <user_id>", nil
+		return "Usage: /deny <user_id>", nil
 	}
 
 	o, err := r.store.OverrideRepo().Get(ctx, msg.Platform, msg.ChannelID, userID)
@@ -649,7 +665,7 @@ func (r *Router) handleDeny(ctx context.Context, msg channel.IncomingMessage, ar
 func (r *Router) handleAdmin(ctx context.Context, msg channel.IncomingMessage, args string) (string, error) {
 	userID := strings.TrimSpace(args)
 	if userID == "" {
-		return "Usage: /occa:admin <user_id>", nil
+		return "Usage: /admin <user_id>", nil
 	}
 	err := r.store.OverrideRepo().UpsertRole(ctx, msg.Platform, msg.ChannelID, userID, "admin")
 	if err != nil {

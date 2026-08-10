@@ -379,7 +379,7 @@ func TestResponseCoordinatorPrematureEOFNotifiesAndReleasesSlot(t *testing.T) {
 	if !reply.contains("partial") {
 		t.Fatalf("buffered response was not final-synced: %v", reply.texts())
 	}
-	if !reply.hasExact("⚠️ Response stream ended before completion. The task may still be running; check /occa:status.") {
+	if !reply.hasExact("⚠️ Response stream ended before completion. The task may still be running; check /status.") {
 		t.Fatalf("missing exact incomplete notice: %v", reply.texts())
 	}
 }
