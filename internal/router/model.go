@@ -193,7 +193,7 @@ func (r *Router) handleVariants(ctx context.Context, msg channel.IncomingMessage
 			return "", err
 		}
 		if modelRef == nil {
-			return "No active model. Usage: /variants <provider>/<model-id>", nil
+			return "No active model. Usage: /variants [provider/model-id]", nil
 		}
 		providerID = modelRef.ProviderID
 		modelID = modelRef.ID
