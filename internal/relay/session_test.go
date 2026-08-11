@@ -22,7 +22,7 @@ type setActiveCall struct {
 func (m *mockSessionRepo) Active(_ context.Context, platform, channelID, threadID, userID string) (string, int, error) {
 	key := [4]string{platform, channelID, threadID, userID}
 	if id, ok := m.byKey[key]; ok {
-		return id, 0, nil
+		return id, m.ownerPID, nil
 	}
 	return m.activeID, m.ownerPID, nil
 }
@@ -53,6 +53,7 @@ type mockClient struct {
 	sessionID     string
 	sessionExists bool
 	existsErr     error
+	existsCalls   int
 }
 
 func (m *mockClient) CreateSession(_ context.Context) (string, error) {
@@ -60,6 +61,7 @@ func (m *mockClient) CreateSession(_ context.Context) (string, error) {
 }
 
 func (m *mockClient) SessionExists(_ context.Context, _ string) (bool, error) {
+	m.existsCalls++
 	if m.existsErr != nil {
 		return false, m.existsErr
 	}
@@ -96,6 +98,9 @@ func TestResolveExisting(t *testing.T) {
 	if len(repo.setCalls) != 0 {
 		t.Fatal("should not call SetActive when session exists")
 	}
+	if client.existsCalls != 0 {
+		t.Fatalf("same-PID fast path must not call SessionExists, got %d calls", client.existsCalls)
+	}
 }
 
 func TestResolveCreatesNew(t *testing.T) {
@@ -121,14 +126,15 @@ func TestResolveCreatesNew(t *testing.T) {
 
 // TestResolveKeysByConversation checks the session-key policy: two users in
 // the same channel resolve different sessions, the same user resolves the
-// same session, and thread participants share one session.
+// same session, and thread participants share one session. Rows are owned by
+// the current process, so resolution uses the same-PID fast path.
 func TestResolveKeysByConversation(t *testing.T) {
 	keyed := map[[4]string]string{
 		{"telegram", "chat", "", "alice"}:   "sess-alice",
 		{"telegram", "chat", "", "bob"}:     "sess-bob",
 		{"discord", "chat", "thread-1", ""}: "sess-thread",
 	}
-	repo := &mockSessionRepo{byKey: keyed}
+	repo := &mockSessionRepo{byKey: keyed, ownerPID: 100}
 	client := &mockClient{sessionID: "sess-new"}
 	resolver := NewSessionResolver(repo, client)
 
@@ -143,6 +149,9 @@ func TestResolveKeysByConversation(t *testing.T) {
 	}
 	if len(repo.setCalls) != 0 {
 		t.Fatalf("expected no session creation for existing keys, got %d SetActive calls", len(repo.setCalls))
+	}
+	if client.existsCalls != 0 {
+		t.Fatalf("expected no validation for owned sessions, got %d SessionExists calls", client.existsCalls)
 	}
 }
 
@@ -193,17 +202,56 @@ func TestResolveStaleSessionRecreates(t *testing.T) {
 	})
 }
 
-// TestResolveUnknownOwnerReuses: legacy rows without an owner PID are reused.
-func TestResolveUnknownOwnerReuses(t *testing.T) {
-	repo := &mockSessionRepo{activeID: "legacy-session", ownerPID: 0}
-	client := &mockClient{sessionID: "fresh-session"}
-	resolver := NewSessionResolver(repo, client)
+// TestResolveLegacyRowValidates: legacy rows without a recorded owner PID
+// (ownerPID == 0) are validated against the agent exactly like rows owned by
+// a replaced process — adopted and stamped with the current PID when the
+// session still exists, or replaced with a fresh session when it is gone.
+func TestResolveLegacyRowValidates(t *testing.T) {
+	t.Run("legacy session exists", func(t *testing.T) {
+		repo := &mockSessionRepo{activeID: "legacy-session", ownerPID: 0}
+		client := &mockClient{sessionID: "fresh-session", sessionExists: true}
+		resolver := NewSessionResolver(repo, client)
 
-	id, err := resolver.Resolve(context.Background(), "telegram", "123", "", "user-1", 100)
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	if id != "legacy-session" {
-		t.Fatalf("got %q, want %q", id, "legacy-session")
-	}
+		id, err := resolver.Resolve(context.Background(), "telegram", "123", "", "user-1", 100)
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if id != "legacy-session" {
+			t.Fatalf("got %q, want %q", id, "legacy-session")
+		}
+		if client.existsCalls != 1 {
+			t.Fatalf("expected 1 SessionExists call, got %d", client.existsCalls)
+		}
+		if len(repo.setCalls) != 1 {
+			t.Fatalf("expected 1 SetActive call, got %d", len(repo.setCalls))
+		}
+		call := repo.setCalls[0]
+		if call.sessionID != "legacy-session" || call.agentPID != 100 {
+			t.Fatalf("expected adoption stamping the current PID, got %+v", call)
+		}
+	})
+
+	t.Run("legacy session gone", func(t *testing.T) {
+		repo := &mockSessionRepo{activeID: "legacy-session", ownerPID: 0}
+		client := &mockClient{sessionID: "fresh-session", sessionExists: false}
+		resolver := NewSessionResolver(repo, client)
+
+		id, err := resolver.Resolve(context.Background(), "telegram", "123", "", "user-1", 100)
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if id != "fresh-session" {
+			t.Fatalf("got %q, want %q", id, "fresh-session")
+		}
+		if client.existsCalls != 1 {
+			t.Fatalf("expected 1 SessionExists call, got %d", client.existsCalls)
+		}
+		if len(repo.setCalls) != 1 {
+			t.Fatalf("expected 1 SetActive call, got %d", len(repo.setCalls))
+		}
+		call := repo.setCalls[0]
+		if call.sessionID != "fresh-session" || call.agentPID != 100 {
+			t.Fatalf("unexpected SetActive call: %+v", call)
+		}
+	})
 }
