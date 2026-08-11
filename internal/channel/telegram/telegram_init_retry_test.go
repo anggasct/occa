@@ -44,9 +44,21 @@ func TestInitBotWithRetrySucceedsAfterTransientFailures(t *testing.T) {
 	if bot.Self.UserName != "testbot" {
 		t.Fatalf("bot.Self.UserName = %q, want testbot", bot.Self.UserName)
 	}
+	// the bounded init client must NOT leak into the long-poll bot.Client
+	if hc, ok := bot.Client.(*http.Client); !ok || hc.Timeout != 0 {
+		t.Fatalf("bot.Client = %T (timeout %v), want unbounded *http.Client (timeout 0) so getUpdates long-poll is not cut", bot.Client, hcTimeout(bot.Client))
+	}
 	if got := atomic.LoadInt32(requests); got != 3 {
 		t.Fatalf("requests = %d, want 3 (2 failures + 1 success)", got)
 	}
+}
+
+// hcTimeout reports the timeout of an http.Client, or -1 for other types.
+func hcTimeout(c any) time.Duration {
+	if hc, ok := c.(*http.Client); ok {
+		return hc.Timeout
+	}
+	return -1
 }
 
 func TestInitBotWithRetryFailsAfterAllAttempts(t *testing.T) {

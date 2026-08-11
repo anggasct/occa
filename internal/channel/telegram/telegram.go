@@ -40,11 +40,19 @@ func New(token string, menu []channel.MenuCommand) *Adapter {
 // unbounded http.Client and fails the whole channel on one network blip
 // (observed 2026-08-11: dial timeout / connection reset to
 // api.telegram.org); getUpdates already retries, init should too.
+//
+// The bounded client is used ONLY for the init (getMe) attempts. The SDK
+// stores it as bot.Client and reuses it for every MakeRequest — including
+// the getUpdates long-poll, which legitimately waits up to 60s. A short
+// client timeout there cuts every poll (observed 2026-08-11: continuous
+// "getUpdates failed, retrying" every ~18s = 15s timeout + 3s sleep), so
+// bot.Client is reset to an unbounded client once init succeeds.
 func initBotWithRetry(token, apiEndpoint string, client *http.Client, attemptDelay time.Duration) (*tgbotapi.BotAPI, error) {
 	var lastErr error
 	for attempt := 1; attempt <= initBotMaxAttempts; attempt++ {
 		bot, err := tgbotapi.NewBotAPIWithClient(token, apiEndpoint, client)
 		if err == nil {
+			bot.Client = &http.Client{}
 			return bot, nil
 		}
 		lastErr = err
