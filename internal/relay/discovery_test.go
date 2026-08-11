@@ -17,19 +17,19 @@ func TestDiscoverSuccess(t *testing.T) {
 		{
 			name: "legacy id parameter style",
 			paths: map[string]any{
-				"/session":              nil,
-				"/session/{id}/message": nil,
-				"/session/{id}/command": nil,
-				"/event":                nil,
+				"/session":                   nil,
+				"/session/{id}/prompt_async": nil,
+				"/session/{id}/command":      nil,
+				"/event":                     nil,
 			},
 		},
 		{
 			name: "opencode sessionID parameter style",
 			paths: map[string]any{
-				"/session":                     nil,
-				"/session/{sessionID}/message": nil,
-				"/session/{sessionID}/command": nil,
-				"/event":                       nil,
+				"/session":                          nil,
+				"/session/{sessionID}/prompt_async": nil,
+				"/session/{sessionID}/command":      nil,
+				"/event":                            nil,
 			},
 		},
 	}
@@ -129,16 +129,16 @@ func TestNormalizePath(t *testing.T) {
 		want  string
 	}{
 		{
-			input: "/session/{id}/message",
-			want:  "/session/{}/message",
+			input: "/session/{id}/prompt_async",
+			want:  "/session/{}/prompt_async",
 		},
 		{
 			input: "/session/{sessionID}/command",
 			want:  "/session/{}/command",
 		},
 		{
-			input: "/session/{session_id}/message",
-			want:  "/session/{}/message",
+			input: "/session/{session_id}/prompt_async",
+			want:  "/session/{}/prompt_async",
 		},
 		{
 			input: "/session",

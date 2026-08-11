@@ -36,10 +36,10 @@ func TestCreateSession(t *testing.T) {
 
 func TestSendMessage(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/session/s1/message" {
+		if r.Method != http.MethodPost || r.URL.Path != "/session/s1/prompt_async" {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer srv.Close()
 
@@ -56,7 +56,7 @@ func TestSendMessageWithModel(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer srv.Close()
 

@@ -20,7 +20,7 @@ type OpenAPIInfo struct {
 
 var requiredEndpoints = []string{
 	"/session",
-	"/session/{id}/message",
+	"/session/{id}/prompt_async",
 	"/session/{id}/command",
 	"/event",
 }
