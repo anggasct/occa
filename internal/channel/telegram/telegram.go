@@ -24,16 +24,42 @@ type Adapter struct {
 	downloadClient *http.Client
 }
 
-const defaultDownloadTimeout = 60 * time.Second
+const (
+	defaultDownloadTimeout = 60 * time.Second
+	initBotMaxAttempts     = 3
+	initBotTimeout         = 15 * time.Second
+	initBotBackoff         = 3 * time.Second
+)
 
 func New(token string, menu []channel.MenuCommand) *Adapter {
 	return &Adapter{token: token, menu: menu, downloadClient: &http.Client{Timeout: defaultDownloadTimeout}}
 }
 
+// initBotWithRetry creates the Telegram bot, retrying transient getMe
+// failures with a bounded client. The SDK's plain NewBotAPI uses an
+// unbounded http.Client and fails the whole channel on one network blip
+// (observed 2026-08-11: dial timeout / connection reset to
+// api.telegram.org); getUpdates already retries, init should too.
+func initBotWithRetry(token, apiEndpoint string, client *http.Client, attemptDelay time.Duration) (*tgbotapi.BotAPI, error) {
+	var lastErr error
+	for attempt := 1; attempt <= initBotMaxAttempts; attempt++ {
+		bot, err := tgbotapi.NewBotAPIWithClient(token, apiEndpoint, client)
+		if err == nil {
+			return bot, nil
+		}
+		lastErr = err
+		if attempt < initBotMaxAttempts {
+			slog.Warn("telegram: init bot failed, retrying", "attempt", attempt, "error", err)
+			time.Sleep(attemptDelay * time.Duration(attempt))
+		}
+	}
+	return nil, lastErr
+}
+
 func (a *Adapter) Name() string { return "telegram" }
 
 func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessage)) error {
-	bot, err := tgbotapi.NewBotAPI(a.token)
+	bot, err := initBotWithRetry(a.token, tgbotapi.APIEndpoint, &http.Client{Timeout: initBotTimeout}, initBotBackoff)
 	if err != nil {
 		return fmt.Errorf("telegram: init bot: %w", err)
 	}
