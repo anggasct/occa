@@ -208,8 +208,13 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 					// name so a follow-up for a capped/bailed-out tool never
 					// relabels a previous tool's bubble.
 					if curTool != "" && curTool == name && curRef != nil {
-						if err := s.reply.Edit(curRef, formatToolLabel(name, ctxStr, curCount)); err != nil {
-							slog.Warn("streaming: tool notice context edit failed", "tool", name, "error", err)
+						// A follow-up with the same context renders the same
+						// label; Telegram rejects no-op edits ("message is not
+						// modified"), so skip the edit unless something changed.
+						if ctxStr != curContext {
+							if err := s.reply.Edit(curRef, formatToolLabel(name, ctxStr, curCount)); err != nil {
+								slog.Warn("streaming: tool notice context edit failed", "tool", name, "error", err)
+							}
 						}
 						curContext = ctxStr
 						if ctxStr != "" {
