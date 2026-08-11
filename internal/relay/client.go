@@ -543,7 +543,17 @@ func buildMessagePayload(text string, model *ModelRef, attachments []Attachment)
 	tools := map[string]bool{"schedule_task": true}
 	payload := map[string]any{"tools": tools}
 	if model != nil {
-		payload["model"] = model
+		// opencode reads the reasoning-effort variant from the TOP-LEVEL
+		// `variant` field (PromptInput schema), not from inside `model`
+		// (ModelRef = {providerID, modelID}). Sending model.variant is
+		// silently dropped by the agent, so keep the wire shape aligned.
+		payload["model"] = map[string]string{
+			"providerID": model.ProviderID,
+			"modelID":    model.ID,
+		}
+		if model.Variant != "" {
+			payload["variant"] = model.Variant
+		}
 	}
 
 	var parts []any

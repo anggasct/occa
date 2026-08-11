@@ -403,14 +403,29 @@ func TestBuildMessagePayloadModelVariant(t *testing.T) {
 			Model struct {
 				ProviderID string `json:"providerID"`
 				ModelID    string `json:"modelID"`
-				Variant    string `json:"variant"`
 			} `json:"model"`
+			Variant string `json:"variant"`
 		}
 		if err := json.Unmarshal(data, &decoded); err != nil {
 			t.Fatalf("Unmarshal: %v", err)
 		}
-		if decoded.Model.Variant != "max" {
-			t.Fatalf("variant = %q, want max", decoded.Model.Variant)
+		if decoded.Model.ProviderID != "zai-coding-plan" {
+			t.Fatalf("providerID = %q, want zai-coding-plan", decoded.Model.ProviderID)
+		}
+		if decoded.Model.ModelID != "glm-5.2" {
+			t.Fatalf("modelID = %q, want glm-5.2", decoded.Model.ModelID)
+		}
+		if decoded.Variant != "max" {
+			t.Fatalf("top-level variant = %q, want max", decoded.Variant)
+		}
+		// variant must NOT be inside model
+		var rawMap map[string]any
+		if err := json.Unmarshal(data, &rawMap); err != nil {
+			t.Fatalf("Unmarshal: %v", err)
+		}
+		modelMap := rawMap["model"].(map[string]any)
+		if _, ok := modelMap["variant"]; ok {
+			t.Fatalf("expected no variant key inside model, got %v", modelMap["variant"])
 		}
 	})
 
@@ -424,9 +439,30 @@ func TestBuildMessagePayloadModelVariant(t *testing.T) {
 		if err := json.Unmarshal(data, &rawMap); err != nil {
 			t.Fatalf("Unmarshal: %v", err)
 		}
+		if _, ok := rawMap["variant"]; ok {
+			t.Fatalf("expected no top-level variant key, got %v", rawMap["variant"])
+		}
 		modelMap := rawMap["model"].(map[string]any)
 		if _, ok := modelMap["variant"]; ok {
-			t.Fatalf("expected variant key to be omitted, got %v", modelMap["variant"])
+			t.Fatalf("expected variant key to be omitted inside model, got %v", modelMap["variant"])
+		}
+	})
+
+	t.Run("no model", func(t *testing.T) {
+		payload := buildMessagePayload("hello", nil, nil)
+		data, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		var rawMap map[string]any
+		if err := json.Unmarshal(data, &rawMap); err != nil {
+			t.Fatalf("Unmarshal: %v", err)
+		}
+		if _, ok := rawMap["model"]; ok {
+			t.Fatalf("expected no model key when model is nil, got %v", rawMap["model"])
+		}
+		if _, ok := rawMap["variant"]; ok {
+			t.Fatalf("expected no variant key when model is nil, got %v", rawMap["variant"])
 		}
 	})
 }
