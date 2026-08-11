@@ -238,19 +238,16 @@ func (c *HTTPClient) SendMessage(ctx context.Context, sessionID, text string, mo
 	}
 
 	payload := buildMessagePayload(text, model, attachments)
-	resp, err := c.post(ctx, "/session/"+sessionID+"/message", payload)
+	resp, err := c.post(ctx, "/session/"+sessionID+"/prompt_async", payload)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-		return fmt.Errorf("relay: send message: drain body: %w", err)
-	}
 
 	if resp.StatusCode == http.StatusNotFound {
 		return ErrNotFound
 	}
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusAccepted {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= 300 {
 		return fmt.Errorf("relay: send message: unexpected status %d", resp.StatusCode)
 	}
 	return nil
