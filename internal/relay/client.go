@@ -99,6 +99,41 @@ func (p Providers) HasVariant(ref ModelRef) bool {
 	return has
 }
 
+func (p Providers) ContextLimit(providerID, modelID string) (int64, bool) {
+	for _, provider := range p.All {
+		if provider.ID == providerID {
+			raw, ok := provider.Models[modelID]
+			if !ok || len(raw) == 0 {
+				return 0, false
+			}
+			var cfg struct {
+				Limit struct {
+					Context int64 `json:"context"`
+				} `json:"limit"`
+			}
+			if err := json.Unmarshal(raw, &cfg); err != nil || cfg.Limit.Context <= 0 {
+				return 0, false
+			}
+			return cfg.Limit.Context, true
+		}
+	}
+	return 0, false
+}
+
+type SessionTokens struct {
+	Input      int64
+	Output     int64
+	Reasoning  int64
+	CacheRead  int64
+	CacheWrite int64
+}
+
+type SessionInfo struct {
+	Tokens SessionTokens
+	Cost   float64
+	Model  ModelRef
+}
+
 // Relay event types delivered on the stream channel.
 const (
 	EventDelta   = "delta"
@@ -157,6 +192,7 @@ const (
 
 type Client interface {
 	CreateSession(ctx context.Context) (string, error)
+	GetSession(ctx context.Context, sessionID string) (*SessionInfo, error)
 	SessionExists(ctx context.Context, sessionID string) (bool, error)
 	SendMessage(ctx context.Context, sessionID, text string, model *ModelRef, attachments []Attachment) error
 	Providers(ctx context.Context) (Providers, error)
@@ -210,6 +246,50 @@ func (c *HTTPClient) CreateSession(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("relay: create session: decode response: %w", err)
 	}
 	return body.ID, nil
+}
+
+func (c *HTTPClient) GetSession(ctx context.Context, sessionID string) (*SessionInfo, error) {
+	resp, err := c.get(ctx, "/session/"+sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, ErrNotFound
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("relay: get session: unexpected status %d", resp.StatusCode)
+	}
+
+	var raw struct {
+		Cost   float64  `json:"cost"`
+		Model  ModelRef `json:"model"`
+		Tokens struct {
+			Input     int64 `json:"input"`
+			Output    int64 `json:"output"`
+			Reasoning int64 `json:"reasoning"`
+			Cache     struct {
+				Read  int64 `json:"read"`
+				Write int64 `json:"write"`
+			} `json:"cache"`
+		} `json:"tokens"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, fmt.Errorf("relay: get session: decode response: %w", err)
+	}
+
+	return &SessionInfo{
+		Tokens: SessionTokens{
+			Input:      raw.Tokens.Input,
+			Output:     raw.Tokens.Output,
+			Reasoning:  raw.Tokens.Reasoning,
+			CacheRead:  raw.Tokens.Cache.Read,
+			CacheWrite: raw.Tokens.Cache.Write,
+		},
+		Cost:  raw.Cost,
+		Model: raw.Model,
+	}, nil
 }
 
 func (c *HTTPClient) SessionExists(ctx context.Context, sessionID string) (bool, error) {

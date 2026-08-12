@@ -550,3 +550,87 @@ func TestAbortSession(t *testing.T) {
 		}
 	})
 }
+
+func TestGetSession(t *testing.T) {
+	t.Run("success 200", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet || r.URL.Path != "/session/ses-123" {
+				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{
+				"cost": 0.05,
+				"model": {"providerID": "anthropic", "modelID": "claude-3-5-sonnet-20241022", "variant": "max"},
+				"tokens": {
+					"input": 12000,
+					"output": 3000,
+					"reasoning": 500,
+					"cache": {"read": 1000, "write": 200}
+				}
+			}`))
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		info, err := c.GetSession(context.Background(), "ses-123")
+		if err != nil {
+			t.Fatalf("GetSession: %v", err)
+		}
+		if info.Cost != 0.05 {
+			t.Fatalf("cost = %v, want 0.05", info.Cost)
+		}
+		if info.Model.ProviderID != "anthropic" || info.Model.ID != "claude-3-5-sonnet-20241022" || info.Model.Variant != "max" {
+			t.Fatalf("unexpected model: %+v", info.Model)
+		}
+		if info.Tokens.Input != 12000 || info.Tokens.Output != 3000 || info.Tokens.Reasoning != 500 || info.Tokens.CacheRead != 1000 || info.Tokens.CacheWrite != 200 {
+			t.Fatalf("unexpected tokens: %+v", info.Tokens)
+		}
+	})
+
+	t.Run("not found 404", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		_, err := c.GetSession(context.Background(), "ses-404")
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("expected ErrNotFound, got %v", err)
+		}
+	})
+}
+
+func TestProvidersContextLimit(t *testing.T) {
+	providers := Providers{All: []Provider{
+		{
+			ID: "openai",
+			Models: map[string]json.RawMessage{
+				"gpt-4o":   json.RawMessage(`{"limit":{"context":128000}}`),
+				"no-limit": json.RawMessage(`{"name":"no-limit"}`),
+			},
+		},
+	}}
+
+	t.Run("limit present", func(t *testing.T) {
+		limit, ok := providers.ContextLimit("openai", "gpt-4o")
+		if !ok || limit != 128000 {
+			t.Fatalf("ContextLimit = (%d, %v), want (128000, true)", limit, ok)
+		}
+	})
+
+	t.Run("limit absent", func(t *testing.T) {
+		limit, ok := providers.ContextLimit("openai", "no-limit")
+		if ok || limit != 0 {
+			t.Fatalf("ContextLimit = (%d, %v), want (0, false)", limit, ok)
+		}
+	})
+
+	t.Run("provider absent", func(t *testing.T) {
+		limit, ok := providers.ContextLimit("missing", "gpt-4o")
+		if ok || limit != 0 {
+			t.Fatalf("ContextLimit = (%d, %v), want (0, false)", limit, ok)
+		}
+	})
+}

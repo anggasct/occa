@@ -23,6 +23,9 @@ type questionClient struct {
 }
 
 func (c *questionClient) CreateSession(_ context.Context) (string, error) { return "ses-1", nil }
+func (c *questionClient) GetSession(_ context.Context, _ string) (*relay.SessionInfo, error) {
+	return &relay.SessionInfo{}, nil
+}
 func (c *questionClient) SessionExists(_ context.Context, _ string) (bool, error) {
 	return true, nil
 }
