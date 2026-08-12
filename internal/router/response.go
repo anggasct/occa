@@ -179,7 +179,7 @@ func (r *Router) runResponse(
 			r.reply(msg, "⚠️ "+dispatchErr.Error())
 		} else if errors.Is(dispatchErr, relay.ErrTimeout) {
 			r.instances.ForceStop(inst.Workdir())
-			r.reply(msg, "⚠️ Agent-nya macet (nggak ngerespon 3 menit). Gw udah restart — coba kirim ulang pesan lo ya.")
+			r.reply(msg, "⚠️ The agent stopped responding after 3 minutes and was restarted automatically. Please send your message again.")
 		} else {
 			r.reply(msg, "⚠️ Agent unreachable")
 		}
@@ -191,7 +191,7 @@ func (r *Router) runResponse(
 
 func progressNotice(seconds int64) string {
 	minutes := seconds / 60
-	return fmt.Sprintf("⏳ masih ngerjain... (%dm)", minutes)
+	return fmt.Sprintf("⏳ Still working... (%dm)", minutes)
 }
 
 var progressTickerInterval = 60 * time.Second

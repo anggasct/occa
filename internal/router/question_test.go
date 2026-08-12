@@ -241,7 +241,7 @@ func TestQuestionAnswerFailureKeepsPromptOpen(t *testing.T) {
 		t.Fatalf("handle: %v", err)
 	}
 	last := reply.edits[len(reply.edits)-1]
-	if !strings.Contains(last.text, "Gagal kirim jawaban") {
+	if !strings.Contains(last.text, "Could not submit your answer") {
 		t.Fatalf("expected retry view, got %q", last.text)
 	}
 	if len(last.buttons) != 3 {
@@ -399,7 +399,7 @@ func TestQuestionMultiQuestionTerminalText(t *testing.T) {
 	}
 
 	last := reply.edits[len(reply.edits)-1]
-	want := "✅ Soal 1: B — soal 2 dilewati (ketuk opsi buat menjawab, atau Skip)."
+	want := "✅ Question 1: B — question 2 skipped (tap an option to answer, or Skip)."
 	if last.text != want {
 		t.Fatalf("multi-question terminal text = %q, want %q", last.text, want)
 	}
@@ -437,7 +437,7 @@ func TestQuestionSingleQuestionTerminalTextUnchanged(t *testing.T) {
 func TestFormatQuestionRetryMessageJSONParsing(t *testing.T) {
 	err := errors.New(`relay: answer question: unexpected status 400: {"message":"Expected a string starting with que, got x"}`)
 	got := formatQuestionRetryMessage(err)
-	want := "⚠️ Gagal kirim jawaban — Expected a string starting with que, got x. Coba lagi atau ketuk Skip."
+	want := "⚠️ Could not submit your answer — Expected a string starting with que, got x. Try again or tap Skip."
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
