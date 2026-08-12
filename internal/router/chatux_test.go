@@ -118,19 +118,42 @@ func TestSameConversationIsSingleFlight(t *testing.T) {
 	}
 
 	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) && client.sendCalls < 1 {
+	for time.Now().Before(deadline) {
+		client.mu.Lock()
+		calls := client.sendCalls
+		client.mu.Unlock()
+		if calls >= 1 {
+			break
+		}
 		time.Sleep(time.Millisecond)
 	}
-	if client.sendCalls != 1 {
-		t.Fatalf("sendCalls = %d, want 1 before unblocking", client.sendCalls)
+
+	client.mu.Lock()
+	sendCalls := client.sendCalls
+	client.mu.Unlock()
+	if sendCalls != 1 {
+		t.Fatalf("sendCalls = %d, want 1 before unblocking", sendCalls)
 	}
 
 	close(block)
 	waitForDispatch(t, client)
-	waitForResponse(t, r)
 
-	if client.sendCalls != 2 {
-		t.Fatalf("sendCalls = %d, want 2 after completion", client.sendCalls)
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		client.mu.Lock()
+		calls := client.sendCalls
+		client.mu.Unlock()
+		if calls >= 2 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	client.mu.Lock()
+	sendCalls = client.sendCalls
+	client.mu.Unlock()
+	if sendCalls != 2 {
+		t.Fatalf("sendCalls = %d, want 2 after completion", sendCalls)
 	}
 }
 

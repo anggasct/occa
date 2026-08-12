@@ -636,6 +636,8 @@ func TestRouterMessageQueueFullRejection(t *testing.T) {
 		events <- relay.Event{Type: "delta", Delta: "running"}
 		select {
 		case <-release:
+			events <- relay.Event{Type: "done"}
+			close(events)
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
@@ -669,11 +671,6 @@ func TestRouterMessageQueueFullRejection(t *testing.T) {
 	}
 
 	close(release)
-	client.mu.Lock()
-	events := client.events
-	client.mu.Unlock()
-	events <- relay.Event{Type: "done"}
-	close(events)
 	waitForAllResponses(t, r)
 }
 
@@ -683,6 +680,8 @@ func TestRouterMessageQueueResetAndSessionNewClearQueue(t *testing.T) {
 		events <- relay.Event{Type: "delta", Delta: "active"}
 		select {
 		case <-release:
+			events <- relay.Event{Type: "done"}
+			close(events)
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
@@ -727,6 +726,8 @@ func TestRouterMessageQueueStopKeepsQueue(t *testing.T) {
 		events <- relay.Event{Type: "delta", Delta: "active"}
 		select {
 		case <-release:
+			events <- relay.Event{Type: "done"}
+			close(events)
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
@@ -767,6 +768,8 @@ func TestRouterStatusIncludesQueueLine(t *testing.T) {
 		events <- relay.Event{Type: "delta", Delta: "active"}
 		select {
 		case <-release:
+			events <- relay.Event{Type: "done"}
+			close(events)
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
@@ -795,10 +798,5 @@ func TestRouterStatusIncludesQueueLine(t *testing.T) {
 	}
 
 	close(release)
-	client.mu.Lock()
-	events := client.events
-	client.mu.Unlock()
-	events <- relay.Event{Type: "done"}
-	close(events)
 	waitForAllResponses(t, r)
 }
