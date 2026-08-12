@@ -263,8 +263,12 @@ func (c *HTTPClient) GetSession(ctx context.Context, sessionID string) (*Session
 	}
 
 	var raw struct {
-		Cost   float64  `json:"cost"`
-		Model  ModelRef `json:"model"`
+		Cost  float64 `json:"cost"`
+		Model struct {
+			ID         string `json:"id"`
+			ProviderID string `json:"providerID"`
+			Variant    string `json:"variant"`
+		} `json:"model"`
 		Tokens struct {
 			Input     int64 `json:"input"`
 			Output    int64 `json:"output"`
@@ -287,8 +291,12 @@ func (c *HTTPClient) GetSession(ctx context.Context, sessionID string) (*Session
 			CacheRead:  raw.Tokens.Cache.Read,
 			CacheWrite: raw.Tokens.Cache.Write,
 		},
-		Cost:  raw.Cost,
-		Model: raw.Model,
+		Cost: raw.Cost,
+		Model: ModelRef{
+			ProviderID: raw.Model.ProviderID,
+			ID:         raw.Model.ID,
+			Variant:    raw.Model.Variant,
+		},
 	}, nil
 }
 

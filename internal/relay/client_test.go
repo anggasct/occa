@@ -561,7 +561,7 @@ func TestGetSession(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{
 				"cost": 0.05,
-				"model": {"providerID": "anthropic", "modelID": "claude-3-5-sonnet-20241022", "variant": "max"},
+				"model": {"providerID": "anthropic", "id": "claude-3-5-sonnet-20241022", "variant": "max"},
 				"tokens": {
 					"input": 12000,
 					"output": 3000,
