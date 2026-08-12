@@ -464,7 +464,7 @@ func TestResponseTimeoutForceStopsAndReplies(t *testing.T) {
 	if provider.stopped != "/default-workdir" {
 		t.Fatalf("stopped = %q, want /default-workdir", provider.stopped)
 	}
-	if !reply.contains("⚠️ The agent stopped responding after 3 minutes, so I restarted it. Please send your message again.") {
+	if !reply.contains("⚠️ The agent stopped responding after 3 minutes and was restarted automatically. Please send your message again.") {
 		t.Fatalf("unexpected reply text: %v", reply.texts())
 	}
 }

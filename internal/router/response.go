@@ -179,7 +179,7 @@ func (r *Router) runResponse(
 			r.reply(msg, "⚠️ "+dispatchErr.Error())
 		} else if errors.Is(dispatchErr, relay.ErrTimeout) {
 			r.instances.ForceStop(inst.Workdir())
-			r.reply(msg, "⚠️ The agent stopped responding after 3 minutes, so I restarted it. Please send your message again.")
+			r.reply(msg, "⚠️ The agent stopped responding after 3 minutes and was restarted automatically. Please send your message again.")
 		} else {
 			r.reply(msg, "⚠️ Agent unreachable")
 		}
