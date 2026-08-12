@@ -286,6 +286,8 @@ func TestResponseCoordinatorBusyQueuesSecondPrompt(t *testing.T) {
 		events <- relay.Event{Type: "delta", Delta: "partial"}
 		select {
 		case <-release:
+			events <- relay.Event{Type: "done"}
+			close(events)
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
@@ -320,11 +322,6 @@ func TestResponseCoordinatorBusyQueuesSecondPrompt(t *testing.T) {
 	}
 
 	close(release)
-	client.mu.Lock()
-	events := client.events
-	client.mu.Unlock()
-	events <- relay.Event{Type: "done"}
-	close(events)
 	waitForAllResponses(t, r)
 
 	if client.eventCalls() != 2 {
