@@ -604,9 +604,9 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 				marker = "→ "
 			}
 			if s.Title != "" {
-				sb.WriteString(fmt.Sprintf("%s%s %q (created %d)\n", marker, s.AgentSessionID, s.Title, s.CreatedAt))
+				fmt.Fprintf(&sb, "%s%s %q (created %d)\n", marker, s.AgentSessionID, s.Title, s.CreatedAt)
 			} else {
-				sb.WriteString(fmt.Sprintf("%s%s (created %d)\n", marker, s.AgentSessionID, s.CreatedAt))
+				fmt.Fprintf(&sb, "%s%s (created %d)\n", marker, s.AgentSessionID, s.CreatedAt)
 			}
 		}
 		return strings.TrimRight(sb.String(), "\n"), nil
