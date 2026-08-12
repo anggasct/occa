@@ -166,6 +166,7 @@ type Client interface {
 	AnswerQuestion(ctx context.Context, requestID string, answers [][]string) error
 	RejectQuestion(ctx context.Context, requestID string) error
 	ListCommands(ctx context.Context) ([]CommandInfo, error)
+	AbortSession(ctx context.Context, sessionID string) error
 }
 
 // CommandInfo describes one command the agent backend can invoke, used to
@@ -228,6 +229,25 @@ func (c *HTTPClient) SessionExists(ctx context.Context, sessionID string) (bool,
 		return false, nil
 	}
 	return false, fmt.Errorf("relay: session exists: unexpected status %d", resp.StatusCode)
+}
+
+func (c *HTTPClient) AbortSession(ctx context.Context, sessionID string) error {
+	resp, err := c.post(ctx, "/session/"+sessionID+"/abort", nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		return fmt.Errorf("relay: abort session: drain body: %w", err)
+	}
+
+	if resp.StatusCode == http.StatusNotFound {
+		return ErrNotFound
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("relay: abort session: unexpected status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func (c *HTTPClient) SendMessage(ctx context.Context, sessionID, text string, model *ModelRef, attachments []Attachment) error {

@@ -106,6 +106,8 @@ func (c *responseClient) SessionExists(_ context.Context, _ string) (bool, error
 	return true, nil
 }
 
+func (c *responseClient) AbortSession(_ context.Context, _ string) error { return nil }
+
 func (c *responseClient) SendMessage(ctx context.Context, _ string, _ string, _ *relay.ModelRef, _ []relay.Attachment) error {
 	c.mu.Lock()
 	c.sendCalls++

@@ -60,6 +60,8 @@ type fakeRelayClient struct {
 	blockSend       chan struct{}
 	sessionSeq      int
 	deltaBeforeDone string
+	abortCalls      []string
+	abortErr        error
 
 	mu           sync.Mutex
 	responses    []pendingResponse
@@ -75,6 +77,12 @@ func (f *fakeRelayClient) CreateSession(_ context.Context) (string, error) {
 }
 func (f *fakeRelayClient) SessionExists(_ context.Context, _ string) (bool, error) {
 	return true, nil
+}
+func (f *fakeRelayClient) AbortSession(_ context.Context, sessionID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.abortCalls = append(f.abortCalls, sessionID)
+	return f.abortErr
 }
 func (f *fakeRelayClient) SendMessage(_ context.Context, _, text string, model *relay.ModelRef, _ []relay.Attachment) error {
 	f.mu.Lock()
@@ -1436,5 +1444,177 @@ func TestShortFormCommandsAndLegacyAliases(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestHandleStopWithActiveSession(t *testing.T) {
+	r, client, reply := newTestRouter()
+	ctx := context.Background()
+
+	err := r.store.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "user1", "sess-active", 0)
+	if err != nil {
+		t.Fatalf("SetActive: %v", err)
+	}
+
+	err = r.Route(ctx, msg("/stop", reply))
+	if err != nil {
+		t.Fatalf("Route /stop: %v", err)
+	}
+
+	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Stopped. Your conversation is kept") {
+		t.Fatalf("expected stopped message, got: %v", reply.sends)
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.abortCalls) != 1 || client.abortCalls[0] != "sess-active" {
+		t.Fatalf("expected AbortSession call for sess-active, got: %v", client.abortCalls)
+	}
+}
+
+func TestHandleStopNoActiveSession(t *testing.T) {
+	r, client, reply := newTestRouter()
+	ctx := context.Background()
+
+	err := r.Route(ctx, msg("/stop", reply))
+	if err != nil {
+		t.Fatalf("Route /stop: %v", err)
+	}
+
+	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Nothing running to stop (no active session).") {
+		t.Fatalf("expected nothing running message, got: %v", reply.sends)
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.abortCalls) != 0 {
+		t.Fatalf("expected 0 AbortSession calls, got: %v", client.abortCalls)
+	}
+}
+
+func TestHandleSteerWithActiveSession(t *testing.T) {
+	r, client, reply := newTestRouter()
+	ctx := context.Background()
+
+	err := r.store.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "user1", "sess-active", 0)
+	if err != nil {
+		t.Fatalf("SetActive: %v", err)
+	}
+
+	err = r.Route(ctx, msg("/steer build a website", reply))
+	if err != nil {
+		t.Fatalf("Route /steer: %v", err)
+	}
+
+	client.mu.Lock()
+	if len(client.abortCalls) != 1 || client.abortCalls[0] != "sess-active" {
+		client.mu.Unlock()
+		t.Fatalf("expected AbortSession for sess-active, got: %v", client.abortCalls)
+	}
+	client.mu.Unlock()
+
+	waitForDispatch(t, client)
+	waitForResponse(t, r)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if !strings.Contains(client.lastMsg, "New direction (previous task cancelled): build a website") {
+		t.Fatalf("expected steer preamble in prompt, got: %q", client.lastMsg)
+	}
+}
+
+func TestHandleSteerNoArgs(t *testing.T) {
+	r, client, reply := newTestRouter()
+	ctx := context.Background()
+
+	err := r.Route(ctx, msg("/steer", reply))
+	if err != nil {
+		t.Fatalf("Route /steer: %v", err)
+	}
+
+	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Usage: /steer") {
+		t.Fatalf("expected usage message, got: %v", reply.sends)
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.abortCalls) != 0 {
+		t.Fatalf("expected 0 AbortSession calls, got: %v", client.abortCalls)
+	}
+}
+
+func TestHandleSteerNoSession(t *testing.T) {
+	r, client, reply := newTestRouter()
+	ctx := context.Background()
+
+	err := r.Route(ctx, msg("/steer initial direction", reply))
+	if err != nil {
+		t.Fatalf("Route /steer: %v", err)
+	}
+
+	client.mu.Lock()
+	if len(client.abortCalls) != 0 {
+		client.mu.Unlock()
+		t.Fatalf("expected 0 AbortSession calls, got: %v", client.abortCalls)
+	}
+	client.mu.Unlock()
+
+	waitForDispatch(t, client)
+	waitForResponse(t, r)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if client.lastMsg != "initial direction" {
+		t.Fatalf("expected prompt without preamble, got: %q", client.lastMsg)
+	}
+}
+
+func TestStopAndSteerHelpAndMenu(t *testing.T) {
+	r, _, reply := newTestRouter()
+	ctx := context.Background()
+
+	rawHelp := r.helpText()
+	if !strings.Contains(rawHelp, "• /stop — stop the running response (session kept)") {
+		t.Fatalf("raw help text missing /stop: %s", rawHelp)
+	}
+	if !strings.Contains(rawHelp, "• /steer <direction> — stop and redirect the agent (session kept)") {
+		t.Fatalf("raw help text missing /steer: %s", rawHelp)
+	}
+
+	err := r.Route(ctx, msg("/help", reply))
+	if err != nil {
+		t.Fatalf("Route /help: %v", err)
+	}
+
+	if len(reply.sends) == 0 {
+		t.Fatal("expected help response")
+	}
+	helpText := reply.sends[0]
+	if !strings.Contains(helpText, "/stop") {
+		t.Fatalf("help text missing /stop: %s", helpText)
+	}
+	if !strings.Contains(helpText, "/steer") {
+		t.Fatalf("help text missing /steer: %s", helpText)
+	}
+
+	menu := r.MenuCommands()
+	foundStop := false
+	foundSteer := false
+	for _, cmd := range menu {
+		if cmd.Alias == "stop" {
+			foundStop = true
+		}
+		if cmd.Alias == "steer" {
+			foundSteer = true
+			if !cmd.HasArgs {
+				t.Fatalf("expected steer HasArgs == true")
+			}
+		}
+	}
+	if !foundStop {
+		t.Fatal("menu missing stop command")
+	}
+	if !foundSteer {
+		t.Fatal("menu missing steer command")
 	}
 }
