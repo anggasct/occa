@@ -46,22 +46,23 @@ type pendingResponse struct {
 }
 
 type fakeRelayClient struct {
-	sessionID       string
-	lastMsg         string
-	rawMsg          string
-	lastCmd         string
-	providers       relay.Providers
-	providersErr    error
-	lastModel       *relay.ModelRef
-	providerCalls   int
-	sendCalls       int
-	commands        []relay.CommandInfo
-	commandsErr     error
-	blockSend       chan struct{}
-	sessionSeq      int
-	deltaBeforeDone string
-	abortCalls      []string
-	abortErr        error
+	sessionID          string
+	lastMsg            string
+	rawMsg             string
+	lastCmd            string
+	providers          relay.Providers
+	providersErr       error
+	lastModel          *relay.ModelRef
+	providerCalls      int
+	sendCalls          int
+	createSessionCalls int
+	commands           []relay.CommandInfo
+	commandsErr        error
+	blockSend          chan struct{}
+	sessionSeq         int
+	deltaBeforeDone    string
+	abortCalls         []string
+	abortErr           error
 
 	mu           sync.Mutex
 	responses    []pendingResponse
@@ -71,6 +72,7 @@ type fakeRelayClient struct {
 func (f *fakeRelayClient) CreateSession(_ context.Context) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.createSessionCalls++
 	f.sessionID = fmt.Sprintf("sess-%d", f.sessionSeq)
 	f.sessionSeq++
 	return f.sessionID, nil
@@ -1518,6 +1520,9 @@ func TestHandleSteerWithActiveSession(t *testing.T) {
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
+	if client.createSessionCalls != 0 {
+		t.Fatalf("expected 0 CreateSession calls, got %d", client.createSessionCalls)
+	}
 	if !strings.Contains(client.lastMsg, "New direction (previous task cancelled): build a website") {
 		t.Fatalf("expected steer preamble in prompt, got: %q", client.lastMsg)
 	}
