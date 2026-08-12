@@ -330,14 +330,52 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 	taskCtx, cancel := context.WithCancel(ctx)
 	if !r.responses.acquire(key, cancel) {
 		cancel()
+		depth, ok := r.responses.enqueue(key, ctx, msg)
+		if ok {
+			r.reply(msg, fmt.Sprintf("⏳ Queued — %d message(s) will run after the current response finishes.", depth))
+			return nil
+		}
 		r.reply(msg, busyResponseMessage)
 		return nil
 	}
+
+	return r.executePassthrough(taskCtx, cancel, key, msg)
+}
+
+func (r *Router) dispatchDrained(key responseKey, drained []queuedMessage) {
+	for i, qmsg := range drained {
+		if r.passthroughQueued(qmsg) {
+			if len(drained[i+1:]) > 0 {
+				r.responses.requeuePrefix(key, drained[i+1:])
+			}
+			return
+		}
+	}
+}
+
+func (r *Router) passthroughQueued(qmsg queuedMessage) bool {
+	threadID, userID := conversationKey(qmsg.msg)
+	key := responseKey{platform: qmsg.msg.Platform, channelID: qmsg.msg.ChannelID, threadID: threadID, userID: userID}
+	taskCtx, cancel := context.WithCancel(qmsg.ctx)
+	if !r.responses.acquire(key, cancel) {
+		cancel()
+		return false
+	}
+	if err := r.executePassthrough(taskCtx, cancel, key, qmsg.msg); err != nil {
+		slog.Error("queued message dispatch failed", "platform", key.platform, "channel_id", key.channelID, "user_id", key.userID, "error", err)
+	}
+	return true
+}
+
+func (r *Router) executePassthrough(taskCtx context.Context, cancel context.CancelFunc, key responseKey, msg channel.IncomingMessage) error {
+	ctx := taskCtx
+	threadID, userID := key.threadID, key.userID
 
 	inst, err := r.clientFor(ctx, msg)
 	if err != nil {
 		r.responses.release(key)
 		r.reply(msg, "⚠️ Agent unreachable")
+		r.dispatchDrained(key, r.responses.drain(key))
 		return nil
 	}
 
@@ -349,6 +387,7 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 		inst.End()
 		r.responses.release(key)
 		r.reply(msg, "⚠️ Agent unreachable")
+		r.dispatchDrained(key, r.responses.drain(key))
 		return nil
 	}
 
@@ -389,6 +428,7 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 			r.responses.release(key)
 			slog.Error("failed to resolve message model; message not sent", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID, "error", err)
 			r.reply(msg, "⚠️ Unable to resolve model configuration. Message not sent.")
+			r.dispatchDrained(key, r.responses.drain(key))
 			return nil
 		}
 		attachments = make([]relay.Attachment, len(msg.Attachments))
@@ -404,6 +444,7 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 		inst.End()
 		r.responses.release(key)
 		r.reply(msg, "⚠️ Agent unreachable")
+		r.dispatchDrained(key, r.responses.drain(key))
 		return nil
 	}
 
@@ -576,8 +617,13 @@ func (r *Router) handleStatus(ctx context.Context, msg channel.IncomingMessage, 
 	uptime := time.Since(r.startedAt).Truncate(time.Second)
 	workdir := r.effectiveWorkdir(ctx, msg.Platform, msg.ChannelID)
 
-	return fmt.Sprintf("✅ Agent connected\nSession: %s%s\nUptime: %s\nWorkdir: %s\nLatency: %s",
-		sessionID, contextLine, uptime, workdir, latency), nil
+	status := fmt.Sprintf("✅ Agent connected\nSession: %s%s\nUptime: %s\nWorkdir: %s\nLatency: %s",
+		sessionID, contextLine, uptime, workdir, latency)
+	key := responseKey{platform: msg.Platform, channelID: msg.ChannelID, threadID: threadID, userID: userID}
+	if qLen := r.responses.queueDepth(key); qLen > 0 {
+		status += fmt.Sprintf("\nQueue: %d message(s)", qLen)
+	}
+	return status, nil
 }
 
 func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage, args string) (string, error) {
@@ -613,7 +659,9 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 
 	case "new":
 		threadID, userID := conversationKey(msg)
-		r.responses.cancelResponse(responseKey{platform: msg.Platform, channelID: msg.ChannelID, threadID: threadID, userID: userID})
+		key := responseKey{platform: msg.Platform, channelID: msg.ChannelID, threadID: threadID, userID: userID}
+		r.responses.cancelResponse(key)
+		r.responses.drain(key)
 
 		inst, err := r.clientFor(ctx, msg)
 		if err != nil {
@@ -680,7 +728,9 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 
 func (r *Router) handleReset(ctx context.Context, msg channel.IncomingMessage, _ string) (string, error) {
 	threadID, userID := conversationKey(msg)
-	r.responses.cancelResponse(responseKey{platform: msg.Platform, channelID: msg.ChannelID, threadID: threadID, userID: userID})
+	key := responseKey{platform: msg.Platform, channelID: msg.ChannelID, threadID: threadID, userID: userID}
+	r.responses.cancelResponse(key)
+	r.responses.drain(key)
 
 	inst, err := r.clientFor(ctx, msg)
 	if err != nil {
