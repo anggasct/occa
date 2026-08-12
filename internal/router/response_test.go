@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -263,12 +264,30 @@ func TestResponseCoordinatorUsesSamePathForCommands(t *testing.T) {
 	}
 }
 
-func TestResponseCoordinatorBusyDoesNotDispatchSecondPrompt(t *testing.T) {
+func waitForAllResponses(t *testing.T, r *Router) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		r.responses.mu.Lock()
+		active := len(r.responses.active)
+		queued := len(r.responses.queues)
+		r.responses.mu.Unlock()
+		if active == 0 && queued == 0 {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("responses did not finish")
+}
+
+func TestResponseCoordinatorBusyQueuesSecondPrompt(t *testing.T) {
 	release := make(chan struct{})
 	client := newResponseClient(func(ctx context.Context, events chan<- relay.Event) error {
 		events <- relay.Event{Type: "delta", Delta: "partial"}
 		select {
 		case <-release:
+			events <- relay.Event{Type: "done"}
+			close(events)
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
@@ -295,20 +314,19 @@ func TestResponseCoordinatorBusyDoesNotDispatchSecondPrompt(t *testing.T) {
 	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "second", secondReply)); err != nil {
 		t.Fatalf("second Route: %v", err)
 	}
-	if !secondReply.hasExact(busyResponseMessage) {
-		t.Fatalf("busy response = %v", secondReply.texts())
+	if !secondReply.hasExact("⏳ Queued — 1 message(s) will run after the current response finishes.") {
+		t.Fatalf("queued response = %v", secondReply.texts())
 	}
 	if client.eventCalls() != 1 {
 		t.Fatalf("Events calls = %d, want 1", client.eventCalls())
 	}
 
 	close(release)
-	client.mu.Lock()
-	events := client.events
-	client.mu.Unlock()
-	events <- relay.Event{Type: "done"}
-	close(events)
-	waitForResponse(t, r)
+	waitForAllResponses(t, r)
+
+	if client.eventCalls() != 2 {
+		t.Fatalf("Events calls = %d, want 2", client.eventCalls())
+	}
 }
 
 func TestResponseCoordinatorDispatchAndStreamOverlap(t *testing.T) {
@@ -569,4 +587,216 @@ func TestProgressTickerDeletesNoticeOnStop(t *testing.T) {
 	if deletedCount != 1 {
 		t.Fatalf("expected Delete called once, got %d", deletedCount)
 	}
+}
+
+func TestResponseCoordinatorQueueMethods(t *testing.T) {
+	coord := newResponseCoordinator()
+	key := responseKey{platform: "telegram", channelID: "chat1", userID: "user1"}
+	msg := channel.IncomingMessage{Text: "test"}
+	ctx := context.Background()
+
+	if depth, ok := coord.enqueue(key, ctx, msg); ok || depth != 0 {
+		t.Fatalf("enqueue while idle = (%d, %v), want (0, false)", depth, ok)
+	}
+
+	cancelCalled := false
+	if !coord.acquire(key, func() { cancelCalled = true }) {
+		t.Fatal("acquire failed")
+	}
+
+	for i := 1; i <= 5; i++ {
+		depth, ok := coord.enqueue(key, ctx, msg)
+		if !ok || depth != i {
+			t.Fatalf("enqueue iteration %d = (%d, %v), want (%d, true)", i, depth, ok, i)
+		}
+	}
+
+	if depth, ok := coord.enqueue(key, ctx, msg); ok || depth != 0 {
+		t.Fatalf("6th enqueue = (%d, %v), want (0, false)", depth, ok)
+	}
+
+	if depth := coord.queueDepth(key); depth != 5 {
+		t.Fatalf("queueDepth = %d, want 5", depth)
+	}
+
+	drained := coord.drain(key)
+	if len(drained) != 5 {
+		t.Fatalf("drained len = %d, want 5", len(drained))
+	}
+	if depth := coord.queueDepth(key); depth != 0 {
+		t.Fatalf("queueDepth after drain = %d, want 0", depth)
+	}
+
+	_ = cancelCalled
+}
+
+func TestRouterMessageQueueFullRejection(t *testing.T) {
+	release := make(chan struct{})
+	client := newResponseClient(func(ctx context.Context, events chan<- relay.Event) error {
+		events <- relay.Event{Type: "delta", Delta: "running"}
+		select {
+		case <-release:
+			events <- relay.Event{Type: "done"}
+			close(events)
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	r, _ := newResponseRouter(client)
+	firstReply := newResponseReply()
+
+	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "first", firstReply)); err != nil {
+		t.Fatalf("first Route: %v", err)
+	}
+	waitForReply(t, firstReply, "running")
+
+	for i := 1; i <= 5; i++ {
+		qReply := newResponseReply()
+		if err := r.Route(context.Background(), responseMessage("user1", "chat1", "queued", qReply)); err != nil {
+			t.Fatalf("queued Route %d: %v", i, err)
+		}
+		expectedNotice := fmt.Sprintf("⏳ Queued — %d message(s) will run after the current response finishes.", i)
+		if !qReply.hasExact(expectedNotice) {
+			t.Fatalf("queued reply %d = %v, want %q", i, qReply.texts(), expectedNotice)
+		}
+	}
+
+	fullReply := newResponseReply()
+	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "full", fullReply)); err != nil {
+		t.Fatalf("full Route: %v", err)
+	}
+	if !fullReply.hasExact(busyResponseMessage) {
+		t.Fatalf("full queue reply = %v, want busyResponseMessage %q", fullReply.texts(), busyResponseMessage)
+	}
+
+	close(release)
+	waitForAllResponses(t, r)
+}
+
+func TestRouterMessageQueueResetAndSessionNewClearQueue(t *testing.T) {
+	release := make(chan struct{})
+	client := newResponseClient(func(ctx context.Context, events chan<- relay.Event) error {
+		events <- relay.Event{Type: "delta", Delta: "active"}
+		select {
+		case <-release:
+			events <- relay.Event{Type: "done"}
+			close(events)
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	r, _ := newResponseRouter(client)
+	firstReply := newResponseReply()
+
+	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "first", firstReply)); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	waitForReply(t, firstReply, "active")
+
+	qReply := newResponseReply()
+	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "second", qReply)); err != nil {
+		t.Fatalf("Route second: %v", err)
+	}
+	if !qReply.hasExact("⏳ Queued — 1 message(s) will run after the current response finishes.") {
+		t.Fatalf("queued reply = %v", qReply.texts())
+	}
+
+	resetReply := newResponseReply()
+	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "/reset", resetReply)); err != nil {
+		t.Fatalf("Route reset: %v", err)
+	}
+	if !resetReply.contains("Session reset") {
+		t.Fatalf("reset reply = %v", resetReply.texts())
+	}
+
+	close(release)
+	waitForAllResponses(t, r)
+
+	key := responseKey{platform: "telegram", channelID: "chat1", userID: "user1"}
+	if depth := r.responses.queueDepth(key); depth != 0 {
+		t.Fatalf("queueDepth after reset = %d, want 0", depth)
+	}
+}
+
+func TestRouterMessageQueueStopKeepsQueue(t *testing.T) {
+	release := make(chan struct{})
+	client := newResponseClient(func(ctx context.Context, events chan<- relay.Event) error {
+		events <- relay.Event{Type: "delta", Delta: "active"}
+		select {
+		case <-release:
+			events <- relay.Event{Type: "done"}
+			close(events)
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	r, _ := newResponseRouter(client)
+	firstReply := newResponseReply()
+
+	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "first", firstReply)); err != nil {
+		t.Fatalf("Route first: %v", err)
+	}
+	waitForReply(t, firstReply, "active")
+
+	qReply := newResponseReply()
+	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "second", qReply)); err != nil {
+		t.Fatalf("Route second: %v", err)
+	}
+
+	stopReply := newResponseReply()
+	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "/stop", stopReply)); err != nil {
+		t.Fatalf("Route stop: %v", err)
+	}
+
+	close(release)
+	waitForAllResponses(t, r)
+
+	client.mu.Lock()
+	sendCalls := client.sendCalls
+	client.mu.Unlock()
+	if sendCalls != 2 {
+		t.Fatalf("sendCalls = %d, want 2", sendCalls)
+	}
+}
+
+func TestRouterStatusIncludesQueueLine(t *testing.T) {
+	release := make(chan struct{})
+	client := newResponseClient(func(ctx context.Context, events chan<- relay.Event) error {
+		events <- relay.Event{Type: "delta", Delta: "active"}
+		select {
+		case <-release:
+			events <- relay.Event{Type: "done"}
+			close(events)
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	r, _ := newResponseRouter(client)
+	firstReply := newResponseReply()
+
+	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "first", firstReply)); err != nil {
+		t.Fatalf("Route first: %v", err)
+	}
+	waitForReply(t, firstReply, "active")
+
+	q1Reply := newResponseReply()
+	_ = r.Route(context.Background(), responseMessage("user1", "chat1", "q1", q1Reply))
+	q2Reply := newResponseReply()
+	_ = r.Route(context.Background(), responseMessage("user1", "chat1", "q2", q2Reply))
+
+	statusReply := newResponseReply()
+	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "/status", statusReply)); err != nil {
+		t.Fatalf("Route status: %v", err)
+	}
+
+	if !statusReply.contains("Queue: 2 message(s)") {
+		t.Fatalf("status reply missing queue info: %v", statusReply.texts())
+	}
+
+	close(release)
+	waitForAllResponses(t, r)
 }

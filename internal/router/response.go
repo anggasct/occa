@@ -15,6 +15,13 @@ import (
 
 const busyResponseMessage = "⚠️ A response is already running in this conversation. Wait for it to finish or check /occa:status."
 
+const maxQueuedMessages = 5
+
+type queuedMessage struct {
+	ctx context.Context
+	msg channel.IncomingMessage
+}
+
 // responseKey is the full conversation key: one active task per
 // (platform, channelID, threadID, userID), so different users or threads in
 // the same channel run concurrently while the same conversation stays
@@ -29,10 +36,14 @@ type responseKey struct {
 type responseCoordinator struct {
 	mu     sync.Mutex
 	active map[responseKey]context.CancelFunc
+	queues map[responseKey][]queuedMessage
 }
 
 func newResponseCoordinator() *responseCoordinator {
-	return &responseCoordinator{active: make(map[responseKey]context.CancelFunc)}
+	return &responseCoordinator{
+		active: make(map[responseKey]context.CancelFunc),
+		queues: make(map[responseKey][]queuedMessage),
+	}
 }
 
 func (c *responseCoordinator) acquire(key responseKey, cancel context.CancelFunc) bool {
@@ -43,6 +54,44 @@ func (c *responseCoordinator) acquire(key responseKey, cancel context.CancelFunc
 	}
 	c.active[key] = cancel
 	return true
+}
+
+func (c *responseCoordinator) enqueue(key responseKey, ctx context.Context, msg channel.IncomingMessage) (int, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, active := c.active[key]; !active {
+		return 0, false
+	}
+	q := c.queues[key]
+	if len(q) >= maxQueuedMessages {
+		return 0, false
+	}
+	q = append(q, queuedMessage{ctx: ctx, msg: msg})
+	c.queues[key] = q
+	return len(q), true
+}
+
+func (c *responseCoordinator) drain(key responseKey) []queuedMessage {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	q := c.queues[key]
+	delete(c.queues, key)
+	return q
+}
+
+func (c *responseCoordinator) queueDepth(key responseKey) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.queues[key])
+}
+
+func (c *responseCoordinator) requeuePrefix(key responseKey, msgs []queuedMessage) {
+	if len(msgs) == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.queues[key] = append(msgs, c.queues[key]...)
 }
 
 func (c *responseCoordinator) release(key responseKey) {
@@ -102,6 +151,8 @@ func (r *Router) runResponse(
 		inst.End()
 		r.responses.release(key)
 		slog.Info("response finished", "platform", key.platform, "channel_id", key.channelID, "thread_id", key.threadID, "user_id", key.userID, "outcome", outcome, "elapsed", time.Since(started).Truncate(time.Millisecond))
+		drained := r.responses.drain(key)
+		r.dispatchDrained(key, drained)
 	}()
 
 	progressStopCh := make(chan struct{})

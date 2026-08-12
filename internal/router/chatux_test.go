@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/store"
@@ -94,7 +95,7 @@ func TestTwoUsersSameChannelSeparateSessions(t *testing.T) {
 }
 
 // TestSameConversationIsSingleFlight: a second message in the same
-// conversation while one task is in flight is rejected with the busy notice.
+// conversation while one task is in flight is queued, not rejected.
 func TestSameConversationIsSingleFlight(t *testing.T) {
 	r, client, _, overrideRepo := newTestRouterWithAccess()
 	overrideRepo.overrides["telegram:chat1:alice"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "alice", Role: "allow"}
@@ -111,13 +112,49 @@ func TestSameConversationIsSingleFlight(t *testing.T) {
 	if err := r.Route(context.Background(), msgFrom("alice", "second task", reply2)); err != nil {
 		t.Fatalf("Route second: %v", err)
 	}
-	if len(reply2.sends) != 1 || reply2.sends[0] != busyResponseMessage {
-		t.Fatalf("second task reply = %v, want busy notice", reply2.sends)
+	expectedQueuedNotice := "⏳ Queued — 1 message(s) will run after the current response finishes."
+	if len(reply2.sends) != 1 || reply2.sends[0] != expectedQueuedNotice {
+		t.Fatalf("second task reply = %v, want queued notice %q", reply2.sends, expectedQueuedNotice)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		client.mu.Lock()
+		calls := client.sendCalls
+		client.mu.Unlock()
+		if calls >= 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	client.mu.Lock()
+	sendCalls := client.sendCalls
+	client.mu.Unlock()
+	if sendCalls != 1 {
+		t.Fatalf("sendCalls = %d, want 1 before unblocking", sendCalls)
 	}
 
 	close(block)
 	waitForDispatch(t, client)
-	waitForResponse(t, r)
+
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		client.mu.Lock()
+		calls := client.sendCalls
+		client.mu.Unlock()
+		if calls >= 2 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	client.mu.Lock()
+	sendCalls = client.sendCalls
+	client.mu.Unlock()
+	if sendCalls != 2 {
+		t.Fatalf("sendCalls = %d, want 2 after completion", sendCalls)
+	}
 }
 
 // TestDifferentThreadsRunConcurrently: tasks in two different threads of the
