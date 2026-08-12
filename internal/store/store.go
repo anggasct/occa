@@ -9,6 +9,7 @@ type Session struct {
 	AgentSessionID string
 	ThreadID       string
 	UserID         string
+	Title          string
 	Active         bool
 	CreatedAt      int64
 	UpdatedAt      int64
@@ -43,6 +44,7 @@ type SessionRepo interface {
 	Active(ctx context.Context, platform, channelID, threadID, userID string) (sessionID string, agentPID int, err error)
 	SetActive(ctx context.Context, platform, channelID, threadID, userID, sessionID string, agentPID int) error
 	Deactivate(ctx context.Context, platform, channelID, threadID, userID string) error
+	SetTitle(ctx context.Context, id int64, title string) error
 	List(ctx context.Context, platform, channelID string) ([]Session, error)
 	ThreadChannel(ctx context.Context, platform, threadID string) (string, error)
 	Delete(ctx context.Context, id int64) error

@@ -494,3 +494,38 @@ func TestSessionThreadChannel(t *testing.T) {
 		t.Fatalf("missing thread channel = %q, want empty", none)
 	}
 }
+
+func TestSessionTitle(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+
+	if err := s.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "", "sess-1", 100); err != nil {
+		t.Fatalf("SetActive: %v", err)
+	}
+
+	sessions, err := s.SessionRepo().List(ctx, "telegram", "chat1")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	if sessions[0].Title != "" {
+		t.Fatalf("expected empty title by default, got %q", sessions[0].Title)
+	}
+
+	if err := s.SessionRepo().SetTitle(ctx, sessions[0].ID, "Refactor backend API"); err != nil {
+		t.Fatalf("SetTitle: %v", err)
+	}
+
+	sessions, err = s.SessionRepo().List(ctx, "telegram", "chat1")
+	if err != nil {
+		t.Fatalf("List after SetTitle: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	if sessions[0].Title != "Refactor backend API" {
+		t.Fatalf("expected title %q, got %q", "Refactor backend API", sessions[0].Title)
+	}
+}
