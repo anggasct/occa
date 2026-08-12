@@ -181,7 +181,7 @@ func (b *questionBroker) HandleQuestionCallback(ctx context.Context, msg channel
 					skipped = append(skipped, strconv.Itoa(i+1))
 				}
 			}
-			terminal = fmt.Sprintf("✅ Soal %d: %s — soal %s dilewati (ketuk opsi buat menjawab, atau Skip).", qIdx+1, label, strings.Join(skipped, ", "))
+			terminal = fmt.Sprintf("✅ Question %d: %s — question %s skipped (tap an option to answer, or Skip).", qIdx+1, label, strings.Join(skipped, ", "))
 		} else {
 			terminal = questionAnsweredLabel + ": " + label
 		}
@@ -265,7 +265,7 @@ func formatQuestionRetryMessage(err error) string {
 
 	reason = truncateRunes(reason, 100)
 
-	return fmt.Sprintf("⚠️ Gagal kirim jawaban — %s. Coba lagi atau ketuk Skip.", reason)
+	return fmt.Sprintf("⚠️ Could not submit your answer — %s. Try again or tap Skip.", reason)
 }
 
 func truncateRunes(s string, max int) string {

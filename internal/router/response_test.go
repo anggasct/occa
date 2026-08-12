@@ -426,14 +426,14 @@ func (p *responseProvider) Instance(_ context.Context, workdir string) (AgentIns
 func (p *responseProvider) ForceStop(_ string) {}
 
 func TestProgressNoticeText(t *testing.T) {
-	if got := progressNotice(60); got != "⏳ masih ngerjain... (1m)" {
-		t.Fatalf("progressNotice(60) = %q, want %q", got, "⏳ masih ngerjain... (1m)")
+	if got := progressNotice(60); got != "⏳ Still working... (1m)" {
+		t.Fatalf("progressNotice(60) = %q, want %q", got, "⏳ Still working... (1m)")
 	}
-	if got := progressNotice(120); got != "⏳ masih ngerjain... (2m)" {
-		t.Fatalf("progressNotice(120) = %q, want %q", got, "⏳ masih ngerjain... (2m)")
+	if got := progressNotice(120); got != "⏳ Still working... (2m)" {
+		t.Fatalf("progressNotice(120) = %q, want %q", got, "⏳ Still working... (2m)")
 	}
-	if got := progressNotice(180); got != "⏳ masih ngerjain... (3m)" {
-		t.Fatalf("progressNotice(180) = %q, want %q", got, "⏳ masih ngerjain... (3m)")
+	if got := progressNotice(180); got != "⏳ Still working... (3m)" {
+		t.Fatalf("progressNotice(180) = %q, want %q", got, "⏳ Still working... (3m)")
 	}
 }
 
@@ -458,13 +458,13 @@ func TestResponseTimeoutForceStopsAndReplies(t *testing.T) {
 	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "hello", reply)); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
-	waitForReply(t, reply, "Agent-nya macet")
+	waitForReply(t, reply, "The agent stopped responding")
 	waitForResponse(t, r)
 
 	if provider.stopped != "/default-workdir" {
 		t.Fatalf("stopped = %q, want /default-workdir", provider.stopped)
 	}
-	if !reply.contains("⚠️ Agent-nya macet (nggak ngerespon 3 menit). Gw udah restart — coba kirim ulang pesan lo ya.") {
+	if !reply.contains("⚠️ The agent stopped responding after 3 minutes, so I restarted it. Please send your message again.") {
 		t.Fatalf("unexpected reply text: %v", reply.texts())
 	}
 }
