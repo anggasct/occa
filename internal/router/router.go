@@ -34,6 +34,8 @@ func (r *Router) MenuCommands() []channel.MenuCommand {
 		{Alias: "help", Description: "Show available commands"},
 		{Alias: "status", Description: "Agent health and session info"},
 		{Alias: "session", Description: "Manage sessions: list, new, switch, or delete", HasArgs: true},
+		{Alias: "stop", Description: "Stop the running response (session kept)"},
+		{Alias: "steer", Description: "Stop and redirect the agent (session kept)", HasArgs: true},
 		{Alias: "reset", Description: "Clear current session and start fresh"},
 		{Alias: "dir", Description: "View or set this channel's working directory", HasArgs: true},
 		{Alias: "allow", Description: "Allow a user to use this bot", HasArgs: true},
@@ -409,6 +411,14 @@ func (r *Router) registerDefaults() {
 		Name:    "session",
 		Handler: r.handleSession,
 	}
+	r.commands["stop"] = Command{
+		Name:    "stop",
+		Handler: r.handleStop,
+	}
+	r.commands["steer"] = Command{
+		Name:    "steer",
+		Handler: r.handleSteer,
+	}
 	r.commands["reset"] = Command{
 		Name:    "reset",
 		Handler: r.handleReset,
@@ -482,6 +492,8 @@ func (r *Router) helpText() string {
 		"• /help — show this message\n" +
 		"• /status — agent health + session info\n" +
 		"• /session [list|new|switch <id>|delete <id>] — manage sessions\n" +
+		"• /stop — stop the running response (session kept)\n" +
+		"• /steer <direction> — stop and redirect the agent (session kept)\n" +
 		"• /dir [path] — view or set this channel's working directory\n" +
 		"• /channel [mention|all|thread] — view or set listen mode\n" +
 		"• /model [channel] [provider/model-id[@variant]] — view or set model\n" +
@@ -627,6 +639,80 @@ func (r *Router) handleReset(ctx context.Context, msg channel.IncomingMessage, _
 		return "", fmt.Errorf("reset: %w", err)
 	}
 	return fmt.Sprintf("✅ Session reset. New session: %s", sessionID), nil
+}
+
+func (r *Router) resolveActiveSession(ctx context.Context, msg channel.IncomingMessage) (string, error) {
+	threadID, userID := conversationKey(msg)
+	sessionID, _, err := r.store.SessionRepo().Active(ctx, msg.Platform, msg.ChannelID, threadID, userID)
+	return sessionID, err
+}
+
+func (r *Router) handleStop(ctx context.Context, msg channel.IncomingMessage, _ string) (string, error) {
+	threadID, userID := conversationKey(msg)
+	key := responseKey{platform: msg.Platform, channelID: msg.ChannelID, threadID: threadID, userID: userID}
+	r.responses.cancelResponse(key)
+
+	sessionID, err := r.resolveActiveSession(ctx, msg)
+	if err != nil {
+		return "", fmt.Errorf("stop: %w", err)
+	}
+	if sessionID == "" {
+		return "✅ Nothing running to stop (no active session).", nil
+	}
+
+	inst, err := r.clientFor(ctx, msg)
+	if err != nil {
+		return "⚠️ Agent unreachable", nil
+	}
+	defer inst.End()
+
+	if err := inst.Client().AbortSession(ctx, sessionID); err != nil {
+		if errors.Is(err, relay.ErrNotFound) {
+			slog.Warn("stop abort: session not found on agent", "session_id", sessionID, "error", err)
+			return "✅ Stopped. Your conversation is kept — send a message to continue.", nil
+		}
+		return "", fmt.Errorf("stop abort: %w", err)
+	}
+	return "✅ Stopped. Your conversation is kept — send a message to continue.", nil
+}
+
+func (r *Router) handleSteer(ctx context.Context, msg channel.IncomingMessage, args string) (string, error) {
+	direction := strings.TrimSpace(args)
+	if direction == "" {
+		return "Usage: /steer <direction>", nil
+	}
+
+	threadID, userID := conversationKey(msg)
+	key := responseKey{platform: msg.Platform, channelID: msg.ChannelID, threadID: threadID, userID: userID}
+	r.responses.cancelResponse(key)
+
+	sessionID, err := r.resolveActiveSession(ctx, msg)
+	if err != nil {
+		return "", fmt.Errorf("steer: %w", err)
+	}
+
+	if sessionID != "" {
+		inst, err := r.clientFor(ctx, msg)
+		if err != nil {
+			return "⚠️ Agent unreachable", nil
+		}
+		if err := inst.Client().AbortSession(ctx, sessionID); err != nil {
+			slog.Warn("steer abort failed", "session_id", sessionID, "error", err)
+		}
+		inst.End()
+	}
+
+	prompt := direction
+	if sessionID != "" {
+		prompt = "New direction (previous task cancelled): " + direction
+	}
+
+	steerMsg := msg
+	steerMsg.Text = prompt
+	if err := r.passthrough(ctx, steerMsg); err != nil {
+		return "", fmt.Errorf("steer: %w", err)
+	}
+	return "", errReplied
 }
 
 func (r *Router) handleAllow(ctx context.Context, msg channel.IncomingMessage, args string) (string, error) {

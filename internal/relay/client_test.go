@@ -507,3 +507,46 @@ func TestProvidersHasVariant(t *testing.T) {
 		}
 	})
 }
+
+func TestAbortSession(t *testing.T) {
+	t.Run("success 200", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost || r.URL.Path != "/session/ses_x/abort" {
+				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			}
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		if err := c.AbortSession(context.Background(), "ses_x"); err != nil {
+			t.Fatalf("AbortSession: %v", err)
+		}
+	})
+
+	t.Run("not found 404", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		err := c.AbortSession(context.Background(), "ses_x")
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("expected ErrNotFound, got %v", err)
+		}
+	})
+
+	t.Run("error 500", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		err := c.AbortSession(context.Background(), "ses_x")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+}

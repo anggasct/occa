@@ -42,6 +42,7 @@ func (c *questionClient) Events(_ context.Context, _ string) (<-chan relay.Event
 func (c *questionClient) ReplyPermission(_ context.Context, _ string, _ relay.PermissionReply) error {
 	return nil
 }
+func (c *questionClient) AbortSession(_ context.Context, _ string) error { return nil }
 
 func (c *questionClient) AnswerQuestion(_ context.Context, requestID string, answers [][]string) error {
 	c.mu.Lock()

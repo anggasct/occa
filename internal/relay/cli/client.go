@@ -84,6 +84,12 @@ func (c *Client) SessionExists(ctx context.Context, sessionID string) (bool, err
 	return sessionID != "", nil
 }
 
+// AbortSession is best-effort: CLI backends run per-prompt subprocesses,
+// so stopping a session is a no-op.
+func (c *Client) AbortSession(ctx context.Context, sessionID string) error {
+	return nil
+}
+
 func (c *Client) Providers(ctx context.Context) (relay.Providers, error) {
 	return relay.Providers{}, nil
 }

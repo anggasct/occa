@@ -82,6 +82,7 @@ func (m *mockClient) RejectQuestion(_ context.Context, _ string) error          
 func (m *mockClient) Events(_ context.Context, _ string) (<-chan Event, error) {
 	return nil, nil
 }
+func (m *mockClient) AbortSession(_ context.Context, _ string) error { return nil }
 
 func TestResolveExisting(t *testing.T) {
 	repo := &mockSessionRepo{activeID: "existing", ownerPID: 100}

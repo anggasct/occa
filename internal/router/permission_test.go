@@ -108,6 +108,7 @@ func (c *permissionClient) AnswerQuestion(_ context.Context, _ string, _ [][]str
 	return nil
 }
 func (c *permissionClient) RejectQuestion(_ context.Context, _ string) error { return nil }
+func (c *permissionClient) AbortSession(_ context.Context, _ string) error   { return nil }
 func (c *permissionClient) ReplyPermission(ctx context.Context, requestID string, decision relay.PermissionReply) error {
 	c.mu.Lock()
 	callIndex := len(c.calls)
