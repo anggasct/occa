@@ -79,6 +79,11 @@ func (c *Client) CreateSession(ctx context.Context) (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// GetSession is best-effort: CLI backends return a zero-value SessionInfo.
+func (c *Client) GetSession(ctx context.Context, sessionID string) (*relay.SessionInfo, error) {
+	return &relay.SessionInfo{}, nil
+}
+
 // SessionExists is best-effort: CLI backends create sessions lazily, so any non-empty session ID is considered valid.
 func (c *Client) SessionExists(ctx context.Context, sessionID string) (bool, error) {
 	return sessionID != "", nil

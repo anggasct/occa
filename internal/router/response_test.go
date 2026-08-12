@@ -102,6 +102,10 @@ func newResponseClient(dispatch func(context.Context, chan<- relay.Event) error)
 
 func (c *responseClient) CreateSession(_ context.Context) (string, error) { return "session", nil }
 
+func (c *responseClient) GetSession(_ context.Context, _ string) (*relay.SessionInfo, error) {
+	return &relay.SessionInfo{}, nil
+}
+
 func (c *responseClient) SessionExists(_ context.Context, _ string) (bool, error) {
 	return true, nil
 }

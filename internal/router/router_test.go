@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -63,6 +64,8 @@ type fakeRelayClient struct {
 	deltaBeforeDone    string
 	abortCalls         []string
 	abortErr           error
+	sessionInfo        *relay.SessionInfo
+	sessionInfoErr     error
 
 	mu           sync.Mutex
 	responses    []pendingResponse
@@ -76,6 +79,15 @@ func (f *fakeRelayClient) CreateSession(_ context.Context) (string, error) {
 	f.sessionID = fmt.Sprintf("sess-%d", f.sessionSeq)
 	f.sessionSeq++
 	return f.sessionID, nil
+}
+func (f *fakeRelayClient) GetSession(_ context.Context, _ string) (*relay.SessionInfo, error) {
+	if f.sessionInfoErr != nil {
+		return nil, f.sessionInfoErr
+	}
+	if f.sessionInfo != nil {
+		return f.sessionInfo, nil
+	}
+	return &relay.SessionInfo{}, nil
 }
 func (f *fakeRelayClient) SessionExists(_ context.Context, _ string) (bool, error) {
 	return true, nil
@@ -316,6 +328,7 @@ func (f *fakeScheduleRepo) ListAll(_ context.Context) ([]store.Schedule, error) 
 type fakeSessionRepo struct {
 	activeID string
 	activeBy map[string]string
+	titles   map[string]string
 }
 
 func (f *fakeSessionRepo) sessionKey(platform, channelID, threadID, userID string) string {
@@ -346,10 +359,27 @@ func (f *fakeSessionRepo) Deactivate(_ context.Context, platform, channelID, thr
 	return nil
 }
 
+func (f *fakeSessionRepo) SetTitle(ctx context.Context, id int64, title string) error {
+	if f.titles == nil {
+		f.titles = make(map[string]string)
+	}
+	sessions, _ := f.List(ctx, "telegram", "chat1")
+	for _, s := range sessions {
+		if s.ID == id {
+			f.titles[s.AgentSessionID] = title
+			return nil
+		}
+	}
+	if f.activeID != "" {
+		f.titles[f.activeID] = title
+	}
+	return nil
+}
+
 func (f *fakeSessionRepo) List(_ context.Context, platform, channelID string) ([]store.Session, error) {
 	if f.activeBy == nil {
 		if f.activeID != "" {
-			return []store.Session{{ID: 1, AgentSessionID: f.activeID, Active: true}}, nil
+			return []store.Session{{ID: 1, AgentSessionID: f.activeID, Active: true, Title: f.titles[f.activeID]}}, nil
 		}
 		return nil, nil
 	}
@@ -364,12 +394,14 @@ func (f *fakeSessionRepo) List(_ context.Context, platform, channelID string) ([
 		if len(parts) == 2 {
 			threadID, userID = parts[0], parts[1]
 		}
+		sessID := int64(len(sessions) + 1)
 		sessions = append(sessions, store.Session{
-			ID:             int64(len(sessions) + 1),
+			ID:             sessID,
 			AgentSessionID: id,
 			Active:         true,
 			ThreadID:       threadID,
 			UserID:         userID,
+			Title:          f.titles[id],
 		})
 	}
 	return sessions, nil
@@ -708,6 +740,162 @@ func TestRouteSessionList(t *testing.T) {
 	if len(reply.sends) == 0 {
 		t.Fatal("expected session list response")
 	}
+}
+
+func TestFirstMessageTitleCapture(t *testing.T) {
+	r, client, reply := newTestRouter()
+
+	// 1. First message stamps title
+	longMsg := "  Fix bug in   authentication logic\nand clean up session handling  "
+	err := r.Route(context.Background(), msg(longMsg, reply))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	waitForDispatch(t, client)
+	waitForResponse(t, r)
+
+	sessions, err := r.store.SessionRepo().List(context.Background(), "telegram", "chat1")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	expectedTitle := "Fix bug in authentication logic and clean up session handlin…"
+	if sessions[0].Title != expectedTitle {
+		t.Fatalf("title = %q, want %q", sessions[0].Title, expectedTitle)
+	}
+
+	// 2. Second message does NOT overwrite title
+	err = r.Route(context.Background(), msg("second message should be ignored for title", reply))
+	if err != nil {
+		t.Fatalf("Route second: %v", err)
+	}
+	waitForDispatch(t, client)
+	waitForResponse(t, r)
+
+	sessions, err = r.store.SessionRepo().List(context.Background(), "telegram", "chat1")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if sessions[0].Title != expectedTitle {
+		t.Fatalf("title after second message = %q, want unchanged %q", sessions[0].Title, expectedTitle)
+	}
+
+	// 3. /session new does NOT stamp a title
+	err = r.Route(context.Background(), msg("/session new", reply))
+	if err != nil {
+		t.Fatalf("Route /session new: %v", err)
+	}
+	sessions, err = r.store.SessionRepo().List(context.Background(), "telegram", "chat1")
+	if err != nil {
+		t.Fatalf("List after new: %v", err)
+	}
+	for _, s := range sessions {
+		if s.Active && s.Title != "" {
+			t.Fatalf("new session should not have title stamped, got %q", s.Title)
+		}
+	}
+}
+
+func TestSessionListTitles(t *testing.T) {
+	r, _, reply := newTestRouter()
+	ctx := context.Background()
+
+	_ = r.store.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "", "sess-1", 100)
+	sessions, _ := r.store.SessionRepo().List(ctx, "telegram", "chat1")
+	if len(sessions) > 0 {
+		_ = r.store.SessionRepo().SetTitle(ctx, sessions[0].ID, "Title One")
+	}
+
+	err := r.Route(ctx, msg("/session list", reply))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if len(reply.sends) == 0 {
+		t.Fatal("expected session list response")
+	}
+	out := reply.sends[len(reply.sends)-1]
+	if !strings.Contains(out, `→ sess-1 "Title One"`) {
+		t.Fatalf("expected title in list output, got: %q", out)
+	}
+}
+
+func TestStatusContextMeter(t *testing.T) {
+	t.Run("with session info and limit", func(t *testing.T) {
+		r, client, reply := newTestRouter()
+		client.sessionInfo = &relay.SessionInfo{
+			Cost:  0.05,
+			Model: relay.ModelRef{ProviderID: "openai", ID: "gpt-4o"},
+			Tokens: relay.SessionTokens{
+				Input: 12000,
+			},
+		}
+		client.providers = relay.Providers{
+			All: []relay.Provider{
+				{
+					ID: "openai",
+					Models: map[string]json.RawMessage{
+						"gpt-4o": json.RawMessage(`{"limit":{"context":128000}}`),
+					},
+				},
+			},
+		}
+
+		err := r.Route(context.Background(), msg("/status", reply))
+		if err != nil {
+			t.Fatalf("Route: %v", err)
+		}
+		if len(reply.sends) == 0 {
+			t.Fatal("expected status response")
+		}
+		out := reply.sends[0]
+		if !strings.Contains(out, "Context: 12.0k / 128.0k tokens (9%) · cost: $0.05") {
+			t.Fatalf("unexpected status output: %q", out)
+		}
+	})
+
+	t.Run("with unknown limit", func(t *testing.T) {
+		r, client, reply := newTestRouter()
+		client.sessionInfo = &relay.SessionInfo{
+			Cost: 0.05,
+			Tokens: relay.SessionTokens{
+				Input: 12000,
+			},
+		}
+
+		err := r.Route(context.Background(), msg("/status", reply))
+		if err != nil {
+			t.Fatalf("Route: %v", err)
+		}
+		if len(reply.sends) == 0 {
+			t.Fatal("expected status response")
+		}
+		out := reply.sends[0]
+		if !strings.Contains(out, "Context: 12.0k tokens used · cost: $0.05") {
+			t.Fatalf("unexpected status output: %q", out)
+		}
+	})
+
+	t.Run("with GetSession error", func(t *testing.T) {
+		r, client, reply := newTestRouter()
+		client.sessionInfoErr = errors.New("agent error")
+
+		err := r.Route(context.Background(), msg("/status", reply))
+		if err != nil {
+			t.Fatalf("Route: %v", err)
+		}
+		if len(reply.sends) == 0 {
+			t.Fatal("expected status response")
+		}
+		out := reply.sends[0]
+		if strings.Contains(out, "Context:") {
+			t.Fatalf("expected Context line omitted on error, got: %q", out)
+		}
+		if !strings.Contains(out, "Agent connected") {
+			t.Fatalf("expected status to succeed without Context line, got: %q", out)
+		}
+	})
 }
 
 func TestAccessDeniedForUnknownUser(t *testing.T) {

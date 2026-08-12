@@ -47,6 +47,8 @@ func (m *mockSessionRepo) ThreadChannel(_ context.Context, platform, threadID st
 	return "", nil
 }
 
+func (m *mockSessionRepo) SetTitle(_ context.Context, _ int64, _ string) error { return nil }
+
 func (m *mockSessionRepo) Delete(_ context.Context, id int64) error { return nil }
 
 type mockClient struct {
@@ -58,6 +60,10 @@ type mockClient struct {
 
 func (m *mockClient) CreateSession(_ context.Context) (string, error) {
 	return m.sessionID, nil
+}
+
+func (m *mockClient) GetSession(_ context.Context, _ string) (*SessionInfo, error) {
+	return &SessionInfo{}, nil
 }
 
 func (m *mockClient) SessionExists(_ context.Context, _ string) (bool, error) {

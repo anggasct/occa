@@ -179,7 +179,7 @@ func TestQueriesUseIndexes(t *testing.T) {
 		args []any
 	}{
 		{"session active", `SELECT agent_session_id FROM session WHERE platform = ? AND channel_id = ? AND thread_id = ? AND user_id = ? AND active = 1`, []any{"telegram", "chat1", "", "user1"}},
-		{"session list", `SELECT id, channel_id, platform, agent_session_id, thread_id, user_id, active, created_at, updated_at FROM session WHERE platform = ? AND channel_id = ? ORDER BY created_at DESC`, []any{"telegram", "chat1"}},
+		{"session list", `SELECT id, channel_id, platform, agent_session_id, thread_id, user_id, title, active, created_at, updated_at FROM session WHERE platform = ? AND channel_id = ? ORDER BY created_at DESC`, []any{"telegram", "chat1"}},
 		{"session deactivate", `UPDATE session SET active = 0, updated_at = ? WHERE platform = ? AND channel_id = ? AND thread_id = ? AND user_id = ? AND active = 1`, []any{int64(1), "telegram", "chat1", "", "user1"}},
 		{"channel get", `SELECT channel_id, platform, model, listen_mode, workdir, auto_thread, created_at, updated_at FROM channel WHERE platform = ? AND channel_id = ?`, []any{"telegram", "chat1"}},
 		{"override get", `SELECT id, channel_id, platform, user_id, role, model, created_at, updated_at FROM user_override WHERE platform = ? AND channel_id = ? AND user_id = ?`, []any{"telegram", "chat1", "user1"}},

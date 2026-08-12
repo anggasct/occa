@@ -341,6 +341,8 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 		return nil
 	}
 
+	preResolveActiveID, _, _ := r.store.SessionRepo().Active(ctx, msg.Platform, msg.ChannelID, threadID, userID)
+
 	resolver := relay.NewSessionResolver(r.store.SessionRepo(), inst.Client())
 	sessionID, err := resolver.Resolve(ctx, msg.Platform, msg.ChannelID, threadID, userID, inst.PID())
 	if err != nil {
@@ -348,6 +350,24 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 		r.responses.release(key)
 		r.reply(msg, "⚠️ Agent unreachable")
 		return nil
+	}
+
+	if preResolveActiveID == "" {
+		title := strings.Join(strings.Fields(msg.Text), " ")
+		title = truncateRunes(title, 60)
+		if title != "" {
+			sessions, err := r.store.SessionRepo().List(ctx, msg.Platform, msg.ChannelID)
+			if err == nil {
+				for _, s := range sessions {
+					if s.AgentSessionID == sessionID {
+						if setErr := r.store.SessionRepo().SetTitle(ctx, s.ID, title); setErr != nil {
+							slog.Warn("router: set session title failed", "session_id", sessionID, "error", setErr)
+						}
+						break
+					}
+				}
+			}
+		}
 	}
 
 	text := msg.Text
@@ -520,11 +540,44 @@ func (r *Router) handleStatus(ctx context.Context, msg channel.IncomingMessage, 
 	}
 	latency := time.Since(start).Truncate(time.Millisecond)
 
+	var contextLine string
+	if sessInfo, err := inst.Client().GetSession(ctx, sessionID); err != nil {
+		slog.Warn("router: status get session failed", "session_id", sessionID, "error", err)
+	} else if sessInfo != nil {
+		var providerID, modelID string
+		if sessInfo.Model.ProviderID != "" && sessInfo.Model.ID != "" {
+			providerID = sessInfo.Model.ProviderID
+			modelID = sessInfo.Model.ID
+		} else if effModel, effErr := r.effectiveModel(ctx, msg); effErr == nil && effModel != nil {
+			providerID = effModel.ProviderID
+			modelID = effModel.ID
+		}
+		var limit int64
+		var hasLimit bool
+		if providerID != "" && modelID != "" {
+			if providers, pErr := inst.Client().Providers(ctx); pErr == nil {
+				limit, hasLimit = providers.ContextLimit(providerID, modelID)
+			}
+		}
+		inputK := float64(sessInfo.Tokens.Input) / 1000.0
+		if hasLimit && limit > 0 {
+			limitK := float64(limit) / 1000.0
+			pct := sessInfo.Tokens.Input * 100 / limit
+			pctStr := fmt.Sprintf("%d", pct)
+			if pct > 100 {
+				pctStr = "100+"
+			}
+			contextLine = fmt.Sprintf("\nContext: %.1fk / %.1fk tokens (%s%%) · cost: $%.2f", inputK, limitK, pctStr, sessInfo.Cost)
+		} else {
+			contextLine = fmt.Sprintf("\nContext: %.1fk tokens used · cost: $%.2f", inputK, sessInfo.Cost)
+		}
+	}
+
 	uptime := time.Since(r.startedAt).Truncate(time.Second)
 	workdir := r.effectiveWorkdir(ctx, msg.Platform, msg.ChannelID)
 
-	return fmt.Sprintf("✅ Agent connected\nSession: %s\nUptime: %s\nWorkdir: %s\nLatency: %s",
-		sessionID, uptime, workdir, latency), nil
+	return fmt.Sprintf("✅ Agent connected\nSession: %s%s\nUptime: %s\nWorkdir: %s\nLatency: %s",
+		sessionID, contextLine, uptime, workdir, latency), nil
 }
 
 func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage, args string) (string, error) {
@@ -550,7 +603,11 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 			if s.Active {
 				marker = "→ "
 			}
-			sb.WriteString(fmt.Sprintf("%s%s (created %d)\n", marker, s.AgentSessionID, s.CreatedAt))
+			if s.Title != "" {
+				fmt.Fprintf(&sb, "%s%s %q (created %d)\n", marker, s.AgentSessionID, s.Title, s.CreatedAt)
+			} else {
+				fmt.Fprintf(&sb, "%s%s (created %d)\n", marker, s.AgentSessionID, s.CreatedAt)
+			}
 		}
 		return strings.TrimRight(sb.String(), "\n"), nil
 

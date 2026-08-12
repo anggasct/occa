@@ -81,9 +81,20 @@ func (r *sqliteSessionRepo) Deactivate(ctx context.Context, platform, channelID,
 	return nil
 }
 
+func (r *sqliteSessionRepo) SetTitle(ctx context.Context, id int64, title string) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE session SET title = ?, updated_at = ? WHERE id = ?`,
+		title, time.Now().Unix(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("store: session set title: %w", err)
+	}
+	return nil
+}
+
 func (r *sqliteSessionRepo) List(ctx context.Context, platform, channelID string) ([]Session, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, channel_id, platform, agent_session_id, thread_id, user_id, active, created_at, updated_at FROM session WHERE platform = ? AND channel_id = ? ORDER BY created_at DESC`,
+		`SELECT id, channel_id, platform, agent_session_id, thread_id, user_id, title, active, created_at, updated_at FROM session WHERE platform = ? AND channel_id = ? ORDER BY created_at DESC`,
 		platform, channelID,
 	)
 	if err != nil {
@@ -95,7 +106,7 @@ func (r *sqliteSessionRepo) List(ctx context.Context, platform, channelID string
 	for rows.Next() {
 		var s Session
 		var active int
-		if err := rows.Scan(&s.ID, &s.ChannelID, &s.Platform, &s.AgentSessionID, &s.ThreadID, &s.UserID, &active, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.ChannelID, &s.Platform, &s.AgentSessionID, &s.ThreadID, &s.UserID, &s.Title, &active, &s.CreatedAt, &s.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("store: session list: scan: %w", err)
 		}
 		s.Active = active == 1
