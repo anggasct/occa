@@ -437,6 +437,42 @@ func (f *fakeSessionRepo) List(_ context.Context, platform, channelID string) ([
 	}
 	return sessions, nil
 }
+
+func (f *fakeSessionRepo) ListConversation(_ context.Context, platform, channelID, threadID, userID string) ([]store.Session, error) {
+	if len(f.sessions) > 0 {
+		var filtered []store.Session
+		for _, s := range f.sessions {
+			if (s.Platform == "" || s.Platform == platform) &&
+				(s.ChannelID == "" || s.ChannelID == channelID) &&
+				(s.ThreadID == "" || s.ThreadID == threadID) &&
+				(s.UserID == "" || s.UserID == userID) {
+				filtered = append(filtered, s)
+			}
+		}
+		return filtered, nil
+	}
+	if f.activeBy == nil {
+		if f.activeID != "" {
+			return []store.Session{{ID: 1, AgentSessionID: f.activeID, Active: true, Title: f.titles[f.activeID]}}, nil
+		}
+		return nil, nil
+	}
+	key := f.sessionKey(platform, channelID, threadID, userID)
+	if id, ok := f.activeBy[key]; ok {
+		return []store.Session{{
+			ID:             1,
+			AgentSessionID: id,
+			Active:         true,
+			Platform:       platform,
+			ChannelID:      channelID,
+			ThreadID:       threadID,
+			UserID:         userID,
+			Title:          f.titles[id],
+		}}, nil
+	}
+	return nil, nil
+}
+
 func (f *fakeSessionRepo) ThreadChannel(_ context.Context, platform, threadID string) (string, error) {
 	if f.activeBy == nil {
 		return "", nil
@@ -833,7 +869,7 @@ func TestSessionListTitles(t *testing.T) {
 	r, _, reply := newTestRouter()
 	ctx := context.Background()
 
-	_ = r.store.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "", "sess-1", 100)
+	_ = r.store.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "user1", "sess-1", 100)
 	sessions, _ := r.store.SessionRepo().List(ctx, "telegram", "chat1")
 	if len(sessions) > 0 {
 		_ = r.store.SessionRepo().SetTitle(ctx, sessions[0].ID, "Title One")
