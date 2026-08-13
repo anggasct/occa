@@ -43,6 +43,10 @@ func (m *mockSessionRepo) List(_ context.Context, platform, channelID string) ([
 	return nil, nil
 }
 
+func (m *mockSessionRepo) ListConversation(_ context.Context, platform, channelID, threadID, userID string) ([]store.Session, error) {
+	return nil, nil
+}
+
 func (m *mockSessionRepo) ThreadChannel(_ context.Context, platform, threadID string) (string, error) {
 	return "", nil
 }

@@ -115,6 +115,29 @@ func (r *sqliteSessionRepo) List(ctx context.Context, platform, channelID string
 	return sessions, rows.Err()
 }
 
+func (r *sqliteSessionRepo) ListConversation(ctx context.Context, platform, channelID, threadID, userID string) ([]Session, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, channel_id, platform, agent_session_id, thread_id, user_id, title, active, created_at, updated_at FROM session WHERE platform = ? AND channel_id = ? AND thread_id = ? AND user_id = ? ORDER BY created_at DESC`,
+		platform, channelID, threadID, userID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: session list conversation: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var sessions []Session
+	for rows.Next() {
+		var s Session
+		var active int
+		if err := rows.Scan(&s.ID, &s.ChannelID, &s.Platform, &s.AgentSessionID, &s.ThreadID, &s.UserID, &s.Title, &active, &s.CreatedAt, &s.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("store: session list conversation: scan: %w", err)
+		}
+		s.Active = active == 1
+		sessions = append(sessions, s)
+	}
+	return sessions, rows.Err()
+}
+
 // ThreadChannel returns the channel_id of the most recent session row keyed
 // to a thread, or "" when the thread has no sessions. An OCCA-created thread
 // resolves to its parent channel (channel_id != thread_id); a thread the bot

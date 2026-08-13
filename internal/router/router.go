@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 var ErrDenied = errors.New("access denied")
 
 const (
+	maxPickerSessions   = 6
 	accessDeniedMessage = "⚠️ Access denied. Ask an admin to /allow you."
 	accessVerifyMessage = "⚠️ Unable to verify access. Try again."
 )
@@ -395,7 +397,7 @@ func (r *Router) executePassthrough(taskCtx context.Context, cancel context.Canc
 		title := strings.Join(strings.Fields(msg.Text), " ")
 		title = truncateRunes(title, 60)
 		if title != "" {
-			sessions, err := r.store.SessionRepo().List(ctx, msg.Platform, msg.ChannelID)
+			sessions, err := r.store.SessionRepo().ListConversation(ctx, msg.Platform, msg.ChannelID, threadID, userID)
 			if err == nil {
 				for _, s := range sessions {
 					if s.AgentSessionID == sessionID {
@@ -552,7 +554,7 @@ func (r *Router) helpText() string {
 	return "OCCA commands:\n" +
 		"• /help — show this message\n" +
 		"• /status — agent health + session info\n" +
-		"• /session [list|new|switch <id>|delete <id>] — manage sessions\n" +
+		"• /session [list|new|switch <id|#|title>|delete <id>] — manage sessions\n" +
 		"• /stop — stop the running response (session kept)\n" +
 		"• /steer <direction> — stop and redirect the agent (session kept)\n" +
 		"• /dir [path] — view or set this channel's working directory\n" +
@@ -617,8 +619,18 @@ func (r *Router) handleStatus(ctx context.Context, msg channel.IncomingMessage, 
 	uptime := time.Since(r.startedAt).Truncate(time.Second)
 	workdir := r.effectiveWorkdir(ctx, msg.Platform, msg.ChannelID)
 
+	sessionLine := sessionID
+	if sessions, err := r.store.SessionRepo().ListConversation(ctx, msg.Platform, msg.ChannelID, threadID, userID); err == nil {
+		for _, s := range sessions {
+			if s.Active && s.AgentSessionID == sessionID && s.Title != "" {
+				sessionLine = fmt.Sprintf("%s (%s)", s.Title, sessionID)
+				break
+			}
+		}
+	}
+
 	status := fmt.Sprintf("✅ Agent connected\nSession: %s%s\nUptime: %s\nWorkdir: %s\nLatency: %s",
-		sessionID, contextLine, uptime, workdir, latency)
+		sessionLine, contextLine, uptime, workdir, latency)
 	key := responseKey{platform: msg.Platform, channelID: msg.ChannelID, threadID: threadID, userID: userID}
 	if qLen := r.responses.queueDepth(key); qLen > 0 {
 		status += fmt.Sprintf("\nQueue: %d message(s)", qLen)
@@ -626,16 +638,153 @@ func (r *Router) handleStatus(ctx context.Context, msg channel.IncomingMessage, 
 	return status, nil
 }
 
-func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage, args string) (string, error) {
-	parts := strings.Fields(args)
-	sub := "list"
-	if len(parts) > 0 {
-		sub = parts[0]
+func relativeAge(createdAt int64) string {
+	if createdAt <= 0 {
+		return "0m ago"
+	}
+	d := time.Since(time.Unix(createdAt, 0))
+	if d < 0 {
+		d = 0
+	}
+	if d < time.Minute {
+		return "0m ago"
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	}
+	if d < 24*time.Hour {
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	}
+	days := int(d.Hours() / 24)
+	return fmt.Sprintf("%dd ago", days)
+}
+
+func (r *Router) renderSessionPicker(ctx context.Context, msg channel.IncomingMessage, headerOverride ...string) (string, error) {
+	threadID, userID := conversationKey(msg)
+	sessions, err := r.store.SessionRepo().ListConversation(ctx, msg.Platform, msg.ChannelID, threadID, userID)
+	if err != nil {
+		return "", fmt.Errorf("session picker: %w", err)
+	}
+	if len(sessions) == 0 {
+		return "No sessions yet.", nil
 	}
 
+	recent := sessions
+	if len(recent) > maxPickerSessions {
+		recent = recent[:maxPickerSessions]
+	}
+
+	header := "Sessions:"
+	if len(headerOverride) > 0 && headerOverride[0] != "" {
+		header = headerOverride[0]
+	}
+
+	var sb strings.Builder
+	sb.WriteString(header)
+	sb.WriteString("\n")
+
+	var buttons []channel.Button
+	for i, s := range recent {
+		num := i + 1
+		marker := "  "
+		if s.Active {
+			marker = "→ "
+		}
+		label := s.AgentSessionID
+		if s.Title != "" {
+			label = s.Title
+		}
+		age := relativeAge(s.CreatedAt)
+		fmt.Fprintf(&sb, "%d. %s%s (%s)\n", num, marker, label, age)
+
+		buttons = append(buttons, channel.Button{
+			Label: fmt.Sprintf("%d", num),
+			Value: "switch:" + s.AgentSessionID,
+			Row:   1,
+		})
+	}
+
+	text := strings.TrimRight(sb.String(), "\n")
+	if msg.ReplyCtx != nil {
+		if _, err := msg.ReplyCtx.SendWithButtons(text, buttons); err != nil {
+			return "", err
+		}
+		return "", errReplied
+	}
+	return text, nil
+}
+
+func (r *Router) switchSession(ctx context.Context, msg channel.IncomingMessage, targetSession *store.Session) (string, error) {
+	threadID, userID := conversationKey(msg)
+	key := responseKey{platform: msg.Platform, channelID: msg.ChannelID, threadID: threadID, userID: userID}
+	r.responses.cancelResponse(key)
+	drained := r.responses.drain(key)
+
+	if err := r.store.SessionRepo().SetActive(ctx, msg.Platform, msg.ChannelID, threadID, userID, targetSession.AgentSessionID, 0); err != nil {
+		return "", fmt.Errorf("session switch: %w", err)
+	}
+
+	var reply string
+	if targetSession.Title != "" {
+		reply = fmt.Sprintf("✅ Switched to %s (%s)", targetSession.Title, targetSession.AgentSessionID)
+	} else {
+		reply = fmt.Sprintf("✅ Switched to: %s", targetSession.AgentSessionID)
+	}
+
+	if len(drained) > 0 {
+		reply += fmt.Sprintf("\nCleared %d queued message(s) from the previous session.", len(drained))
+	}
+	return reply, nil
+}
+
+func (r *Router) handleSwitchCallback(ctx context.Context, msg channel.IncomingMessage) error {
+	targetID := strings.TrimPrefix(msg.CallbackData, "switch:")
+	threadID, userID := conversationKey(msg)
+	sessions, err := r.store.SessionRepo().ListConversation(ctx, msg.Platform, msg.ChannelID, threadID, userID)
+	if err != nil {
+		if msg.ReplyCtx != nil && msg.CallbackRef != nil {
+			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "Session not found.", nil)
+		}
+		return nil
+	}
+	var targetSession *store.Session
+	for i := range sessions {
+		if sessions[i].AgentSessionID == targetID {
+			targetSession = &sessions[i]
+			break
+		}
+	}
+	if targetSession == nil {
+		if msg.ReplyCtx != nil && msg.CallbackRef != nil {
+			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "Session not found.", nil)
+		}
+		r.reply(msg, "Session not found.")
+		return nil
+	}
+
+	replyText, err := r.switchSession(ctx, msg, targetSession)
+	if err != nil {
+		return err
+	}
+
+	if msg.ReplyCtx != nil && msg.CallbackRef != nil {
+		return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, replyText, nil)
+	}
+	r.reply(msg, replyText)
+	return nil
+}
+
+func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage, args string) (string, error) {
+	parts := strings.Fields(args)
+	if len(parts) == 0 {
+		return r.renderSessionPicker(ctx, msg)
+	}
+
+	sub := parts[0]
 	switch sub {
 	case "list":
-		sessions, err := r.store.SessionRepo().List(ctx, msg.Platform, msg.ChannelID)
+		threadID, userID := conversationKey(msg)
+		sessions, err := r.store.SessionRepo().ListConversation(ctx, msg.Platform, msg.ChannelID, threadID, userID)
 		if err != nil {
 			return "", fmt.Errorf("session list: %w", err)
 		}
@@ -679,35 +828,67 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 
 	case "switch":
 		if len(parts) < 2 {
-			return "Usage: /session switch <id>", nil
+			return "Usage: /session switch <id|#|title>", nil
 		}
-		target := parts[1]
-		sessions, err := r.store.SessionRepo().List(ctx, msg.Platform, msg.ChannelID)
+		target := strings.Join(parts[1:], " ")
+		threadID, userID := conversationKey(msg)
+		sessions, err := r.store.SessionRepo().ListConversation(ctx, msg.Platform, msg.ChannelID, threadID, userID)
 		if err != nil {
 			return "", fmt.Errorf("session switch: %w", err)
 		}
-		found := false
-		for _, s := range sessions {
-			if s.AgentSessionID == target {
-				found = true
+
+		var matched *store.Session
+		// 1. Full ID exact match
+		for i := range sessions {
+			if sessions[i].AgentSessionID == target {
+				matched = &sessions[i]
 				break
 			}
 		}
-		if !found {
+
+		// 2. Picker number
+		if matched == nil {
+			if num, err := strconv.Atoi(target); err == nil && num >= 1 {
+				recentLimit := len(sessions)
+				if recentLimit > maxPickerSessions {
+					recentLimit = maxPickerSessions
+				}
+				if num <= recentLimit {
+					matched = &sessions[num-1]
+				}
+			}
+		}
+
+		// 3. Title substring (case-insensitive)
+		if matched == nil {
+			lowerTarget := strings.ToLower(target)
+			var titleMatches []store.Session
+			for _, s := range sessions {
+				if s.Title != "" && strings.Contains(strings.ToLower(s.Title), lowerTarget) {
+					titleMatches = append(titleMatches, s)
+				}
+			}
+			if len(titleMatches) == 1 {
+				matched = &titleMatches[0]
+			} else if len(titleMatches) > 1 {
+				header := fmt.Sprintf("Multiple sessions match %q — pick one:", target)
+				return r.renderSessionPicker(ctx, msg, header)
+			}
+		}
+
+		if matched == nil {
 			return "Session not found.", nil
 		}
-		threadID, userID := conversationKey(msg)
-		if err := r.store.SessionRepo().SetActive(ctx, msg.Platform, msg.ChannelID, threadID, userID, target, 0); err != nil {
-			return "", fmt.Errorf("session switch: %w", err)
-		}
-		return fmt.Sprintf("✅ Switched to: %s", target), nil
+
+		return r.switchSession(ctx, msg, matched)
 
 	case "delete":
 		if len(parts) < 2 {
 			return "Usage: /session delete <id>", nil
 		}
 		target := parts[1]
-		sessions, err := r.store.SessionRepo().List(ctx, msg.Platform, msg.ChannelID)
+		threadID, userID := conversationKey(msg)
+		sessions, err := r.store.SessionRepo().ListConversation(ctx, msg.Platform, msg.ChannelID, threadID, userID)
 		if err != nil {
 			return "", fmt.Errorf("session delete: %w", err)
 		}
@@ -722,7 +903,7 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 		return "Session not found.", nil
 
 	default:
-		return "Usage: /session [list|new|switch <id>|delete <id>]", nil
+		return "Usage: /session [list|new|switch <id|#|title>|delete <id>]", nil
 	}
 }
 

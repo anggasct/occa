@@ -18,7 +18,9 @@ import (
 )
 
 type fakeReplyCtx struct {
-	sends []string
+	sends   []string
+	buttons [][]channel.Button
+	edits   []string
 }
 
 func (f *fakeReplyCtx) SendTyping() error { return nil }
@@ -26,12 +28,18 @@ func (f *fakeReplyCtx) Send(text string) (channel.MessageRef, error) {
 	f.sends = append(f.sends, text)
 	return fakeRef{id: "1"}, nil
 }
-func (f *fakeReplyCtx) Edit(ref channel.MessageRef, text string) error { return nil }
+func (f *fakeReplyCtx) Edit(ref channel.MessageRef, text string) error {
+	f.edits = append(f.edits, text)
+	return nil
+}
 func (f *fakeReplyCtx) EditWithButtons(ref channel.MessageRef, text string, buttons []channel.Button) error {
+	f.edits = append(f.edits, text)
+	f.buttons = append(f.buttons, buttons)
 	return nil
 }
 func (f *fakeReplyCtx) SendWithButtons(text string, buttons []channel.Button) (channel.MessageRef, error) {
 	f.sends = append(f.sends, text)
+	f.buttons = append(f.buttons, buttons)
 	return fakeRef{id: "1"}, nil
 }
 
@@ -329,6 +337,7 @@ type fakeSessionRepo struct {
 	activeID string
 	activeBy map[string]string
 	titles   map[string]string
+	sessions []store.Session
 }
 
 func (f *fakeSessionRepo) sessionKey(platform, channelID, threadID, userID string) string {
@@ -348,6 +357,11 @@ func (f *fakeSessionRepo) SetActive(_ context.Context, platform, channelID, thre
 		f.activeBy = make(map[string]string)
 	}
 	f.activeBy[f.sessionKey(platform, channelID, threadID, userID)] = sessionID
+	if len(f.sessions) > 0 {
+		for i := range f.sessions {
+			f.sessions[i].Active = (f.sessions[i].AgentSessionID == sessionID)
+		}
+	}
 	return nil
 }
 
@@ -356,12 +370,26 @@ func (f *fakeSessionRepo) Deactivate(_ context.Context, platform, channelID, thr
 	if f.activeBy != nil {
 		delete(f.activeBy, f.sessionKey(platform, channelID, threadID, userID))
 	}
+	if len(f.sessions) > 0 {
+		for i := range f.sessions {
+			f.sessions[i].Active = false
+		}
+	}
 	return nil
 }
 
 func (f *fakeSessionRepo) SetTitle(ctx context.Context, id int64, title string) error {
 	if f.titles == nil {
 		f.titles = make(map[string]string)
+	}
+	if len(f.sessions) > 0 {
+		for i := range f.sessions {
+			if f.sessions[i].ID == id || f.sessions[i].AgentSessionID == f.activeID {
+				f.sessions[i].Title = title
+				f.titles[f.sessions[i].AgentSessionID] = title
+				return nil
+			}
+		}
 	}
 	sessions, _ := f.List(ctx, "telegram", "chat1")
 	for _, s := range sessions {
@@ -377,6 +405,9 @@ func (f *fakeSessionRepo) SetTitle(ctx context.Context, id int64, title string) 
 }
 
 func (f *fakeSessionRepo) List(_ context.Context, platform, channelID string) ([]store.Session, error) {
+	if len(f.sessions) > 0 {
+		return f.sessions, nil
+	}
 	if f.activeBy == nil {
 		if f.activeID != "" {
 			return []store.Session{{ID: 1, AgentSessionID: f.activeID, Active: true, Title: f.titles[f.activeID]}}, nil
@@ -406,6 +437,42 @@ func (f *fakeSessionRepo) List(_ context.Context, platform, channelID string) ([
 	}
 	return sessions, nil
 }
+
+func (f *fakeSessionRepo) ListConversation(_ context.Context, platform, channelID, threadID, userID string) ([]store.Session, error) {
+	if len(f.sessions) > 0 {
+		var filtered []store.Session
+		for _, s := range f.sessions {
+			if (s.Platform == "" || s.Platform == platform) &&
+				(s.ChannelID == "" || s.ChannelID == channelID) &&
+				(s.ThreadID == "" || s.ThreadID == threadID) &&
+				(s.UserID == "" || s.UserID == userID) {
+				filtered = append(filtered, s)
+			}
+		}
+		return filtered, nil
+	}
+	if f.activeBy == nil {
+		if f.activeID != "" {
+			return []store.Session{{ID: 1, AgentSessionID: f.activeID, Active: true, Title: f.titles[f.activeID]}}, nil
+		}
+		return nil, nil
+	}
+	key := f.sessionKey(platform, channelID, threadID, userID)
+	if id, ok := f.activeBy[key]; ok {
+		return []store.Session{{
+			ID:             1,
+			AgentSessionID: id,
+			Active:         true,
+			Platform:       platform,
+			ChannelID:      channelID,
+			ThreadID:       threadID,
+			UserID:         userID,
+			Title:          f.titles[id],
+		}}, nil
+	}
+	return nil, nil
+}
+
 func (f *fakeSessionRepo) ThreadChannel(_ context.Context, platform, threadID string) (string, error) {
 	if f.activeBy == nil {
 		return "", nil
@@ -802,7 +869,7 @@ func TestSessionListTitles(t *testing.T) {
 	r, _, reply := newTestRouter()
 	ctx := context.Background()
 
-	_ = r.store.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "", "sess-1", 100)
+	_ = r.store.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "user1", "sess-1", 100)
 	sessions, _ := r.store.SessionRepo().List(ctx, "telegram", "chat1")
 	if len(sessions) > 0 {
 		_ = r.store.SessionRepo().SetTitle(ctx, sessions[0].ID, "Title One")
@@ -1809,5 +1876,397 @@ func TestStopAndSteerHelpAndMenu(t *testing.T) {
 	}
 	if !foundSteer {
 		t.Fatal("menu missing steer command")
+	}
+}
+
+func TestStatusShowsActiveSessionTitle(t *testing.T) {
+	r, _, reply, overrides := newTestRouterWithAccess()
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
+	}
+
+	stRepo := &fakeSessionRepo{
+		activeID: "sess-titled",
+		sessions: []store.Session{
+			{ID: 1, AgentSessionID: "sess-titled", Title: "llm-runtime PR #54 resolve config", Active: true, CreatedAt: time.Now().Unix()},
+		},
+	}
+	r.store = &fakeStore{
+		sessionRepo:  stRepo,
+		channelRepo:  newFakeChannelRepo(),
+		overrideRepo: overrides,
+		scheduleRepo: &fakeScheduleRepo{},
+	}
+
+	err := r.Route(context.Background(), msg("/status", reply))
+	if err != nil {
+		t.Fatalf("Route /status: %v", err)
+	}
+	if len(reply.sends) == 0 {
+		t.Fatal("expected status response")
+	}
+	want := "Session: llm-runtime PR #54 resolve config (sess-titled)"
+	if !strings.Contains(reply.sends[0], want) {
+		t.Fatalf("expected status to contain %q, got %q", want, reply.sends[0])
+	}
+}
+
+func TestStatusShowsUntitledSessionIDOnly(t *testing.T) {
+	r, _, reply, overrides := newTestRouterWithAccess()
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
+	}
+
+	stRepo := &fakeSessionRepo{
+		activeID: "sess-untitled",
+		sessions: []store.Session{
+			{ID: 1, AgentSessionID: "sess-untitled", Title: "", Active: true, CreatedAt: time.Now().Unix()},
+		},
+	}
+	r.store = &fakeStore{
+		sessionRepo:  stRepo,
+		channelRepo:  newFakeChannelRepo(),
+		overrideRepo: overrides,
+		scheduleRepo: &fakeScheduleRepo{},
+	}
+
+	err := r.Route(context.Background(), msg("/status", reply))
+	if err != nil {
+		t.Fatalf("Route /status: %v", err)
+	}
+	if len(reply.sends) == 0 {
+		t.Fatal("expected status response")
+	}
+	if !strings.Contains(reply.sends[0], "Session: sess-untitled") {
+		t.Fatalf("expected status to contain Session: sess-untitled, got %q", reply.sends[0])
+	}
+	if strings.Contains(reply.sends[0], "Session:  (") {
+		t.Fatalf("unexpected empty title parens in status: %q", reply.sends[0])
+	}
+}
+
+func TestBareSessionRendersNumberedPicker(t *testing.T) {
+	r, _, reply, overrides := newTestRouterWithAccess()
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
+	}
+
+	now := time.Now().Unix()
+	stRepo := &fakeSessionRepo{
+		activeID: "sess-1",
+		sessions: []store.Session{
+			{ID: 1, AgentSessionID: "sess-1", Title: "Active Feature", Active: true, CreatedAt: now - 120},
+			{ID: 2, AgentSessionID: "sess-2", Title: "Older Feature", Active: false, CreatedAt: now - 3600},
+			{ID: 3, AgentSessionID: "sess-3", Title: "", Active: false, CreatedAt: now - 7200},
+		},
+	}
+	r.store = &fakeStore{
+		sessionRepo:  stRepo,
+		channelRepo:  newFakeChannelRepo(),
+		overrideRepo: overrides,
+		scheduleRepo: &fakeScheduleRepo{},
+	}
+
+	err := r.Route(context.Background(), msg("/session", reply))
+	if err != nil {
+		t.Fatalf("Route /session: %v", err)
+	}
+	if len(reply.sends) == 0 {
+		t.Fatal("expected picker response")
+	}
+	text := reply.sends[0]
+	if !strings.Contains(text, "Sessions:") {
+		t.Fatalf("expected Sessions: header, got %q", text)
+	}
+	if !strings.Contains(text, "1. → Active Feature (2m ago)") {
+		t.Fatalf("expected active row formatted with arrow, got %q", text)
+	}
+	if !strings.Contains(text, "2.   Older Feature (1h ago)") {
+		t.Fatalf("expected second row formatted, got %q", text)
+	}
+	if !strings.Contains(text, "3.   sess-3 (2h ago)") {
+		t.Fatalf("expected untitled third row fallback to id, got %q", text)
+	}
+
+	if len(reply.buttons) == 0 || len(reply.buttons[0]) != 3 {
+		t.Fatalf("expected 3 buttons, got %v", reply.buttons)
+	}
+	b1 := reply.buttons[0][0]
+	if b1.Label != "1" || b1.Value != "switch:sess-1" || b1.Row != 1 {
+		t.Fatalf("unexpected button 1: %+v", b1)
+	}
+}
+
+func TestSessionPickerBoundedToMax(t *testing.T) {
+	r, _, reply, overrides := newTestRouterWithAccess()
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
+	}
+
+	var sessions []store.Session
+	for i := 1; i <= 10; i++ {
+		sessions = append(sessions, store.Session{
+			ID:             int64(i),
+			AgentSessionID: fmt.Sprintf("sess-%d", i),
+			Title:          fmt.Sprintf("Session %d", i),
+			Active:         i == 1,
+			CreatedAt:      time.Now().Unix() - int64(i*60),
+		})
+	}
+
+	stRepo := &fakeSessionRepo{activeID: "sess-1", sessions: sessions}
+	r.store = &fakeStore{
+		sessionRepo:  stRepo,
+		channelRepo:  newFakeChannelRepo(),
+		overrideRepo: overrides,
+		scheduleRepo: &fakeScheduleRepo{},
+	}
+
+	err := r.Route(context.Background(), msg("/session", reply))
+	if err != nil {
+		t.Fatalf("Route /session: %v", err)
+	}
+	if len(reply.buttons) == 0 || len(reply.buttons[0]) != maxPickerSessions {
+		t.Fatalf("expected %d buttons bounded by maxPickerSessions, got %d", maxPickerSessions, len(reply.buttons[0]))
+	}
+}
+
+func TestSessionSwitchFullID(t *testing.T) {
+	r, _, reply, overrides := newTestRouterWithAccess()
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
+	}
+
+	stRepo := &fakeSessionRepo{
+		activeID: "sess-1",
+		sessions: []store.Session{
+			{ID: 1, AgentSessionID: "sess-1", Title: "Old Session", Active: true},
+			{ID: 2, AgentSessionID: "sess-2", Title: "Target Session", Active: false},
+		},
+	}
+	r.store = &fakeStore{
+		sessionRepo:  stRepo,
+		channelRepo:  newFakeChannelRepo(),
+		overrideRepo: overrides,
+		scheduleRepo: &fakeScheduleRepo{},
+	}
+
+	err := r.Route(context.Background(), msg("/session switch sess-2", reply))
+	if err != nil {
+		t.Fatalf("Route switch full id: %v", err)
+	}
+	if len(reply.sends) == 0 {
+		t.Fatal("expected reply")
+	}
+	if !strings.Contains(reply.sends[0], "✅ Switched to Target Session (sess-2)") {
+		t.Fatalf("unexpected reply: %q", reply.sends[0])
+	}
+	if stRepo.activeID != "sess-2" {
+		t.Fatalf("expected activeID sess-2, got %q", stRepo.activeID)
+	}
+}
+
+func TestSessionSwitchNumericIndex(t *testing.T) {
+	r, _, reply, overrides := newTestRouterWithAccess()
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
+	}
+
+	stRepo := &fakeSessionRepo{
+		activeID: "sess-1",
+		sessions: []store.Session{
+			{ID: 1, AgentSessionID: "sess-1", Title: "First Session", Active: true},
+			{ID: 2, AgentSessionID: "sess-2", Title: "Second Session", Active: false},
+		},
+	}
+	r.store = &fakeStore{
+		sessionRepo:  stRepo,
+		channelRepo:  newFakeChannelRepo(),
+		overrideRepo: overrides,
+		scheduleRepo: &fakeScheduleRepo{},
+	}
+
+	err := r.Route(context.Background(), msg("/session switch 2", reply))
+	if err != nil {
+		t.Fatalf("Route switch index 2: %v", err)
+	}
+	if len(reply.sends) == 0 {
+		t.Fatal("expected reply")
+	}
+	if !strings.Contains(reply.sends[0], "✅ Switched to Second Session (sess-2)") {
+		t.Fatalf("unexpected reply: %q", reply.sends[0])
+	}
+	if stRepo.activeID != "sess-2" {
+		t.Fatalf("expected activeID sess-2, got %q", stRepo.activeID)
+	}
+}
+
+func TestSessionSwitchTitleSubstringUnique(t *testing.T) {
+	r, _, reply, overrides := newTestRouterWithAccess()
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
+	}
+
+	stRepo := &fakeSessionRepo{
+		activeID: "sess-1",
+		sessions: []store.Session{
+			{ID: 1, AgentSessionID: "sess-1", Title: "Fix authentication bug", Active: true},
+			{ID: 2, AgentSessionID: "sess-2", Title: "Optimize SQL queries", Active: false},
+		},
+	}
+	r.store = &fakeStore{
+		sessionRepo:  stRepo,
+		channelRepo:  newFakeChannelRepo(),
+		overrideRepo: overrides,
+		scheduleRepo: &fakeScheduleRepo{},
+	}
+
+	err := r.Route(context.Background(), msg("/session switch sql", reply))
+	if err != nil {
+		t.Fatalf("Route switch substring: %v", err)
+	}
+	if len(reply.sends) == 0 {
+		t.Fatal("expected reply")
+	}
+	if !strings.Contains(reply.sends[0], "✅ Switched to Optimize SQL queries (sess-2)") {
+		t.Fatalf("unexpected reply: %q", reply.sends[0])
+	}
+	if stRepo.activeID != "sess-2" {
+		t.Fatalf("expected activeID sess-2, got %q", stRepo.activeID)
+	}
+}
+
+func TestSessionSwitchTitleSubstringAmbiguous(t *testing.T) {
+	r, _, reply, overrides := newTestRouterWithAccess()
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
+	}
+
+	stRepo := &fakeSessionRepo{
+		activeID: "sess-1",
+		sessions: []store.Session{
+			{ID: 1, AgentSessionID: "sess-1", Title: "Fix auth bug in handler", Active: true},
+			{ID: 2, AgentSessionID: "sess-2", Title: "Fix UI bug in picker", Active: false},
+		},
+	}
+	r.store = &fakeStore{
+		sessionRepo:  stRepo,
+		channelRepo:  newFakeChannelRepo(),
+		overrideRepo: overrides,
+		scheduleRepo: &fakeScheduleRepo{},
+	}
+
+	err := r.Route(context.Background(), msg("/session switch bug", reply))
+	if err != nil {
+		t.Fatalf("Route switch ambiguous: %v", err)
+	}
+	if len(reply.sends) == 0 {
+		t.Fatal("expected reply")
+	}
+	if !strings.Contains(reply.sends[0], `Multiple sessions match "bug" — pick one:`) {
+		t.Fatalf("expected ambiguous picker header, got %q", reply.sends[0])
+	}
+	if stRepo.activeID != "sess-1" {
+		t.Fatalf("expected activeID unchanged sess-1, got %q", stRepo.activeID)
+	}
+}
+
+func TestSessionSwitchCancelsAndDrainsQueue(t *testing.T) {
+	r, _, reply, overrides := newTestRouterWithAccess()
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
+	}
+
+	stRepo := &fakeSessionRepo{
+		activeID: "sess-1",
+		sessions: []store.Session{
+			{ID: 1, AgentSessionID: "sess-1", Title: "Old", Active: true},
+			{ID: 2, AgentSessionID: "sess-2", Title: "New", Active: false},
+		},
+	}
+	r.store = &fakeStore{
+		sessionRepo:  stRepo,
+		channelRepo:  newFakeChannelRepo(),
+		overrideRepo: overrides,
+		scheduleRepo: &fakeScheduleRepo{},
+	}
+
+	key := responseKey{platform: "telegram", channelID: "chat1", threadID: "", userID: "user1"}
+	r.responses.acquire(key, func() {})
+	r.responses.enqueue(key, context.Background(), msg("queued msg 1", reply))
+	r.responses.enqueue(key, context.Background(), msg("queued msg 2", reply))
+
+	err := r.Route(context.Background(), msg("/session switch sess-2", reply))
+	if err != nil {
+		t.Fatalf("Route switch with queue: %v", err)
+	}
+	if len(reply.sends) == 0 {
+		t.Fatal("expected reply")
+	}
+	if !strings.Contains(reply.sends[0], "Cleared 2 queued message(s) from the previous session.") {
+		t.Fatalf("expected cleared queued message count in reply, got %q", reply.sends[0])
+	}
+}
+
+func TestCallbackSwitchSuccessAndDeadID(t *testing.T) {
+	r, _, reply, overrides := newTestRouterWithAccess()
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
+	}
+
+	stRepo := &fakeSessionRepo{
+		activeID: "sess-1",
+		sessions: []store.Session{
+			{ID: 1, AgentSessionID: "sess-1", Title: "First", Active: true},
+			{ID: 2, AgentSessionID: "sess-2", Title: "Second", Active: false},
+		},
+	}
+	r.store = &fakeStore{
+		sessionRepo:  stRepo,
+		channelRepo:  newFakeChannelRepo(),
+		overrideRepo: overrides,
+		scheduleRepo: &fakeScheduleRepo{},
+	}
+
+	// 1. Success callback
+	cbMsg := channel.IncomingMessage{
+		Platform:     "telegram",
+		ChannelID:    "chat1",
+		UserID:       "user1",
+		IsCallback:   true,
+		CallbackData: "switch:sess-2",
+		CallbackRef:  fakeRef{id: "msg-1"},
+		ReplyCtx:     reply,
+	}
+
+	err := r.Route(context.Background(), cbMsg)
+	if err != nil {
+		t.Fatalf("Route callback switch: %v", err)
+	}
+	if stRepo.activeID != "sess-2" {
+		t.Fatalf("expected activeID sess-2, got %q", stRepo.activeID)
+	}
+	if len(reply.edits) == 0 || !strings.Contains(reply.edits[0], "✅ Switched to Second (sess-2)") {
+		t.Fatalf("expected edit with switched text, got %v", reply.edits)
+	}
+
+	// 2. Dead ID callback
+	deadCbMsg := channel.IncomingMessage{
+		Platform:     "telegram",
+		ChannelID:    "chat1",
+		UserID:       "user1",
+		IsCallback:   true,
+		CallbackData: "switch:sess-dead",
+		CallbackRef:  fakeRef{id: "msg-1"},
+		ReplyCtx:     reply,
+	}
+
+	reply.edits = nil
+	err = r.Route(context.Background(), deadCbMsg)
+	if err != nil {
+		t.Fatalf("Route callback switch dead: %v", err)
+	}
+	if len(reply.edits) == 0 || reply.edits[0] != "Session not found." {
+		t.Fatalf("expected Session not found. edit, got %v", reply.edits)
 	}
 }
