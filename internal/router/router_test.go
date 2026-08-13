@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -449,6 +450,10 @@ func (f *fakeSessionRepo) ListConversation(_ context.Context, platform, channelI
 				filtered = append(filtered, s)
 			}
 		}
+		// Mirror the real store's ORDER BY created_at DESC.
+		sort.SliceStable(filtered, func(i, j int) bool {
+			return filtered[i].CreatedAt > filtered[j].CreatedAt
+		})
 		return filtered, nil
 	}
 	if f.activeBy == nil {
@@ -649,7 +654,7 @@ func TestRouteAcceptsUnderscoreAlias(t *testing.T) {
 
 func TestRouteAcceptsUnderscoreAliasWithArgs(t *testing.T) {
 	r, _, reply := newTestRouter()
-	err := r.Route(context.Background(), msg("/occa_session list", reply))
+	err := r.Route(context.Background(), msg("/occa_session switch foo", reply))
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
@@ -798,14 +803,17 @@ func TestRouteReset(t *testing.T) {
 	}
 }
 
-func TestRouteSessionList(t *testing.T) {
+func TestRouteSessionListRetired(t *testing.T) {
 	r, _, reply := newTestRouter()
 	err := r.Route(context.Background(), msg("/session list", reply))
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
 	if len(reply.sends) == 0 {
-		t.Fatal("expected session list response")
+		t.Fatal("expected session response")
+	}
+	if !strings.Contains(reply.sends[0], "Usage: /session") {
+		t.Fatalf("expected usage text on retired /session list, got %q", reply.sends[0])
 	}
 }
 
@@ -865,7 +873,7 @@ func TestFirstMessageTitleCapture(t *testing.T) {
 	}
 }
 
-func TestSessionListTitles(t *testing.T) {
+func TestSessionPickerTitles(t *testing.T) {
 	r, _, reply := newTestRouter()
 	ctx := context.Background()
 
@@ -875,16 +883,16 @@ func TestSessionListTitles(t *testing.T) {
 		_ = r.store.SessionRepo().SetTitle(ctx, sessions[0].ID, "Title One")
 	}
 
-	err := r.Route(ctx, msg("/session list", reply))
+	err := r.Route(ctx, msg("/session", reply))
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
 	if len(reply.sends) == 0 {
-		t.Fatal("expected session list response")
+		t.Fatal("expected session response")
 	}
 	out := reply.sends[len(reply.sends)-1]
-	if !strings.Contains(out, `→ sess-1 "Title One"`) {
-		t.Fatalf("expected title in list output, got: %q", out)
+	if !strings.Contains(out, "Title One") {
+		t.Fatalf("expected title in picker output, got: %q", out)
 	}
 }
 
@@ -1664,9 +1672,10 @@ func TestShortFormCommandsAndLegacyAliases(t *testing.T) {
 		{input: "/occa:help", wantSend: "OCCA commands:"},
 		{input: "/occa_help", wantSend: "OCCA commands:"},
 		{input: "/status", wantSend: "Agent connected"},
-		{input: "/session list", wantSend: "Sessions:"},
-		{input: "/occa_session list", wantSend: "Sessions:"},
-		{input: "/occa:session list", wantSend: "Sessions:"},
+		{input: "/session", wantSend: "Sessions:"},
+		{input: "/occa_session", wantSend: "Sessions:"},
+		{input: "/occa:session", wantSend: "Sessions:"},
+		{input: "/session list", wantSend: "Usage: /session"},
 		{input: "/reset", wantSend: "Session reset"},
 		{input: "/dir", wantSend: "Workdir:"},
 		{input: "/allow user2", wantSend: "Allowed user: user2"},
@@ -2026,8 +2035,8 @@ func TestSessionPickerBoundedToMax(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Route /session: %v", err)
 	}
-	if len(reply.buttons) == 0 || len(reply.buttons[0]) != maxPickerSessions {
-		t.Fatalf("expected %d buttons bounded by maxPickerSessions, got %d", maxPickerSessions, len(reply.buttons[0]))
+	if len(reply.buttons) == 0 || len(reply.buttons[0]) != maxPickerSessions+1 {
+		t.Fatalf("expected %d buttons (6 session + 1 nav), got %d", maxPickerSessions+1, len(reply.buttons[0]))
 	}
 }
 
@@ -2268,5 +2277,352 @@ func TestCallbackSwitchSuccessAndDeadID(t *testing.T) {
 	}
 	if len(reply.edits) == 0 || reply.edits[0] != "Session not found." {
 		t.Fatalf("expected Session not found. edit, got %v", reply.edits)
+	}
+}
+
+func TestSessionPickerPagination(t *testing.T) {
+	r, _, reply := newTestRouter()
+	ctx := context.Background()
+
+	// Create 13 sessions for chat1 / user1
+	var sessions []store.Session
+	now := time.Now()
+	for i := 1; i <= 13; i++ {
+		sessID := fmt.Sprintf("sess-%02d", i)
+		sessions = append(sessions, store.Session{
+			ID:             int64(i),
+			AgentSessionID: sessID,
+			Platform:       "telegram",
+			ChannelID:      "chat1",
+			UserID:         "user1",
+			Active:         (i == 13),
+			CreatedAt:      now.Add(time.Duration(i) * time.Minute).Unix(), // i=13 is most recent
+		})
+	}
+	// Store in fakeSessionRepo in created_at DESC order (sess-13 down to sess-01)
+	fakeRepo := r.store.SessionRepo().(*fakeSessionRepo)
+	for i := len(sessions) - 1; i >= 0; i-- {
+		fakeRepo.sessions = append(fakeRepo.sessions, sessions[i])
+	}
+
+	// 1. Page 1
+	reply.sends = nil
+	reply.buttons = nil
+	err := r.Route(ctx, msg("/session", reply))
+	if err != nil {
+		t.Fatalf("Route /session: %v", err)
+	}
+	if len(reply.sends) == 0 {
+		t.Fatal("expected page 1 text")
+	}
+	out1 := reply.sends[0]
+	if !strings.Contains(out1, "Page 1/3 · Sessions") {
+		t.Fatalf("expected header 'Page 1/3 · Sessions', got %q", out1)
+	}
+	if !strings.Contains(out1, "1. → sess-13") || !strings.Contains(out1, "6.   sess-08") {
+		t.Fatalf("unexpected page 1 rows: %q", out1)
+	}
+	if len(reply.buttons) == 0 || len(reply.buttons[0]) != 7 { // 6 session buttons + 1 nav button (Next)
+		t.Fatalf("expected 7 buttons on page 1, got %v", reply.buttons)
+	}
+	navBtn1 := reply.buttons[0][len(reply.buttons[0])-1]
+	if navBtn1.Label != "Next ▶️" || navBtn1.Value != "spage:2" {
+		t.Fatalf("unexpected nav button on page 1: %+v", navBtn1)
+	}
+
+	// 2. Page 2 (via /session 2)
+	reply.sends = nil
+	reply.buttons = nil
+	err = r.Route(ctx, msg("/session 2", reply))
+	if err != nil {
+		t.Fatalf("Route /session 2: %v", err)
+	}
+	if len(reply.sends) == 0 {
+		t.Fatal("expected page 2 text")
+	}
+	out2 := reply.sends[0]
+	if !strings.Contains(out2, "Page 2/3 · Sessions") {
+		t.Fatalf("expected header 'Page 2/3 · Sessions', got %q", out2)
+	}
+	if !strings.Contains(out2, "7.   sess-07") || !strings.Contains(out2, "12.   sess-02") {
+		t.Fatalf("unexpected page 2 rows: %q", out2)
+	}
+	if len(reply.buttons) == 0 || len(reply.buttons[0]) != 8 { // 6 session buttons + 2 nav buttons (Prev, Next)
+		t.Fatalf("expected 8 buttons on page 2, got %v", reply.buttons)
+	}
+	prevBtn2 := reply.buttons[0][len(reply.buttons[0])-2]
+	nextBtn2 := reply.buttons[0][len(reply.buttons[0])-1]
+	if prevBtn2.Label != "◀️ Prev" || prevBtn2.Value != "spage:1" {
+		t.Fatalf("unexpected prev button on page 2: %+v", prevBtn2)
+	}
+	if nextBtn2.Label != "Next ▶️" || nextBtn2.Value != "spage:3" {
+		t.Fatalf("unexpected next button on page 2: %+v", nextBtn2)
+	}
+
+	// 3. Page 3 (via /session 3)
+	reply.sends = nil
+	reply.buttons = nil
+	err = r.Route(ctx, msg("/session 3", reply))
+	if err != nil {
+		t.Fatalf("Route /session 3: %v", err)
+	}
+	if len(reply.sends) == 0 {
+		t.Fatal("expected page 3 text")
+	}
+	out3 := reply.sends[0]
+	if !strings.Contains(out3, "Page 3/3 · Sessions") {
+		t.Fatalf("expected header 'Page 3/3 · Sessions', got %q", out3)
+	}
+	if !strings.Contains(out3, "13.   sess-01") {
+		t.Fatalf("unexpected page 3 rows: %q", out3)
+	}
+	if len(reply.buttons) == 0 || len(reply.buttons[0]) != 2 { // 1 session button + 1 nav button (Prev)
+		t.Fatalf("expected 2 buttons on page 3, got %v", reply.buttons)
+	}
+	prevBtn3 := reply.buttons[0][len(reply.buttons[0])-1]
+	if prevBtn3.Label != "◀️ Prev" || prevBtn3.Value != "spage:2" {
+		t.Fatalf("unexpected prev button on page 3: %+v", prevBtn3)
+	}
+}
+
+func TestSessionPickerCap40(t *testing.T) {
+	r, _, reply := newTestRouter()
+	ctx := context.Background()
+
+	// Create 40 sessions
+	now := time.Now()
+	fakeRepo := r.store.SessionRepo().(*fakeSessionRepo)
+	for i := 40; i >= 1; i-- {
+		fakeRepo.sessions = append(fakeRepo.sessions, store.Session{
+			ID:             int64(i),
+			AgentSessionID: fmt.Sprintf("sess-%02d", i),
+			Platform:       "telegram",
+			ChannelID:      "chat1",
+			UserID:         "user1",
+			CreatedAt:      now.Add(time.Duration(i) * time.Minute).Unix(),
+		})
+	}
+
+	// Page 1: 5 pages total (capped at 30 sessions)
+	reply.sends = nil
+	err := r.Route(ctx, msg("/session 1", reply))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if !strings.Contains(reply.sends[0], "Page 1/5 · Sessions") {
+		t.Fatalf("expected Page 1/5, got %q", reply.sends[0])
+	}
+
+	// Page 5
+	reply.sends = nil
+	reply.buttons = nil
+	err = r.Route(ctx, msg("/session 5", reply))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	out5 := reply.sends[0]
+	if !strings.Contains(out5, "Page 5/5 · Sessions") {
+		t.Fatalf("expected Page 5/5, got %q", out5)
+	}
+	if !strings.Contains(out5, "25.   sess-16") || !strings.Contains(out5, "30.   sess-11") {
+		t.Fatalf("unexpected page 5 rows: %q", out5)
+	}
+	// Nav button should only be Prev (spage:4), no Next (spage:6)
+	if len(reply.buttons) > 0 {
+		for _, b := range reply.buttons[0] {
+			if b.Label == "Next ▶️" {
+				t.Fatalf("page 5 should not have Next button: %+v", reply.buttons[0])
+			}
+		}
+	}
+
+	// Page 6 request clamps to Page 5
+	reply.sends = nil
+	err = r.Route(ctx, msg("/session 6", reply))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if !strings.Contains(reply.sends[0], "Page 5/5 · Sessions") {
+		t.Fatalf("expected clamp to Page 5/5, got %q", reply.sends[0])
+	}
+}
+
+func TestSessionPageCallback(t *testing.T) {
+	r, _, reply := newTestRouter()
+	ctx := context.Background()
+
+	fakeRepo := r.store.SessionRepo().(*fakeSessionRepo)
+	now := time.Now()
+	for i := 12; i >= 1; i-- {
+		fakeRepo.sessions = append(fakeRepo.sessions, store.Session{
+			ID:             int64(i),
+			AgentSessionID: fmt.Sprintf("sess-%02d", i),
+			Platform:       "telegram",
+			ChannelID:      "chat1",
+			UserID:         "user1",
+			CreatedAt:      now.Add(time.Duration(i) * time.Minute).Unix(),
+		})
+	}
+
+	// 1. Valid spage:2 callback edits in place
+	cbMsg := channel.IncomingMessage{
+		Platform:     "telegram",
+		ChannelID:    "chat1",
+		UserID:       "user1",
+		IsCallback:   true,
+		CallbackData: "spage:2",
+		CallbackRef:  fakeRef{id: "msg-1"},
+		ReplyCtx:     reply,
+	}
+	reply.edits = nil
+	reply.buttons = nil
+	err := r.Route(ctx, cbMsg)
+	if err != nil {
+		t.Fatalf("Route spage callback: %v", err)
+	}
+	if len(reply.edits) == 0 || !strings.Contains(reply.edits[0], "Page 2/2 · Sessions") {
+		t.Fatalf("expected edit to page 2, got %v", reply.edits)
+	}
+	if len(reply.buttons) == 0 || len(reply.buttons[0]) != 7 { // 6 session buttons + 1 prev nav button
+		t.Fatalf("expected 7 edit buttons, got %v", reply.buttons)
+	}
+
+	// 2. Out of bounds callback (spage:99 -> clamps to 2)
+	cbMsg.CallbackData = "spage:99"
+	reply.edits = nil
+	err = r.Route(ctx, cbMsg)
+	if err != nil {
+		t.Fatalf("Route spage:99: %v", err)
+	}
+	if len(reply.edits) == 0 || !strings.Contains(reply.edits[0], "Page 2/2 · Sessions") {
+		t.Fatalf("expected clamp to page 2, got %v", reply.edits)
+	}
+
+	// 3. Malformed callback (spage:abc -> defaults to 1)
+	cbMsg.CallbackData = "spage:abc"
+	reply.edits = nil
+	err = r.Route(ctx, cbMsg)
+	if err != nil {
+		t.Fatalf("Route spage:abc: %v", err)
+	}
+	if len(reply.edits) == 0 || !strings.Contains(reply.edits[0], "Page 1/2 · Sessions") {
+		t.Fatalf("expected default to page 1, got %v", reply.edits)
+	}
+}
+
+func TestSessionSwitchAbsoluteIndexing(t *testing.T) {
+	r, _, reply := newTestRouter()
+	ctx := context.Background()
+
+	fakeRepo := r.store.SessionRepo().(*fakeSessionRepo)
+	now := time.Now()
+	for i := 35; i >= 1; i-- {
+		fakeRepo.sessions = append(fakeRepo.sessions, store.Session{
+			ID:             int64(i),
+			AgentSessionID: fmt.Sprintf("sess-%02d", i),
+			Platform:       "telegram",
+			ChannelID:      "chat1",
+			UserID:         "user1",
+			Title:          fmt.Sprintf("Title %d", i),
+			CreatedAt:      now.Add(time.Duration(i) * time.Minute).Unix(), // sess-35 is index 0 (row 1 page 1), sess-29 is index 6 (row 1 page 2)
+		})
+	}
+
+	// /session switch 7 -> matches 7th item (sess-29)
+	reply.sends = nil
+	err := r.Route(ctx, msg("/session switch 7", reply))
+	if err != nil {
+		t.Fatalf("Route switch 7: %v", err)
+	}
+	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Switched to Title 29 (sess-29)") {
+		t.Fatalf("expected switch to sess-29, got %v", reply.sends)
+	}
+
+	// /session switch sess-01 -> full ID match beyond 30-browsable cap (sess-01 is item 35)
+	reply.sends = nil
+	err = r.Route(ctx, msg("/session switch sess-01", reply))
+	if err != nil {
+		t.Fatalf("Route switch sess-01: %v", err)
+	}
+	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Switched to Title 1 (sess-01)") {
+		t.Fatalf("expected switch to sess-01, got %v", reply.sends)
+	}
+}
+
+func TestSessionPickerConversationIsolation(t *testing.T) {
+	r, _, reply, overrides := newTestRouterWithAccess()
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+	}
+	overrides.overrides["telegram:chat1:user2"] = &store.UserOverride{
+		ChannelID: "chat1", Platform: "telegram", UserID: "user2", Role: "allow",
+	}
+	ctx := context.Background()
+
+	fakeRepo := r.store.SessionRepo().(*fakeSessionRepo)
+	now := time.Now()
+	// Sessions for user1
+	for i := 1; i <= 8; i++ {
+		fakeRepo.sessions = append(fakeRepo.sessions, store.Session{
+			ID:             int64(i),
+			AgentSessionID: fmt.Sprintf("user1-sess-%d", i),
+			Platform:       "telegram",
+			ChannelID:      "chat1",
+			UserID:         "user1",
+			CreatedAt:      now.Add(time.Duration(i) * time.Minute).Unix(),
+		})
+	}
+	// Sessions for user2
+	for i := 9; i <= 15; i++ {
+		fakeRepo.sessions = append(fakeRepo.sessions, store.Session{
+			ID:             int64(i),
+			AgentSessionID: fmt.Sprintf("user2-sess-%d", i),
+			Platform:       "telegram",
+			ChannelID:      "chat1",
+			UserID:         "user2",
+			CreatedAt:      now.Add(time.Duration(i) * time.Minute).Unix(),
+		})
+	}
+
+	// User1 views picker page 1
+	msgUser1 := channel.IncomingMessage{
+		Platform:  "telegram",
+		ChannelID: "chat1",
+		UserID:    "user1",
+		Text:      "/session",
+		ReplyCtx:  reply,
+	}
+	reply.sends = nil
+	err := r.Route(ctx, msgUser1)
+	if err != nil {
+		t.Fatalf("Route user1: %v", err)
+	}
+	out1 := reply.sends[0]
+	if !strings.Contains(out1, "user1-sess-8") {
+		t.Fatalf("expected user1 session, got %q", out1)
+	}
+	if strings.Contains(out1, "user2-sess") {
+		t.Fatalf("user1 picker contains user2 session: %q", out1)
+	}
+
+	// User2 views picker page 1
+	msgUser2 := channel.IncomingMessage{
+		Platform:  "telegram",
+		ChannelID: "chat1",
+		UserID:    "user2",
+		Text:      "/session",
+		ReplyCtx:  reply,
+	}
+	reply.sends = nil
+	err = r.Route(ctx, msgUser2)
+	if err != nil {
+		t.Fatalf("Route user2: %v", err)
+	}
+	out2 := reply.sends[0]
+	if !strings.Contains(out2, "user2-sess-15") {
+		t.Fatalf("expected user2 session, got %q", out2)
+	}
+	if strings.Contains(out2, "user1-sess") {
+		t.Fatalf("user2 picker contains user1 session: %q", out2)
 	}
 }

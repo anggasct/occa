@@ -19,6 +19,7 @@ var ErrDenied = errors.New("access denied")
 
 const (
 	maxPickerSessions   = 6
+	maxPickerPages      = 5
 	accessDeniedMessage = "⚠️ Access denied. Ask an admin to /allow you."
 	accessVerifyMessage = "⚠️ Unable to verify access. Try again."
 )
@@ -35,7 +36,7 @@ func (r *Router) MenuCommands() []channel.MenuCommand {
 	return []channel.MenuCommand{
 		{Alias: "help", Description: "Show available commands"},
 		{Alias: "status", Description: "Agent health and session info"},
-		{Alias: "session", Description: "Manage sessions: list, new, switch, or delete", HasArgs: true},
+		{Alias: "session", Description: "Manage sessions: new, switch, or delete", HasArgs: true},
 		{Alias: "stop", Description: "Stop the running response (session kept)"},
 		{Alias: "steer", Description: "Stop and redirect the agent (session kept)", HasArgs: true},
 		{Alias: "reset", Description: "Clear current session and start fresh"},
@@ -554,7 +555,7 @@ func (r *Router) helpText() string {
 	return "OCCA commands:\n" +
 		"• /help — show this message\n" +
 		"• /status — agent health + session info\n" +
-		"• /session [list|new|switch <id|#|title>|delete <id>] — manage sessions\n" +
+		"• /session [new|switch <id|#|title>|delete <id>] — manage sessions\n" +
 		"• /stop — stop the running response (session kept)\n" +
 		"• /steer <direction> — stop and redirect the agent (session kept)\n" +
 		"• /dir [path] — view or set this channel's working directory\n" +
@@ -659,24 +660,60 @@ func relativeAge(createdAt int64) string {
 	return fmt.Sprintf("%dd ago", days)
 }
 
-func (r *Router) renderSessionPicker(ctx context.Context, msg channel.IncomingMessage, headerOverride ...string) (string, error) {
+func sessionPickerTotalPages(totalSessions int) int {
+	if totalSessions <= 0 {
+		return 1
+	}
+	pages := (totalSessions + maxPickerSessions - 1) / maxPickerSessions
+	if pages > maxPickerPages {
+		pages = maxPickerPages
+	}
+	return pages
+}
+
+func sessionPickerPageBounds(totalSessions, page int) (start int, end int, clampedPage int) {
+	totalPages := sessionPickerTotalPages(totalSessions)
+	clampedPage = page
+	if clampedPage < 1 {
+		clampedPage = 1
+	}
+	if clampedPage > totalPages {
+		clampedPage = totalPages
+	}
+
+	if totalSessions <= 0 {
+		return 0, 0, clampedPage
+	}
+
+	start = (clampedPage - 1) * maxPickerSessions
+	if start > totalSessions {
+		start = totalSessions
+	}
+	end = start + maxPickerSessions
+	if end > totalSessions {
+		end = totalSessions
+	}
+	return start, end, clampedPage
+}
+
+func (r *Router) buildSessionPickerPage(ctx context.Context, msg channel.IncomingMessage, page int, headerOverride ...string) (string, []channel.Button, error) {
 	threadID, userID := conversationKey(msg)
 	sessions, err := r.store.SessionRepo().ListConversation(ctx, msg.Platform, msg.ChannelID, threadID, userID)
 	if err != nil {
-		return "", fmt.Errorf("session picker: %w", err)
+		return "", nil, fmt.Errorf("session picker: %w", err)
 	}
 	if len(sessions) == 0 {
-		return "No sessions yet.", nil
+		return "No sessions yet.", nil, nil
 	}
 
-	recent := sessions
-	if len(recent) > maxPickerSessions {
-		recent = recent[:maxPickerSessions]
-	}
+	totalPages := sessionPickerTotalPages(len(sessions))
+	start, end, clampedPage := sessionPickerPageBounds(len(sessions), page)
 
 	header := "Sessions:"
 	if len(headerOverride) > 0 && headerOverride[0] != "" {
 		header = headerOverride[0]
+	} else if totalPages > 1 {
+		header = fmt.Sprintf("Page %d/%d · Sessions", clampedPage, totalPages)
 	}
 
 	var sb strings.Builder
@@ -684,7 +721,8 @@ func (r *Router) renderSessionPicker(ctx context.Context, msg channel.IncomingMe
 	sb.WriteString("\n")
 
 	var buttons []channel.Button
-	for i, s := range recent {
+	for i := start; i < end; i++ {
+		s := sessions[i]
 		num := i + 1
 		marker := "  "
 		if s.Active {
@@ -704,7 +742,30 @@ func (r *Router) renderSessionPicker(ctx context.Context, msg channel.IncomingMe
 		})
 	}
 
+	if clampedPage > 1 {
+		buttons = append(buttons, channel.Button{
+			Label: "◀️ Prev",
+			Value: fmt.Sprintf("spage:%d", clampedPage-1),
+			Row:   2,
+		})
+	}
+	if clampedPage < totalPages {
+		buttons = append(buttons, channel.Button{
+			Label: "Next ▶️",
+			Value: fmt.Sprintf("spage:%d", clampedPage+1),
+			Row:   2,
+		})
+	}
+
 	text := strings.TrimRight(sb.String(), "\n")
+	return text, buttons, nil
+}
+
+func (r *Router) renderSessionPickerPage(ctx context.Context, msg channel.IncomingMessage, page int, headerOverride ...string) (string, error) {
+	text, buttons, err := r.buildSessionPickerPage(ctx, msg, page, headerOverride...)
+	if err != nil {
+		return "", err
+	}
 	if msg.ReplyCtx != nil {
 		if _, err := msg.ReplyCtx.SendWithButtons(text, buttons); err != nil {
 			return "", err
@@ -712,6 +773,10 @@ func (r *Router) renderSessionPicker(ctx context.Context, msg channel.IncomingMe
 		return "", errReplied
 	}
 	return text, nil
+}
+
+func (r *Router) renderSessionPicker(ctx context.Context, msg channel.IncomingMessage, headerOverride ...string) (string, error) {
+	return r.renderSessionPickerPage(ctx, msg, 1, headerOverride...)
 }
 
 func (r *Router) switchSession(ctx context.Context, msg channel.IncomingMessage, targetSession *store.Session) (string, error) {
@@ -774,6 +839,28 @@ func (r *Router) handleSwitchCallback(ctx context.Context, msg channel.IncomingM
 	return nil
 }
 
+func (r *Router) handleSessionPageCallback(ctx context.Context, msg channel.IncomingMessage) error {
+	pageStr := strings.TrimPrefix(msg.CallbackData, "spage:")
+	page, err := strconv.Atoi(pageStr)
+	if err != nil {
+		page = 1
+	}
+
+	text, buttons, err := r.buildSessionPickerPage(ctx, msg, page)
+	if err != nil {
+		if msg.ReplyCtx != nil && msg.CallbackRef != nil {
+			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "Error loading sessions.", nil)
+		}
+		return err
+	}
+
+	if msg.ReplyCtx != nil && msg.CallbackRef != nil {
+		return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, text, buttons)
+	}
+	r.reply(msg, text)
+	return nil
+}
+
 func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage, args string) (string, error) {
 	parts := strings.Fields(args)
 	if len(parts) == 0 {
@@ -781,31 +868,11 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 	}
 
 	sub := parts[0]
-	switch sub {
-	case "list":
-		threadID, userID := conversationKey(msg)
-		sessions, err := r.store.SessionRepo().ListConversation(ctx, msg.Platform, msg.ChannelID, threadID, userID)
-		if err != nil {
-			return "", fmt.Errorf("session list: %w", err)
-		}
-		if len(sessions) == 0 {
-			return "No sessions yet.", nil
-		}
-		var sb strings.Builder
-		sb.WriteString("Sessions:\n")
-		for _, s := range sessions {
-			marker := "  "
-			if s.Active {
-				marker = "→ "
-			}
-			if s.Title != "" {
-				fmt.Fprintf(&sb, "%s%s %q (created %d)\n", marker, s.AgentSessionID, s.Title, s.CreatedAt)
-			} else {
-				fmt.Fprintf(&sb, "%s%s (created %d)\n", marker, s.AgentSessionID, s.CreatedAt)
-			}
-		}
-		return strings.TrimRight(sb.String(), "\n"), nil
+	if page, err := strconv.Atoi(sub); err == nil && page >= 1 {
+		return r.renderSessionPickerPage(ctx, msg, page)
+	}
 
+	switch sub {
 	case "new":
 		threadID, userID := conversationKey(msg)
 		key := responseKey{platform: msg.Platform, channelID: msg.ChannelID, threadID: threadID, userID: userID}
@@ -849,11 +916,11 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 		// 2. Picker number
 		if matched == nil {
 			if num, err := strconv.Atoi(target); err == nil && num >= 1 {
-				recentLimit := len(sessions)
-				if recentLimit > maxPickerSessions {
-					recentLimit = maxPickerSessions
+				maxBrowsable := len(sessions)
+				if maxBrowsable > maxPickerPages*maxPickerSessions {
+					maxBrowsable = maxPickerPages * maxPickerSessions
 				}
-				if num <= recentLimit {
+				if num <= maxBrowsable {
 					matched = &sessions[num-1]
 				}
 			}
@@ -903,7 +970,7 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 		return "Session not found.", nil
 
 	default:
-		return "Usage: /session [list|new|switch <id|#|title>|delete <id>]", nil
+		return "Usage: /session [new|switch <id|#|title>|delete <id>]", nil
 	}
 }
 
