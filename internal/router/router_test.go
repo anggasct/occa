@@ -1672,9 +1672,9 @@ func TestShortFormCommandsAndLegacyAliases(t *testing.T) {
 		{input: "/occa:help", wantSend: "OCCA commands:"},
 		{input: "/occa_help", wantSend: "OCCA commands:"},
 		{input: "/status", wantSend: "Agent connected"},
-		{input: "/session", wantSend: "Sessions:"},
-		{input: "/occa_session", wantSend: "Sessions:"},
-		{input: "/occa:session", wantSend: "Sessions:"},
+		{input: "/session", wantSend: "Page 1/1 · Sessions"},
+		{input: "/occa_session", wantSend: "Page 1/1 · Sessions"},
+		{input: "/occa:session", wantSend: "Page 1/1 · Sessions"},
 		{input: "/session list", wantSend: "Usage: /session"},
 		{input: "/reset", wantSend: "Session reset"},
 		{input: "/dir", wantSend: "Workdir:"},
@@ -1984,8 +1984,8 @@ func TestBareSessionRendersNumberedPicker(t *testing.T) {
 		t.Fatal("expected picker response")
 	}
 	text := reply.sends[0]
-	if !strings.Contains(text, "Sessions:") {
-		t.Fatalf("expected Sessions: header, got %q", text)
+	if !strings.Contains(text, "Page 1/1 · Sessions") {
+		t.Fatalf("expected Page 1/1 header, got %q", text)
 	}
 	if !strings.Contains(text, "1. → Active Feature (2m ago)") {
 		t.Fatalf("expected active row formatted with arrow, got %q", text)
@@ -2382,6 +2382,41 @@ func TestSessionPickerPagination(t *testing.T) {
 	prevBtn3 := reply.buttons[0][len(reply.buttons[0])-1]
 	if prevBtn3.Label != "◀️ Prev" || prevBtn3.Value != "spage:2" {
 		t.Fatalf("unexpected prev button on page 3: %+v", prevBtn3)
+	}
+}
+
+func TestSessionPickerSinglePageShowsPageIndicator(t *testing.T) {
+	r, _, reply := newTestRouter()
+	ctx := context.Background()
+
+	// Create 3 sessions for chat1 / user1 (single page).
+	fakeRepo := r.store.SessionRepo().(*fakeSessionRepo)
+	now := time.Now()
+	for i := 1; i <= 3; i++ {
+		fakeRepo.sessions = append(fakeRepo.sessions, store.Session{
+			ID:             int64(i),
+			AgentSessionID: fmt.Sprintf("sess-%02d", i),
+			Platform:       "telegram",
+			ChannelID:      "chat1",
+			UserID:         "user1",
+			CreatedAt:      now.Add(time.Duration(i) * time.Minute).Unix(),
+		})
+	}
+
+	reply.sends = nil
+	err := r.Route(ctx, msg("/session", reply))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if len(reply.sends) == 0 {
+		t.Fatal("expected picker response")
+	}
+	out := reply.sends[0]
+	if !strings.Contains(out, "Page 1/1 · Sessions") {
+		t.Fatalf("expected Page 1/1 indicator on a single-page picker, got %q", out)
+	}
+	if !strings.Contains(out, "1.   sess-03 (0m ago)") {
+		t.Fatalf("expected newest session first, got %q", out)
 	}
 }
 

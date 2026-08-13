@@ -712,7 +712,7 @@ func (r *Router) buildSessionPickerPage(ctx context.Context, msg channel.Incomin
 	header := "Sessions:"
 	if len(headerOverride) > 0 && headerOverride[0] != "" {
 		header = headerOverride[0]
-	} else if totalPages > 1 {
+	} else {
 		header = fmt.Sprintf("Page %d/%d · Sessions", clampedPage, totalPages)
 	}
 
