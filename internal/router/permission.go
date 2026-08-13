@@ -18,6 +18,9 @@ func (r *Router) handleCallback(ctx context.Context, msg channel.IncomingMessage
 	if strings.HasPrefix(msg.CallbackData, "question:") {
 		return r.processQuestionCallback(ctx, msg)
 	}
+	if strings.HasPrefix(msg.CallbackData, "switch:") {
+		return r.handleSwitchCallback(ctx, msg)
+	}
 	if !strings.HasPrefix(msg.CallbackData, "permission:") {
 		return nil
 	}
