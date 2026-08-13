@@ -77,29 +77,41 @@ func TestToolBubbleDistinctTools(t *testing.T) {
 	}
 }
 
-// TestToolBubbleCapShowsWorkingIndicator: after 5 distinct bubbles, further
-// new tools stop creating bubbles and a single working indicator appears.
+// TestToolBubbleCapShowsWorkingIndicator: after 5 distinct bubbles in a phase,
+// further new tools stop creating bubbles and a single working indicator appears.
+// An EventSegment (text block) resets the bubble count so subsequent tools start
+// fresh bubbles again.
 func TestToolBubbleCapShowsWorkingIndicator(t *testing.T) {
-	names := []string{"a", "b", "c", "d", "e", "f", "g"}
-	events := make([]Event, 0, len(names)+1)
-	for _, n := range names {
-		events = append(events, Event{Type: EventTool, Delta: n})
-	}
-	got := runToolEvents(t, events...)
+	got := runToolEvents(t,
+		Event{Type: EventTool, Delta: "a"},
+		Event{Type: EventTool, Delta: "b"},
+		Event{Type: EventTool, Delta: "c"},
+		Event{Type: EventTool, Delta: "d"},
+		Event{Type: EventTool, Delta: "e"},
+		Event{Type: EventTool, Delta: "f"},
+		Event{Type: EventSegment},
+		Event{Type: EventTool, Delta: "g"},
+		Event{Type: EventTool, Delta: "h"},
+	)
 
-	var bubbles, working []string
-	for _, n := range got {
-		if strings.HasPrefix(n, "🔄 ") {
-			working = append(working, n)
-		} else {
-			bubbles = append(bubbles, n)
+	want := []string{
+		"⚙️ a",
+		"⚙️ b",
+		"⚙️ c",
+		"⚙️ d",
+		"⚙️ e",
+		"🔄 Working…",
+		"⚙️ g",
+		"⚙️ h",
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("notices len = %d, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("notices[%d] = %q, want %q (got: %v)", i, got[i], want[i], got)
 		}
-	}
-	if len(bubbles) != 5 {
-		t.Fatalf("bubbles = %v, want exactly 5", bubbles)
-	}
-	if len(working) != 1 || working[0] != "🔄 Working…" {
-		t.Fatalf("working = %v, want exactly one indicator", working)
 	}
 }
 
