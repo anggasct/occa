@@ -295,6 +295,50 @@ func TestDecoderPartTransitions(t *testing.T) {
 	}
 }
 
+func TestDecoderToolInputArrivingLateEmitted(t *testing.T) {
+	decoder := newEventDecoder()
+
+	// First event: schedule_task part announced without state.input yet.
+	first := `{"type":"message.part.updated","properties":{"part":{"id":"prt-sched","type":"tool","tool":"schedule_task","state":{"status":"pending"}}}}`
+	// Second event: same part now carries the full schedule arguments.
+	inputJSON := `{"cron_expression":"0 9 * * 1-5","prompt":"run tests","human_schedule":"weekdays at 9am"}`
+	second := `{"type":"message.part.updated","properties":{"part":{"id":"prt-sched","type":"tool","tool":"schedule_task","state":{"input":` + inputJSON + `}}}}`
+
+	var got []Event
+	for _, data := range []string{first, second} {
+		if ev, ok := parseSSEEvent(decoder, "", data); ok {
+			got = append(got, ev)
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("events = %+v, want 2 (empty announce + late input)", got)
+	}
+	if got[0].Type != EventTool || len(got[0].ToolInput) != 0 {
+		t.Fatalf("first event = %+v, want EventTool with empty input", got[0])
+	}
+	if got[1].Type != EventTool || !got[1].ToolSamePart {
+		t.Fatalf("second event = %+v, want same-part follow-up with input", got[1])
+	}
+	if string(got[1].ToolInput) != inputJSON {
+		t.Fatalf("second event ToolInput = %s, want %s", got[1].ToolInput, inputJSON)
+	}
+}
+
+func TestDecoderIdenticalToolUpdateStillSkipped(t *testing.T) {
+	decoder := newEventDecoder()
+
+	updated := `{"type":"message.part.updated","properties":{"part":{"id":"prt-b","type":"tool","tool":"bash","state":{"input":{"command":"ls"}}}}}`
+	var got []Event
+	for _, data := range []string{updated, updated} {
+		if ev, ok := parseSSEEvent(decoder, "", data); ok {
+			got = append(got, ev)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("events = %+v, want 1 (identical re-emission skipped)", got)
+	}
+}
+
 func TestParseLegacyEventsStillWork(t *testing.T) {
 	ev, ok := parseSSEEvent(newEventDecoder(), "message.part.delta", "hello")
 	if !ok || ev.Type != "delta" || ev.Delta != "hello" {

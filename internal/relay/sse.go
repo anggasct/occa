@@ -2,6 +2,7 @@ package relay
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -101,6 +102,15 @@ func parseSSEEvent(decoder *eventDecoder, eventType, data string) (Event, bool) 
 // text and a TextPart's text both stream as field:"text" deltas, so field
 // name alone cannot distinguish reasoning (internal) from text (the actual
 // reply) content.
+// toolSeen records the last emitted context and raw input for a tool part
+// id. The dedupe compares both: parts whose context is empty (e.g.
+// schedule_task args carry no filePath/command/path) must still emit a
+// follow-up when the state.input arrives on a later event.
+type toolSeen struct {
+	ctx   string
+	input json.RawMessage
+}
+
 type eventDecoder struct {
 	partKind   map[string]string
 	activeKind string
@@ -111,11 +121,11 @@ type eventDecoder struct {
 	// input (command/file) arrives on a later event for the same part, a
 	// follow-up tool notice is emitted with ToolSamePart set so the streamer
 	// can update the existing bubble in place instead of starting a new one.
-	toolContext map[string]string
+	toolContext map[string]toolSeen
 }
 
 func newEventDecoder() *eventDecoder {
-	return &eventDecoder{partKind: make(map[string]string), toolContext: make(map[string]string)}
+	return &eventDecoder{partKind: make(map[string]string), toolContext: make(map[string]toolSeen)}
 }
 
 // isStreamKind reports whether a part type participates in stream-boundary
@@ -192,14 +202,14 @@ func (d *eventDecoder) parseJSON(data string) (Event, bool) {
 		case kind == "tool":
 			toolCtx := extractToolContext(ev.Properties.Part.State.Input)
 			partID := ev.Properties.Part.ID
-			prevCtx, seen := d.toolContext[partID]
-			if seen && prevCtx == toolCtx {
+			prevSeen, seen := d.toolContext[partID]
+			if seen && prevSeen.ctx == toolCtx && bytes.Equal(prevSeen.input, ev.Properties.Part.State.Input) {
 				// Same tool part re-emitted with identical input (e.g.
 				// pending → completed). Skip to avoid duplicate bubbles.
 				return Event{}, false
 			}
 			if partID != "" {
-				d.toolContext[partID] = toolCtx
+				d.toolContext[partID] = toolSeen{ctx: toolCtx, input: ev.Properties.Part.State.Input}
 			}
 			// A context arriving on a later event for the same part means the
 			// streamer should update the existing bubble in place rather than
