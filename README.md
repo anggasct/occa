@@ -70,45 +70,6 @@ overridden with an `OCCA_*` environment variable (env var > config file >
 built-in default). Bot tokens are env-only and never written to the config
 file.
 
-## Scheduling
-
-Describe a recurring task in plain language:
-
-> every morning at 9am, summarize my GitHub issues
-
-OCCA registers a cron job and pushes each run's result back to the chat.
-`/schedules` lists active jobs; `/schedules delete <id>` removes one.
-
-## How it works
-
-```
-chat platform ──► channel adapter ──► router ──► opencode
-                      ▲                  │
-                      └── streaming ─────┘
-```
-
-- **Adapters** own the platform SDKs (Telegram, Discord) and normalize every
-  incoming message into one generic shape.
-- **Router** authorizes everything at the ingress, classifies input as a
-  callback, an OCCA command, or an ordinary message, and enforces the command
-  namespace and listen-mode policy.
-- **Relay** speaks to OpenCode — sessions, messages, commands, and its SSE
-  event stream — over `opencode serve`'s HTTP interface.
-- **Process manager** supervises one OpenCode instance per working directory:
-  lazy spawn, health checks, idle reaping, and graceful process-group
-  shutdown.
-- **Store** persists sessions, channel and user configuration, and schedules
-  in SQLite.
-- **Render** converts markdown to the destination platform's format and
-  guarantees every outbound string is escaped exactly once and split without
-  cutting characters.
-
-## Documentation
-
-- [OpenCode docs](https://opencode.ai/docs) — the agent backend OCCA talks to
-- [OpenCode installer](https://opencode.ai/install) — installs the `opencode`
-  binary OCCA manages
-
 ## Contributing
 
 Bug reports, feature requests, and pull requests are welcome. Please open an
