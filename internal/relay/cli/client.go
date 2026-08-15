@@ -17,15 +17,12 @@ import (
 
 type runResult struct {
 	stdout io.ReadCloser
-	wait   func() error // blocks until exit; wraps exit errors with captured stderr
+	wait   func() error
 	stderr func() string
 }
 
 type runner func(ctx context.Context, binary string, args []string) (*runResult, error)
 
-// Client implements relay.Client against a subprocess-invoked CLI agent: the
-// CLI couples send and stream, so each SendMessage spawns one subprocess and
-// pushes parsed stdout events onto a per-session channel Events returns.
 type Client struct {
 	binary  string
 	run     runner
@@ -69,8 +66,6 @@ func execRunner(ctx context.Context, binary string, args []string) (*runResult, 
 
 var _ relay.Client = (*Client)(nil)
 
-// CreateSession returns a local placeholder id; the tool creates nothing
-// until the first message is sent.
 func (c *Client) CreateSession(ctx context.Context) (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
@@ -79,18 +74,14 @@ func (c *Client) CreateSession(ctx context.Context) (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// GetSession is best-effort: CLI backends return a zero-value SessionInfo.
 func (c *Client) GetSession(ctx context.Context, sessionID string) (*relay.SessionInfo, error) {
 	return &relay.SessionInfo{}, nil
 }
 
-// SessionExists is best-effort: CLI backends create sessions lazily, so any non-empty session ID is considered valid.
 func (c *Client) SessionExists(ctx context.Context, sessionID string) (bool, error) {
 	return sessionID != "", nil
 }
 
-// AbortSession is best-effort: CLI backends run per-prompt subprocesses,
-// so stopping a session is a no-op.
 func (c *Client) AbortSession(ctx context.Context, sessionID string) error {
 	return nil
 }
@@ -115,13 +106,10 @@ func (c *Client) Providers(ctx context.Context) (relay.Providers, error) {
 	return relay.Providers{}, nil
 }
 
-// ListCommands returns an empty list: no discrete command-list endpoint
-// exists for this backend, same best-effort posture as Providers.
 func (c *Client) ListCommands(ctx context.Context) ([]relay.CommandInfo, error) {
 	return nil, nil
 }
 
-// Events mints a fresh channel per call, mirroring one event stream per turn.
 func (c *Client) Events(ctx context.Context, sessionID string) (<-chan relay.Event, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -130,9 +118,6 @@ func (c *Client) Events(ctx context.Context, sessionID string) (<-chan relay.Eve
 	return ch, nil
 }
 
-// SendMessage spawns one CLI invocation per call. The first call for a
-// session runs without --resume; later calls resume with the tool's real
-// session id captured from the previous result line.
 func (c *Client) SendMessage(ctx context.Context, sessionID, text string, model *relay.ModelRef, attachments []relay.Attachment) error {
 	if len(attachments) > 0 {
 		return fmt.Errorf("cli: attachments are not supported by the CLI backend")
@@ -165,8 +150,6 @@ func (c *Client) SendMessage(ctx context.Context, sessionID, text string, model 
 	return nil
 }
 
-// stream surfaces a run that produced no parsed events as an error event,
-// never a silent empty response.
 func (c *Client) stream(ctx context.Context, sessionID string, ch chan<- relay.Event, res *runResult) {
 	defer c.closeStream(sessionID)
 	defer func() { _ = res.stdout.Close() }()
@@ -193,8 +176,7 @@ func (c *Client) stream(ctx context.Context, sessionID string, ch chan<- relay.E
 	}
 
 	if scanErr := scanner.Err(); scanErr != nil {
-		// The child may still be writing to a full pipe; closing the read side
-		// unblocks it before reaping.
+		// Pipe unblocking before reaping
 		_ = res.stdout.Close()
 		_ = res.wait()
 		select {
@@ -223,13 +205,10 @@ func (c *Client) stream(ctx context.Context, sessionID string, ch chan<- relay.E
 	}
 }
 
-// RunCommand is best-effort: CLI backends have no discrete command endpoint.
 func (c *Client) RunCommand(ctx context.Context, sessionID, command string) error {
 	return c.SendMessage(ctx, sessionID, command, nil, nil)
 }
 
-// ReplyPermission is unsupported: tools are pre-approved for unattended runs,
-// so permission prompts never surface through this backend.
 func (c *Client) ReplyPermission(ctx context.Context, requestID string, reply relay.PermissionReply) error {
 	return fmt.Errorf("cli: permission replies are not supported by the CLI backend")
 }

@@ -12,8 +12,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config is OCCA's resolved runtime configuration. Secrets (bot tokens) are
-// deliberately not part of Config — they are read from the environment only.
 type Config struct {
 	AdminID  string
 	Agent    AgentConfig    `yaml:"agent"`
@@ -53,8 +51,6 @@ type EndpointConfig struct {
 	Prompt    string `yaml:"prompt"`
 }
 
-// fileConfig mirrors Config for YAML parsing, holding durations as strings so
-// values like "20m" decode cleanly; build() converts them to time.Duration.
 type fileConfig struct {
 	Agent struct {
 		Binary         string `yaml:"binary"`
@@ -86,7 +82,6 @@ logging:
   format: text
 `
 
-// DefaultConfigPath returns ~/.occa/config.yaml.
 func DefaultConfigPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -95,9 +90,6 @@ func DefaultConfigPath() (string, error) {
 	return filepath.Join(home, ".occa", "config.yaml"), nil
 }
 
-// Load resolves configuration with precedence: defaults <- YAML file <- env.
-// An empty configPath uses ~/.occa/config.yaml, bootstrapping it (and ~/.occa/)
-// when missing. An explicit non-existent configPath is an error.
 func Load(configPath string) (Config, error) {
 	explicit := configPath != ""
 	if configPath == "" {
@@ -260,7 +252,6 @@ func isLoopbackBind(addr string) bool {
 	return false
 }
 
-// expandHome expands a leading "~" to the user's home directory.
 func expandHome(path string) (string, error) {
 	if path != "~" && !strings.HasPrefix(path, "~/") {
 		return path, nil

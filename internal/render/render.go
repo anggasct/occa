@@ -192,16 +192,11 @@ func looksLikeTagStart(s string) bool {
 	return len(s) < len(aOpenPrefix) && strings.HasPrefix(aOpenPrefix, s)
 }
 
-// openTag is a tag currently open in a chunk: name pairs it with its closing
-// tag, text is the exact bytes needed to reopen it verbatim (this matters for
-// <a href="...">, whose text varies per link — reopening with a bare "<a>"
-// would drop the destination and produce an invalid tag).
 type openTag struct {
 	name string
 	text string
 }
 
-// openTagStack returns the tags currently open in s, innermost last.
 func openTagStack(s string) []openTag {
 	var stack []openTag
 	for i := 0; i < len(s); {
@@ -240,9 +235,6 @@ func openTags(stack []openTag) string {
 
 func tagName(t string) string { return t[1 : len(t)-1] }
 
-// candidateBreaks lists boundary indices in preference order — after a closed
-// code block, then paragraph, line, and word boundaries, each from the last
-// occurrence backwards.
 func candidateBreaks(window string) []int {
 	var out []int
 	collect := func(sep string, offset int) {
@@ -259,14 +251,7 @@ func candidateBreaks(window string) []int {
 	return out
 }
 
-// htmlBalanced reports whether every tag opened in s is closed and no closing
-// tag appears without its opener. Plain text with no tags is trivially
-// balanced.
 func htmlBalanced(s string) bool {
-	// A candidate break can land inside a tag's own bytes (e.g. the space
-	// between "a" and "href" in "<a href=..."), which a plain opens/closes
-	// count would miss entirely — the fragment matches no known tag, open or
-	// closed, and would otherwise be reported vacuously balanced.
 	if _, ok := danglingTagStart(s); ok {
 		return false
 	}
@@ -294,11 +279,6 @@ var (
 
 const aOpenPrefix = `<a href="`
 
-// matchOpenTag reports whether s begins with a recognized opening tag.
-// <a href="..."> has a variable attribute value, but this codebase always
-// escapes it through escapeHTMLAttr first, which guarantees no literal '"'
-// appears before the closing quote — so the first '"' after the prefix
-// reliably ends the attribute, making the match deterministic.
 func matchOpenTag(s string) (tag openTag, length int, ok bool) {
 	for _, t := range openTagTokens {
 		if strings.HasPrefix(s, t) {
@@ -328,9 +308,6 @@ func matchCloseTag(s string) (length int, ok bool) {
 	return 0, false
 }
 
-// maxPrefix returns the largest rune-aligned byte index whose prefix measures
-// at most limit. It always advances by at least one rune so Split terminates
-// even when a single rune exceeds the limit.
 func maxPrefix(s string, limit int) int {
 	units := 0
 	for i, r := range s {
@@ -361,8 +338,6 @@ func utf16Len(r rune) int {
 	return 1
 }
 
-// listCtx tracks one open list's numbering: ordered lists render real
-// sequential numbers starting at Start, unordered lists render a bullet.
 type listCtx struct {
 	ordered bool
 	next    int
@@ -464,9 +439,6 @@ func renderTelegramHTML(doc ast.Node, source []byte) string {
 					buf.WriteByte('\n')
 				}
 			}
-		// Markup the author wrote literally is escaped, not passed through:
-		// the platform accepts only a small tag subset, and dropping these
-		// nodes would silently delete the user's text.
 		case *ast.RawHTML:
 			if entering {
 				for i := 0; i < node.Segments.Len(); i++ {
@@ -738,7 +710,6 @@ func renderDiscord(doc ast.Node, source []byte) string {
 	return strings.TrimRight(root.String(), "\n")
 }
 
-// quoteLines prefixes every line of s with Discord's blockquote marker.
 func quoteLines(s string) string {
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
@@ -755,9 +726,6 @@ func escapeHTML(b []byte) []byte {
 	return []byte(s)
 }
 
-// escapeHTMLAttr escapes b for use inside a double-quoted HTML attribute
-// value, on top of escapeHTML's escaping — without it, a destination
-// containing a literal '"' could break out of the href attribute.
 func escapeHTMLAttr(b []byte) []byte {
 	return []byte(strings.ReplaceAll(string(escapeHTML(b)), `"`, "&quot;"))
 }

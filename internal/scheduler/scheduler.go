@@ -63,7 +63,6 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop waits for running jobs for a bounded grace period, then cancels them.
 func (s *Scheduler) Stop() error {
 	done := s.cron.Stop()
 

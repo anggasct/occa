@@ -28,8 +28,6 @@ import (
 	"github.com/anggasct/occa/internal/webhook"
 )
 
-// managerProvider adapts *process.Manager (concrete Instance) to the
-// router.InstanceProvider interface (AgentInstance).
 type managerProvider struct{ m *process.Manager }
 
 func (p managerProvider) Instance(ctx context.Context, workdir string) (router.AgentInstance, error) {
@@ -52,9 +50,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Secrets are env-only (never in the config file). Read before the
-	// logger is built so every log line, including startup errors, is
-	// covered by redaction from the start.
 	telegramToken := os.Getenv("OCCA_TELEGRAM_TOKEN")
 	discordToken := os.Getenv("OCCA_DISCORD_TOKEN")
 	if telegramToken == "" && discordToken == "" {
@@ -289,9 +284,6 @@ func main() {
 
 var outboundRenderer = render.New()
 
-// notify renders operator-facing text for the destination platform before it
-// reaches the adapter, so a prompt or agent result containing markup
-// characters is escaped rather than rejected by the platform.
 func notify(ch channel.Channel, channelID, text string) {
 	chunks, err := outboundRenderer.Render(text, render.PlatformFor(ch.Name()))
 	if err != nil || len(chunks) == 0 {
@@ -309,8 +301,6 @@ type messageRouter interface {
 	Route(ctx context.Context, msg channel.IncomingMessage) error
 }
 
-// runChannel supervises one adapter. A panic here would otherwise take the
-// whole process down and with it every other connected platform.
 func runChannel(ctx context.Context, c channel.Channel, rt messageRouter) {
 	defer func() {
 		if v := recover(); v != nil {
@@ -320,10 +310,6 @@ func runChannel(ctx context.Context, c channel.Channel, rt messageRouter) {
 
 	slog.Info("starting channel", "platform", c.Name())
 	if err := c.Start(ctx, func(msg channel.IncomingMessage) {
-		// Route in a goroutine: a long-running response must never block the
-		// adapter's update loop, or callbacks (permission buttons, question
-		// options) would never be fetched while a response is in flight.
-		// Per-conversation serialization is the response coordinator's job.
 		go func() {
 			if err := rt.Route(ctx, msg); err != nil {
 				slog.Error("route error", "platform", msg.Platform, "error", err)

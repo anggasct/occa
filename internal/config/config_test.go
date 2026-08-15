@@ -169,7 +169,6 @@ func TestLoadInvalidLogFormatErrors(t *testing.T) {
 
 func TestBootstrapCreatesDefault(t *testing.T) {
 	t.Setenv("OCCA_ADMIN_ID", "admin123")
-	// Nested path verifies MkdirAll creates parent directories.
 	path := filepath.Join(t.TempDir(), "sub", "config.yaml")
 	if err := bootstrap(path); err != nil {
 		t.Fatalf("bootstrap: %v", err)

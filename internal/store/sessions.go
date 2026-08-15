@@ -43,9 +43,6 @@ func (r *sqliteSessionRepo) SetActive(ctx context.Context, platform, channelID, 
 		return fmt.Errorf("store: session set active: deactivate: %w", err)
 	}
 
-	// Re-key the target row to this conversation key so a session created
-	// before key granularity (or in another conversation) is adopted by the
-	// current one on /occa:session switch.
 	res, err := tx.ExecContext(ctx,
 		`UPDATE session SET active = 1, thread_id = ?, user_id = ?, agent_pid = ?, updated_at = ? WHERE platform = ? AND channel_id = ? AND agent_session_id = ?`,
 		threadID, userID, agentPID, now, platform, channelID, sessionID,
@@ -138,10 +135,6 @@ func (r *sqliteSessionRepo) ListConversation(ctx context.Context, platform, chan
 	return sessions, rows.Err()
 }
 
-// ThreadChannel returns the channel_id of the most recent session row keyed
-// to a thread, or "" when the thread has no sessions. An OCCA-created thread
-// resolves to its parent channel (channel_id != thread_id); a thread the bot
-// only participated in resolves to itself.
 func (r *sqliteSessionRepo) ThreadChannel(ctx context.Context, platform, threadID string) (string, error) {
 	var channelID string
 	err := r.db.QueryRowContext(ctx,

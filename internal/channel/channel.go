@@ -11,14 +11,9 @@ type Attachment struct {
 type Button struct {
 	Label string
 	Value string
-	Row   int // layout hint: buttons sharing a non-zero Row render in one platform row; 0 = own row
+	Row   int
 }
 
-// MenuCommand describes one command for native platform command-menu
-// registration (Telegram setMyCommands, Discord slash-command registration).
-// Alias is the platform-safe name (letters/digits/underscore only, no ':') —
-// adapters register Alias, the router normalizes it back to the canonical
-// colon-form command before dispatch.
 type MenuCommand struct {
 	Alias       string
 	Description string
@@ -50,33 +45,22 @@ type ReplyContext interface {
 	EditWithButtons(ref MessageRef, text string, buttons []Button) error
 }
 
-// MessageRemover is implemented by ReplyContexts that can delete a
-// previously sent message. Not every ReplyContext does — callers must
-// type-assert and skip silently.
 type MessageRemover interface {
 	Delete(ref MessageRef) error
 }
 
-// ChatCommandSetter is implemented by ReplyContexts that support per-chat
-// native command-menu registration. Not every ReplyContext does (e.g. a
-// Discord DM has no guild to scope to) — callers must type-assert and treat
-// a missing implementation as "skip silently."
 type ChatCommandSetter interface {
 	SetChatCommands(commands []MenuCommand) error
 }
 
-// ReactionState is the lifecycle status of a reply message.
 type ReactionState int
 
 const (
-	ReactionProcessing ReactionState = iota // 👀
-	ReactionSuccess                         // ✅
-	ReactionError                           // ❌
+	ReactionProcessing ReactionState = iota
+	ReactionSuccess
+	ReactionError
 )
 
-// ReactionSetter is implemented by ReplyContexts that surface a reply
-// message's lifecycle as a reaction. Not every ReplyContext does — callers
-// type-assert and treat a missing implementation as "skip silently."
 type ReactionSetter interface {
 	SetReaction(ref MessageRef, state ReactionState) error
 }

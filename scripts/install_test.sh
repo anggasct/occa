@@ -1,10 +1,6 @@
 #!/bin/sh
 set -eu
 
-# Shell harness for install.sh: stubs uname, curl, and opencode on PATH so
-# every acceptance criterion is an exit-code or file-existence assertion.
-# No network access and no real download happen.
-
 fail() {
 	echo "FAIL: $*" >&2
 	exit 1
@@ -100,7 +96,6 @@ for pair in "Linux x86_64" "Linux aarch64" "Darwin x86_64" "Darwin arm64"; do
 	pass "$os/$arch: binary installed"
 done
 
-#: OCCA_INSTALL_DIR overrides default and XDG_BIN_DIR.
 inst="$work/inst-override"
 xdg="$work/inst-xdg"
 mkdir -p "$inst" "$xdg"
@@ -114,7 +109,6 @@ if [ -e "$xdg/occa" ]; then
 fi
 pass "OCCA_INSTALL_DIR wins over XDG_BIN_DIR"
 
-#: opencode missing -> exactly one call to its installer.
 : > "$calls"
 mv "$stub_bin/opencode" "$work/opencode-hidden"
 run_install "Linux" "x86_64" env OCCA_INSTALL_DIR="$inst" sh ./install.sh
@@ -123,7 +117,6 @@ if [ "$(count_calls "opencode.ai/install")" -ne 1 ]; then
 fi
 pass "opencode installer invoked once when missing"
 
-#: opencode present -> no installer call.
 : > "$calls"
 mv "$work/opencode-hidden" "$stub_bin/opencode"
 run_install "Linux" "x86_64" env OCCA_INSTALL_DIR="$inst" sh ./install.sh
@@ -132,7 +125,6 @@ if [ "$(count_calls "opencode.ai/install")" -ne 0 ]; then
 fi
 pass "opencode not reinstalled when present"
 
-#: OCCA_VERSION pins the release download path.
 inst_ver="$work/inst-ver"
 mkdir -p "$inst_ver"
 : > "$calls"
@@ -145,7 +137,6 @@ if [ ! -x "$inst_ver/occa" ]; then
 fi
 pass "OCCA_VERSION pins the release download"
 
-#: OCCA_VERSION without the v prefix is normalized.
 : > "$calls"
 run_install "Linux" "x86_64" env OCCA_INSTALL_DIR="$inst_ver" OCCA_VERSION="0.1.0" sh ./install.sh
 if [ "$(count_calls "releases/download/v0.1.0/occa_linux_amd64")" -ne 1 ]; then
@@ -153,7 +144,6 @@ if [ "$(count_calls "releases/download/v0.1.0/occa_linux_amd64")" -ne 1 ]; then
 fi
 pass "bare version normalized to v prefix"
 
-#: without OCCA_VERSION the default latest path is used.
 : > "$calls"
 run_install "Linux" "x86_64" env OCCA_INSTALL_DIR="$inst_ver" sh ./install.sh
 if [ "$(count_calls "releases/latest/download/occa_linux_amd64")" -ne 1 ]; then
@@ -161,7 +151,6 @@ if [ "$(count_calls "releases/latest/download/occa_linux_amd64")" -ne 1 ]; then
 fi
 pass "default download path is latest"
 
-#: unsupported platform fails with nothing installed.
 inst_bad="$work/inst-bad"
 mkdir -p "$inst_bad"
 : > "$calls"
@@ -177,7 +166,6 @@ if [ -e "$inst_bad/occa" ]; then
 fi
 pass "unsupported OS fails cleanly"
 
-# Idempotence: second run against the same install dir succeeds.
 : > "$calls"
 if ! run_install "Linux" "x86_64" env OCCA_INSTALL_DIR="$inst" sh ./install.sh; then
 	fail "idempotence: second run failed"

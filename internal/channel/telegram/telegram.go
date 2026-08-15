@@ -129,8 +129,6 @@ func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessag
 	}
 }
 
-// rawUpdate captures the update fields the SDK's Update type drops, most
-// importantly message_thread_id (forum topics / private-chat topics).
 type rawUpdate struct {
 	Message *struct {
 		MessageThreadID int64 `json:"message_thread_id"`
@@ -152,9 +150,6 @@ func (r rawUpdate) threadID() int64 {
 	return 0
 }
 
-// registerCommands populates Telegram's native "/" command menu. A failure
-// here is logged and never blocks the adapter — the bot remains fully usable
-// via typed commands regardless.
 func (a *Adapter) registerCommands() {
 	if len(a.menu) == 0 {
 		return
@@ -168,9 +163,6 @@ func (a *Adapter) registerCommands() {
 	}
 }
 
-// sanitizeCommandName maps an arbitrary command name (e.g. an agent's own
-// command, which may contain characters Telegram rejects) into Telegram's
-// allowed set: lowercase letters, digits, and underscores, 1-32 characters.
 func sanitizeCommandName(name string) string {
 	var b strings.Builder
 	for _, r := range strings.ToLower(name) {
@@ -187,9 +179,6 @@ func sanitizeCommandName(name string) string {
 	return s
 }
 
-// maxCommandDescriptionLen is Telegram's BotCommand.Description limit. A
-// batch setMyCommands call fails atomically if any single description
-// exceeds it, so every description must be capped before sending.
 const maxCommandDescriptionLen = 256
 
 func sanitizeDescription(desc string) string {
@@ -353,8 +342,6 @@ func (a *Adapter) downloadFile(fileID, filename, mimeType string) *channel.Attac
 	return &channel.Attachment{Filename: filename, MimeType: mimeType, Data: data}
 }
 
-// fetchFile downloads a file URL with a bounded client: a stalled CDN must
-// fail the attachment instead of blocking the update loop.
 func (a *Adapter) fetchFile(url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
 	if err != nil {
@@ -374,10 +361,6 @@ type replyContext struct {
 	threadID int64
 }
 
-// SetChatCommands registers a native command menu scoped to this one chat,
-// overriding the global menu for it. Telegram's per-chat scope replaces
-// (does not merge with) the default scope, so callers must pass the full
-// desired menu, not just the delta.
 func (rc *replyContext) SetChatCommands(commands []channel.MenuCommand) error {
 	botCommands := make([]tgbotapi.BotCommand, len(commands))
 	for i, m := range commands {
@@ -400,7 +383,6 @@ func (rc *replyContext) SendTyping() error {
 	return err
 }
 
-// baseParams returns the common chat params for outbound messages.
 func (rc *replyContext) baseParams() tgbotapi.Params {
 	params := tgbotapi.Params{
 		"chat_id":                  strconv.FormatInt(rc.chatID, 10),
@@ -473,8 +455,6 @@ func (rc *replyContext) EditWithButtons(ref channel.MessageRef, text string, but
 	return rc.requestSilent("editMessageText", params)
 }
 
-// request calls a bot API method with retry-on-429 backoff and returns the
-// parsed message result.
 func (rc *replyContext) request(method string, params tgbotapi.Params) (tgbotapi.Message, error) {
 	for {
 		resp, err := rc.bot.MakeRequest(method, params)
@@ -494,8 +474,6 @@ func (rc *replyContext) request(method string, params tgbotapi.Params) (tgbotapi
 	}
 }
 
-// requestSilent is request for methods whose result carries no message (e.g.
-// edits, where a failed edit is a normal condition, not a stream failure).
 func (rc *replyContext) requestSilent(method string, params tgbotapi.Params) error {
 	for {
 		_, err := rc.bot.MakeRequest(method, params)
@@ -511,9 +489,6 @@ func (rc *replyContext) requestSilent(method string, params tgbotapi.Params) err
 	}
 }
 
-// inlineKeyboard renders buttons grouped by their Row hint: buttons sharing
-// a non-zero Row land in one platform row (max 8 per row); Row 0 keeps the
-// legacy one-button-per-row layout.
 func inlineKeyboard(buttons []channel.Button) tgbotapi.InlineKeyboardMarkup {
 	rows := make([][]tgbotapi.InlineKeyboardButton, 0, len(buttons))
 	var solo []tgbotapi.InlineKeyboardButton

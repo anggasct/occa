@@ -21,11 +21,8 @@ const (
 	defaultStopGrace        = 5 * time.Second
 )
 
-// instanceFactory starts a ready agent instance for workdir on the given port.
-// Production spawns a subprocess; tests back it with an httptest server.
 type instanceFactory func(ctx context.Context, workdir string, port int) (*Instance, error)
 
-// Instance is one managed agent server bound to a working directory.
 type Instance struct {
 	workdir  string
 	addr     string
@@ -43,18 +40,13 @@ func (i *Instance) Addr() string         { return i.addr }
 func (i *Instance) Workdir() string      { return i.workdir }
 func (i *Instance) PID() int             { return i.pid }
 
-// Touch marks the instance as recently used (reaper / eviction input).
 func (i *Instance) Touch() { i.lastUsed.Store(time.Now().Unix()) }
 
-// End releases an in-flight use begun by Manager.Instance.
 func (i *Instance) End() { i.inflight.Add(-1) }
 
 func (i *Instance) begin()       { i.inflight.Add(1); i.Touch() }
 func (i *Instance) isIdle() bool { return i.inflight.Load() == 0 }
 
-// productionFactory returns a factory that spawns `binary serve` in workdir,
-// waits for readiness, and wraps the instance in a relay.Client. The process
-// runs in its own process group so stop can reach its descendants.
 func productionFactory(binary string, readinessTimeout, stopGrace time.Duration) instanceFactory {
 	if readinessTimeout <= 0 {
 		readinessTimeout = defaultReadinessTimeout
@@ -91,7 +83,6 @@ func productionFactory(binary string, readinessTimeout, stopGrace time.Duration)
 				}
 			},
 		}
-		// Watchdog: mark dead when the process exits (enables lazy restart).
 		go func() {
 			cmd.Wait()
 			inst.dead.Store(true)
@@ -107,7 +98,6 @@ func productionFactory(binary string, readinessTimeout, stopGrace time.Duration)
 	}
 }
 
-// waitReady polls the instance health endpoint until healthy or timeout.
 func waitReady(ctx context.Context, addr string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

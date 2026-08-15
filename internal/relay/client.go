@@ -43,10 +43,8 @@ type Provider struct {
 }
 
 type Providers struct {
-	All []Provider `json:"all"`
-	// Connected lists the provider ids with working credentials, as
-	// reported by the agent; empty when the backend does not report it.
-	Connected []string `json:"connected"`
+	All       []Provider `json:"all"`
+	Connected []string   `json:"connected"`
 }
 
 func (p Providers) HasProvider(id string) bool {
@@ -134,24 +132,19 @@ type SessionInfo struct {
 	Model  ModelRef
 }
 
-// Relay event types delivered on the stream channel.
 const (
 	EventDelta   = "delta"
 	EventDone    = "done"
 	EventError   = "error"
-	EventSegment = "segment" // tool/part boundary — finalize preview, next delta = new message
-	EventTool    = "tool"    // a tool part started — emit ⚙️ notice once per part, then segment
+	EventSegment = "segment"
+	EventTool    = "tool"
 )
 
 type Event struct {
-	Type        string
-	Delta       string
-	ToolContext string // file or command being executed (empty when none)
-	ToolInput   json.RawMessage
-	// ToolSamePart reports that this tool notice is a follow-up update for a
-	// tool part already rendered (e.g. the command/file input arrived on a
-	// later message.part.updated for the same part). The streamer updates the
-	// existing bubble in place instead of starting a new one.
+	Type         string
+	Delta        string
+	ToolContext  string
+	ToolInput    json.RawMessage
 	ToolSamePart bool
 	Err          error
 	Permission   *PermissionRequest
@@ -216,8 +209,6 @@ type Client interface {
 	ListMessages(ctx context.Context, sessionID string) ([]MessageInfo, error)
 }
 
-// CommandInfo describes one command the agent backend can invoke, used to
-// enrich the chat-facing help text with the agent's own commands.
 type CommandInfo struct {
 	Name        string
 	Description string
@@ -523,8 +514,6 @@ func (c *HTTPClient) ListCommands(ctx context.Context) ([]CommandInfo, error) {
 	return commands, nil
 }
 
-// splitCommand separates a forwarded "/name args" text into the agent's
-// command name (without the leading slash) and its arguments.
 func splitCommand(command string) (name, args string) {
 	text := strings.TrimPrefix(command, "/")
 	fields := strings.Fields(text)
@@ -597,8 +586,6 @@ func (c *HTTPClient) RegisterMCP(ctx context.Context, name string, config McpCon
 	return nil
 }
 
-// AnswerQuestion submits one label per question (empty for unanswered)
-// to an in-flight question request.
 func (c *HTTPClient) AnswerQuestion(ctx context.Context, requestID string, answers [][]string) error {
 	payload := map[string]any{"answers": answers}
 	resp, err := c.post(ctx, "/question/"+requestID+"/reply", payload)
@@ -611,16 +598,12 @@ func (c *HTTPClient) AnswerQuestion(ctx context.Context, requestID string, answe
 		return ErrNotFound
 	}
 	if resp.StatusCode != http.StatusOK {
-		// Log the agent's error body instead of discarding it: the 400
-		// details (e.g. "Expected a string starting with que") are the only
-		// way to diagnose why the agent rejects a reply.
 		slog.Warn("relay: answer question rejected", "request_id", requestID, "status", resp.StatusCode, "body", truncateBody(body))
 		return fmt.Errorf("relay: answer question: unexpected status %d: %s", resp.StatusCode, truncateBody(body))
 	}
 	return nil
 }
 
-// RejectQuestion cancels an in-flight question request.
 func (c *HTTPClient) RejectQuestion(ctx context.Context, requestID string) error {
 	resp, err := c.post(ctx, "/question/"+requestID+"/reject", nil)
 	if err != nil {
@@ -635,8 +618,6 @@ func (c *HTTPClient) RejectQuestion(ctx context.Context, requestID string) error
 	return nil
 }
 
-// truncateBody caps an agent error body for logging so a pathological
-// response cannot flood the log.
 func truncateBody(b []byte) string {
 	const max = 512
 	s := string(b)

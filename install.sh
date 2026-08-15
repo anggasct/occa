@@ -1,10 +1,6 @@
 #!/bin/sh
 set -eu
 
-# OCCA install script. Detects the platform, downloads the matching release
-# binary, and delegates the OpenCode prerequisite to its own official
-# installer when it is not already on PATH.
-
 version="${OCCA_VERSION:-}"
 if [ -n "$version" ]; then
 	case "$version" in

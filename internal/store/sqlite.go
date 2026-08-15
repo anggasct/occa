@@ -13,8 +13,6 @@ const (
 	busyTimeoutMilli = 5000
 )
 
-// migrations run in order inside a transaction that stamps user_version, so
-// a step cannot be applied twice or out of order.
 var migrations = []func(tx *sql.Tx) error{
 	createInitialSchema,
 	addConversationKeys,
@@ -33,8 +31,6 @@ func addSessionAgentPID(tx *sql.Tx) error {
 }
 
 func addConversationKeys(tx *sql.Tx) error {
-	// thread_id/user_id are NOT NULL DEFAULT '' so the partial unique index
-	// works — SQLite treats NULLs as distinct in unique indexes.
 	ddl := `
 ALTER TABLE session ADD COLUMN thread_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE session ADD COLUMN user_id TEXT NOT NULL DEFAULT '';
@@ -142,7 +138,6 @@ func Open(path string) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("store: foreign keys: %w", err)
 	}
 
-	// SQLite allows a single writer; one connection removes lock contention.
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 

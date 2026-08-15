@@ -259,8 +259,6 @@ func (b *permissionBroker) handle(ctx context.Context, msg channel.IncomingMessa
 
 	terminal := permissionTerminalLabel(decision)
 	if b.resolve(record, attempt, terminal) {
-		// createdAt is immutable after construction; the broker lock is not
-		// held here by design (the backend call above must stay outside it).
 		slog.Info("permission callback resolved", "platform", msg.Platform, "channel_id", msg.ChannelID, "decision", decision, "latency", time.Since(record.createdAt).Truncate(time.Millisecond))
 		if err := reply.EditWithButtons(origin, terminal, nil); err != nil {
 			slog.Warn("permission: terminal view update failed", "platform", msg.Platform, "channel_id", msg.ChannelID, "error", err)
@@ -389,8 +387,6 @@ func permissionButtons(token string) []channel.Button {
 	}
 }
 
-// promptText escapes through the platform renderer: the permission name and
-// tool come from the agent and can contain markup characters.
 func (h *permissionPromptHandler) promptText(requests ...relay.PermissionRequest) string {
 	text := permissionPromptText(requests...)
 	if h.encode == nil {

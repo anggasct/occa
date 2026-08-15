@@ -31,8 +31,6 @@ type Command struct {
 	Handler func(ctx context.Context, msg channel.IncomingMessage, args string) (string, error)
 }
 
-// MenuCommands is the single source of truth for native command-menu
-// registration on both platforms.
 func (r *Router) MenuCommands() []channel.MenuCommand {
 	return []channel.MenuCommand{
 		{Alias: "help", Description: "Show available commands"},
@@ -55,7 +53,6 @@ func (r *Router) MenuCommands() []channel.MenuCommand {
 	}
 }
 
-// AgentInstance is a ready agent backend handle for a working directory.
 type AgentInstance interface {
 	Client() relay.Client
 	End()
@@ -63,7 +60,6 @@ type AgentInstance interface {
 	Workdir() string
 }
 
-// InstanceProvider resolves an AgentInstance for a working directory.
 type InstanceProvider interface {
 	Instance(ctx context.Context, workdir string) (AgentInstance, error)
 	ForceStop(workdir string)
@@ -147,8 +143,6 @@ func (r *Router) Route(ctx context.Context, msg channel.IncomingMessage) error {
 	return r.passthrough(ctx, msg)
 }
 
-// normalizeCommandAlias rewrites legacy "/occa_name" and "/occa:name" aliases
-// to the short canonical form "/name".
 func normalizeCommandAlias(text string) string {
 	if strings.HasPrefix(text, "/occa:") {
 		return "/" + strings.TrimPrefix(text, "/occa:")
@@ -183,10 +177,6 @@ func (r *Router) routeInputKind(msg channel.IncomingMessage, isOcca bool) string
 	return "message"
 }
 
-// reply renders text for the destination platform before it reaches the
-// adapter. Every outbound string goes through here so that a workdir path, a
-// stored prompt, or an agent error containing markup characters is escaped
-// rather than silently rejected by the platform's parser.
 func (r *Router) reply(msg channel.IncomingMessage, text string) {
 	if msg.ReplyCtx == nil {
 		slog.Warn("reply has no reply context", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID)
@@ -310,16 +300,11 @@ func (r *Router) handleCommand(ctx context.Context, msg channel.IncomingMessage)
 	return nil
 }
 
-// clientFor resolves the agent instance for a message's effective workdir.
 func (r *Router) clientFor(ctx context.Context, msg channel.IncomingMessage) (AgentInstance, error) {
 	workdir := r.effectiveWorkdir(ctx, msg.Platform, msg.ChannelID)
 	return r.instances.Instance(ctx, workdir)
 }
 
-// conversationKey derives the session-key components (threadID, userID) from
-// a message per the session-key policy: threads are shared per thread; other
-// conversations are isolated per sender. DM chats resolve to the sender too —
-// a private chat has a single sender, so the key stays per-chat in effect.
 func conversationKey(msg channel.IncomingMessage) (threadID, userID string) {
 	if msg.IsThread && msg.ThreadID != "" {
 		return msg.ThreadID, ""
@@ -912,7 +897,6 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 		}
 
 		var matched *store.Session
-		// 1. Full ID exact match
 		for i := range sessions {
 			if sessions[i].AgentSessionID == target {
 				matched = &sessions[i]
@@ -920,7 +904,6 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 			}
 		}
 
-		// 2. Picker number
 		if matched == nil {
 			if num, err := strconv.Atoi(target); err == nil && num >= 1 {
 				maxBrowsable := len(sessions)
@@ -933,7 +916,6 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 			}
 		}
 
-		// 3. Title substring (case-insensitive)
 		if matched == nil {
 			lowerTarget := strings.ToLower(target)
 			var titleMatches []store.Session

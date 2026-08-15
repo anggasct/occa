@@ -14,14 +14,12 @@ import (
 
 var errClosed = errors.New("process: manager closed")
 
-// entry is a pool slot: a ready instance or an in-progress spawn.
 type entry struct {
 	inst  *Instance
 	err   error
-	ready chan struct{} // closed once inst/err is set
+	ready chan struct{}
 }
 
-// Manager supervises one agent instance per distinct working directory.
 type Manager struct {
 	cfg     config.AgentConfig
 	mu      sync.Mutex
@@ -34,7 +32,6 @@ type Manager struct {
 	closed  atomic.Bool
 }
 
-// NewManager creates a Manager and starts its idle reaper.
 func NewManager(cfg config.AgentConfig, factory instanceFactory) (*Manager, error) {
 	lo, hi, err := parsePortRange(cfg.PortRange)
 	if err != nil {
@@ -54,7 +51,6 @@ func NewManager(cfg config.AgentConfig, factory instanceFactory) (*Manager, erro
 	return m, nil
 }
 
-// DefaultManager builds a Manager that spawns real `binary serve` subprocesses.
 func DefaultManager(cfg config.AgentConfig) (*Manager, error) {
 	factory := productionFactory(cfg.Binary, defaultReadinessTimeout, defaultStopGrace)
 	factory = wrapWithAutoInstall(factory, cfg.Binary, cfg.AutoInstall, func(ctx context.Context, _ string) error {
@@ -75,8 +71,6 @@ func reapInterval(idle time.Duration) time.Duration {
 	}
 }
 
-// Instance returns a ready instance for workdir (spawning if needed), already
-// marked in-flight. The caller must call End() on the returned Instance.
 func (m *Manager) Instance(ctx context.Context, workdir string) (*Instance, error) {
 	workdir = NormalizeWorkdir(workdir)
 	for {
@@ -94,12 +88,10 @@ func (m *Manager) Instance(ctx context.Context, workdir string) (*Instance, erro
 					m.mu.Unlock()
 					return e.inst, nil
 				}
-				// Dead or errored: discard and respawn below.
 				m.discardLocked(workdir, e)
 				m.mu.Unlock()
 				continue
 			default:
-				// Spawn in progress: wait for it, then re-check.
 				m.mu.Unlock()
 				select {
 				case <-e.ready:
@@ -110,7 +102,6 @@ func (m *Manager) Instance(ctx context.Context, workdir string) (*Instance, erro
 			}
 		}
 
-		// Spawn a new instance. Make room if at capacity.
 		if len(m.pool) >= m.cfg.MaxInstances && !m.evictLRULocked() {
 			m.mu.Unlock()
 			return nil, fmt.Errorf("process: agent instance limit reached (%d in use)", m.cfg.MaxInstances)
@@ -124,7 +115,6 @@ func (m *Manager) Instance(ctx context.Context, workdir string) (*Instance, erro
 		m.pool[workdir] = e
 		m.mu.Unlock()
 
-		// Spawn outside the lock (readiness can take seconds).
 		m.spawnWG.Add(1)
 		inst, spawnErr := m.newInst(ctx, workdir, port)
 		defer m.spawnWG.Done()
@@ -139,8 +129,7 @@ func (m *Manager) Instance(ctx context.Context, workdir string) (*Instance, erro
 			return nil, spawnErr
 		}
 		if m.closed.Load() {
-			// Close drained the pool while this spawn was in flight: the
-			// instance must not outlive the manager.
+			// In-flight spawn handling under closed manager (race prevention)
 			inst.stop()
 			m.ports.Release(port)
 			delete(m.pool, workdir)
@@ -157,7 +146,6 @@ func (m *Manager) Instance(ctx context.Context, workdir string) (*Instance, erro
 	}
 }
 
-// discardLocked removes a dead/errored entry, releasing its resources.
 func (m *Manager) discardLocked(workdir string, e *entry) {
 	if e.inst != nil {
 		e.inst.stop()
@@ -166,9 +154,6 @@ func (m *Manager) discardLocked(workdir string, e *entry) {
 	delete(m.pool, workdir)
 }
 
-// ForceStop stops and removes the pool entry for workdir if a ready instance
-// exists, forcing the hung agent process down so the next Instance call spawns
-// a fresh one.
 func (m *Manager) ForceStop(workdir string) {
 	workdir = NormalizeWorkdir(workdir)
 	m.mu.Lock()
@@ -188,8 +173,6 @@ func (m *Manager) ForceStop(workdir string) {
 	}
 }
 
-// evictLRULocked stops the least-recently-used idle instance to free a slot.
-// Returns false if no idle instance can be evicted.
 func (m *Manager) evictLRULocked() bool {
 	var oldestKey string
 	oldestTime := int64(math.MaxInt64)
@@ -205,7 +188,6 @@ func (m *Manager) evictLRULocked() bool {
 				}
 			}
 		default:
-			// Pending spawn: not evictable.
 		}
 	}
 	if !found {
@@ -218,7 +200,6 @@ func (m *Manager) evictLRULocked() bool {
 	return true
 }
 
-// reapOnce stops idle instances whose last use is older than the idle timeout.
 func (m *Manager) reapOnce(now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -253,7 +234,6 @@ func (m *Manager) startReaper(interval time.Duration) {
 	}()
 }
 
-// Close stops the reaper and all managed instances (no orphans).
 func (m *Manager) Close() error {
 	if m.closed.Swap(true) {
 		return nil
@@ -275,8 +255,6 @@ func (m *Manager) Close() error {
 	}
 	m.mu.Unlock()
 
-	// A spawn that was in flight when Close ran finishes under the closed
-	// flag: Instance re-checks it after spawning and stops the instance.
 	m.spawnWG.Wait()
 	return nil
 }

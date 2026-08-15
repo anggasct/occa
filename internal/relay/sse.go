@@ -14,9 +14,6 @@ import (
 // bufio's 64 KB default.
 const MaxEventLineBytes = 1024*1024 + 64*1024
 
-// readSSE reads events until clean EOF, a read failure, or ctx cancellation.
-// A failure that is not a clean EOF is emitted as a terminal stream_error
-// event so callers can tell it apart from a clean close, and returned.
 func readSSE(ctx context.Context, r io.Reader, ch chan<- Event) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), MaxEventLineBytes+1)
@@ -128,9 +125,6 @@ func newEventDecoder() *eventDecoder {
 	return &eventDecoder{partKind: make(map[string]string), toolContext: make(map[string]toolSeen)}
 }
 
-// isStreamKind reports whether a part type participates in stream-boundary
-// detection. Container/bookkeeping part types are skipped so they never
-// trigger a spurious segment at stream start.
 func isStreamKind(kind string) bool {
 	switch kind {
 	case "text", "tool", "reasoning":
@@ -157,12 +151,6 @@ func extractToolContext(raw json.RawMessage) string {
 	return ""
 }
 
-// parseJSON handles the current agent event stream, where the event type
-// lives inside the JSON payload rather than in an SSE event: line.
-// Bookkeeping events (heartbeats, session status) are skipped; text deltas
-// from text-typed parts and the idle transition that marks completion are
-// mapped to relay events. Part-type transitions emit segment (text finalized,
-// next delta starts a new message) and tool parts emit a tool notice event.
 func (d *eventDecoder) parseJSON(data string) (Event, bool) {
 	var ev struct {
 		Type       string `json:"type"`

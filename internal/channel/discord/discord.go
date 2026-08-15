@@ -19,13 +19,8 @@ import (
 
 const maxDownloadSize = 10 * 1024 * 1024
 
-// ThreadPolicy decides whether a channel auto-creates a thread on @mention.
-// A nil policy disables auto-threading entirely.
 type ThreadPolicy func(channelID string) (bool, error)
 
-// OwnedThreadCheck reports whether a thread was created by OCCA. It backs
-// participation tracking across restarts: a thread OCCA created keeps its
-// session keyed to the parent channel, which is observable from the store.
 type OwnedThreadCheck func(threadID string) (bool, error)
 
 type Adapter struct {
@@ -51,15 +46,10 @@ func New(token string, menu []channel.MenuCommand) *Adapter {
 
 func (a *Adapter) Name() string { return "discord" }
 
-// SetAutoThreadPolicy configures the per-channel auto-thread decision. When
-// unset (or nil), @mentions never auto-create threads.
 func (a *Adapter) SetAutoThreadPolicy(policy ThreadPolicy) {
 	a.autoThread = policy
 }
 
-// SetOwnedThreadCheck configures the persisted participation lookup, used to
-// recognize threads OCCA created after a restart. When unset, only threads
-// created in this process are recognized.
 func (a *Adapter) SetOwnedThreadCheck(check OwnedThreadCheck) {
 	a.ownedThread = check
 }
@@ -80,9 +70,6 @@ func (a *Adapter) isTrackedThread(threadID string) bool {
 	return ok
 }
 
-// isOwnedThread reports whether OCCA created (or owns) the thread: either
-// created in this process or, across restarts, resolvable as an owned thread
-// through the injected check.
 func (a *Adapter) isOwnedThread(threadID string) bool {
 	if a.isTrackedThread(threadID) {
 		return true
@@ -102,15 +89,11 @@ func (a *Adapter) setBotID(id string) { a.botID.Store(id) }
 
 func (a *Adapter) setAppID(id string) { a.appID.Store(id) }
 
-// appIDValue is empty until the gateway delivers READY. Callers must treat
-// an empty result as "app ID not known yet."
 func (a *Adapter) appIDValue() string {
 	id, _ := a.appID.Load().(string)
 	return id
 }
 
-// selfID is empty until the gateway delivers READY. Callers must treat an
-// empty result as "not this bot" rather than as a match.
 func (a *Adapter) selfID() string {
 	id, _ := a.botID.Load().(string)
 	return id
@@ -138,9 +121,6 @@ func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessag
 	return nil
 }
 
-// configure registers intents and gateway handlers. It must not read session
-// state the gateway populates — State.User stays nil until READY arrives, so
-// reading it here would panic before the connection is even open.
 func (a *Adapter) configure(s *discordgo.Session, handler func(channel.IncomingMessage)) {
 	s.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsMessageContent | discordgo.IntentsDirectMessages
 
@@ -204,12 +184,6 @@ func (a *Adapter) configure(s *discordgo.Session, handler func(channel.IncomingM
 	})
 }
 
-// handleApplicationCommandInteraction reconstructs a slash-command
-// interaction into the same "/name arg" text the message-content path
-// produces, so both reach the router identically. The registered command
-// name is the menu alias (e.g. "session");
-// Router.normalizeCommandAlias reconciles legacy aliases back to the short
-// "/session" form before dispatch.
 func (a *Adapter) handleApplicationCommandInteraction(sess *discordgo.Session, i *discordgo.InteractionCreate, handler func(channel.IncomingMessage)) {
 	data := i.ApplicationCommandData()
 	text := "/" + data.Name
@@ -267,9 +241,6 @@ func (a *Adapter) onReady(r *discordgo.Ready) {
 	a.registerCommands(r)
 }
 
-// registerCommands populates Discord's native slash-command menu globally.
-// A failure here is logged and never blocks the adapter — the bot remains
-// fully usable via typed commands and existing slash interactions regardless.
 func (a *Adapter) registerCommands(r *discordgo.Ready) {
 	if len(a.menu) == 0 {
 		return
@@ -300,10 +271,6 @@ func buildApplicationCommands(menu []channel.MenuCommand) []*discordgo.Applicati
 	return commands
 }
 
-// sanitizeCommandName maps an arbitrary command name (e.g. an agent's own
-// command, which may contain characters Discord rejects) into Discord's
-// allowed set: lowercase letters, digits, underscores, and hyphens, 1-32
-// characters.
 func sanitizeCommandName(name string) string {
 	var b strings.Builder
 	for _, r := range strings.ToLower(name) {
@@ -320,9 +287,6 @@ func sanitizeCommandName(name string) string {
 	return s
 }
 
-// maxCommandDescriptionLen is Discord's ApplicationCommand.Description limit.
-// A bulk overwrite fails atomically if any single description exceeds it, so
-// every description must be capped before sending.
 const maxCommandDescriptionLen = 100
 
 func sanitizeDescription(desc string) string {
@@ -382,10 +346,6 @@ func (a *Adapter) normalizeMessage(m *discordgo.Message) channel.IncomingMessage
 	}
 	replyChannelID := m.ChannelID
 
-	// Auto-thread: an @mention in a channel with auto_thread enabled (and not
-	// already inside a thread) spawns a public thread from the message; the
-	// conversation then lives in the thread, so the message is re-scoped to
-	// it. On failure the reply stays inline in the parent channel.
 	if isMention && !isThread && m.GuildID != "" && a.autoThread != nil && a.session != nil {
 		enabled, err := a.autoThread(m.ChannelID)
 		if err != nil {
@@ -405,9 +365,6 @@ func (a *Adapter) normalizeMessage(m *discordgo.Message) channel.IncomingMessage
 		}
 	}
 
-	// Messages inside threads OCCA created need no @mention (also across
-	// restarts, via the persisted ownership check), and their access scope is
-	// the parent channel the user was originally allowed in.
 	if isThread && threadID != "" && a.isOwnedThread(threadID) {
 		isMention = true
 		if parentChannelID != "" {
@@ -430,10 +387,6 @@ func (a *Adapter) normalizeMessage(m *discordgo.Message) channel.IncomingMessage
 	}
 }
 
-// threadName derives an auto-thread name from the message content: mention
-// and channel tokens (<...>) and Discord-forbidden channel characters are
-// stripped, the result is truncated to Discord's 100-character thread-name
-// limit, and an empty name falls back to a fixed label.
 func threadName(content string) string {
 	var b strings.Builder
 	inToken := false
@@ -552,9 +505,6 @@ func (rc *replyContext) SendTyping() error {
 	return rc.session.ChannelTyping(rc.channelID)
 }
 
-// SetReaction surfaces a reply message's lifecycle as a reaction (👀/✅/❌).
-// The previous state's emoji is removed before the new one is added; a
-// same-state repeat is a no-op. Single-goroutine per stream.
 func (rc *replyContext) SetReaction(ref channel.MessageRef, state channel.ReactionState) error {
 	emoji := reactionEmoji(state)
 	if rc.currentReaction == nil {
@@ -587,11 +537,6 @@ func reactionEmoji(state channel.ReactionState) string {
 	return ""
 }
 
-// SetChatCommands registers a native command menu scoped to this chat's
-// guild — Discord's ApplicationCommandBulkOverwrite has no per-channel scope,
-// only per-guild, so this affects every channel in the guild, not just this
-// one. A DM (no guild) is a no-op: Discord has no per-DM-channel slash
-// command scope to target.
 func (rc *replyContext) SetChatCommands(commands []channel.MenuCommand) error {
 	if rc.guildID == "" || rc.appID == "" {
 		return nil
@@ -665,10 +610,6 @@ func (rc *replyContext) EditWithButtons(ref channel.MessageRef, text string, but
 	return err
 }
 
-// componentRows renders buttons grouped by their Row hint into action rows:
-// buttons sharing a non-zero Row land in one row (Discord caps 5 per row,
-// so larger groups are chunked); Row 0 keeps the legacy layout (all buttons
-// in one row, chunked at 5).
 func componentRows(buttons []channel.Button) []discordgo.MessageComponent {
 	components := make([]discordgo.MessageComponent, 0, 1)
 	if len(buttons) == 0 {

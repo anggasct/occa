@@ -14,16 +14,11 @@ var sensitiveKeys = map[string]bool{
 	"authorization": true, "api_key": true,
 }
 
-// RedactHandler wraps an slog.Handler, scrubbing registered secret values
-// and denylisted field names from every record before it reaches next.
 type RedactHandler struct {
 	next    slog.Handler
-	secrets []string // registered known secret values, longest-first (avoid partial-match ordering bugs)
+	secrets []string
 }
 
-// NewRedactHandler wraps next, registering secrets (ignoring empty values) to
-// scrub from every record's message and attribute values, recursively
-// through groups, in addition to the field-name denylist.
 func NewRedactHandler(next slog.Handler, secrets ...string) *RedactHandler {
 	registered := make([]string, 0, len(secrets))
 	for _, s := range secrets {
@@ -60,9 +55,6 @@ func (h *RedactHandler) WithGroup(name string) slog.Handler {
 	return &RedactHandler{next: h.next.WithGroup(name), secrets: h.secrets}
 }
 
-// redactAttr redacts a by key (denylist, regardless of value) or by scrubbing
-// any registered secret substring out of its value, recursing into groups.
-// An attr whose value contains no match is returned unchanged.
 func (h *RedactHandler) redactAttr(a slog.Attr) slog.Attr {
 	if sensitiveKeys[a.Key] {
 		return slog.String(a.Key, redacted)

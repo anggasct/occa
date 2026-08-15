@@ -106,7 +106,6 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
-// Addr returns the bound listen address; valid after Start succeeds.
 func (s *Server) Addr() string { return s.bindAddr }
 
 func (s *Server) Stop(ctx context.Context) error {

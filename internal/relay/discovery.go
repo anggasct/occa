@@ -27,8 +27,6 @@ var requiredEndpoints = []string{
 
 var pathParamRegexp = regexp.MustCompile(`\{[^}]+\}`)
 
-// normalizePath replaces path parameter placeholders (e.g. {id}, {sessionID})
-// with a canonical placeholder ({}) to enable parameter-name-agnostic path matching.
 func normalizePath(p string) string {
 	return pathParamRegexp.ReplaceAllString(p, "{}")
 }

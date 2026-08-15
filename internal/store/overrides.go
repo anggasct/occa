@@ -28,8 +28,6 @@ func (r *sqliteOverrideRepo) Get(ctx context.Context, platform, channelID, userI
 	return &o, nil
 }
 
-// UpsertRole writes only the role column. On first touch for a (platform, channel, user)
-// tuple, model starts unset (NULL); on conflict, the existing model is left untouched.
 func (r *sqliteOverrideRepo) UpsertRole(ctx context.Context, platform, channelID, userID, role string) error {
 	now := time.Now().Unix()
 	_, err := r.db.ExecContext(ctx,
@@ -44,8 +42,6 @@ func (r *sqliteOverrideRepo) UpsertRole(ctx context.Context, platform, channelID
 	return nil
 }
 
-// UpsertModel writes only the model column. A row created here (no prior role write)
-// defaults role to "deny" — setting a model preference must never itself grant access.
 func (r *sqliteOverrideRepo) UpsertModel(ctx context.Context, platform, channelID, userID, model string) error {
 	now := time.Now().Unix()
 	_, err := r.db.ExecContext(ctx,

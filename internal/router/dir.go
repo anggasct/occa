@@ -19,8 +19,6 @@ func (r *Router) handleDir(ctx context.Context, msg channel.IncomingMessage, arg
 	return r.setDir(ctx, msg, path)
 }
 
-// effectiveWorkdir resolves the working directory for a channel: the channel's
-// stored override, else the application default.
 func (r *Router) effectiveWorkdir(ctx context.Context, platform, channelID string) string {
 	ch, err := r.store.ChannelRepo().Get(ctx, platform, channelID)
 	if err == nil && ch != nil && ch.Workdir != "" {
@@ -49,22 +47,15 @@ func (r *Router) setDir(ctx context.Context, msg channel.IncomingMessage, path s
 		return fmt.Sprintf("⚠️ Not a directory: %s", dir), nil
 	}
 
-	// A Discord thread has its own channel_id, so writing under msg.ChannelID
-	// isolates the override to that thread and leaves the parent unchanged.
 	if err := r.store.ChannelRepo().UpsertWorkdir(ctx, msg.Platform, msg.ChannelID, dir); err != nil {
 		return "", fmt.Errorf("dir: %w", err)
 	}
 
-	// The active session belongs to the old project; clear it so the next
-	// message starts a fresh session in the new working directory.
 	threadID, userID := conversationKey(msg)
 	if err := r.store.SessionRepo().Deactivate(ctx, msg.Platform, msg.ChannelID, threadID, userID); err != nil {
 		return "", fmt.Errorf("dir: reset session: %w", err)
 	}
 
-	// Best-effort, off the request path: a slow agent/ListCommands call must
-	// never delay this reply. Uses a detached context since ctx may be
-	// canceled once the reply is sent.
 	if setter, ok := msg.ReplyCtx.(channel.ChatCommandSetter); ok {
 		go r.updateChatCommands(context.Background(), msg, setter, dir)
 	}
@@ -72,10 +63,6 @@ func (r *Router) setDir(ctx context.Context, msg channel.IncomingMessage, path s
 	return fmt.Sprintf("✅ Workdir set: %s", dir), nil
 }
 
-// updateChatCommands re-registers this chat's (Telegram) or this chat's
-// guild's (Discord) native command menu with OCCA's commands plus the new
-// workdir's agent commands. Any failure is logged and never surfaces to the
-// user — the workdir change itself already succeeded and is not affected.
 func (r *Router) updateChatCommands(ctx context.Context, msg channel.IncomingMessage, setter channel.ChatCommandSetter, workdir string) {
 	commands := r.MenuCommands()
 
