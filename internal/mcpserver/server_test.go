@@ -44,13 +44,17 @@ func (f *fakeStore) List(_ context.Context, _, _ string) ([]store.Schedule, erro
 	if f.failList {
 		return nil, store.ErrNotFound
 	}
-	return f.schedules, nil
+	out := make([]store.Schedule, len(f.schedules))
+	copy(out, f.schedules)
+	return out, nil
 }
 
 func (f *fakeStore) ListAll(_ context.Context) ([]store.Schedule, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.schedules, nil
+	out := make([]store.Schedule, len(f.schedules))
+	copy(out, f.schedules)
+	return out, nil
 }
 
 func (f *fakeStore) Attribute(_ context.Context, id int64, platform, channelID string) error {
