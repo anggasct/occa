@@ -13,6 +13,7 @@ import (
 type fakeScheduleStore struct {
 	schedules []store.Schedule
 	nextID    int64
+	failList  bool
 }
 
 func (f *fakeScheduleStore) Create(_ context.Context, s *store.Schedule) (int64, error) {
@@ -33,6 +34,9 @@ func (f *fakeScheduleStore) Delete(_ context.Context, _, _ string, id int64) err
 }
 
 func (f *fakeScheduleStore) List(_ context.Context, _, _ string) ([]store.Schedule, error) {
+	if f.failList {
+		return nil, store.ErrNotFound
+	}
 	return f.schedules, nil
 }
 
@@ -310,6 +314,29 @@ func TestSchedulerStartSweepErrorFailsStartup(t *testing.T) {
 	repo := &failingSweepStore{fakeScheduleStore: &fakeScheduleStore{nextID: 0}}
 	s := New(repo, func(ctx context.Context, platform, channelID, prompt string) {})
 	if err := s.Start(context.Background()); err == nil {
-		t.Fatal("expected Start to fail when pending-row cleanup errors")
+		t.Fatal("expected Start to fail when the pending-row sweep errors")
+	}
+}
+
+func TestAttributeScheduleListFailureCleansUp(t *testing.T) {
+	// Regression: if the follow-up List (or registration) fails AFTER the
+	// row was stamped with platform/channel, the attributed row must not
+	// survive as an enabled schedule.
+	repo := &fakeScheduleStore{failList: true}
+	s := New(repo, func(ctx context.Context, platform, channelID, prompt string) {})
+
+	id, err := repo.Create(context.Background(), &store.Schedule{
+		Platform: "", ChannelID: "", CronExpression: "0 9 * * 1-5",
+		HumanSchedule: "weekdays at 9am", Prompt: "run", Enabled: false,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := s.AttributeSchedule(context.Background(), id, "telegram", "chat123"); err == nil {
+		t.Fatal("expected AttributeSchedule to fail when List fails")
+	}
+	if len(repo.schedules) != 0 {
+		t.Fatalf("expected stamped row to be cleaned up, got: %+v", repo.schedules)
 	}
 }

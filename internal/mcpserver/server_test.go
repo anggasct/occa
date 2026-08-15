@@ -15,6 +15,7 @@ import (
 type fakeStore struct {
 	mu        sync.Mutex
 	schedules []store.Schedule
+	failList  bool
 }
 
 func (f *fakeStore) Create(_ context.Context, s *store.Schedule) (int64, error) {
@@ -40,6 +41,9 @@ func (f *fakeStore) Delete(_ context.Context, _, _ string, id int64) error {
 func (f *fakeStore) List(_ context.Context, _, _ string) ([]store.Schedule, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failList {
+		return nil, store.ErrNotFound
+	}
 	return f.schedules, nil
 }
 
@@ -221,6 +225,33 @@ func TestMCPServerConcurrentIdenticalCalls(t *testing.T) {
 	}
 	if byChannel["c1"] != "telegram" || byChannel["c2"] != "discord" {
 		t.Fatalf("rows attributed to wrong conversation: %+v", byChannel)
+	}
+}
+
+func TestMCPServerPostAttributeFailureCleansRow(t *testing.T) {
+	// Regression (review round 4): if the follow-up List fails AFTER the row
+	// is stamped with platform/channel, the handler must not leave an
+	// enabled schedule behind while returning an error.
+	srv, repo, attrib := newTestServer()
+	repo.failList = true
+	cronExpr := "0 9 * * 1-5"
+	prompt := "run tests"
+	humanSched := "weekdays at 9am"
+	attrib.Put(fp(cronExpr, prompt, humanSched), "telegram", "chat123")
+
+	result, _, err := srv.handleScheduleTask(context.Background(), nil, scheduleTaskInput{
+		CronExpression: cronExpr,
+		Prompt:         prompt,
+		HumanSchedule:  humanSched,
+	})
+	if err != nil {
+		t.Fatalf("handleScheduleTask: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error result when attribution registration fails")
+	}
+	if len(repo.schedules) != 0 {
+		t.Fatalf("expected no enabled row to remain, got: %+v", repo.schedules)
 	}
 }
 

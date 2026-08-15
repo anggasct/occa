@@ -106,7 +106,10 @@ func (s *Server) handleScheduleTask(ctx context.Context, req *mcp.CallToolReques
 	}
 
 	if err := s.sched.AttributeSchedule(ctx, id, platform, channelID); err != nil {
-		_ = s.sched.RemoveSchedule(ctx, "", "", id)
+		// AttributeSchedule already undoes any partial stamp with the
+		// attributed values; this is a belt-and-suspenders cleanup for the
+		// same row so an error result can never leave an enabled schedule.
+		_ = s.sched.RemoveSchedule(ctx, platform, channelID, id)
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Error attributing schedule: %v", err)}},
 			IsError: true,

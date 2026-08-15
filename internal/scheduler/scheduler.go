@@ -119,13 +119,22 @@ func (s *Scheduler) AttributeSchedule(ctx context.Context, id int64, platform, c
 	}
 	schedules, err := s.store.List(ctx, platform, channelID)
 	if err != nil {
+		// The row is already stamped with platform/channel; undo it with the
+		// attributed values so a half-attributed schedule cannot survive.
+		_ = s.RemoveSchedule(ctx, platform, channelID, id)
 		return err
 	}
 	for _, sched := range schedules {
 		if sched.ID == id {
-			return s.register(sched)
+			if err := s.register(sched); err != nil {
+				_ = s.RemoveSchedule(ctx, platform, channelID, id)
+				return err
+			}
+			return nil
 		}
 	}
+	// Row no longer visible under its attributed conversation: clean up.
+	_ = s.RemoveSchedule(ctx, platform, channelID, id)
 	return nil
 }
 
