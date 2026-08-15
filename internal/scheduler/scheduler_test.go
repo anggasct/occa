@@ -13,6 +13,7 @@ import (
 type fakeScheduleStore struct {
 	schedules []store.Schedule
 	nextID    int64
+	failList  bool
 }
 
 func (f *fakeScheduleStore) Create(_ context.Context, s *store.Schedule) (int64, error) {
@@ -33,11 +34,54 @@ func (f *fakeScheduleStore) Delete(_ context.Context, _, _ string, id int64) err
 }
 
 func (f *fakeScheduleStore) List(_ context.Context, _, _ string) ([]store.Schedule, error) {
+	if f.failList {
+		return nil, store.ErrNotFound
+	}
 	return f.schedules, nil
 }
 
 func (f *fakeScheduleStore) ListAll(_ context.Context) ([]store.Schedule, error) {
-	return f.schedules, nil
+	var enabled []store.Schedule
+	for _, s := range f.schedules {
+		if s.Enabled {
+			enabled = append(enabled, s)
+		}
+	}
+	return enabled, nil
+}
+
+func (f *fakeScheduleStore) Attribute(_ context.Context, id int64, platform, channelID string) error {
+	for i, s := range f.schedules {
+		if s.ID == id {
+			f.schedules[i].Platform = platform
+			f.schedules[i].ChannelID = channelID
+			f.schedules[i].Enabled = true
+			return nil
+		}
+	}
+	return store.ErrNotFound
+}
+
+func (f *fakeScheduleStore) SweepPending(_ context.Context) (int64, error) {
+	var count int64
+	var kept []store.Schedule
+	for _, s := range f.schedules {
+		if s.Platform == "" && s.ChannelID == "" && !s.Enabled {
+			count++
+		} else {
+			kept = append(kept, s)
+		}
+	}
+	f.schedules = kept
+	return count, nil
+}
+
+type failingSweepStore struct {
+	*fakeScheduleStore
+}
+
+func (f *failingSweepStore) SweepPending(_ context.Context) (int64, error) {
+	return 0, store.ErrNotFound
 }
 
 func TestSchedulerAddAndRemove(t *testing.T) {
@@ -245,5 +289,54 @@ func TestJobKeepsBoundedRunTimeout(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("job did not report its deadline")
+	}
+}
+
+func TestSchedulerStartSweepsPending(t *testing.T) {
+	repo := &fakeScheduleStore{
+		schedules: []store.Schedule{
+			{ID: 1, Platform: "", ChannelID: "", CronExpression: "0 9 * * 1-5", Prompt: "stray", Enabled: false},
+			{ID: 2, Platform: "telegram", ChannelID: "c1", CronExpression: "0 9 * * 1-5", Prompt: "active", Enabled: true},
+		},
+	}
+	s := New(repo, func(ctx context.Context, platform, channelID, prompt string) {})
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = s.Stop() }()
+
+	if len(repo.schedules) != 1 || repo.schedules[0].ID != 2 {
+		t.Fatalf("expected stray pending schedule to be swept, got: %+v", repo.schedules)
+	}
+}
+
+func TestSchedulerStartSweepErrorFailsStartup(t *testing.T) {
+	repo := &failingSweepStore{fakeScheduleStore: &fakeScheduleStore{nextID: 0}}
+	s := New(repo, func(ctx context.Context, platform, channelID, prompt string) {})
+	if err := s.Start(context.Background()); err == nil {
+		t.Fatal("expected Start to fail when the pending-row sweep errors")
+	}
+}
+
+func TestAttributeScheduleListFailureCleansUp(t *testing.T) {
+	// Regression: if the follow-up List (or registration) fails AFTER the
+	// row was stamped with platform/channel, the attributed row must not
+	// survive as an enabled schedule.
+	repo := &fakeScheduleStore{failList: true}
+	s := New(repo, func(ctx context.Context, platform, channelID, prompt string) {})
+
+	id, err := repo.Create(context.Background(), &store.Schedule{
+		Platform: "", ChannelID: "", CronExpression: "0 9 * * 1-5",
+		HumanSchedule: "weekdays at 9am", Prompt: "run", Enabled: false,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := s.AttributeSchedule(context.Background(), id, "telegram", "chat123"); err == nil {
+		t.Fatal("expected AttributeSchedule to fail when List fails")
+	}
+	if len(repo.schedules) != 0 {
+		t.Fatalf("expected stamped row to be cleaned up, got: %+v", repo.schedules)
 	}
 }

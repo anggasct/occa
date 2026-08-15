@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/anggasct/occa/internal/attribution"
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/relay"
 	"github.com/anggasct/occa/internal/render"
@@ -164,7 +165,7 @@ func (r *Router) runResponse(
 	}
 	defer stopProgress()
 
-	go startProgressTicker(ctx, msg.ReplyCtx, progressStopCh)
+	go startProgressTicker(ctx, msg.ReplyCtx, progressStopCh, progressTickerInterval)
 
 	observedEvents := make(chan relay.Event, 64)
 	go func() {
@@ -189,6 +190,16 @@ func (r *Router) runResponse(
 		streamer := relay.NewStreamer(msg.ReplyCtx, r.renderer, render.PlatformFor(msg.Platform))
 		streamer.SetPermissionPromptHandler(permissionHandler)
 		streamer.SetQuestionPromptHandler(questionHandler)
+		if r.attrib != nil {
+			streamer.SetScheduleAttributionHandler(func(input map[string]any) error {
+				cronExpr, _ := input["cron_expression"].(string)
+				prompt, _ := input["prompt"].(string)
+				humanSched, _ := input["human_schedule"].(string)
+				fp := attribution.Fingerprint(cronExpr, prompt, humanSched)
+				r.attrib.Put(fp, msg.Platform, msg.ChannelID)
+				return nil
+			})
+		}
 		if setter, ok := msg.ReplyCtx.(channel.ReactionSetter); ok {
 			streamer.SetReactionSetter(setter)
 		}
@@ -247,8 +258,8 @@ func progressNotice(seconds int64) string {
 
 var progressTickerInterval = 60 * time.Second
 
-func startProgressTicker(ctx context.Context, reply channel.ReplyContext, stopCh <-chan struct{}) {
-	ticker := time.NewTicker(progressTickerInterval)
+func startProgressTicker(ctx context.Context, reply channel.ReplyContext, stopCh <-chan struct{}, interval time.Duration) {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	var elapsed int64

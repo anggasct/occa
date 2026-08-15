@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -527,5 +528,63 @@ func TestSessionTitle(t *testing.T) {
 	}
 	if sessions[0].Title != "Refactor backend API" {
 		t.Fatalf("expected title %q, got %q", "Refactor backend API", sessions[0].Title)
+	}
+}
+
+func TestScheduleAttribute(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+
+	sched := Schedule{
+		Platform:       "",
+		ChannelID:      "",
+		CronExpression: "0 9 * * 1-5",
+		HumanSchedule:  "weekdays 9am",
+		Prompt:         "test",
+		Enabled:        false,
+	}
+	id, err := s.ScheduleRepo().Create(ctx, &sched)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := s.ScheduleRepo().Attribute(ctx, id, "telegram", "chat123"); err != nil {
+		t.Fatalf("Attribute: %v", err)
+	}
+
+	list, err := s.ScheduleRepo().List(ctx, "telegram", "chat123")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 || list[0].ID != id || list[0].Platform != "telegram" || list[0].ChannelID != "chat123" || !list[0].Enabled {
+		t.Fatalf("unexpected attributed schedule: %+v", list)
+	}
+
+	if err := s.ScheduleRepo().Attribute(ctx, 99999, "telegram", "chat123"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for missing id, got: %v", err)
+	}
+}
+
+func TestScheduleSweepPending(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+
+	sched1 := Schedule{CronExpression: "0 9 * * 1-5", Prompt: "stray", Enabled: false}
+	sched2 := Schedule{Platform: "telegram", ChannelID: "c1", CronExpression: "0 9 * * 1-5", Prompt: "active", Enabled: true}
+
+	_, _ = s.ScheduleRepo().Create(ctx, &sched1)
+	_, _ = s.ScheduleRepo().Create(ctx, &sched2)
+
+	n, err := s.ScheduleRepo().SweepPending(ctx)
+	if err != nil {
+		t.Fatalf("SweepPending: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("expected 1 swept row, got %d", n)
+	}
+
+	all, _ := s.ScheduleRepo().ListAll(ctx)
+	if len(all) != 1 || all[0].Prompt != "active" {
+		t.Fatalf("unexpected remaining schedules after sweep: %+v", all)
 	}
 }

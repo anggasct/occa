@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anggasct/occa/internal/attribution"
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/relay"
 	"github.com/anggasct/occa/internal/store"
@@ -84,6 +85,8 @@ type fakeRelayClient struct {
 	unrevertErr     error
 	messages        []relay.MessageInfo
 	listMessagesErr error
+
+	customEvents []relay.Event
 
 	mu           sync.Mutex
 	responses    []pendingResponse
@@ -167,6 +170,9 @@ func (f *fakeRelayClient) finishResponse() {
 	}
 	resp := f.responses[0]
 	f.responses = f.responses[1:]
+	for _, ev := range f.customEvents {
+		resp.events <- ev
+	}
 	resp.events <- relay.Event{Type: "done"}
 	close(resp.events)
 	close(resp.dispatchDone)
@@ -368,6 +374,12 @@ func (f *fakeScheduleRepo) List(_ context.Context, _, _ string) ([]store.Schedul
 	return nil, nil
 }
 func (f *fakeScheduleRepo) ListAll(_ context.Context) ([]store.Schedule, error) { return nil, nil }
+func (f *fakeScheduleRepo) ListSchedules(_ context.Context, _, _ string) ([]store.Schedule, error) {
+	return nil, nil
+}
+func (f *fakeScheduleRepo) RemoveSchedule(_ context.Context, _, _ string, _ int64) error { return nil }
+func (f *fakeScheduleRepo) Attribute(_ context.Context, _ int64, _, _ string) error      { return nil }
+func (f *fakeScheduleRepo) SweepPending(_ context.Context) (int64, error)                { return 0, nil }
 
 type fakeSessionRepo struct {
 	activeID string
@@ -1646,48 +1658,58 @@ func TestChannelThreadIsolation(t *testing.T) {
 	}
 }
 
-type fakeTokenGen struct{}
-
-func (f *fakeTokenGen) Generate(_, _ string) (string, error) { return "test-token-123", nil }
-
-type failingTokenGen struct{}
-
-func (f *failingTokenGen) Generate(_, _ string) (string, error) { return "", errors.New("rng failed") }
-
-func TestPassthroughSkipsTokenLineWhenGenerationFails(t *testing.T) {
+func TestPassthroughContainsNoScheduleToken(t *testing.T) {
 	r, client, reply := newTestRouter()
-	r.SetTokenGenerator(&failingTokenGen{})
 
 	if err := r.Route(context.Background(), msg("hello world", reply)); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
 	waitForDispatch(t, client)
 	waitForResponse(t, r)
-	if client.rawMsg == "" {
-		t.Fatal("message was not dispatched")
+	if strings.Contains(client.rawMsg, "schedule_token") {
+		t.Fatalf("agent-bound text must not contain schedule_token, got: %q", client.rawMsg)
 	}
-	if strings.Contains(client.rawMsg, "<occa:schedule_token>") {
-		t.Fatalf("token line appended despite failure: %q", client.rawMsg)
-	}
-	if strings.Contains(client.rawMsg, "test-token") {
-		t.Fatalf("weak token leaked into message: %q", client.rawMsg)
+	if client.rawMsg != "hello world" {
+		t.Fatalf("agent-bound text = %q, want 'hello world'", client.rawMsg)
 	}
 }
 
-func TestPassthroughAppendsScheduleToken(t *testing.T) {
+func TestResponseWiringScheduleAttribution(t *testing.T) {
 	r, client, reply := newTestRouter()
-	r.SetTokenGenerator(&fakeTokenGen{})
+	attrib := attribution.NewStore()
+	r.SetAttributionStore(attrib)
 
-	if err := r.Route(context.Background(), msg("hello world", reply)); err != nil {
+	cronExpr := "0 9 * * 1-5"
+	prompt := "hello"
+	humanSched := "weekdays at 9am"
+	fp := attribution.Fingerprint(cronExpr, prompt, humanSched)
+
+	inputJSON, _ := json.Marshal(map[string]any{
+		"cron_expression": cronExpr,
+		"prompt":          prompt,
+		"human_schedule":  humanSched,
+	})
+
+	client.customEvents = []relay.Event{
+		{
+			Type:      relay.EventTool,
+			Delta:     "schedule_task",
+			ToolInput: inputJSON,
+		},
+	}
+
+	if err := r.Route(context.Background(), msg("schedule hello", reply)); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
 	waitForDispatch(t, client)
 	waitForResponse(t, r)
-	if !strings.Contains(client.rawMsg, "<occa:schedule_token>test-token-123</occa:schedule_token>") {
-		t.Fatalf("expected schedule token in message, got: %q", client.rawMsg)
+
+	platform, channelID, ok := attrib.Pop(fp)
+	if !ok {
+		t.Fatal("expected attribution store to be populated by response stream event")
 	}
-	if !strings.HasPrefix(client.rawMsg, "hello world") {
-		t.Fatalf("original text should be preserved, got: %q", client.rawMsg)
+	if platform != "telegram" || channelID != "chat1" {
+		t.Fatalf("unexpected attribution: platform=%s channelID=%s", platform, channelID)
 	}
 }
 

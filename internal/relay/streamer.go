@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -31,15 +32,16 @@ const (
 )
 
 type Streamer struct {
-	reply             channel.ReplyContext
-	renderer          render.Renderer
-	platform          render.Platform
-	permissionHandler PermissionPromptHandler
-	questionHandler   QuestionPromptHandler
-	reactionSetter    channel.ReactionSetter
-	firstRef          channel.MessageRef
-	noEventTimeout    time.Duration
-	typingInterval    time.Duration
+	reply                      channel.ReplyContext
+	renderer                   render.Renderer
+	platform                   render.Platform
+	permissionHandler          PermissionPromptHandler
+	questionHandler            QuestionPromptHandler
+	scheduleAttributionHandler func(input map[string]any) error
+	reactionSetter             channel.ReactionSetter
+	firstRef                   channel.MessageRef
+	noEventTimeout             time.Duration
+	typingInterval             time.Duration
 }
 
 type PermissionPromptHandler interface {
@@ -66,6 +68,10 @@ func (s *Streamer) SetPermissionPromptHandler(handler PermissionPromptHandler) {
 
 func (s *Streamer) SetQuestionPromptHandler(handler QuestionPromptHandler) {
 	s.questionHandler = handler
+}
+
+func (s *Streamer) SetScheduleAttributionHandler(handler func(input map[string]any) error) {
+	s.scheduleAttributionHandler = handler
 }
 
 func (s *Streamer) SetReactionSetter(setter channel.ReactionSetter) {
@@ -201,6 +207,14 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				name := ev.Delta
 				if name == "" {
 					name = "Tool call"
+				}
+				if s.scheduleAttributionHandler != nil && (name == "schedule_task" || strings.HasSuffix(name, "schedule_task")) && len(ev.ToolInput) > 0 {
+					var input map[string]any
+					if err := json.Unmarshal(ev.ToolInput, &input); err == nil && len(input) > 0 {
+						if err := s.scheduleAttributionHandler(input); err != nil {
+							slog.Warn("streaming: schedule attribution handler failed", "error", err)
+						}
+					}
 				}
 				ctxStr := normalizeToolContext(ev.ToolContext)
 				if ev.ToolSamePart {

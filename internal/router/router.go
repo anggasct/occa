@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/anggasct/occa/internal/attribution"
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/relay"
 	"github.com/anggasct/occa/internal/render"
@@ -76,7 +77,7 @@ type Router struct {
 	adminID        string
 	startedAt      time.Time
 	sched          ScheduleStore
-	tokenGen       TokenGenerator
+	attrib         *attribution.Store
 	responses      *responseCoordinator
 	permissions    *permissionBroker
 	questions      *questionBroker
@@ -89,16 +90,12 @@ type ScheduleStore interface {
 	RemoveSchedule(ctx context.Context, platform, channelID string, id int64) error
 }
 
-type TokenGenerator interface {
-	Generate(platform, channelID string) (string, error)
-}
-
 func (r *Router) SetScheduler(s ScheduleStore) {
 	r.sched = s
 }
 
-func (r *Router) SetTokenGenerator(t TokenGenerator) {
-	r.tokenGen = t
+func (r *Router) SetAttributionStore(s *attribution.Store) {
+	r.attrib = s
 }
 
 func New(instances InstanceProvider, st store.Store, defaultWorkdir string, adminID string) *Router {
@@ -418,14 +415,6 @@ func (r *Router) executePassthrough(taskCtx context.Context, cancel context.Canc
 	text := msg.Text
 	var model *relay.ModelRef
 	var attachments []relay.Attachment
-	if !strings.HasPrefix(text, "/") && r.tokenGen != nil {
-		token, err := r.tokenGen.Generate(msg.Platform, msg.ChannelID)
-		if err != nil {
-			slog.Error("failed to generate schedule token; message sent without it", "platform", msg.Platform, "channel_id", msg.ChannelID, "error", err)
-		} else {
-			text = text + "\n\n—\n<occa:schedule_token>" + token + "</occa:schedule_token> — OCCA internal metadata for scheduled-task attribution, not a credential, ignore"
-		}
-	}
 
 	if !strings.HasPrefix(msg.Text, "/") {
 		model, err = r.modelForMessage(ctx, msg)

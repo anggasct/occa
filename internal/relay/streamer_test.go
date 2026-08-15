@@ -467,3 +467,79 @@ func TestStreamerEmptyStreamShowsCompletionNotice(t *testing.T) {
 		t.Fatalf("messages = %v, want completion notice", msgs)
 	}
 }
+
+func TestStreamerScheduleAttributionHandler(t *testing.T) {
+	reply := newFakeReplyContext()
+	renderer := render.New()
+	s := NewStreamer(reply, renderer, render.Telegram)
+
+	var called bool
+	var capturedInput map[string]any
+
+	s.SetScheduleAttributionHandler(func(input map[string]any) error {
+		called = true
+		capturedInput = input
+		return nil
+	})
+
+	events := make(chan Event, 10)
+	events <- Event{
+		Type:      EventTool,
+		Delta:     "schedule_task",
+		ToolInput: []byte(`{"cron_expression":"0 9 * * 1-5","prompt":"hello"}`),
+	}
+	events <- Event{
+		Type:      EventTool,
+		Delta:     "other_tool",
+		ToolInput: []byte(`{"foo":"bar"}`),
+	}
+	events <- Event{Type: EventDone}
+	close(events)
+
+	if err := s.Run(context.Background(), events); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if !called {
+		t.Fatal("expected attribution handler to be called")
+	}
+	if capturedInput["prompt"] != "hello" {
+		t.Fatalf("unexpected input in attribution handler: %+v", capturedInput)
+	}
+}
+
+func TestStreamerScheduleAttributionLateInput(t *testing.T) {
+	reply := newFakeReplyContext()
+	renderer := render.New()
+	s := NewStreamer(reply, renderer, render.Telegram)
+
+	var calls int
+	var capturedInput map[string]any
+
+	s.SetScheduleAttributionHandler(func(input map[string]any) error {
+		calls++
+		capturedInput = input
+		return nil
+	})
+
+	// A real stream announces the tool part before its input arrives; the
+	// attribution handler must still receive the full arguments.
+	fullInput := []byte(`{"cron_expression":"0 9 * * 1-5","prompt":"hello","human_schedule":"weekdays at 9am"}`)
+
+	events := make(chan Event, 10)
+	events <- Event{Type: EventTool, Delta: "schedule_task", ToolInput: nil}
+	events <- Event{Type: EventTool, Delta: "schedule_task", ToolInput: fullInput, ToolSamePart: true}
+	events <- Event{Type: EventDone}
+	close(events)
+
+	if err := s.Run(context.Background(), events); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if calls != 1 {
+		t.Fatalf("expected attribution handler to be called once with the full input, got %d calls", calls)
+	}
+	if capturedInput["prompt"] != "hello" || capturedInput["cron_expression"] != "0 9 * * 1-5" {
+		t.Fatalf("unexpected input in attribution handler: %+v", capturedInput)
+	}
+}
