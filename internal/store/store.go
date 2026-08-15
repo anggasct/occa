@@ -1,6 +1,11 @@
 package store
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+var ErrNotFound = errors.New("store: not found")
 
 type Session struct {
 	ID             int64

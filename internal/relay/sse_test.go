@@ -520,3 +520,16 @@ func TestNonToolEventsNeverLeakToolContext(t *testing.T) {
 		t.Fatalf("done event ToolContext = %q, want empty", doneEv.ToolContext)
 	}
 }
+
+func TestDecoderSetsToolInput(t *testing.T) {
+	decoder := newEventDecoder()
+	payload := `{"type":"message.part.updated","properties":{"part":{"id":"p1","type":"tool","tool":"schedule_task","state":{"input":{"cron_expression":"0 9 * * 1-5","prompt":"hello"}}}}}`
+	ev, ok := parseSSEEvent(decoder, "", payload)
+	if !ok || ev.Type != EventTool {
+		t.Fatalf("expected EventTool, got ok=%v ev=%+v", ok, ev)
+	}
+	if len(ev.ToolInput) == 0 || !strings.Contains(string(ev.ToolInput), "0 9 * * 1-5") {
+		t.Fatalf("expected ToolInput to contain cron_expression, got: %s", string(ev.ToolInput))
+	}
+}
+

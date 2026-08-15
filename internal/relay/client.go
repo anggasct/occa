@@ -147,6 +147,7 @@ type Event struct {
 	Type        string
 	Delta       string
 	ToolContext string // file or command being executed (empty when none)
+	ToolInput   json.RawMessage
 	// ToolSamePart reports that this tool notice is a follow-up update for a
 	// tool part already rendered (e.g. the command/file input arrived on a
 	// later message.part.updated for the same part). The streamer updates the

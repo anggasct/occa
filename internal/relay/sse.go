@@ -206,7 +206,7 @@ func (d *eventDecoder) parseJSON(data string) (Event, bool) {
 			// start a new one (fixes double bubbles: "⚙️ bash" then
 			// "⚙️ bash: <cmd>" for one tool call).
 			samePart := partID != "" && seen
-			return Event{Type: EventTool, Delta: ev.Properties.Part.Tool, ToolContext: toolCtx, ToolSamePart: samePart}, true
+			return Event{Type: EventTool, Delta: ev.Properties.Part.Tool, ToolContext: toolCtx, ToolInput: ev.Properties.Part.State.Input, ToolSamePart: samePart}, true
 		case prev == "" || kind == prev:
 			return Event{}, false
 		case prev == "text" || kind == "text":

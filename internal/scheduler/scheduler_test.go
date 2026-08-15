@@ -37,7 +37,39 @@ func (f *fakeScheduleStore) List(_ context.Context, _, _ string) ([]store.Schedu
 }
 
 func (f *fakeScheduleStore) ListAll(_ context.Context) ([]store.Schedule, error) {
-	return f.schedules, nil
+	var enabled []store.Schedule
+	for _, s := range f.schedules {
+		if s.Enabled {
+			enabled = append(enabled, s)
+		}
+	}
+	return enabled, nil
+}
+
+func (f *fakeScheduleStore) Attribute(_ context.Context, id int64, platform, channelID string) error {
+	for i, s := range f.schedules {
+		if s.ID == id {
+			f.schedules[i].Platform = platform
+			f.schedules[i].ChannelID = channelID
+			f.schedules[i].Enabled = true
+			return nil
+		}
+	}
+	return store.ErrNotFound
+}
+
+func (f *fakeScheduleStore) SweepPending(_ context.Context) (int64, error) {
+	var count int64
+	var kept []store.Schedule
+	for _, s := range f.schedules {
+		if s.Platform == "" && s.ChannelID == "" && !s.Enabled {
+			count++
+		} else {
+			kept = append(kept, s)
+		}
+	}
+	f.schedules = kept
+	return count, nil
 }
 
 func TestSchedulerAddAndRemove(t *testing.T) {
@@ -247,3 +279,22 @@ func TestJobKeepsBoundedRunTimeout(t *testing.T) {
 		t.Fatal("job did not report its deadline")
 	}
 }
+
+func TestSchedulerStartSweepsPending(t *testing.T) {
+	repo := &fakeScheduleStore{
+		schedules: []store.Schedule{
+			{ID: 1, Platform: "", ChannelID: "", CronExpression: "0 9 * * 1-5", Prompt: "stray", Enabled: false},
+			{ID: 2, Platform: "telegram", ChannelID: "c1", CronExpression: "0 9 * * 1-5", Prompt: "active", Enabled: true},
+		},
+	}
+	s := New(repo, func(ctx context.Context, platform, channelID, prompt string) {})
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = s.Stop() }()
+
+	if len(repo.schedules) != 1 || repo.schedules[0].ID != 2 {
+		t.Fatalf("expected stray pending schedule to be swept, got: %+v", repo.schedules)
+	}
+}
+

@@ -24,6 +24,8 @@ type ScheduleRepo interface {
 	Delete(ctx context.Context, platform, channelID string, id int64) error
 	List(ctx context.Context, platform, channelID string) ([]Schedule, error)
 	ListAll(ctx context.Context) ([]Schedule, error)
+	Attribute(ctx context.Context, id int64, platform, channelID string) error
+	SweepPending(ctx context.Context) (int64, error)
 }
 
 type sqliteScheduleRepo struct {
@@ -52,6 +54,37 @@ func (r *sqliteScheduleRepo) Create(ctx context.Context, s *Schedule) (int64, er
 	}
 	s.ID = id
 	return id, nil
+}
+
+func (r *sqliteScheduleRepo) Attribute(ctx context.Context, id int64, platform, channelID string) error {
+	now := time.Now().Unix()
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE schedule SET platform = ?, channel_id = ?, enabled = 1, updated_at = ? WHERE id = ?`,
+		platform, channelID, now, id,
+	)
+	if err != nil {
+		return fmt.Errorf("store: schedule attribute: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: schedule attribute: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *sqliteScheduleRepo) SweepPending(ctx context.Context) (int64, error) {
+	res, err := r.db.ExecContext(ctx, `DELETE FROM schedule WHERE platform = '' AND channel_id = '' AND enabled = 0`)
+	if err != nil {
+		return 0, fmt.Errorf("store: schedule sweep pending: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("store: schedule sweep pending: %w", err)
+	}
+	return n, nil
 }
 
 func (r *sqliteScheduleRepo) Delete(ctx context.Context, platform, channelID string, id int64) error {

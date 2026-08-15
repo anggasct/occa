@@ -6,23 +6,26 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/anggasct/occa/internal/attribution"
 	"github.com/anggasct/occa/internal/scheduler"
 	"github.com/anggasct/occa/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/robfig/cron/v3"
 )
 
 type Server struct {
 	sched     *scheduler.Scheduler
-	tokens    *TokenStore
+	attrib    *attribution.Store
 	mcpServer *mcp.Server
 	httpSrv   *http.Server
 	port      int
 }
 
-func New(sched *scheduler.Scheduler, tokens *TokenStore) *Server {
-	s := &Server{sched: sched, tokens: tokens}
+func New(sched *scheduler.Scheduler, attrib *attribution.Store) *Server {
+	s := &Server{sched: sched, attrib: attrib}
 
 	mcpServer := mcp.NewServer(&mcp.Implementation{
 		Name:    "occa",
@@ -31,7 +34,7 @@ func New(sched *scheduler.Scheduler, tokens *TokenStore) *Server {
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
 		Name:        "schedule_task",
-		Description: "Schedule a recurring background task. The prompt will be executed automatically at the specified cron schedule and results pushed to the chat. The schedule_token is provided in the <occa:schedule_token> tag of the OCCA internal metadata line at the end of the user's message — include it verbatim.",
+		Description: "Schedule a recurring background task. The prompt will be executed automatically at the specified cron schedule and results pushed to the chat.",
 	}, s.handleScheduleTask)
 
 	s.mcpServer = mcpServer
@@ -39,34 +42,68 @@ func New(sched *scheduler.Scheduler, tokens *TokenStore) *Server {
 }
 
 type scheduleTaskInput struct {
-	ScheduleToken  string `json:"schedule_token" jsonschema:"the token from the <occa:schedule_token> tag in the OCCA internal metadata line at the end of the user's message"`
 	CronExpression string `json:"cron_expression" jsonschema:"the 5-field cron expression (e.g. '0 9 * * 1-5' for weekdays at 9 AM)"`
 	Prompt         string `json:"prompt" jsonschema:"the prompt or instruction to execute at each scheduled run"`
 	HumanSchedule  string `json:"human_schedule" jsonschema:"human-readable description of the schedule (e.g. 'every weekday at 9 AM')"`
 }
 
 func (s *Server) handleScheduleTask(ctx context.Context, req *mcp.CallToolRequest, input scheduleTaskInput) (*mcp.CallToolResult, scheduleTaskInput, error) {
-	platform, channelID, ok := s.tokens.Lookup(input.ScheduleToken)
-	if !ok {
+	if _, err := cron.ParseStandard(input.CronExpression); err != nil {
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "Error: invalid or expired schedule token. Include the schedule_token from the <occa:schedule_token> tag in the OCCA internal metadata line at the end of the user's message."}},
+			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Error: invalid cron expression %q: %v", input.CronExpression, err)}},
 			IsError: true,
 		}, input, nil
 	}
 
-	sched := store.Schedule{
-		Platform:       platform,
-		ChannelID:      channelID,
+	if strings.TrimSpace(input.Prompt) == "" {
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: "Error: prompt cannot be empty"}},
+			IsError: true,
+		}, input, nil
+	}
+
+	pending := store.Schedule{
+		Platform:       "",
+		ChannelID:      "",
 		CronExpression: input.CronExpression,
 		HumanSchedule:  input.HumanSchedule,
 		Prompt:         input.Prompt,
-		Enabled:        true,
+		Enabled:        false,
 	}
 
-	id, err := s.sched.AddSchedule(ctx, sched)
+	id, err := s.sched.AddSchedule(ctx, pending)
 	if err != nil {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Error creating schedule: %v", err)}},
+			IsError: true,
+		}, input, nil
+	}
+
+	fp := attribution.Fingerprint(input.CronExpression, input.Prompt, input.HumanSchedule)
+	var platform, channelID string
+	var attributed bool
+	for i := 0; i < 10; i++ {
+		if p, c, ok := s.attrib.Get(fp); ok {
+			platform = p
+			channelID = c
+			attributed = true
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	if !attributed {
+		_ = s.sched.RemoveSchedule(ctx, "", "", id)
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: "Error: could not attribute schedule — please try again"}},
+			IsError: true,
+		}, input, nil
+	}
+
+	if err := s.sched.AttributeSchedule(ctx, id, platform, channelID); err != nil {
+		_ = s.sched.RemoveSchedule(ctx, "", "", id)
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Error attributing schedule: %v", err)}},
 			IsError: true,
 		}, input, nil
 	}

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/anggasct/occa/internal/attribution"
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/relay"
 	"github.com/anggasct/occa/internal/render"
@@ -189,6 +190,16 @@ func (r *Router) runResponse(
 		streamer := relay.NewStreamer(msg.ReplyCtx, r.renderer, render.PlatformFor(msg.Platform))
 		streamer.SetPermissionPromptHandler(permissionHandler)
 		streamer.SetQuestionPromptHandler(questionHandler)
+		if r.attrib != nil {
+			streamer.SetScheduleAttributionHandler(func(input map[string]any) error {
+				cronExpr, _ := input["cron_expression"].(string)
+				prompt, _ := input["prompt"].(string)
+				humanSched, _ := input["human_schedule"].(string)
+				fp := attribution.Fingerprint(cronExpr, prompt, humanSched)
+				r.attrib.Put(fp, msg.Platform, msg.ChannelID)
+				return nil
+			})
+		}
 		if setter, ok := msg.ReplyCtx.(channel.ReactionSetter); ok {
 			streamer.SetReactionSetter(setter)
 		}

@@ -44,6 +44,9 @@ func New(st store.ScheduleRepo, executor Executor) *Scheduler {
 
 func (s *Scheduler) Start(ctx context.Context) error {
 	s.appCtx = ctx
+	if n, err := s.store.SweepPending(ctx); err == nil && n > 0 {
+		slog.Info("scheduler: swept stray pending schedules", "count", n)
+	}
 	schedules, err := s.store.ListAll(ctx)
 	if err != nil {
 		return fmt.Errorf("scheduler: load schedules: %w", err)
@@ -98,12 +101,30 @@ func (s *Scheduler) AddSchedule(ctx context.Context, sched store.Schedule) (int6
 		return 0, err
 	}
 	sched.ID = id
-	if err := s.register(sched); err != nil {
-		_ = s.store.Delete(ctx, sched.Platform, sched.ChannelID, id)
-		return 0, err
+	if sched.Enabled {
+		if err := s.register(sched); err != nil {
+			_ = s.store.Delete(ctx, sched.Platform, sched.ChannelID, id)
+			return 0, err
+		}
 	}
 	slog.Info("scheduler: schedule added", "id", id, "cron", sched.CronExpression, "channel", sched.ChannelID)
 	return id, nil
+}
+
+func (s *Scheduler) AttributeSchedule(ctx context.Context, id int64, platform, channelID string) error {
+	if err := s.store.Attribute(ctx, id, platform, channelID); err != nil {
+		return err
+	}
+	schedules, err := s.store.List(ctx, platform, channelID)
+	if err != nil {
+		return err
+	}
+	for _, sched := range schedules {
+		if sched.ID == id {
+			return s.register(sched)
+		}
+	}
+	return nil
 }
 
 func (s *Scheduler) RemoveSchedule(ctx context.Context, platform, channelID string, id int64) error {

@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/anggasct/occa/internal/attribution"
 	"github.com/anggasct/occa/internal/scheduler"
 	"github.com/anggasct/occa/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -24,53 +25,82 @@ func (f *fakeStore) Create(_ context.Context, s *store.Schedule) (int64, error) 
 	return s.ID, nil
 }
 
-func (f *fakeStore) Delete(_ context.Context, _, _ string, _ int64) error { return nil }
+func (f *fakeStore) Delete(_ context.Context, _, _ string, id int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, s := range f.schedules {
+		if s.ID == id {
+			f.schedules = append(f.schedules[:i], f.schedules[i+1:]...)
+			return nil
+		}
+	}
+	return nil
+}
 
 func (f *fakeStore) List(_ context.Context, _, _ string) ([]store.Schedule, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.schedules, nil
 }
 
 func (f *fakeStore) ListAll(_ context.Context) ([]store.Schedule, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.schedules, nil
 }
 
-func newTestServer() (*Server, *fakeStore, *TokenStore) {
+func (f *fakeStore) Attribute(_ context.Context, id int64, platform, channelID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, s := range f.schedules {
+		if s.ID == id {
+			f.schedules[i].Platform = platform
+			f.schedules[i].ChannelID = channelID
+			f.schedules[i].Enabled = true
+			return nil
+		}
+	}
+	return store.ErrNotFound
+}
+
+func (f *fakeStore) SweepPending(_ context.Context) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var count int64
+	var kept []store.Schedule
+	for _, s := range f.schedules {
+		if s.Platform == "" && s.ChannelID == "" && !s.Enabled {
+			count++
+		} else {
+			kept = append(kept, s)
+		}
+	}
+	f.schedules = kept
+	return count, nil
+}
+
+func newTestServer() (*Server, *fakeStore, *attribution.Store) {
 	repo := &fakeStore{}
 	executor := func(ctx context.Context, platform, channelID, prompt string) {}
 	sched := scheduler.New(repo, executor)
-	tokens := NewTokenStore()
-	srv := New(sched, tokens)
-	return srv, repo, tokens
+	attrib := attribution.NewStore()
+	srv := New(sched, attrib)
+	return srv, repo, attrib
 }
 
-func TestMCPServerInvalidToken(t *testing.T) {
-	srv, _, _ := newTestServer()
+func TestMCPServerHappyPath(t *testing.T) {
+	srv, repo, attrib := newTestServer()
+	cronExpr := "0 9 * * 1-5"
+	prompt := "run tests"
+	humanSched := "weekdays at 9am"
+
+	fp := attribution.Fingerprint(cronExpr, prompt, humanSched)
+	attrib.Put(fp, "telegram", "chat123")
 
 	result, _, err := srv.handleScheduleTask(context.Background(), nil, scheduleTaskInput{
-		ScheduleToken:  "bogus",
-		CronExpression: "0 9 * * 1-5",
-		Prompt:         "test",
-	})
-	if err != nil {
-		t.Fatalf("handleScheduleTask: %v", err)
-	}
-	if !result.IsError {
-		t.Fatal("expected error for invalid token")
-	}
-}
-
-func TestMCPServerValidToken(t *testing.T) {
-	srv, repo, tokens := newTestServer()
-	token, err := tokens.Generate("telegram", "chat123")
-	if err != nil {
-		t.Fatalf("Generate: %v", err)
-	}
-
-	result, _, err := srv.handleScheduleTask(context.Background(), nil, scheduleTaskInput{
-		ScheduleToken:  token,
-		CronExpression: "0 9 * * 1-5",
-		Prompt:         "run tests",
-		HumanSchedule:  "weekdays at 9am",
+		CronExpression: cronExpr,
+		Prompt:         prompt,
+		HumanSchedule:  humanSched,
 	})
 	if err != nil {
 		t.Fatalf("handleScheduleTask: %v", err)
@@ -85,65 +115,59 @@ func TestMCPServerValidToken(t *testing.T) {
 			text = tc.Text
 		}
 	}
-	if !strings.Contains(text, "Scheduled") {
-		t.Fatalf("expected 'Scheduled' in result, got: %s", text)
+	if !strings.Contains(text, "Scheduled (ID: 1)") {
+		t.Fatalf("expected 'Scheduled (ID: 1)' in result, got: %s", text)
 	}
 	if len(repo.schedules) != 1 {
 		t.Fatalf("expected 1 schedule, got %d", len(repo.schedules))
 	}
 	s := repo.schedules[0]
-	if s.Platform != "telegram" || s.ChannelID != "chat123" {
-		t.Fatalf("wrong attribution: platform=%s channel=%s", s.Platform, s.ChannelID)
+	if s.Platform != "telegram" || s.ChannelID != "chat123" || !s.Enabled {
+		t.Fatalf("wrong attribution or state: %+v", s)
 	}
 }
 
-func TestMCPServerTokenCannotBeUsedForOtherChannel(t *testing.T) {
-	srv, repo, tokens := newTestServer()
-	tokenA, err := tokens.Generate("telegram", "chatA")
-	if err != nil {
-		t.Fatalf("Generate A: %v", err)
-	}
-	tokenB, err := tokens.Generate("discord", "chatB")
-	if err != nil {
-		t.Fatalf("Generate B: %v", err)
-	}
+func TestMCPServerTimeoutPath(t *testing.T) {
+	srv, repo, _ := newTestServer()
 
-	_, _, _ = srv.handleScheduleTask(context.Background(), nil, scheduleTaskInput{
-		ScheduleToken:  tokenA,
+	result, _, err := srv.handleScheduleTask(context.Background(), nil, scheduleTaskInput{
 		CronExpression: "0 9 * * 1-5",
-		Prompt:         "from A",
+		Prompt:         "unattributed",
+		HumanSchedule:  "weekdays at 9am",
 	})
-	_, _, _ = srv.handleScheduleTask(context.Background(), nil, scheduleTaskInput{
-		ScheduleToken:  tokenB,
-		CronExpression: "0 10 * * 1-5",
-		Prompt:         "from B",
-	})
+	if err != nil {
+		t.Fatalf("handleScheduleTask: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error result on attribution timeout")
+	}
 
-	if len(repo.schedules) != 2 {
-		t.Fatalf("expected 2 schedules, got %d", len(repo.schedules))
-	}
-	if repo.schedules[0].ChannelID != "chatA" {
-		t.Fatalf("schedule 0 should be chatA, got %s", repo.schedules[0].ChannelID)
-	}
-	if repo.schedules[1].ChannelID != "chatB" {
-		t.Fatalf("schedule 1 should be chatB, got %s", repo.schedules[1].ChannelID)
+	if len(repo.schedules) != 0 {
+		t.Fatalf("expected pending row to be deleted on timeout, got %d rows", len(repo.schedules))
 	}
 }
 
-func TestMCPServerForgedTokenRejected(t *testing.T) {
-	srv, repo, tokens := newTestServer()
-	_, _ = tokens.Generate("telegram", "chatA")
+func TestMCPServerInvalidCronAndEmptyPrompt(t *testing.T) {
+	srv, repo, _ := newTestServer()
 
 	result, _, _ := srv.handleScheduleTask(context.Background(), nil, scheduleTaskInput{
-		ScheduleToken:  "forged-token-not-in-store",
-		CronExpression: "0 9 * * 1-5",
-		Prompt:         "attack",
+		CronExpression: "invalid cron",
+		Prompt:         "test",
 	})
 	if !result.IsError {
-		t.Fatal("forged token should be rejected")
+		t.Fatal("expected error for invalid cron")
 	}
+
+	result, _, _ = srv.handleScheduleTask(context.Background(), nil, scheduleTaskInput{
+		CronExpression: "0 9 * * 1-5",
+		Prompt:         "   ",
+	})
+	if !result.IsError {
+		t.Fatal("expected error for empty prompt")
+	}
+
 	if len(repo.schedules) != 0 {
-		t.Fatal("no schedule should be created with forged token")
+		t.Fatalf("expected 0 schedules created, got %d", len(repo.schedules))
 	}
 }
 
