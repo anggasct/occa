@@ -164,7 +164,7 @@ func (r *Router) runResponse(
 	}
 	defer stopProgress()
 
-	go startProgressTicker(ctx, msg.ReplyCtx, progressStopCh)
+	go startProgressTicker(ctx, msg.ReplyCtx, progressStopCh, progressTickerInterval)
 
 	observedEvents := make(chan relay.Event, 64)
 	go func() {
@@ -270,8 +270,8 @@ func progressNotice(seconds int64) string {
 
 var progressTickerInterval = 60 * time.Second
 
-func startProgressTicker(ctx context.Context, reply channel.ReplyContext, stopCh <-chan struct{}) {
-	ticker := time.NewTicker(progressTickerInterval)
+func startProgressTicker(ctx context.Context, reply channel.ReplyContext, stopCh <-chan struct{}, interval time.Duration) {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	var elapsed int64

@@ -556,14 +556,10 @@ func (r *removerReply) Delete(ref channel.MessageRef) error {
 var _ channel.MessageRemover = (*removerReply)(nil)
 
 func TestProgressTickerDeletesNoticeOnStop(t *testing.T) {
-	origInterval := progressTickerInterval
-	progressTickerInterval = 5 * time.Millisecond
-	defer func() { progressTickerInterval = origInterval }()
-
 	reply := &removerReply{responseReply: newResponseReply()}
 	stopCh := make(chan struct{})
 
-	go startProgressTicker(context.Background(), reply, stopCh)
+	go startProgressTicker(context.Background(), reply, stopCh, 5*time.Millisecond)
 
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
