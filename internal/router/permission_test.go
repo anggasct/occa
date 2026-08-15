@@ -110,8 +110,14 @@ func (c *permissionClient) Events(_ context.Context, _ string) (<-chan relay.Eve
 func (c *permissionClient) AnswerQuestion(_ context.Context, _ string, _ [][]string) error {
 	return nil
 }
-func (c *permissionClient) RejectQuestion(_ context.Context, _ string) error { return nil }
-func (c *permissionClient) AbortSession(_ context.Context, _ string) error   { return nil }
+func (c *permissionClient) RejectQuestion(_ context.Context, _ string) error         { return nil }
+func (c *permissionClient) AbortSession(_ context.Context, _ string) error           { return nil }
+func (c *permissionClient) SummarizeSession(_ context.Context, _, _, _ string) error { return nil }
+func (c *permissionClient) RevertMessage(_ context.Context, _, _ string) error       { return nil }
+func (c *permissionClient) UnrevertSession(_ context.Context, _ string) error        { return nil }
+func (c *permissionClient) ListMessages(_ context.Context, _ string) ([]relay.MessageInfo, error) {
+	return nil, nil
+}
 func (c *permissionClient) ReplyPermission(ctx context.Context, requestID string, decision relay.PermissionReply) error {
 	c.mu.Lock()
 	callIndex := len(c.calls)

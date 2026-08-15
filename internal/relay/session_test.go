@@ -93,6 +93,14 @@ func (m *mockClient) Events(_ context.Context, _ string) (<-chan Event, error) {
 	return nil, nil
 }
 func (m *mockClient) AbortSession(_ context.Context, _ string) error { return nil }
+func (m *mockClient) SummarizeSession(_ context.Context, _, _, _ string) error {
+	return nil
+}
+func (m *mockClient) RevertMessage(_ context.Context, _, _ string) error { return nil }
+func (m *mockClient) UnrevertSession(_ context.Context, _ string) error  { return nil }
+func (m *mockClient) ListMessages(_ context.Context, _ string) ([]MessageInfo, error) {
+	return nil, nil
+}
 
 func TestResolveExisting(t *testing.T) {
 	repo := &mockSessionRepo{activeID: "existing", ownerPID: 100}

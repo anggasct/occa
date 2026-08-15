@@ -95,6 +95,22 @@ func (c *Client) AbortSession(ctx context.Context, sessionID string) error {
 	return nil
 }
 
+func (c *Client) SummarizeSession(ctx context.Context, sessionID, providerID, modelID string) error {
+	return fmt.Errorf("cli: session state commands are not supported by the CLI backend")
+}
+
+func (c *Client) RevertMessage(ctx context.Context, sessionID, messageID string) error {
+	return fmt.Errorf("cli: session state commands are not supported by the CLI backend")
+}
+
+func (c *Client) UnrevertSession(ctx context.Context, sessionID string) error {
+	return fmt.Errorf("cli: session state commands are not supported by the CLI backend")
+}
+
+func (c *Client) ListMessages(ctx context.Context, sessionID string) ([]relay.MessageInfo, error) {
+	return nil, fmt.Errorf("cli: list messages is not supported by the CLI backend")
+}
+
 func (c *Client) Providers(ctx context.Context) (relay.Providers, error) {
 	return relay.Providers{}, nil
 }
