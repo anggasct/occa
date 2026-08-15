@@ -46,26 +46,16 @@ func (f *fakeScheduleStore) ListAll(_ context.Context) ([]store.Schedule, error)
 	return enabled, nil
 }
 
-func (f *fakeScheduleStore) AttributePending(_ context.Context, platform, channelID, cronExpression, prompt, humanSchedule string) (bool, error) {
+func (f *fakeScheduleStore) Attribute(_ context.Context, id int64, platform, channelID string) error {
 	for i, s := range f.schedules {
-		if s.Platform == "" && s.ChannelID == "" && !s.Enabled &&
-			s.CronExpression == cronExpression && s.Prompt == prompt && s.HumanSchedule == humanSchedule {
+		if s.ID == id {
 			f.schedules[i].Platform = platform
 			f.schedules[i].ChannelID = channelID
 			f.schedules[i].Enabled = true
-			return true, nil
+			return nil
 		}
 	}
-	return false, nil
-}
-
-func (f *fakeScheduleStore) Attributed(_ context.Context, id int64) (bool, error) {
-	for _, s := range f.schedules {
-		if s.ID == id {
-			return s.Platform != "", nil
-		}
-	}
-	return false, nil
+	return store.ErrNotFound
 }
 
 func (f *fakeScheduleStore) SweepPending(_ context.Context) (int64, error) {

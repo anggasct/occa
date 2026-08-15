@@ -113,32 +113,23 @@ func (s *Scheduler) AddSchedule(ctx context.Context, sched store.Schedule) (int6
 	return id, nil
 }
 
-func (s *Scheduler) Attributed(ctx context.Context, id int64) (bool, error) {
-	ok, err := s.store.Attributed(ctx, id)
-	if err != nil || !ok {
-		return ok, err
+func (s *Scheduler) AttributeSchedule(ctx context.Context, id int64, platform, channelID string) error {
+	if err := s.store.Attribute(ctx, id, platform, channelID); err != nil {
+		return err
 	}
-	schedules, err := s.store.ListAll(ctx)
+	schedules, err := s.store.List(ctx, platform, channelID)
 	if err != nil {
-		return false, err
+		return err
 	}
 	for _, sched := range schedules {
-		if sched.ID != id {
-			continue
+		if sched.ID == id {
+			return s.register(sched)
 		}
-		s.mu.Lock()
-		_, registered := s.entryIDs[id]
-		s.mu.Unlock()
-		if !registered {
-			if err := s.register(sched); err != nil {
-				slog.Warn("scheduler: attributed schedule not registered", "id", id, "error", err)
-			}
-		}
-		return true, nil
 	}
-	return false, nil
+	return nil
 }
 
+// RemoveSchedule removes a schedule and its cron entry.
 func (s *Scheduler) RemoveSchedule(ctx context.Context, platform, channelID string, id int64) error {
 	s.mu.Lock()
 	entryID, ok := s.entryIDs[id]
@@ -148,12 +139,6 @@ func (s *Scheduler) RemoveSchedule(ctx context.Context, platform, channelID stri
 	}
 	s.mu.Unlock()
 	return s.store.Delete(ctx, platform, channelID, id)
-}
-
-// AttributePending stamps the oldest unattributed pending row with the
-// originating conversation (relay-side attribution for schedule_task).
-func (s *Scheduler) AttributePending(ctx context.Context, platform, channelID, cronExpression, prompt, humanSchedule string) (bool, error) {
-	return s.store.AttributePending(ctx, platform, channelID, cronExpression, prompt, humanSchedule)
 }
 
 func (s *Scheduler) ListSchedules(ctx context.Context, platform, channelID string) ([]store.Schedule, error) {

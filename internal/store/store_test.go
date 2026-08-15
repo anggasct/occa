@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -530,106 +531,37 @@ func TestSessionTitle(t *testing.T) {
 	}
 }
 
-func TestScheduleAttributePending(t *testing.T) {
+func TestScheduleAttribute(t *testing.T) {
 	s := tempStore(t)
 	ctx := context.Background()
 
-	cronExpr := "0 9 * * 1-5"
-	prompt := "test"
-	humanSched := "weekdays 9am"
-
-	sched1 := Schedule{
+	sched := Schedule{
 		Platform:       "",
 		ChannelID:      "",
-		CronExpression: cronExpr,
-		HumanSchedule:  humanSched,
-		Prompt:         prompt,
+		CronExpression: "0 9 * * 1-5",
+		HumanSchedule:  "weekdays 9am",
+		Prompt:         "test",
 		Enabled:        false,
 	}
-	sched2 := Schedule{
-		Platform:       "",
-		ChannelID:      "",
-		CronExpression: cronExpr,
-		HumanSchedule:  humanSched,
-		Prompt:         prompt,
-		Enabled:        false,
-	}
-	id1, err := s.ScheduleRepo().Create(ctx, &sched1)
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	id2, err := s.ScheduleRepo().Create(ctx, &sched2)
+	id, err := s.ScheduleRepo().Create(ctx, &sched)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	// Oldest pending row first, then the next — one-to-one pairing for
-	// identical concurrent calls.
-	stamped, err := s.ScheduleRepo().AttributePending(ctx, "telegram", "chat123", cronExpr, prompt, humanSched)
-	if err != nil {
-		t.Fatalf("AttributePending: %v", err)
-	}
-	if !stamped {
-		t.Fatal("expected first stamp to hit a pending row")
-	}
-	stamped, err = s.ScheduleRepo().AttributePending(ctx, "discord", "c2", cronExpr, prompt, humanSched)
-	if err != nil {
-		t.Fatalf("AttributePending: %v", err)
-	}
-	if !stamped {
-		t.Fatal("expected second stamp to hit the remaining pending row")
+	if err := s.ScheduleRepo().Attribute(ctx, id, "telegram", "chat123"); err != nil {
+		t.Fatalf("Attribute: %v", err)
 	}
 
-	ok, err := s.ScheduleRepo().Attributed(ctx, id1)
-	if err != nil {
-		t.Fatalf("Attributed: %v", err)
-	}
-	if !ok {
-		t.Fatal("expected row 1 attributed")
-	}
-	ok, err = s.ScheduleRepo().Attributed(ctx, id2)
-	if err != nil {
-		t.Fatalf("Attributed: %v", err)
-	}
-	if !ok {
-		t.Fatal("expected row 2 attributed")
-	}
-
-	row1, err := s.ScheduleRepo().List(ctx, "telegram", "chat123")
+	list, err := s.ScheduleRepo().List(ctx, "telegram", "chat123")
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(row1) != 1 || row1[0].ID != id1 || !row1[0].Enabled {
-		t.Fatalf("row 1 attributed wrong: %+v", row1)
-	}
-	row2, err := s.ScheduleRepo().List(ctx, "discord", "c2")
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(row2) != 1 || row2[0].ID != id2 || !row2[0].Enabled {
-		t.Fatalf("row 2 attributed wrong: %+v", row2)
+	if len(list) != 1 || list[0].ID != id || list[0].Platform != "telegram" || list[0].ChannelID != "chat123" || !list[0].Enabled {
+		t.Fatalf("unexpected attributed schedule: %+v", list)
 	}
 
-	// No pending rows left to stamp.
-	stamped, err = s.ScheduleRepo().AttributePending(ctx, "telegram", "chat3", cronExpr, prompt, humanSched)
-	if err != nil {
-		t.Fatalf("AttributePending: %v", err)
-	}
-	if stamped {
-		t.Fatal("expected no pending row to stamp after both attributed")
-	}
-}
-
-func TestScheduleAttributedUnknownID(t *testing.T) {
-	s := tempStore(t)
-	ctx := context.Background()
-
-	ok, err := s.ScheduleRepo().Attributed(ctx, 99999)
-	if err != nil {
-		t.Fatalf("Attributed: %v", err)
-	}
-	if ok {
-		t.Fatal("expected unknown id to be unattributed")
+	if err := s.ScheduleRepo().Attribute(ctx, 99999, "telegram", "chat123"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for missing id, got: %v", err)
 	}
 }
 

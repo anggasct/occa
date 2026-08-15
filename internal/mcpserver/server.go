@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/anggasct/occa/internal/attribution"
 	"github.com/anggasct/occa/internal/scheduler"
 	"github.com/anggasct/occa/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -17,13 +18,14 @@ import (
 
 type Server struct {
 	sched     *scheduler.Scheduler
+	attrib    *attribution.Store
 	mcpServer *mcp.Server
 	httpSrv   *http.Server
 	port      int
 }
 
-func New(sched *scheduler.Scheduler) *Server {
-	s := &Server{sched: sched}
+func New(sched *scheduler.Scheduler, attrib *attribution.Store) *Server {
+	s := &Server{sched: sched, attrib: attrib}
 
 	mcpServer := mcp.NewServer(&mcp.Implementation{
 		Name:    "occa",
@@ -77,13 +79,16 @@ func (s *Server) handleScheduleTask(ctx context.Context, req *mcp.CallToolReques
 		}, input, nil
 	}
 
-	attributed := false
+	// Wait for the relay to observe this tool call and record the
+	// originating conversation. The FIFO pop consumes exactly one entry, so
+	// identical concurrent calls pair one-to-one by tool-execution order.
+	fp := attribution.Fingerprint(input.CronExpression, input.Prompt, input.HumanSchedule)
+	var platform, channelID string
+	var attributed bool
 	for i := 0; i < 10; i++ {
-		ok, err := s.sched.Attributed(ctx, id)
-		if err != nil {
-			break
-		}
-		if ok {
+		if p, c, ok := s.attrib.Pop(fp); ok {
+			platform = p
+			channelID = c
 			attributed = true
 			break
 		}
@@ -91,9 +96,19 @@ func (s *Server) handleScheduleTask(ctx context.Context, req *mcp.CallToolReques
 	}
 
 	if !attributed {
-		_ = s.sched.RemoveSchedule(ctx, "", "", id)
+		if err := s.sched.RemoveSchedule(ctx, "", "", id); err != nil {
+			slog.Warn("schedule attribution: timeout cleanup failed", "id", id, "error", err)
+		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "Error: could not attribute schedule — please try again"}},
+			IsError: true,
+		}, input, nil
+	}
+
+	if err := s.sched.AttributeSchedule(ctx, id, platform, channelID); err != nil {
+		_ = s.sched.RemoveSchedule(ctx, "", "", id)
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Error attributing schedule: %v", err)}},
 			IsError: true,
 		}, input, nil
 	}

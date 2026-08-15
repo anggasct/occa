@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anggasct/occa/internal/attribution"
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/relay"
 	"github.com/anggasct/occa/internal/store"
@@ -365,18 +366,7 @@ func (f *fakeStore) OverrideRepo() store.OverrideRepo { return f.overrideRepo }
 func (f *fakeStore) ScheduleRepo() store.ScheduleRepo { return f.scheduleRepo }
 func (f *fakeStore) Close() error                     { return nil }
 
-type attrCall struct {
-	platform  string
-	channelID string
-	cron      string
-	prompt    string
-	human     string
-}
-
-type fakeScheduleRepo struct {
-	mu             sync.Mutex
-	attributeCalls []attrCall
-}
+type fakeScheduleRepo struct{}
 
 func (f *fakeScheduleRepo) Create(_ context.Context, s *store.Schedule) (int64, error) { return 1, nil }
 func (f *fakeScheduleRepo) Delete(_ context.Context, _, _ string, _ int64) error       { return nil }
@@ -388,15 +378,8 @@ func (f *fakeScheduleRepo) ListSchedules(_ context.Context, _, _ string) ([]stor
 	return nil, nil
 }
 func (f *fakeScheduleRepo) RemoveSchedule(_ context.Context, _, _ string, _ int64) error { return nil }
-func (f *fakeScheduleRepo) Attributed(_ context.Context, _ int64) (bool, error)          { return false, nil }
+func (f *fakeScheduleRepo) Attribute(_ context.Context, _ int64, _, _ string) error      { return nil }
 func (f *fakeScheduleRepo) SweepPending(_ context.Context) (int64, error)                { return 0, nil }
-
-func (f *fakeScheduleRepo) AttributePending(_ context.Context, platform, channelID, cronExpression, prompt, humanSchedule string) (bool, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.attributeCalls = append(f.attributeCalls, attrCall{platform, channelID, cronExpression, prompt, humanSchedule})
-	return true, nil
-}
 
 type fakeSessionRepo struct {
 	activeID string
@@ -1693,12 +1676,13 @@ func TestPassthroughContainsNoScheduleToken(t *testing.T) {
 
 func TestResponseWiringScheduleAttribution(t *testing.T) {
 	r, client, reply := newTestRouter()
-	sched := &fakeScheduleRepo{}
-	r.SetScheduler(sched)
+	attrib := attribution.NewStore()
+	r.SetAttributionStore(attrib)
 
 	cronExpr := "0 9 * * 1-5"
 	prompt := "hello"
 	humanSched := "weekdays at 9am"
+	fp := attribution.Fingerprint(cronExpr, prompt, humanSched)
 
 	inputJSON, _ := json.Marshal(map[string]any{
 		"cron_expression": cronExpr,
@@ -1720,17 +1704,12 @@ func TestResponseWiringScheduleAttribution(t *testing.T) {
 	waitForDispatch(t, client)
 	waitForResponse(t, r)
 
-	sched.mu.Lock()
-	defer sched.mu.Unlock()
-	if len(sched.attributeCalls) != 1 {
-		t.Fatalf("expected 1 AttributePending call, got %d", len(sched.attributeCalls))
+	platform, channelID, ok := attrib.Pop(fp)
+	if !ok {
+		t.Fatal("expected attribution store to be populated by response stream event")
 	}
-	call := sched.attributeCalls[0]
-	if call.platform != "telegram" || call.channelID != "chat1" {
-		t.Fatalf("unexpected attribution: platform=%s channelID=%s", call.platform, call.channelID)
-	}
-	if call.cron != cronExpr || call.prompt != prompt || call.human != humanSched {
-		t.Fatalf("unexpected fingerprint fields: %+v", call)
+	if platform != "telegram" || channelID != "chat1" {
+		t.Fatalf("unexpected attribution: platform=%s channelID=%s", platform, channelID)
 	}
 }
 

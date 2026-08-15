@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/anggasct/occa/internal/attribution"
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/channel/discord"
 	"github.com/anggasct/occa/internal/channel/telegram"
@@ -185,17 +186,23 @@ func main() {
 
 	sched := scheduler.New(db.ScheduleRepo(), executor)
 	if err := sched.Start(ctx); err != nil {
-		slog.Error("failed to start scheduler", "error", err)
+		// Do not serve scheduling (or the rest of the app) after a failed
+		// pending-row sweep / schedule load: a half-initialized scheduler
+		// would silently drop or misfire jobs.
+		fmt.Fprintf(os.Stderr, "occa: scheduler start: %v\n", err)
+		os.Exit(1)
 	}
 	defer func() { _ = sched.Stop() }()
 
-	mcpSrv := mcpserver.New(sched)
+	attrib := attribution.NewStore()
+	mcpSrv := mcpserver.New(sched, attrib)
 	if err := mcpSrv.Start(ctx); err != nil {
 		slog.Error("failed to start mcp server", "error", err)
 	}
 	defer mcpSrv.Stop()
 
 	rt.SetScheduler(sched)
+	rt.SetAttributionStore(attrib)
 
 	registerMCP(ctx, manager, mcpSrv, cfg.Agent.DefaultWorkdir)
 

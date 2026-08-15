@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/anggasct/occa/internal/attribution"
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/relay"
 	"github.com/anggasct/occa/internal/render"
@@ -76,6 +77,7 @@ type Router struct {
 	adminID        string
 	startedAt      time.Time
 	sched          ScheduleStore
+	attrib         *attribution.Store
 	responses      *responseCoordinator
 	permissions    *permissionBroker
 	questions      *questionBroker
@@ -86,11 +88,14 @@ type Router struct {
 type ScheduleStore interface {
 	ListSchedules(ctx context.Context, platform, channelID string) ([]store.Schedule, error)
 	RemoveSchedule(ctx context.Context, platform, channelID string, id int64) error
-	AttributePending(ctx context.Context, platform, channelID, cronExpression, prompt, humanSchedule string) (bool, error)
 }
 
 func (r *Router) SetScheduler(s ScheduleStore) {
 	r.sched = s
+}
+
+func (r *Router) SetAttributionStore(s *attribution.Store) {
+	r.attrib = s
 }
 
 func New(instances InstanceProvider, st store.Store, defaultWorkdir string, adminID string) *Router {
