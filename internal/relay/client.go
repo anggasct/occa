@@ -414,7 +414,7 @@ func (c *HTTPClient) UnrevertSession(ctx context.Context, sessionID string) erro
 }
 
 func (c *HTTPClient) ListMessages(ctx context.Context, sessionID string) ([]MessageInfo, error) {
-	resp, err := c.get(ctx, "/session/"+sessionID+"/message")
+	resp, err := c.get(ctx, "/session/"+sessionID+"/message?limit=50")
 	if err != nil {
 		return nil, fmt.Errorf("relay: list messages: %w", err)
 	}

@@ -717,6 +717,20 @@ func TestRevertMessage(t *testing.T) {
 			t.Fatalf("expected ErrNotFound, got %v", err)
 		}
 	})
+
+	t.Run("error 500", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("revert failed"))
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		err := c.RevertMessage(context.Background(), "ses_500", "msg-123")
+		if err == nil || !strings.Contains(err.Error(), "revert failed") {
+			t.Fatalf("expected error containing revert failed, got %v", err)
+		}
+	})
 }
 
 func TestUnrevertSession(t *testing.T) {
@@ -747,13 +761,27 @@ func TestUnrevertSession(t *testing.T) {
 			t.Fatalf("expected ErrNotFound, got %v", err)
 		}
 	})
+
+	t.Run("error 500", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("unrevert failed"))
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		err := c.UnrevertSession(context.Background(), "ses_500")
+		if err == nil || !strings.Contains(err.Error(), "unrevert failed") {
+			t.Fatalf("expected error containing unrevert failed, got %v", err)
+		}
+	})
 }
 
 func TestListMessages(t *testing.T) {
 	t.Run("success 200", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodGet || r.URL.Path != "/session/ses_x/message" {
-				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			if r.Method != http.MethodGet || r.URL.Path != "/session/ses_x/message" || r.URL.RawQuery != "limit=50" {
+				t.Errorf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
@@ -787,6 +815,19 @@ func TestListMessages(t *testing.T) {
 		_, err := c.ListMessages(context.Background(), "ses_404")
 		if !errors.Is(err, ErrNotFound) {
 			t.Fatalf("expected ErrNotFound, got %v", err)
+		}
+	})
+
+	t.Run("error 500", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		_, err := c.ListMessages(context.Background(), "ses_500")
+		if err == nil || !strings.Contains(err.Error(), "unexpected status 500") {
+			t.Fatalf("expected error containing unexpected status 500, got %v", err)
 		}
 	})
 }
