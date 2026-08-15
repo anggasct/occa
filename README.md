@@ -1,43 +1,41 @@
 # OCCA
 
-A chat adapter for [OpenCode](https://opencode.ai). OCCA bridges your chat
-platform to OpenCode: it answers short-form commands (with legacy `/occa:*` aliases) and
-forwards everything else to OpenCode unchanged, so you can drive an OpenCode
-agent from Telegram or Discord.
+> A chat adapter that lets you drive an [OpenCode](https://opencode.ai) agent from your messaging platform.
 
-OCCA is a single static binary with zero runtime dependencies. It holds no
-agent loop, no model configuration, and no provider state — OpenCode owns all
-of that.
+OCCA sits between a chat platform (Telegram, Discord) and OpenCode's server
+mode. It answers its own short-form commands, forwards everything else to
+OpenCode unchanged, and streams the agent's responses back into the chat as
+progressive edits. It is a single static binary with zero runtime
+dependencies — OpenCode owns the agent loop, model configuration, and
+provider state.
 
-## Features
+## What it can do
 
-- **Telegram & Discord adapters** — receive messages, stream OpenCode
-  responses as progressive edits, render markdown per platform (HTML for
-  Telegram, native for Discord), inline permission prompts with buttons, file
-  and voice attachments.
-- **Transparent passthrough** — anything that is not one of OCCA's commands goes
-  to OpenCode verbatim, so new OpenCode commands work without changes.
-- **Streaming responses** — OpenCode's event stream is buffered into
-  incremental chat edits, with multi-message overflow and continuation markers
-  for long outputs.
-- **Sessions & commands** — per-channel session persistence across restarts.
-- **Access control** — deny-by-default at the ingress boundary, per-user roles
-  per channel, admin-only commands.
-- **Scheduled tasks** — describe a recurring task in chat and OCCA registers a
-  cron job whose results are pushed back to the channel.
+- **Telegram & Discord adapters** — stream OpenCode responses as progressive
+  chat edits, render markdown per platform, inline permission prompts with
+  buttons, file and voice attachments, and lifecycle reactions on Discord.
+- **Transparent passthrough** — anything that is not one of OCCA's commands
+  goes to OpenCode verbatim, so new agent commands work without changes.
+- **Sessions & commands** — per-conversation sessions that persist across
+  restarts, session titles, a numbered session switcher, context usage in
+  `/status`, and session control via `/stop`, `/steer`, and `/reset`.
+- **Conversation queue** — while the agent is busy, up to five more messages
+  queue up and run automatically in order when the current response finishes.
+- **Access control** — deny-by-default at the ingress, per-user roles per
+  channel, admin-only commands.
+- **Scheduled tasks** — describe a recurring task in plain language and OCCA
+  runs it on a cron schedule, pushing each result back to the chat.
 - **Webhook ingestion** — HTTP endpoints with per-endpoint secrets that feed
-  prompts into a channel for OpenCode analysis.
-- **OpenCode process management** — lazy spawn of one OpenCode instance per
-  working directory, idle reaping, capacity caps, graceful shutdown, optional
-  auto-install when the `opencode` binary is missing.
+  prompts into a channel for agent analysis.
+- **OpenCode process management** — lazy-spawns one agent instance per working
+  directory, idles them out, caps capacity, and shuts down gracefully
+  (optional auto-install when the `opencode` binary is missing).
 - **SQLite store** — sessions, channels, overrides, and schedules in a single
   pure-Go database file with versioned migrations.
 
-## Requirements
+## Stack
 
-- A chat bot token for at least one platform (Telegram, Discord, or both).
-- [OpenCode](https://opencode.ai) installed (its server mode, `opencode
-  serve`, is used under the hood).
+Go · SQLite · Telegram Bot API · Discord API · OpenCode (SSE)
 
 ## Install
 
@@ -45,10 +43,9 @@ of that.
 curl -fsSL https://github.com/anggasct/occa/releases/latest/download/occa_$(uname -s)_$(uname -m) | bash
 ```
 
-The installer detects your OS/arch and installs the matching release binary.
-If `opencode` is not already on `PATH`, it runs OpenCode's official installer.
-
-To install a specific release instead of the latest:
+The installer detects your OS/arch, installs the matching release binary, and
+runs OpenCode's official installer if `opencode` is not on `PATH`. To pin a
+specific release:
 
 ```sh
 OCCA_VERSION=v1.0.0 curl -fsSL https://github.com/anggasct/occa/releases/latest/download/occa_$(uname -s)_$(uname -m) | bash
@@ -60,7 +57,7 @@ Or build from source:
 go build -o occa ./cmd/occa
 ```
 
-## Quick start
+Quick start:
 
 ```sh
 export OCCA_TELEGRAM_TOKEN="<your bot token>"
@@ -73,39 +70,7 @@ overridden with an `OCCA_*` environment variable (env var > config file >
 built-in default). Bot tokens are env-only and never written to the config
 file.
 
-## Usage
-
-Send OCCA a message in your chat and it is forwarded to OpenCode:
-
-> refactor this function to use generics
-
-When OpenCode asks for permission to use a tool, an inline prompt with buttons
-appears in the chat:
-
-> 🔐 Permission requested: bash — Allow once / Always / Reject
-
-### Commands
-
-| Command | Purpose |
-|---------|---------|
-| `/help` | List commands |
-| `/status` | Agent health and session info |
-| `/session [list\|new\|switch <id>\|delete <id>]` | Manage sessions |
-| `/dir [path]` | View or set this channel's working directory |
-| `/channel [mention\|all\|thread]` | View or set listen mode |
-| `/model [channel] [provider/model-id[@variant]]` | View or set the model |
-| `/variants [provider/model-id]` | List/set model reasoning variants |
-| `/admin <user_id>` | Grant or revoke admin |
-| `/allow <user_id>` / `/deny <user_id>` | Grant or revoke access |
-| `/reset` | Clear the current session and start fresh |
-| `/schedules [delete <id>]` | View or delete scheduled tasks |
-
-Legacy `/occa:*` and `/occa_*` forms still work as aliases.
-
-Everything else — including other `/`-prefixed commands — is passed through to
-OpenCode untouched.
-
-### Scheduling
+## Scheduling
 
 Describe a recurring task in plain language:
 
@@ -125,8 +90,8 @@ chat platform ──► channel adapter ──► router ──► opencode
 - **Adapters** own the platform SDKs (Telegram, Discord) and normalize every
   incoming message into one generic shape.
 - **Router** authorizes everything at the ingress, classifies input as a
-  callback, an OCCA command (short form or legacy alias), or an ordinary
-  message, and enforces the command namespace and listen-mode policy.
+  callback, an OCCA command, or an ordinary message, and enforces the command
+  namespace and listen-mode policy.
 - **Relay** speaks to OpenCode — sessions, messages, commands, and its SSE
   event stream — over `opencode serve`'s HTTP interface.
 - **Process manager** supervises one OpenCode instance per working directory:
@@ -148,7 +113,3 @@ chat platform ──► channel adapter ──► router ──► opencode
 
 Bug reports, feature requests, and pull requests are welcome. Please open an
 issue before starting large changes so the approach can be discussed first.
-
-## License
-
-[MIT](LICENSE)
