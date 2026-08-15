@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/anggasct/occa/internal/attribution"
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/relay"
 	"github.com/anggasct/occa/internal/render"
@@ -190,13 +189,26 @@ func (r *Router) runResponse(
 		streamer := relay.NewStreamer(msg.ReplyCtx, r.renderer, render.PlatformFor(msg.Platform))
 		streamer.SetPermissionPromptHandler(permissionHandler)
 		streamer.SetQuestionPromptHandler(questionHandler)
-		if r.attrib != nil {
+		if r.sched != nil {
 			streamer.SetScheduleAttributionHandler(func(input map[string]any) error {
 				cronExpr, _ := input["cron_expression"].(string)
 				prompt, _ := input["prompt"].(string)
 				humanSched, _ := input["human_schedule"].(string)
-				fp := attribution.Fingerprint(cronExpr, prompt, humanSched)
-				r.attrib.Put(fp, msg.Platform, msg.ChannelID)
+				for i := 0; i < 10; i++ {
+					stamped, err := r.sched.AttributePending(ctx, msg.Platform, msg.ChannelID, cronExpr, prompt, humanSched)
+					if err != nil {
+						slog.Warn("schedule attribution: stamp pending", "error", err)
+						return err
+					}
+					if stamped {
+						return nil
+					}
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-time.After(100 * time.Millisecond):
+					}
+				}
 				return nil
 			})
 		}

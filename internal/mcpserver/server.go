@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/anggasct/occa/internal/attribution"
 	"github.com/anggasct/occa/internal/scheduler"
 	"github.com/anggasct/occa/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -18,14 +17,13 @@ import (
 
 type Server struct {
 	sched     *scheduler.Scheduler
-	attrib    *attribution.Store
 	mcpServer *mcp.Server
 	httpSrv   *http.Server
 	port      int
 }
 
-func New(sched *scheduler.Scheduler, attrib *attribution.Store) *Server {
-	s := &Server{sched: sched, attrib: attrib}
+func New(sched *scheduler.Scheduler) *Server {
+	s := &Server{sched: sched}
 
 	mcpServer := mcp.NewServer(&mcp.Implementation{
 		Name:    "occa",
@@ -79,13 +77,13 @@ func (s *Server) handleScheduleTask(ctx context.Context, req *mcp.CallToolReques
 		}, input, nil
 	}
 
-	fp := attribution.Fingerprint(input.CronExpression, input.Prompt, input.HumanSchedule)
-	var platform, channelID string
-	var attributed bool
+	attributed := false
 	for i := 0; i < 10; i++ {
-		if p, c, ok := s.attrib.Get(fp); ok {
-			platform = p
-			channelID = c
+		ok, err := s.sched.Attributed(ctx, id)
+		if err != nil {
+			break
+		}
+		if ok {
 			attributed = true
 			break
 		}
@@ -96,14 +94,6 @@ func (s *Server) handleScheduleTask(ctx context.Context, req *mcp.CallToolReques
 		_ = s.sched.RemoveSchedule(ctx, "", "", id)
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "Error: could not attribute schedule — please try again"}},
-			IsError: true,
-		}, input, nil
-	}
-
-	if err := s.sched.AttributeSchedule(ctx, id, platform, channelID); err != nil {
-		_ = s.sched.RemoveSchedule(ctx, "", "", id)
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Error attributing schedule: %v", err)}},
 			IsError: true,
 		}, input, nil
 	}

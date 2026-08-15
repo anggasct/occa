@@ -35,8 +35,8 @@ type Streamer struct {
 	reply                      channel.ReplyContext
 	renderer                   render.Renderer
 	platform                   render.Platform
-	permissionHandler        PermissionPromptHandler
-	questionHandler          QuestionPromptHandler
+	permissionHandler          PermissionPromptHandler
+	questionHandler            QuestionPromptHandler
 	scheduleAttributionHandler func(input map[string]any) error
 	reactionSetter             channel.ReactionSetter
 	firstRef                   channel.MessageRef

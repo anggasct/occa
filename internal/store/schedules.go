@@ -24,7 +24,8 @@ type ScheduleRepo interface {
 	Delete(ctx context.Context, platform, channelID string, id int64) error
 	List(ctx context.Context, platform, channelID string) ([]Schedule, error)
 	ListAll(ctx context.Context) ([]Schedule, error)
-	Attribute(ctx context.Context, id int64, platform, channelID string) error
+	AttributePending(ctx context.Context, platform, channelID, cronExpression, prompt, humanSchedule string) (bool, error)
+	Attributed(ctx context.Context, id int64) (bool, error)
 	SweepPending(ctx context.Context) (int64, error)
 }
 
@@ -56,23 +57,38 @@ func (r *sqliteScheduleRepo) Create(ctx context.Context, s *Schedule) (int64, er
 	return id, nil
 }
 
-func (r *sqliteScheduleRepo) Attribute(ctx context.Context, id int64, platform, channelID string) error {
+func (r *sqliteScheduleRepo) AttributePending(ctx context.Context, platform, channelID, cronExpression, prompt, humanSchedule string) (bool, error) {
 	now := time.Now().Unix()
 	res, err := r.db.ExecContext(ctx,
-		`UPDATE schedule SET platform = ?, channel_id = ?, enabled = 1, updated_at = ? WHERE id = ?`,
-		platform, channelID, now, id,
+		`UPDATE schedule SET platform = ?, channel_id = ?, enabled = 1, updated_at = ? WHERE id = (
+			SELECT id FROM schedule WHERE platform = '' AND channel_id = '' AND enabled = 0
+				AND cron_expression = ? AND prompt = ? AND human_schedule = ?
+			ORDER BY id LIMIT 1
+		)`,
+		platform, channelID, now, cronExpression, prompt, humanSchedule,
 	)
 	if err != nil {
-		return fmt.Errorf("store: schedule attribute: %w", err)
+		return false, fmt.Errorf("store: schedule attribute pending: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("store: schedule attribute: %w", err)
+		return false, fmt.Errorf("store: schedule attribute pending: %w", err)
 	}
-	if n == 0 {
-		return ErrNotFound
+	return n > 0, nil
+}
+
+func (r *sqliteScheduleRepo) Attributed(ctx context.Context, id int64) (bool, error) {
+	var platform string
+	err := r.db.QueryRowContext(ctx,
+		`SELECT platform FROM schedule WHERE id = ?`, id,
+	).Scan(&platform)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, fmt.Errorf("store: schedule attributed: %w", err)
 	}
-	return nil
+	return platform != "", nil
 }
 
 func (r *sqliteScheduleRepo) SweepPending(ctx context.Context) (int64, error) {

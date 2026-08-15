@@ -532,4 +532,3 @@ func TestDecoderSetsToolInput(t *testing.T) {
 		t.Fatalf("expected ToolInput to contain cron_expression, got: %s", string(ev.ToolInput))
 	}
 }
-

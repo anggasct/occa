@@ -507,4 +507,3 @@ func TestStreamerScheduleAttributionHandler(t *testing.T) {
 		t.Fatalf("unexpected input in attribution handler: %+v", capturedInput)
 	}
 }
-

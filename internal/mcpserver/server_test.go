@@ -5,8 +5,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
-	"github.com/anggasct/occa/internal/attribution"
 	"github.com/anggasct/occa/internal/scheduler"
 	"github.com/anggasct/occa/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -49,18 +49,31 @@ func (f *fakeStore) ListAll(_ context.Context) ([]store.Schedule, error) {
 	return f.schedules, nil
 }
 
-func (f *fakeStore) Attribute(_ context.Context, id int64, platform, channelID string) error {
+func (f *fakeStore) AttributePending(_ context.Context, platform, channelID, cronExpression, prompt, humanSchedule string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	for i, s := range f.schedules {
-		if s.ID == id {
-			f.schedules[i].Platform = platform
-			f.schedules[i].ChannelID = channelID
-			f.schedules[i].Enabled = true
-			return nil
+	for i := range f.schedules {
+		s := &f.schedules[i]
+		if s.Platform == "" && s.ChannelID == "" && !s.Enabled &&
+			s.CronExpression == cronExpression && s.Prompt == prompt && s.HumanSchedule == humanSchedule {
+			s.Platform = platform
+			s.ChannelID = channelID
+			s.Enabled = true
+			return true, nil
 		}
 	}
-	return store.ErrNotFound
+	return false, nil
+}
+
+func (f *fakeStore) Attributed(_ context.Context, id int64) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.schedules {
+		if f.schedules[i].ID == id {
+			return f.schedules[i].Platform != "", nil
+		}
+	}
+	return false, nil
 }
 
 func (f *fakeStore) SweepPending(_ context.Context) (int64, error) {
@@ -79,23 +92,30 @@ func (f *fakeStore) SweepPending(_ context.Context) (int64, error) {
 	return count, nil
 }
 
-func newTestServer() (*Server, *fakeStore, *attribution.Store) {
+func newTestServer() (*Server, *fakeStore) {
 	repo := &fakeStore{}
 	executor := func(ctx context.Context, platform, channelID, prompt string) {}
 	sched := scheduler.New(repo, executor)
-	attrib := attribution.NewStore()
-	srv := New(sched, attrib)
-	return srv, repo, attrib
+	srv := New(sched)
+	return srv, repo
 }
 
 func TestMCPServerHappyPath(t *testing.T) {
-	srv, repo, attrib := newTestServer()
+	srv, repo := newTestServer()
 	cronExpr := "0 9 * * 1-5"
 	prompt := "run tests"
 	humanSched := "weekdays at 9am"
 
-	fp := attribution.Fingerprint(cronExpr, prompt, humanSched)
-	attrib.Put(fp, "telegram", "chat123")
+	// The relay observes the tool call and stamps the pending row while the
+	// handler polls; the retry covers the event-before-row window.
+	go func() {
+		for {
+			ok, err := repo.AttributePending(context.Background(), "telegram", "chat123", cronExpr, prompt, humanSched)
+			if err == nil && ok {
+				return
+			}
+		}
+	}()
 
 	result, _, err := srv.handleScheduleTask(context.Background(), nil, scheduleTaskInput{
 		CronExpression: cronExpr,
@@ -128,7 +148,7 @@ func TestMCPServerHappyPath(t *testing.T) {
 }
 
 func TestMCPServerTimeoutPath(t *testing.T) {
-	srv, repo, _ := newTestServer()
+	srv, repo := newTestServer()
 
 	result, _, err := srv.handleScheduleTask(context.Background(), nil, scheduleTaskInput{
 		CronExpression: "0 9 * * 1-5",
@@ -147,8 +167,63 @@ func TestMCPServerTimeoutPath(t *testing.T) {
 	}
 }
 
+func TestMCPServerConcurrentIdenticalCalls(t *testing.T) {
+	srv, repo := newTestServer()
+	cronExpr := "0 9 * * 1-5"
+	prompt := "same prompt"
+	humanSched := "weekdays at 9am"
+
+	// Two conversations issue identical schedule_task calls. The relay stamps
+	// the oldest pending row per conversation; AttributePending consumes the
+	// oldest matching row, so the two stamps pair one-to-one with the two
+	// pending rows even though the handlers create them concurrently.
+	var wg sync.WaitGroup
+	results := make([]*mcp.CallToolResult, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			res, _, _ := srv.handleScheduleTask(context.Background(), nil, scheduleTaskInput{
+				CronExpression: cronExpr, Prompt: prompt, HumanSchedule: humanSched,
+			})
+			results[i] = res
+		}(i)
+	}
+
+	relayStamp := func(platform, channelID string) {
+		for i := 0; i < 50; i++ {
+			ok, err := repo.AttributePending(context.Background(), platform, channelID, cronExpr, prompt, humanSched)
+			if err == nil && ok {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	relayStamp("telegram", "c1")
+	relayStamp("discord", "c2")
+
+	wg.Wait()
+
+	if results[0].IsError || results[1].IsError {
+		t.Fatalf("expected both calls to succeed: %+v %+v", results[0], results[1])
+	}
+	if len(repo.schedules) != 2 {
+		t.Fatalf("expected 2 schedules, got %d", len(repo.schedules))
+	}
+	byChannel := map[string]string{}
+	for _, s := range repo.schedules {
+		if !s.Enabled {
+			t.Fatalf("schedule not enabled: %+v", s)
+		}
+		byChannel[s.ChannelID] = s.Platform
+	}
+	if byChannel["c1"] != "telegram" || byChannel["c2"] != "discord" {
+		t.Fatalf("rows attributed to wrong conversation: %+v", byChannel)
+	}
+}
+
 func TestMCPServerInvalidCronAndEmptyPrompt(t *testing.T) {
-	srv, repo, _ := newTestServer()
+	srv, repo := newTestServer()
 
 	result, _, _ := srv.handleScheduleTask(context.Background(), nil, scheduleTaskInput{
 		CronExpression: "invalid cron",
@@ -172,7 +247,7 @@ func TestMCPServerInvalidCronAndEmptyPrompt(t *testing.T) {
 }
 
 func TestServerTimeoutsSet(t *testing.T) {
-	srv, _, _ := newTestServer()
+	srv, _ := newTestServer()
 	if err := srv.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

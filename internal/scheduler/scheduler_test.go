@@ -46,16 +46,26 @@ func (f *fakeScheduleStore) ListAll(_ context.Context) ([]store.Schedule, error)
 	return enabled, nil
 }
 
-func (f *fakeScheduleStore) Attribute(_ context.Context, id int64, platform, channelID string) error {
+func (f *fakeScheduleStore) AttributePending(_ context.Context, platform, channelID, cronExpression, prompt, humanSchedule string) (bool, error) {
 	for i, s := range f.schedules {
-		if s.ID == id {
+		if s.Platform == "" && s.ChannelID == "" && !s.Enabled &&
+			s.CronExpression == cronExpression && s.Prompt == prompt && s.HumanSchedule == humanSchedule {
 			f.schedules[i].Platform = platform
 			f.schedules[i].ChannelID = channelID
 			f.schedules[i].Enabled = true
-			return nil
+			return true, nil
 		}
 	}
-	return store.ErrNotFound
+	return false, nil
+}
+
+func (f *fakeScheduleStore) Attributed(_ context.Context, id int64) (bool, error) {
+	for _, s := range f.schedules {
+		if s.ID == id {
+			return s.Platform != "", nil
+		}
+	}
+	return false, nil
 }
 
 func (f *fakeScheduleStore) SweepPending(_ context.Context) (int64, error) {
@@ -70,6 +80,14 @@ func (f *fakeScheduleStore) SweepPending(_ context.Context) (int64, error) {
 	}
 	f.schedules = kept
 	return count, nil
+}
+
+type failingSweepStore struct {
+	*fakeScheduleStore
+}
+
+func (f *failingSweepStore) SweepPending(_ context.Context) (int64, error) {
+	return 0, store.ErrNotFound
 }
 
 func TestSchedulerAddAndRemove(t *testing.T) {
@@ -298,3 +316,10 @@ func TestSchedulerStartSweepsPending(t *testing.T) {
 	}
 }
 
+func TestSchedulerStartSweepErrorFailsStartup(t *testing.T) {
+	repo := &failingSweepStore{fakeScheduleStore: &fakeScheduleStore{nextID: 0}}
+	s := New(repo, func(ctx context.Context, platform, channelID, prompt string) {})
+	if err := s.Start(context.Background()); err == nil {
+		t.Fatal("expected Start to fail when pending-row cleanup errors")
+	}
+}
