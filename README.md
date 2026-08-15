@@ -33,10 +33,6 @@ provider state.
 - **SQLite store** — sessions, channels, overrides, and schedules in a single
   pure-Go database file with versioned migrations.
 
-## Stack
-
-Go · SQLite · Telegram Bot API · Discord API · OpenCode (SSE)
-
 ## Install
 
 ```sh
