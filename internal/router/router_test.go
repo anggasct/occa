@@ -76,6 +76,15 @@ type fakeRelayClient struct {
 	sessionInfo        *relay.SessionInfo
 	sessionInfoErr     error
 
+	summarizeCalls  []struct{ sessionID, providerID, modelID string }
+	summarizeErr    error
+	revertCalls     []struct{ sessionID, messageID string }
+	revertErr       error
+	unrevertCalls   []string
+	unrevertErr     error
+	messages        []relay.MessageInfo
+	listMessagesErr error
+
 	mu           sync.Mutex
 	responses    []pendingResponse
 	dispatchDone chan struct{}
@@ -173,6 +182,32 @@ func (f *fakeRelayClient) ReplyPermission(_ context.Context, _ string, _ relay.P
 }
 func (f *fakeRelayClient) ListCommands(_ context.Context) ([]relay.CommandInfo, error) {
 	return f.commands, f.commandsErr
+}
+func (f *fakeRelayClient) SummarizeSession(_ context.Context, sessionID, providerID, modelID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.summarizeCalls = append(f.summarizeCalls, struct{ sessionID, providerID, modelID string }{sessionID, providerID, modelID})
+	return f.summarizeErr
+}
+func (f *fakeRelayClient) RevertMessage(_ context.Context, sessionID, messageID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.revertCalls = append(f.revertCalls, struct{ sessionID, messageID string }{sessionID, messageID})
+	return f.revertErr
+}
+func (f *fakeRelayClient) UnrevertSession(_ context.Context, sessionID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.unrevertCalls = append(f.unrevertCalls, sessionID)
+	return f.unrevertErr
+}
+func (f *fakeRelayClient) ListMessages(_ context.Context, _ string) ([]relay.MessageInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.listMessagesErr != nil {
+		return nil, f.listMessagesErr
+	}
+	return f.messages, nil
 }
 func (f *fakeRelayClient) RunCommand(_ context.Context, _, cmd string) error {
 	f.lastCmd = cmd
@@ -2660,4 +2695,296 @@ func TestSessionPickerConversationIsolation(t *testing.T) {
 	if strings.Contains(out2, "user1-sess") {
 		t.Fatalf("user2 picker contains user1 session: %q", out2)
 	}
+}
+
+func TestSessionStateCommands(t *testing.T) {
+	t.Run("compact with active session uses session model", func(t *testing.T) {
+		r, client, reply, overrides := newTestRouterWithAccess()
+		overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+			ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+		}
+		_ = r.store.SessionRepo().SetActive(context.Background(), "telegram", "chat1", "", "user1", "active-sess-1", 100)
+		client.sessionInfo = &relay.SessionInfo{
+			Model: relay.ModelRef{ProviderID: "anthropic", ID: "claude-3-5-sonnet"},
+		}
+
+		msg := channel.IncomingMessage{
+			Platform:  "telegram",
+			ChannelID: "chat1",
+			UserID:    "user1",
+			Text:      "/compact",
+			ReplyCtx:  reply,
+		}
+		if err := r.Route(context.Background(), msg); err != nil {
+			t.Fatalf("Route: %v", err)
+		}
+
+		if client.createSessionCalls != 0 {
+			t.Fatalf("createSessionCalls = %d, want 0", client.createSessionCalls)
+		}
+		if len(client.summarizeCalls) != 1 {
+			t.Fatalf("summarizeCalls len = %d, want 1", len(client.summarizeCalls))
+		}
+		call := client.summarizeCalls[0]
+		if call.sessionID != "active-sess-1" || call.providerID != "anthropic" || call.modelID != "claude-3-5-sonnet" {
+			t.Fatalf("unexpected summarize call: %+v", call)
+		}
+		if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], "Session compacted") {
+			t.Fatalf("unexpected reply: %v", reply.sends)
+		}
+	})
+
+	t.Run("compact without session model falls back to message model", func(t *testing.T) {
+		r, client, reply, overrides := newTestRouterWithAccess()
+		client.providers = modelTestProviders()
+		overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+			ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow", Model: "openai/gpt-4o",
+		}
+		_ = r.store.SessionRepo().SetActive(context.Background(), "telegram", "chat1", "", "user1", "active-sess-2", 100)
+		client.sessionInfo = &relay.SessionInfo{}
+
+		msg := channel.IncomingMessage{
+			Platform:  "telegram",
+			ChannelID: "chat1",
+			UserID:    "user1",
+			Text:      "/compact",
+			ReplyCtx:  reply,
+		}
+		if err := r.Route(context.Background(), msg); err != nil {
+			t.Fatalf("Route: %v", err)
+		}
+
+		if len(client.summarizeCalls) != 1 {
+			t.Fatalf("summarizeCalls len = %d, want 1", len(client.summarizeCalls))
+		}
+		call := client.summarizeCalls[0]
+		if call.sessionID != "active-sess-2" || call.providerID != "openai" || call.modelID != "gpt-4o" {
+			t.Fatalf("unexpected summarize call: %+v", call)
+		}
+		if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], "Session compacted") {
+			t.Fatalf("unexpected reply: %v", reply.sends)
+		}
+	})
+
+	t.Run("compact with no active session", func(t *testing.T) {
+		r, client, reply, overrides := newTestRouterWithAccess()
+		overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+			ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+		}
+
+		msg := channel.IncomingMessage{
+			Platform:  "telegram",
+			ChannelID: "chat1",
+			UserID:    "user1",
+			Text:      "/compact",
+			ReplyCtx:  reply,
+		}
+		if err := r.Route(context.Background(), msg); err != nil {
+			t.Fatalf("Route: %v", err)
+		}
+
+		if len(client.summarizeCalls) != 0 {
+			t.Fatalf("summarizeCalls len = %d, want 0", len(client.summarizeCalls))
+		}
+		if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], "No active session") {
+			t.Fatalf("unexpected reply: %v", reply.sends)
+		}
+	})
+
+	t.Run("compact surfaces server error in reply", func(t *testing.T) {
+		r, client, reply, overrides := newTestRouterWithAccess()
+		overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+			ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+		}
+		_ = r.store.SessionRepo().SetActive(context.Background(), "telegram", "chat1", "", "user1", "active-sess-3", 100)
+		client.sessionInfo = &relay.SessionInfo{
+			Model: relay.ModelRef{ProviderID: "openai", ID: "gpt-4o"},
+		}
+		client.summarizeErr = errors.New("unconnected provider")
+
+		msg := channel.IncomingMessage{
+			Platform:  "telegram",
+			ChannelID: "chat1",
+			UserID:    "user1",
+			Text:      "/compact",
+			ReplyCtx:  reply,
+		}
+		if err := r.Route(context.Background(), msg); err != nil {
+			t.Fatalf("Route: %v", err)
+		}
+
+		if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], "unconnected provider") {
+			t.Fatalf("expected error surfaced in reply, got %v", reply.sends)
+		}
+	})
+
+	t.Run("undo resolves most recent user message", func(t *testing.T) {
+		r, client, reply, overrides := newTestRouterWithAccess()
+		overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+			ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+		}
+		_ = r.store.SessionRepo().SetActive(context.Background(), "telegram", "chat1", "", "user1", "active-sess-4", 100)
+		client.messages = []relay.MessageInfo{
+			{ID: "msg-user-1", Role: "user", Created: 100},
+			{ID: "msg-asst-1", Role: "assistant", Created: 101},
+			{ID: "msg-user-2", Role: "user", Created: 102},
+			{ID: "msg-asst-2", Role: "assistant", Created: 103},
+		}
+
+		msg := channel.IncomingMessage{
+			Platform:  "telegram",
+			ChannelID: "chat1",
+			UserID:    "user1",
+			Text:      "/undo",
+			ReplyCtx:  reply,
+		}
+		if err := r.Route(context.Background(), msg); err != nil {
+			t.Fatalf("Route: %v", err)
+		}
+
+		if client.createSessionCalls != 0 {
+			t.Fatalf("createSessionCalls = %d, want 0", client.createSessionCalls)
+		}
+		if len(client.revertCalls) != 1 {
+			t.Fatalf("revertCalls len = %d, want 1", len(client.revertCalls))
+		}
+		call := client.revertCalls[0]
+		if call.sessionID != "active-sess-4" || call.messageID != "msg-user-2" {
+			t.Fatalf("unexpected revert call: %+v", call)
+		}
+		if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], "undone") {
+			t.Fatalf("unexpected reply: %v", reply.sends)
+		}
+	})
+
+	t.Run("undo with no session or no user message", func(t *testing.T) {
+		t.Run("no session", func(t *testing.T) {
+			r, client, reply, overrides := newTestRouterWithAccess()
+			overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+				ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+			}
+
+			msg := channel.IncomingMessage{
+				Platform:  "telegram",
+				ChannelID: "chat1",
+				UserID:    "user1",
+				Text:      "/undo",
+				ReplyCtx:  reply,
+			}
+			if err := r.Route(context.Background(), msg); err != nil {
+				t.Fatalf("Route: %v", err)
+			}
+
+			if len(client.revertCalls) != 0 {
+				t.Fatalf("revertCalls len = %d, want 0", len(client.revertCalls))
+			}
+			if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], "Nothing to undo") {
+				t.Fatalf("unexpected reply: %v", reply.sends)
+			}
+		})
+
+		t.Run("no user message", func(t *testing.T) {
+			r, client, reply, overrides := newTestRouterWithAccess()
+			overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+				ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+			}
+			_ = r.store.SessionRepo().SetActive(context.Background(), "telegram", "chat1", "", "user1", "active-sess-5", 100)
+			client.messages = []relay.MessageInfo{
+				{ID: "msg-asst-1", Role: "assistant", Created: 100},
+			}
+
+			msg := channel.IncomingMessage{
+				Platform:  "telegram",
+				ChannelID: "chat1",
+				UserID:    "user1",
+				Text:      "/undo",
+				ReplyCtx:  reply,
+			}
+			if err := r.Route(context.Background(), msg); err != nil {
+				t.Fatalf("Route: %v", err)
+			}
+
+			if len(client.revertCalls) != 0 {
+				t.Fatalf("revertCalls len = %d, want 0", len(client.revertCalls))
+			}
+			if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], "Nothing to undo yet") {
+				t.Fatalf("unexpected reply: %v", reply.sends)
+			}
+		})
+	})
+
+	t.Run("redo calls UnrevertSession", func(t *testing.T) {
+		r, client, reply, overrides := newTestRouterWithAccess()
+		overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+			ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+		}
+		_ = r.store.SessionRepo().SetActive(context.Background(), "telegram", "chat1", "", "user1", "active-sess-6", 100)
+
+		msg := channel.IncomingMessage{
+			Platform:  "telegram",
+			ChannelID: "chat1",
+			UserID:    "user1",
+			Text:      "/redo",
+			ReplyCtx:  reply,
+		}
+		if err := r.Route(context.Background(), msg); err != nil {
+			t.Fatalf("Route: %v", err)
+		}
+
+		if client.createSessionCalls != 0 {
+			t.Fatalf("createSessionCalls = %d, want 0", client.createSessionCalls)
+		}
+		if len(client.unrevertCalls) != 1 || client.unrevertCalls[0] != "active-sess-6" {
+			t.Fatalf("unrevertCalls = %v, want [active-sess-6]", client.unrevertCalls)
+		}
+		if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], "restored") {
+			t.Fatalf("unexpected reply: %v", reply.sends)
+		}
+	})
+
+	t.Run("redo with no active session", func(t *testing.T) {
+		r, client, reply, overrides := newTestRouterWithAccess()
+		overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+			ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+		}
+
+		msg := channel.IncomingMessage{
+			Platform:  "telegram",
+			ChannelID: "chat1",
+			UserID:    "user1",
+			Text:      "/redo",
+			ReplyCtx:  reply,
+		}
+		if err := r.Route(context.Background(), msg); err != nil {
+			t.Fatalf("Route: %v", err)
+		}
+
+		if len(client.unrevertCalls) != 0 {
+			t.Fatalf("unrevertCalls len = %d, want 0", len(client.unrevertCalls))
+		}
+		if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], "No active session") {
+			t.Fatalf("unexpected reply: %v", reply.sends)
+		}
+	})
+
+	t.Run("commands present in help text and menu commands", func(t *testing.T) {
+		r, _, _, _ := newTestRouterWithAccess()
+		help := r.helpText()
+		for _, cmd := range []string{"/compact", "/undo", "/redo"} {
+			if !strings.Contains(help, cmd) {
+				t.Fatalf("help text missing %s", cmd)
+			}
+		}
+
+		menu := r.MenuCommands()
+		aliases := make(map[string]bool)
+		for _, m := range menu {
+			aliases[m.Alias] = true
+		}
+		for _, cmd := range []string{"compact", "undo", "redo"} {
+			if !aliases[cmd] {
+				t.Fatalf("MenuCommands missing %s", cmd)
+			}
+		}
+	})
 }

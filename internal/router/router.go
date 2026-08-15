@@ -39,6 +39,9 @@ func (r *Router) MenuCommands() []channel.MenuCommand {
 		{Alias: "session", Description: "Manage sessions: new, switch, or delete", HasArgs: true},
 		{Alias: "stop", Description: "Stop the running response (session kept)"},
 		{Alias: "steer", Description: "Stop and redirect the agent (session kept)", HasArgs: true},
+		{Alias: "compact", Description: "Compact the current session context"},
+		{Alias: "undo", Description: "Undo the last turn (message + file changes)"},
+		{Alias: "redo", Description: "Restore a reverted turn"},
 		{Alias: "reset", Description: "Clear current session and start fresh"},
 		{Alias: "dir", Description: "View or set this channel's working directory", HasArgs: true},
 		{Alias: "allow", Description: "Allow a user to use this bot", HasArgs: true},
@@ -483,6 +486,18 @@ func (r *Router) registerDefaults() {
 		Name:    "steer",
 		Handler: r.handleSteer,
 	}
+	r.commands["compact"] = Command{
+		Name:    "compact",
+		Handler: r.handleCompact,
+	}
+	r.commands["undo"] = Command{
+		Name:    "undo",
+		Handler: r.handleUndo,
+	}
+	r.commands["redo"] = Command{
+		Name:    "redo",
+		Handler: r.handleRedo,
+	}
 	r.commands["reset"] = Command{
 		Name:    "reset",
 		Handler: r.handleReset,
@@ -558,6 +573,9 @@ func (r *Router) helpText() string {
 		"• /session [new|switch <id|#|title>|delete <id>] — manage sessions\n" +
 		"• /stop — stop the running response (session kept)\n" +
 		"• /steer <direction> — stop and redirect the agent (session kept)\n" +
+		"• /compact — compact the current session context\n" +
+		"• /undo — undo the last turn (message + file changes)\n" +
+		"• /redo — restore a reverted turn\n" +
 		"• /dir [path] — view or set this channel's working directory\n" +
 		"• /channel [mention|all|thread] — view or set listen mode\n" +
 		"• /model [channel] [provider/model-id[@variant]] — view or set model\n" +
@@ -1068,6 +1086,103 @@ func (r *Router) handleSteer(ctx context.Context, msg channel.IncomingMessage, a
 		return "", fmt.Errorf("steer: %w", err)
 	}
 	return "", errReplied
+}
+
+func (r *Router) handleCompact(ctx context.Context, msg channel.IncomingMessage, _ string) (string, error) {
+	sessionID, err := r.resolveActiveSession(ctx, msg)
+	if err != nil {
+		return "", fmt.Errorf("compact: %w", err)
+	}
+	if sessionID == "" {
+		return "⚠️ No active session to compact — start a conversation first.", nil
+	}
+
+	inst, err := r.clientFor(ctx, msg)
+	if err != nil {
+		return "⚠️ Agent unreachable", nil
+	}
+	defer inst.End()
+
+	var providerID, modelID string
+	sessInfo, err := inst.Client().GetSession(ctx, sessionID)
+	if err == nil && sessInfo != nil && sessInfo.Model.ProviderID != "" && sessInfo.Model.ID != "" {
+		providerID = sessInfo.Model.ProviderID
+		modelID = sessInfo.Model.ID
+	} else {
+		effModel, effErr := r.modelForMessage(ctx, msg)
+		if effErr == nil && effModel != nil {
+			providerID = effModel.ProviderID
+			modelID = effModel.ID
+		}
+	}
+
+	if providerID == "" || modelID == "" {
+		return "⚠️ Unable to resolve model configuration for compact.", nil
+	}
+
+	if err := inst.Client().SummarizeSession(ctx, sessionID, providerID, modelID); err != nil {
+		return fmt.Sprintf("⚠️ Failed to compact session: %v", err), nil
+	}
+	return "✅ Session compacted — context summarized.", nil
+}
+
+func (r *Router) handleUndo(ctx context.Context, msg channel.IncomingMessage, _ string) (string, error) {
+	sessionID, err := r.resolveActiveSession(ctx, msg)
+	if err != nil {
+		return "", fmt.Errorf("undo: %w", err)
+	}
+	if sessionID == "" {
+		return "⚠️ Nothing to undo (no active session).", nil
+	}
+
+	inst, err := r.clientFor(ctx, msg)
+	if err != nil {
+		return "⚠️ Agent unreachable", nil
+	}
+	defer inst.End()
+
+	messages, err := inst.Client().ListMessages(ctx, sessionID)
+	if err != nil {
+		return fmt.Sprintf("⚠️ Failed to list messages: %v", err), nil
+	}
+
+	var lastUserMsg *relay.MessageInfo
+	for i := range messages {
+		if messages[i].Role == "user" {
+			if lastUserMsg == nil || messages[i].Created >= lastUserMsg.Created {
+				lastUserMsg = &messages[i]
+			}
+		}
+	}
+	if lastUserMsg == nil {
+		return "⚠️ Nothing to undo yet.", nil
+	}
+
+	if err := inst.Client().RevertMessage(ctx, sessionID, lastUserMsg.ID); err != nil {
+		return fmt.Sprintf("⚠️ Failed to undo last turn: %v", err), nil
+	}
+	return "✅ Last turn undone (message + file changes reverted).", nil
+}
+
+func (r *Router) handleRedo(ctx context.Context, msg channel.IncomingMessage, _ string) (string, error) {
+	sessionID, err := r.resolveActiveSession(ctx, msg)
+	if err != nil {
+		return "", fmt.Errorf("redo: %w", err)
+	}
+	if sessionID == "" {
+		return "⚠️ No active session — start a conversation first.", nil
+	}
+
+	inst, err := r.clientFor(ctx, msg)
+	if err != nil {
+		return "⚠️ Agent unreachable", nil
+	}
+	defer inst.End()
+
+	if err := inst.Client().UnrevertSession(ctx, sessionID); err != nil {
+		return fmt.Sprintf("⚠️ Failed to restore turn: %v", err), nil
+	}
+	return "✅ Reverted turns restored.", nil
 }
 
 func (r *Router) handleAllow(ctx context.Context, msg channel.IncomingMessage, args string) (string, error) {

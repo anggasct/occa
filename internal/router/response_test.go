@@ -159,6 +159,12 @@ func (c *responseClient) RejectQuestion(_ context.Context, _ string) error {
 func (c *responseClient) ListCommands(_ context.Context) ([]relay.CommandInfo, error) {
 	return nil, nil
 }
+func (c *responseClient) SummarizeSession(_ context.Context, _, _, _ string) error { return nil }
+func (c *responseClient) RevertMessage(_ context.Context, _, _ string) error       { return nil }
+func (c *responseClient) UnrevertSession(_ context.Context, _ string) error        { return nil }
+func (c *responseClient) ListMessages(_ context.Context, _ string) ([]relay.MessageInfo, error) {
+	return nil, nil
+}
 
 func (c *responseClient) Events(_ context.Context, _ string) (<-chan relay.Event, error) {
 	c.mu.Lock()

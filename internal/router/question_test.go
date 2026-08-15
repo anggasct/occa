@@ -45,7 +45,13 @@ func (c *questionClient) Events(_ context.Context, _ string) (<-chan relay.Event
 func (c *questionClient) ReplyPermission(_ context.Context, _ string, _ relay.PermissionReply) error {
 	return nil
 }
-func (c *questionClient) AbortSession(_ context.Context, _ string) error { return nil }
+func (c *questionClient) AbortSession(_ context.Context, _ string) error           { return nil }
+func (c *questionClient) SummarizeSession(_ context.Context, _, _, _ string) error { return nil }
+func (c *questionClient) RevertMessage(_ context.Context, _, _ string) error       { return nil }
+func (c *questionClient) UnrevertSession(_ context.Context, _ string) error        { return nil }
+func (c *questionClient) ListMessages(_ context.Context, _ string) ([]relay.MessageInfo, error) {
+	return nil, nil
+}
 
 func (c *questionClient) AnswerQuestion(_ context.Context, requestID string, answers [][]string) error {
 	c.mu.Lock()

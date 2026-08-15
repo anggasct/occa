@@ -190,6 +190,12 @@ const (
 	PermissionReject PermissionReply = "reject"
 )
 
+type MessageInfo struct {
+	ID      string
+	Role    string
+	Created int64
+}
+
 type Client interface {
 	CreateSession(ctx context.Context) (string, error)
 	GetSession(ctx context.Context, sessionID string) (*SessionInfo, error)
@@ -203,6 +209,10 @@ type Client interface {
 	RejectQuestion(ctx context.Context, requestID string) error
 	ListCommands(ctx context.Context) ([]CommandInfo, error)
 	AbortSession(ctx context.Context, sessionID string) error
+	SummarizeSession(ctx context.Context, sessionID, providerID, modelID string) error
+	RevertMessage(ctx context.Context, sessionID, messageID string) error
+	UnrevertSession(ctx context.Context, sessionID string) error
+	ListMessages(ctx context.Context, sessionID string) ([]MessageInfo, error)
 }
 
 // CommandInfo describes one command the agent backend can invoke, used to
@@ -336,6 +346,109 @@ func (c *HTTPClient) AbortSession(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("relay: abort session: unexpected status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+func (c *HTTPClient) SummarizeSession(ctx context.Context, sessionID, providerID, modelID string) error {
+	payload := map[string]string{
+		"providerID": providerID,
+		"modelID":    modelID,
+	}
+	resp, err := c.post(ctx, "/session/"+sessionID+"/summarize", payload)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode == http.StatusNotFound {
+		return ErrNotFound
+	}
+	if resp.StatusCode != http.StatusOK {
+		if len(body) > 0 {
+			return fmt.Errorf("relay: summarize session: unexpected status %d: %s", resp.StatusCode, truncateBody(body))
+		}
+		return fmt.Errorf("relay: summarize session: unexpected status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (c *HTTPClient) RevertMessage(ctx context.Context, sessionID, messageID string) error {
+	payload := map[string]string{"messageID": messageID}
+	resp, err := c.post(ctx, "/session/"+sessionID+"/revert", payload)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode == http.StatusNotFound {
+		return ErrNotFound
+	}
+	if resp.StatusCode != http.StatusOK {
+		if len(body) > 0 {
+			return fmt.Errorf("relay: revert message: unexpected status %d: %s", resp.StatusCode, truncateBody(body))
+		}
+		return fmt.Errorf("relay: revert message: unexpected status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (c *HTTPClient) UnrevertSession(ctx context.Context, sessionID string) error {
+	resp, err := c.post(ctx, "/session/"+sessionID+"/unrevert", map[string]any{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode == http.StatusNotFound {
+		return ErrNotFound
+	}
+	if resp.StatusCode != http.StatusOK {
+		if len(body) > 0 {
+			return fmt.Errorf("relay: unrevert session: unexpected status %d: %s", resp.StatusCode, truncateBody(body))
+		}
+		return fmt.Errorf("relay: unrevert session: unexpected status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (c *HTTPClient) ListMessages(ctx context.Context, sessionID string) ([]MessageInfo, error) {
+	resp, err := c.get(ctx, "/session/"+sessionID+"/message")
+	if err != nil {
+		return nil, fmt.Errorf("relay: list messages: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, ErrNotFound
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("relay: list messages: unexpected status %d", resp.StatusCode)
+	}
+
+	var raw []struct {
+		Info struct {
+			ID   string `json:"id"`
+			Role string `json:"role"`
+			Time struct {
+				Created int64 `json:"created"`
+			} `json:"time"`
+		} `json:"info"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, fmt.Errorf("relay: list messages: decode response: %w", err)
+	}
+
+	messages := make([]MessageInfo, len(raw))
+	for i, r := range raw {
+		messages[i] = MessageInfo{
+			ID:      r.Info.ID,
+			Role:    r.Info.Role,
+			Created: r.Info.Time.Created,
+		}
+	}
+	return messages, nil
 }
 
 func (c *HTTPClient) SendMessage(ctx context.Context, sessionID, text string, model *ModelRef, attachments []Attachment) error {

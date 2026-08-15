@@ -634,3 +634,159 @@ func TestProvidersContextLimit(t *testing.T) {
 		}
 	})
 }
+
+func TestSummarizeSession(t *testing.T) {
+	t.Run("success 200", func(t *testing.T) {
+		var gotBody map[string]string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost || r.URL.Path != "/session/ses_x/summarize" {
+				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			}
+			_ = json.NewDecoder(r.Body).Decode(&gotBody)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		if err := c.SummarizeSession(context.Background(), "ses_x", "openai", "gpt-4o"); err != nil {
+			t.Fatalf("SummarizeSession: %v", err)
+		}
+		if gotBody["providerID"] != "openai" || gotBody["modelID"] != "gpt-4o" {
+			t.Fatalf("unexpected body: %+v", gotBody)
+		}
+	})
+
+	t.Run("not found 404", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		err := c.SummarizeSession(context.Background(), "ses_404", "openai", "gpt-4o")
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("expected ErrNotFound, got %v", err)
+		}
+	})
+
+	t.Run("error 500", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("unconnected provider"))
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		err := c.SummarizeSession(context.Background(), "ses_500", "openai", "gpt-4o")
+		if err == nil || !strings.Contains(err.Error(), "unconnected provider") {
+			t.Fatalf("expected error containing unconnected provider, got %v", err)
+		}
+	})
+}
+
+func TestRevertMessage(t *testing.T) {
+	t.Run("success 200", func(t *testing.T) {
+		var gotBody map[string]string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost || r.URL.Path != "/session/ses_x/revert" {
+				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			}
+			_ = json.NewDecoder(r.Body).Decode(&gotBody)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		if err := c.RevertMessage(context.Background(), "ses_x", "msg-123"); err != nil {
+			t.Fatalf("RevertMessage: %v", err)
+		}
+		if gotBody["messageID"] != "msg-123" {
+			t.Fatalf("messageID = %q, want msg-123", gotBody["messageID"])
+		}
+	})
+
+	t.Run("not found 404", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		err := c.RevertMessage(context.Background(), "ses_404", "msg-123")
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("expected ErrNotFound, got %v", err)
+		}
+	})
+}
+
+func TestUnrevertSession(t *testing.T) {
+	t.Run("success 200", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost || r.URL.Path != "/session/ses_x/unrevert" {
+				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			}
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		if err := c.UnrevertSession(context.Background(), "ses_x"); err != nil {
+			t.Fatalf("UnrevertSession: %v", err)
+		}
+	})
+
+	t.Run("not found 404", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		err := c.UnrevertSession(context.Background(), "ses_404")
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("expected ErrNotFound, got %v", err)
+		}
+	})
+}
+
+func TestListMessages(t *testing.T) {
+	t.Run("success 200", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet || r.URL.Path != "/session/ses_x/message" {
+				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[
+				{"info":{"id":"msg-1","role":"user","time":{"created":1000}}},
+				{"info":{"id":"msg-2","role":"assistant","time":{"created":1001}}}
+			]`))
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		msgs, err := c.ListMessages(context.Background(), "ses_x")
+		if err != nil {
+			t.Fatalf("ListMessages: %v", err)
+		}
+		if len(msgs) != 2 {
+			t.Fatalf("len = %d, want 2", len(msgs))
+		}
+		if msgs[0].ID != "msg-1" || msgs[0].Role != "user" || msgs[0].Created != 1000 {
+			t.Fatalf("unexpected message 0: %+v", msgs[0])
+		}
+	})
+
+	t.Run("not found 404", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		_, err := c.ListMessages(context.Background(), "ses_404")
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("expected ErrNotFound, got %v", err)
+		}
+	})
+}
