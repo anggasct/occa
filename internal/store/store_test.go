@@ -601,6 +601,9 @@ func TestProgressNoticeMigrationFromV4(t *testing.T) {
 	if _, err := s1.db.Exec("DROP TABLE progress_notice"); err != nil {
 		t.Fatalf("drop progress_notice: %v", err)
 	}
+	if _, err := s1.db.Exec("ALTER TABLE session DROP COLUMN model"); err != nil {
+		t.Fatalf("drop session model column: %v", err)
+	}
 	if _, err := s1.db.Exec("PRAGMA user_version=4"); err != nil {
 		t.Fatalf("stamp user_version=4: %v", err)
 	}
@@ -616,8 +619,8 @@ func TestProgressNoticeMigrationFromV4(t *testing.T) {
 	if err := s2.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatalf("read schema version: %v", err)
 	}
-	if version != 5 {
-		t.Fatalf("schema version = %d, want 5", version)
+	if version != 6 {
+		t.Fatalf("schema version = %d, want 6", version)
 	}
 
 	if err := s2.ProgressNoticeRepo().Put(ctx, "telegram", "chat1", "", "m1"); err != nil {
@@ -661,5 +664,152 @@ func TestProgressNoticeRoundTrip(t *testing.T) {
 	}
 	if len(notices) != 1 || notices[0].MessageID != "m2" {
 		t.Fatalf("unexpected notices after delete: %+v", notices)
+	}
+}
+
+func TestSessionModelRoundTrip(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+	repo := s.SessionRepo()
+
+	if err := repo.SetActive(ctx, "telegram", "chat1", "", "user1", "sess-1", 100); err != nil {
+		t.Fatalf("SetActive: %v", err)
+	}
+
+	model, err := repo.ActiveModel(ctx, "telegram", "chat1", "", "user1")
+	if err != nil {
+		t.Fatalf("ActiveModel unset: %v", err)
+	}
+	if model != "" {
+		t.Fatalf("expected unset model, got %q", model)
+	}
+
+	if err := repo.SetModel(ctx, "telegram", "chat1", "", "user1", "openai/gpt-4o"); err != nil {
+		t.Fatalf("SetModel: %v", err)
+	}
+	model, err = repo.ActiveModel(ctx, "telegram", "chat1", "", "user1")
+	if err != nil {
+		t.Fatalf("ActiveModel set: %v", err)
+	}
+	if model != "openai/gpt-4o" {
+		t.Fatalf("model = %q, want openai/gpt-4o", model)
+	}
+
+	if err := repo.SetModel(ctx, "telegram", "chat1", "", "user1", ""); err != nil {
+		t.Fatalf("SetModel clear: %v", err)
+	}
+	model, err = repo.ActiveModel(ctx, "telegram", "chat1", "", "user1")
+	if err != nil {
+		t.Fatalf("ActiveModel after clear: %v", err)
+	}
+	if model != "" {
+		t.Fatalf("expected cleared model, got %q", model)
+	}
+}
+
+func TestSessionSetModelNoActiveRow(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+
+	if err := s.SessionRepo().SetModel(ctx, "telegram", "chat1", "", "user1", "openai/gpt-4o"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("SetModel without active row = %v, want ErrNotFound", err)
+	}
+	model, err := s.SessionRepo().ActiveModel(ctx, "telegram", "chat1", "", "user1")
+	if err != nil {
+		t.Fatalf("ActiveModel without active row: %v", err)
+	}
+	if model != "" {
+		t.Fatalf("ActiveModel without active row = %q, want empty", model)
+	}
+}
+
+// TestSessionSetModelActiveRowOnly: SetModel writes the active row only, so
+// switching sessions restores the target row's stored model.
+func TestSessionSetModelActiveRowOnly(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+	repo := s.SessionRepo()
+
+	if err := repo.SetActive(ctx, "telegram", "chat1", "", "user1", "sess-1", 100); err != nil {
+		t.Fatalf("SetActive sess-1: %v", err)
+	}
+	if err := repo.SetModel(ctx, "telegram", "chat1", "", "user1", "openai/gpt-4o"); err != nil {
+		t.Fatalf("SetModel sess-1: %v", err)
+	}
+
+	if err := repo.SetActive(ctx, "telegram", "chat1", "", "user1", "sess-2", 100); err != nil {
+		t.Fatalf("SetActive sess-2: %v", err)
+	}
+	model, err := repo.ActiveModel(ctx, "telegram", "chat1", "", "user1")
+	if err != nil {
+		t.Fatalf("ActiveModel sess-2: %v", err)
+	}
+	if model != "" {
+		t.Fatalf("sess-2 model = %q, want empty", model)
+	}
+
+	if err := repo.SetActive(ctx, "telegram", "chat1", "", "user1", "sess-1", 100); err != nil {
+		t.Fatalf("SetActive back to sess-1: %v", err)
+	}
+	model, err = repo.ActiveModel(ctx, "telegram", "chat1", "", "user1")
+	if err != nil {
+		t.Fatalf("ActiveModel sess-1 restored: %v", err)
+	}
+	if model != "openai/gpt-4o" {
+		t.Fatalf("restored model = %q, want openai/gpt-4o", model)
+	}
+}
+
+func TestSessionModelMigrationFromV5(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "upgrade.db")
+	ctx := context.Background()
+
+	s1, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := s1.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "user1", "sess-1", 100); err != nil {
+		t.Fatalf("SetActive: %v", err)
+	}
+	if _, err := s1.db.Exec("ALTER TABLE session DROP COLUMN model"); err != nil {
+		t.Fatalf("drop model column: %v", err)
+	}
+	if _, err := s1.db.Exec("PRAGMA user_version=5"); err != nil {
+		t.Fatalf("stamp user_version=5: %v", err)
+	}
+	_ = s1.Close()
+
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = s2.Close() }()
+
+	var version int
+	if err := s2.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatalf("read schema version: %v", err)
+	}
+	if version != 6 {
+		t.Fatalf("schema version = %d, want 6", version)
+	}
+
+	model, err := s2.SessionRepo().ActiveModel(ctx, "telegram", "chat1", "", "user1")
+	if err != nil {
+		t.Fatalf("ActiveModel after migration: %v", err)
+	}
+	if model != "" {
+		t.Fatalf("existing row model = %q, want empty", model)
+	}
+
+	if err := s2.SessionRepo().SetModel(ctx, "telegram", "chat1", "", "user1", "openai/gpt-4o"); err != nil {
+		t.Fatalf("SetModel after migration: %v", err)
+	}
+	model, err = s2.SessionRepo().ActiveModel(ctx, "telegram", "chat1", "", "user1")
+	if err != nil {
+		t.Fatalf("ActiveModel after migration write: %v", err)
+	}
+	if model != "openai/gpt-4o" {
+		t.Fatalf("model after migration write = %q, want openai/gpt-4o", model)
 	}
 }

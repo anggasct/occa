@@ -56,6 +56,8 @@ type SessionRepo interface {
 	SetActive(ctx context.Context, platform, channelID, threadID, userID, sessionID string, agentPID int) error
 	Deactivate(ctx context.Context, platform, channelID, threadID, userID string) error
 	SetTitle(ctx context.Context, id int64, title string) error
+	SetModel(ctx context.Context, platform, channelID, threadID, userID, model string) error
+	ActiveModel(ctx context.Context, platform, channelID, threadID, userID string) (string, error)
 	List(ctx context.Context, platform, channelID string) ([]Session, error)
 	ListConversation(ctx context.Context, platform, channelID, threadID, userID string) ([]Session, error)
 	ThreadChannel(ctx context.Context, platform, threadID string) (string, error)

@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	schemaVersion    = 5
+	schemaVersion    = 6
 	busyTimeoutMilli = 5000
 )
 
@@ -19,6 +19,12 @@ var migrations = []func(tx *sql.Tx) error{
 	addSessionAgentPID,
 	addSessionTitle,
 	addProgressNotices,
+	addSessionModel,
+}
+
+func addSessionModel(tx *sql.Tx) error {
+	_, err := tx.Exec(`ALTER TABLE session ADD COLUMN model TEXT NOT NULL DEFAULT '';`)
+	return err
 }
 
 func addProgressNotices(tx *sql.Tx) error {

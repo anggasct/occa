@@ -8,6 +8,7 @@ import (
 
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/relay"
+	"github.com/anggasct/occa/internal/store"
 )
 
 var errChannelScopeUnresolved = errors.New("channel scope unresolved")
@@ -49,6 +50,30 @@ func (r *Router) handleModel(ctx context.Context, msg channel.IncomingMessage, a
 		return fmt.Sprintf("✅ Channel model set: %s", formatModelRef(ref)), nil
 	}
 
+	if parts[0] == "session" {
+		if len(parts) != 2 {
+			return "Usage: /model session <provider>/<model-id>[@variant] | default", nil
+		}
+		threadID, userID := conversationKey(msg)
+		if parts[1] == "default" {
+			if err := r.setSessionModel(ctx, msg, threadID, userID, ""); err != nil {
+				return "", err
+			}
+			return "✅ Session model cleared.", nil
+		}
+		ref, err := parseModelRef(parts[1])
+		if err != nil {
+			return "", err
+		}
+		if err := r.validateModel(ctx, msg, ref); err != nil {
+			return "", err
+		}
+		if err := r.setSessionModel(ctx, msg, threadID, userID, formatModelRef(ref)); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("✅ Session model set: %s", formatModelRef(ref)), nil
+	}
+
 	if len(parts) != 1 {
 		return "Usage: /model [channel] [provider/model-id[@variant]]", nil
 	}
@@ -69,6 +94,16 @@ func (r *Router) handleModel(ctx context.Context, msg channel.IncomingMessage, a
 	return fmt.Sprintf("✅ Personal model set: %s", formatModelRef(ref)), nil
 }
 
+func (r *Router) setSessionModel(ctx context.Context, msg channel.IncomingMessage, threadID, userID, model string) error {
+	if err := r.store.SessionRepo().SetModel(ctx, msg.Platform, msg.ChannelID, threadID, userID, model); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return safeReplyError("No active session to configure — start a conversation first.", nil)
+		}
+		return fmt.Errorf("model: set session: %w", err)
+	}
+	return nil
+}
+
 func (r *Router) viewModel(ctx context.Context, msg channel.IncomingMessage) (string, error) {
 	model, err := r.effectiveModel(ctx, msg)
 	if err != nil {
@@ -81,6 +116,19 @@ func (r *Router) viewModel(ctx context.Context, msg channel.IncomingMessage) (st
 }
 
 func (r *Router) effectiveModel(ctx context.Context, msg channel.IncomingMessage) (*relay.ModelRef, error) {
+	threadID, userID := conversationKey(msg)
+	sessionModel, err := r.store.SessionRepo().ActiveModel(ctx, msg.Platform, msg.ChannelID, threadID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("model: get session model: %w", err)
+	}
+	if sessionModel != "" {
+		ref, err := parseModelRef(sessionModel)
+		if err != nil {
+			return nil, fmt.Errorf("model: invalid stored session model %q: %w", sessionModel, err)
+		}
+		return &ref, nil
+	}
+
 	modelChannelID, err := modelScopeChannelID(msg)
 	if err != nil {
 		return nil, safeReplyError("Channel information unavailable. Please try again.", err)

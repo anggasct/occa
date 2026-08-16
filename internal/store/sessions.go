@@ -89,6 +89,39 @@ func (r *sqliteSessionRepo) SetTitle(ctx context.Context, id int64, title string
 	return nil
 }
 
+func (r *sqliteSessionRepo) SetModel(ctx context.Context, platform, channelID, threadID, userID, model string) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE session SET model = ?, updated_at = ? WHERE platform = ? AND channel_id = ? AND thread_id = ? AND user_id = ? AND active = 1`,
+		model, time.Now().Unix(), platform, channelID, threadID, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("store: session set model: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: session set model: rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *sqliteSessionRepo) ActiveModel(ctx context.Context, platform, channelID, threadID, userID string) (string, error) {
+	var model string
+	err := r.db.QueryRowContext(ctx,
+		`SELECT model FROM session WHERE platform = ? AND channel_id = ? AND thread_id = ? AND user_id = ? AND active = 1`,
+		platform, channelID, threadID, userID,
+	).Scan(&model)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: session active model: %w", err)
+	}
+	return model, nil
+}
+
 func (r *sqliteSessionRepo) List(ctx context.Context, platform, channelID string) ([]Session, error) {
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT id, channel_id, platform, agent_session_id, thread_id, user_id, title, active, created_at, updated_at FROM session WHERE platform = ? AND channel_id = ? ORDER BY created_at DESC`,
