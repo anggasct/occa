@@ -28,7 +28,7 @@ func (r *Router) setChannel(ctx context.Context, msg channel.IncomingMessage, mo
 	}
 
 	if isOwnedThreadMessage(msg) {
-		if err := r.store.ThreadConfigRepo().UpsertListenMode(ctx, msg.Platform, msg.ThreadID, mode); err != nil {
+		if err := r.store.ThreadConfigRepo().UpsertListenMode(ctx, msg.Platform, threadScopeChannelID(msg), msg.ThreadID, mode); err != nil {
 			return "", fmt.Errorf("channel: %w", err)
 		}
 	} else {

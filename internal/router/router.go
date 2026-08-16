@@ -557,8 +557,8 @@ func (r *Router) helpText() string {
 		"• /compact — compact the current session context\n" +
 		"• /undo — undo the last turn (message + file changes)\n" +
 		"• /redo — restore a reverted turn\n" +
-		"• /dir [path] — view or set this channel's working directory\n" +
-		"• /channel [mention|all|thread] — view or set listen mode\n" +
+		"• /dir [path] — view or set working directory (per location)\n" +
+		"• /channel [mention|all|thread] — view or set listen mode (per location)\n" +
 		"• /model [provider/model-id[@variant]] — view or set model (per location)\n" +
 		"• /variants [provider/model-id] — list and set model reasoning variants\n" +
 		"• /schedules [delete <id>] — view or delete scheduled tasks\n" +

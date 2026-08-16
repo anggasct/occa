@@ -45,7 +45,7 @@ func (r *Router) handleModel(ctx context.Context, msg channel.IncomingMessage, a
 		if err := r.validateModel(ctx, msg, ref); err != nil {
 			return "", err
 		}
-		if err := r.store.ThreadConfigRepo().UpsertModel(ctx, msg.Platform, msg.ThreadID, formatModelRef(ref)); err != nil {
+		if err := r.store.ThreadConfigRepo().UpsertModel(ctx, msg.Platform, threadScopeChannelID(msg), msg.ThreadID, formatModelRef(ref)); err != nil {
 			return "", fmt.Errorf("model: set thread: %w", err)
 		}
 		return fmt.Sprintf("✅ Thread model set: %s", formatModelRef(ref)), nil
@@ -71,7 +71,7 @@ func (r *Router) handleModel(ctx context.Context, msg channel.IncomingMessage, a
 
 func (r *Router) clearModel(ctx context.Context, msg channel.IncomingMessage) (string, error) {
 	if isOwnedThreadMessage(msg) {
-		if err := r.store.ThreadConfigRepo().UpsertModel(ctx, msg.Platform, msg.ThreadID, ""); err != nil {
+		if err := r.store.ThreadConfigRepo().UpsertModel(ctx, msg.Platform, threadScopeChannelID(msg), msg.ThreadID, ""); err != nil {
 			return "", fmt.Errorf("model: clear thread: %w", err)
 		}
 		return "✅ Thread model cleared.", nil

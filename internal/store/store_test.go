@@ -832,6 +832,12 @@ func TestThreadConfigMigrationBackfillsOwnedThreads(t *testing.T) {
 	if err := s1.SessionRepo().SetActive(ctx, "discord", "user-thread", "user-thread", "", "sess-3", 100); err != nil {
 		t.Fatalf("SetActive self-scoped thread: %v", err)
 	}
+	if err := s1.SessionRepo().SetActive(ctx, "telegram", "chat-a", "555", "", "sess-4", 100); err != nil {
+		t.Fatalf("SetActive chat-a topic: %v", err)
+	}
+	if err := s1.SessionRepo().SetActive(ctx, "telegram", "chat-b", "555", "", "sess-5", 100); err != nil {
+		t.Fatalf("SetActive chat-b topic: %v", err)
+	}
 	if err := s1.ChannelRepo().UpsertWorkdir(ctx, "discord", "parent-1", "/repo"); err != nil {
 		t.Fatalf("UpsertWorkdir parent-1: %v", err)
 	}
@@ -840,6 +846,9 @@ func TestThreadConfigMigrationBackfillsOwnedThreads(t *testing.T) {
 	}
 	if err := s1.ChannelRepo().UpsertListenMode(ctx, "discord", "parent-1", "all"); err != nil {
 		t.Fatalf("UpsertListenMode parent-1: %v", err)
+	}
+	if err := s1.ChannelRepo().UpsertWorkdir(ctx, "telegram", "chat-a", "/tg-a"); err != nil {
+		t.Fatalf("UpsertWorkdir chat-a: %v", err)
 	}
 	if _, err := s1.db.Exec("DROP TABLE thread_config"); err != nil {
 		t.Fatalf("drop thread_config: %v", err)
@@ -864,7 +873,7 @@ func TestThreadConfigMigrationBackfillsOwnedThreads(t *testing.T) {
 	}
 
 	repo := s2.ThreadConfigRepo()
-	tc, err := repo.Get(ctx, "discord", "thread-1")
+	tc, err := repo.Get(ctx, "discord", "parent-1", "thread-1")
 	if err != nil {
 		t.Fatalf("Get thread-1: %v", err)
 	}
@@ -872,7 +881,7 @@ func TestThreadConfigMigrationBackfillsOwnedThreads(t *testing.T) {
 		t.Fatalf("thread-1 backfill = %+v, want channel effective values", tc)
 	}
 
-	tc2, err := repo.Get(ctx, "discord", "thread-2")
+	tc2, err := repo.Get(ctx, "discord", "parent-2", "thread-2")
 	if err != nil {
 		t.Fatalf("Get thread-2: %v", err)
 	}
@@ -880,12 +889,31 @@ func TestThreadConfigMigrationBackfillsOwnedThreads(t *testing.T) {
 		t.Fatalf("thread-2 backfill = %+v, want defaults", tc2)
 	}
 
-	self, err := repo.Get(ctx, "discord", "user-thread")
+	self, err := repo.Get(ctx, "discord", "user-thread", "user-thread")
 	if err != nil {
 		t.Fatalf("Get user-thread: %v", err)
 	}
 	if self != nil {
 		t.Fatalf("self-scoped thread must not be backfilled, got %+v", self)
+	}
+
+	// Same bare topic id in two chats must produce two isolated rows.
+	tgA, err := repo.Get(ctx, "telegram", "chat-a", "555")
+	if err != nil {
+		t.Fatalf("Get chat-a topic: %v", err)
+	}
+	if tgA == nil || tgA.Workdir != "/tg-a" {
+		t.Fatalf("chat-a topic backfill = %+v, want workdir /tg-a", tgA)
+	}
+	tgB, err := repo.Get(ctx, "telegram", "chat-b", "555")
+	if err != nil {
+		t.Fatalf("Get chat-b topic: %v", err)
+	}
+	if tgB == nil || tgB.Workdir != "/default-workdir" {
+		t.Fatalf("chat-b topic backfill = %+v, want default workdir", tgB)
+	}
+	if tgA.ID == tgB.ID {
+		t.Fatalf("chat-a and chat-b topic rows share id %d, want distinct rows", tgA.ID)
 	}
 }
 
@@ -894,7 +922,7 @@ func TestThreadConfigRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	repo := s.ThreadConfigRepo()
 
-	tc, err := repo.Get(ctx, "discord", "thread-1")
+	tc, err := repo.Get(ctx, "discord", "parent", "thread-1")
 	if err != nil {
 		t.Fatalf("Get missing: %v", err)
 	}
@@ -902,17 +930,17 @@ func TestThreadConfigRoundTrip(t *testing.T) {
 		t.Fatal("expected nil for missing row")
 	}
 
-	if err := repo.UpsertWorkdir(ctx, "discord", "thread-1", "/repo"); err != nil {
+	if err := repo.UpsertWorkdir(ctx, "discord", "parent", "thread-1", "/repo"); err != nil {
 		t.Fatalf("UpsertWorkdir: %v", err)
 	}
-	if err := repo.UpsertModel(ctx, "discord", "thread-1", "openai/gpt-4o"); err != nil {
+	if err := repo.UpsertModel(ctx, "discord", "parent", "thread-1", "openai/gpt-4o"); err != nil {
 		t.Fatalf("UpsertModel: %v", err)
 	}
-	if err := repo.UpsertListenMode(ctx, "discord", "thread-1", "all"); err != nil {
+	if err := repo.UpsertListenMode(ctx, "discord", "parent", "thread-1", "all"); err != nil {
 		t.Fatalf("UpsertListenMode: %v", err)
 	}
 
-	tc, err = repo.Get(ctx, "discord", "thread-1")
+	tc, err = repo.Get(ctx, "discord", "parent", "thread-1")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -920,10 +948,10 @@ func TestThreadConfigRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected row: %+v", tc)
 	}
 
-	if err := repo.UpsertModel(ctx, "discord", "thread-1", "anthropic/claude-3"); err != nil {
+	if err := repo.UpsertModel(ctx, "discord", "parent", "thread-1", "anthropic/claude-3"); err != nil {
 		t.Fatalf("UpsertModel update: %v", err)
 	}
-	tc, err = repo.Get(ctx, "discord", "thread-1")
+	tc, err = repo.Get(ctx, "discord", "parent", "thread-1")
 	if err != nil {
 		t.Fatalf("Get after update: %v", err)
 	}
@@ -931,12 +959,20 @@ func TestThreadConfigRoundTrip(t *testing.T) {
 		t.Fatalf("model update changed another field: %+v", tc)
 	}
 
-	other, err := repo.Get(ctx, "telegram", "thread-1")
+	other, err := repo.Get(ctx, "telegram", "parent", "thread-1")
 	if err != nil {
 		t.Fatalf("Get other platform: %v", err)
 	}
 	if other != nil {
 		t.Fatalf("expected no cross-platform leak, got %+v", other)
+	}
+
+	otherChannel, err := repo.Get(ctx, "discord", "other-parent", "thread-1")
+	if err != nil {
+		t.Fatalf("Get other channel: %v", err)
+	}
+	if otherChannel != nil {
+		t.Fatalf("expected no cross-channel leak, got %+v", otherChannel)
 	}
 }
 
@@ -956,10 +992,10 @@ func TestThreadConfigSnapshotFromChannel(t *testing.T) {
 		t.Fatalf("UpsertListenMode parent: %v", err)
 	}
 
-	if err := repo.SnapshotFromChannel(ctx, "discord", "thread-1", "parent", "/default"); err != nil {
+	if err := repo.SnapshotFromChannel(ctx, "discord", "parent", "thread-1", "/default"); err != nil {
 		t.Fatalf("SnapshotFromChannel: %v", err)
 	}
-	tc, err := repo.Get(ctx, "discord", "thread-1")
+	tc, err := repo.Get(ctx, "discord", "parent", "thread-1")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -970,10 +1006,10 @@ func TestThreadConfigSnapshotFromChannel(t *testing.T) {
 	if err := chRepo.UpsertModel(ctx, "discord", "parent", "anthropic/claude-3"); err != nil {
 		t.Fatalf("UpsertModel parent after snapshot: %v", err)
 	}
-	if err := repo.SnapshotFromChannel(ctx, "discord", "thread-1", "parent", "/default"); err != nil {
+	if err := repo.SnapshotFromChannel(ctx, "discord", "parent", "thread-1", "/default"); err != nil {
 		t.Fatalf("second snapshot: %v", err)
 	}
-	tc, err = repo.Get(ctx, "discord", "thread-1")
+	tc, err = repo.Get(ctx, "discord", "parent", "thread-1")
 	if err != nil {
 		t.Fatalf("Get after channel change: %v", err)
 	}
@@ -981,14 +1017,34 @@ func TestThreadConfigSnapshotFromChannel(t *testing.T) {
 		t.Fatalf("existing thread row must not be overwritten by a later snapshot, got %q", tc.Model)
 	}
 
-	if err := repo.SnapshotFromChannel(ctx, "discord", "thread-2", "missing-parent", "/default"); err != nil {
+	if err := repo.SnapshotFromChannel(ctx, "discord", "missing-parent", "thread-2", "/default"); err != nil {
 		t.Fatalf("SnapshotFromChannel missing channel: %v", err)
 	}
-	tc2, err := repo.Get(ctx, "discord", "thread-2")
+	tc2, err := repo.Get(ctx, "discord", "missing-parent", "thread-2")
 	if err != nil {
 		t.Fatalf("Get thread-2: %v", err)
 	}
 	if tc2 == nil || tc2.Workdir != "/default" || tc2.Model != "" || tc2.ListenMode != "mention" {
 		t.Fatalf("missing-channel snapshot = %+v, want defaults", tc2)
+	}
+
+	// Snapshotting the same thread id under a different parent channel must
+	// not touch the original row.
+	if err := repo.SnapshotFromChannel(ctx, "discord", "parent-2", "thread-1", "/default"); err != nil {
+		t.Fatalf("SnapshotFromChannel parent-2: %v", err)
+	}
+	tcOther, err := repo.Get(ctx, "discord", "parent-2", "thread-1")
+	if err != nil {
+		t.Fatalf("Get parent-2 thread-1: %v", err)
+	}
+	if tcOther == nil || tcOther.Workdir != "/default" {
+		t.Fatalf("parent-2 thread-1 snapshot = %+v, want default workdir", tcOther)
+	}
+	tc, err = repo.Get(ctx, "discord", "parent", "thread-1")
+	if err != nil {
+		t.Fatalf("Get original after sibling snapshot: %v", err)
+	}
+	if tc.Workdir != "/repo" || tc.Model != "openai/gpt-4o" {
+		t.Fatalf("sibling snapshot overwrote original row: %+v", tc)
 	}
 }

@@ -40,7 +40,7 @@ func (r *Router) setDir(ctx context.Context, msg channel.IncomingMessage, path s
 	}
 
 	if isOwnedThreadMessage(msg) {
-		if err := r.store.ThreadConfigRepo().UpsertWorkdir(ctx, msg.Platform, msg.ThreadID, dir); err != nil {
+		if err := r.store.ThreadConfigRepo().UpsertWorkdir(ctx, msg.Platform, threadScopeChannelID(msg), msg.ThreadID, dir); err != nil {
 			return "", fmt.Errorf("dir: %w", err)
 		}
 	} else {

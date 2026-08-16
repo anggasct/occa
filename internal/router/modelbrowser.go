@@ -225,7 +225,7 @@ func (r *Router) modelBrowserSet(ctx context.Context, msg channel.IncomingMessag
 	}
 
 	if isOwnedThreadMessage(msg) {
-		if err := r.store.ThreadConfigRepo().UpsertModel(ctx, msg.Platform, msg.ThreadID, formatModelRef(ref)); err != nil {
+		if err := r.store.ThreadConfigRepo().UpsertModel(ctx, msg.Platform, threadScopeChannelID(msg), msg.ThreadID, formatModelRef(ref)); err != nil {
 			return err
 		}
 		return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "✅ Thread model set: "+formatModelRef(ref), nil)

@@ -52,7 +52,7 @@ func TestSnapshotAtSessionActivation(t *testing.T) {
 	waitForDispatch(t, client)
 	waitForResponse(t, r)
 
-	tc := threadConfigsOf(r).configs["discord:thread-1"]
+	tc := threadConfigsOf(r).configs["discord:parent:thread-1"]
 	if tc == nil {
 		t.Fatal("thread config not materialized at session activation")
 	}
@@ -70,14 +70,14 @@ func TestEnsureThreadConfigIdempotent(t *testing.T) {
 	st.channelRepo.channels["discord:parent"] = &store.Channel{
 		ChannelID: "parent", Platform: "discord", Workdir: "/repo", ListenMode: "all",
 	}
-	threadConfigsOf(r).configs["discord:thread-1"] = &store.ThreadConfig{
-		Platform: "discord", ThreadID: "thread-1", Workdir: "/custom", ListenMode: "mention",
+	threadConfigsOf(r).configs["discord:parent:thread-1"] = &store.ThreadConfig{
+		Platform: "discord", ChannelID: "parent", ThreadID: "thread-1", Workdir: "/custom", ListenMode: "mention",
 	}
 
 	if err := r.Route(context.Background(), ownedThreadMsg("thread-1", "/dir", &fakeReplyCtx{})); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
-	tc := threadConfigsOf(r).configs["discord:thread-1"]
+	tc := threadConfigsOf(r).configs["discord:parent:thread-1"]
 	if tc.Workdir != "/custom" || tc.ListenMode != "mention" {
 		t.Fatalf("existing thread row overwritten by ensureThreadConfig: %+v", tc)
 	}
@@ -91,8 +91,8 @@ func TestEffectiveWorkdirIsolation(t *testing.T) {
 	}
 
 	threadWithRow := ownedThreadMsg("thread-1", "", &fakeReplyCtx{})
-	threadConfigsOf(r).configs["discord:thread-1"] = &store.ThreadConfig{
-		Platform: "discord", ThreadID: "thread-1", Workdir: "/thread-wd",
+	threadConfigsOf(r).configs["discord:parent:thread-1"] = &store.ThreadConfig{
+		Platform: "discord", ChannelID: "parent", ThreadID: "thread-1", Workdir: "/thread-wd",
 	}
 	if got := r.effectiveWorkdir(context.Background(), threadWithRow); got != "/thread-wd" {
 		t.Fatalf("thread workdir = %q, want /thread-wd", got)
@@ -108,8 +108,8 @@ func TestEffectiveWorkdirIsolation(t *testing.T) {
 		t.Fatalf("no-row thread workdir = %q, want channel /channel-wd-2", got)
 	}
 
-	threadConfigsOf(r).configs["discord:thread-2"] = &store.ThreadConfig{
-		Platform: "discord", ThreadID: "thread-2", Workdir: "",
+	threadConfigsOf(r).configs["discord:parent:thread-2"] = &store.ThreadConfig{
+		Platform: "discord", ChannelID: "parent", ThreadID: "thread-2", Workdir: "",
 	}
 	if got := r.effectiveWorkdir(context.Background(), threadNoRow); got != "/default-workdir" {
 		t.Fatalf("empty-row thread workdir = %q, want agent default", got)
@@ -124,8 +124,8 @@ func TestEffectiveListenModeIsolation(t *testing.T) {
 	}
 
 	threadWithRow := ownedThreadMsg("thread-1", "", &fakeReplyCtx{})
-	threadConfigsOf(r).configs["discord:thread-1"] = &store.ThreadConfig{
-		Platform: "discord", ThreadID: "thread-1", ListenMode: "mention",
+	threadConfigsOf(r).configs["discord:parent:thread-1"] = &store.ThreadConfig{
+		Platform: "discord", ChannelID: "parent", ThreadID: "thread-1", ListenMode: "mention",
 	}
 	if got := r.effectiveListenMode(context.Background(), threadWithRow); got != "mention" {
 		t.Fatalf("thread listen mode = %q, want mention", got)
@@ -141,8 +141,8 @@ func TestEffectiveListenModeIsolation(t *testing.T) {
 		t.Fatalf("no-row thread listen mode = %q, want channel thread", got)
 	}
 
-	threadConfigsOf(r).configs["discord:thread-2"] = &store.ThreadConfig{
-		Platform: "discord", ThreadID: "thread-2", ListenMode: "",
+	threadConfigsOf(r).configs["discord:parent:thread-2"] = &store.ThreadConfig{
+		Platform: "discord", ChannelID: "parent", ThreadID: "thread-2", ListenMode: "",
 	}
 	if got := r.effectiveListenMode(context.Background(), threadNoRow); got != "mention" {
 		t.Fatalf("empty-row thread listen mode = %q, want mention default", got)
@@ -156,7 +156,7 @@ func TestSetDirInThreadIsThreadScoped(t *testing.T) {
 	if err := r.Route(context.Background(), ownedThreadMsg("thread-1", "/dir "+dir, &fakeReplyCtx{})); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
-	tc := threadConfigsOf(r).configs["discord:thread-1"]
+	tc := threadConfigsOf(r).configs["discord:parent:thread-1"]
 	if tc == nil || tc.Workdir != dir {
 		t.Fatalf("thread workdir = %+v, want %q", tc, dir)
 	}
@@ -180,7 +180,7 @@ func TestBareModelInThreadWritesThreadConfig(t *testing.T) {
 	if !strings.Contains(reply.sends[0], "Thread model set: openai/gpt-4o") {
 		t.Fatalf("unexpected reply: %q", reply.sends[0])
 	}
-	tc := threadConfigsOf(r).configs["discord:thread-1"]
+	tc := threadConfigsOf(r).configs["discord:parent:thread-1"]
 	if tc == nil || tc.Model != "openai/gpt-4o" {
 		t.Fatalf("thread model = %+v, want openai/gpt-4o", tc)
 	}
@@ -242,8 +242,8 @@ func TestBareModelInChannelAdminWritesChannel(t *testing.T) {
 func TestModelDefaultClearsCurrentLocation(t *testing.T) {
 	t.Run("thread", func(t *testing.T) {
 		r, _ := newThreadTestRouter()
-		threadConfigsOf(r).configs["discord:thread-1"] = &store.ThreadConfig{
-			Platform: "discord", ThreadID: "thread-1", Model: "openai/gpt-4o",
+		threadConfigsOf(r).configs["discord:parent:thread-1"] = &store.ThreadConfig{
+			Platform: "discord", ChannelID: "parent", ThreadID: "thread-1", Model: "openai/gpt-4o",
 		}
 		reply := &fakeReplyCtx{}
 		if err := r.Route(context.Background(), ownedThreadMsg("thread-1", "/model default", reply)); err != nil {
@@ -252,7 +252,7 @@ func TestModelDefaultClearsCurrentLocation(t *testing.T) {
 		if !strings.Contains(reply.sends[0], "Thread model cleared") {
 			t.Fatalf("unexpected response: %q", reply.sends[0])
 		}
-		tc := threadConfigsOf(r).configs["discord:thread-1"]
+		tc := threadConfigsOf(r).configs["discord:parent:thread-1"]
 		if tc.Model != "" {
 			t.Fatalf("thread model after default = %q, want empty", tc.Model)
 		}
@@ -314,7 +314,7 @@ func TestOldSessionAndChannelKeywordsRejected(t *testing.T) {
 			if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], "Usage: /model") {
 				t.Fatalf("expected usage error, got: %v", reply.sends)
 			}
-			if tc := threadConfigsOf(r).configs["discord:thread-1"]; tc != nil && tc.Model != "" {
+			if tc := threadConfigsOf(r).configs["discord:parent:thread-1"]; tc != nil && tc.Model != "" {
 				t.Fatalf("keyword form wrote a thread model: %+v", tc)
 			}
 		})
@@ -331,8 +331,8 @@ func TestEffectiveModelIsolation(t *testing.T) {
 	}
 
 	t.Run("thread row exists beats channel", func(t *testing.T) {
-		threadConfigsOf(r).configs["discord:thread-1"] = &store.ThreadConfig{
-			Platform: "discord", ThreadID: "thread-1", Model: "openai/gpt-4o",
+		threadConfigsOf(r).configs["discord:parent:thread-1"] = &store.ThreadConfig{
+			Platform: "discord", ChannelID: "parent", ThreadID: "thread-1", Model: "openai/gpt-4o",
 		}
 		model, err := r.effectiveModel(ctx, ownedThreadMsg("thread-1", "", &fakeReplyCtx{}))
 		if err != nil {
@@ -344,8 +344,8 @@ func TestEffectiveModelIsolation(t *testing.T) {
 	})
 
 	t.Run("empty thread row means agent default", func(t *testing.T) {
-		threadConfigsOf(r).configs["discord:thread-2"] = &store.ThreadConfig{
-			Platform: "discord", ThreadID: "thread-2", Model: "",
+		threadConfigsOf(r).configs["discord:parent:thread-2"] = &store.ThreadConfig{
+			Platform: "discord", ChannelID: "parent", ThreadID: "thread-2", Model: "",
 		}
 		model, err := r.effectiveModel(ctx, ownedThreadMsg("thread-2", "", &fakeReplyCtx{}))
 		if err != nil {
@@ -367,8 +367,8 @@ func TestEffectiveModelIsolation(t *testing.T) {
 	})
 
 	t.Run("personal beats thread", func(t *testing.T) {
-		threadConfigsOf(r).configs["discord:thread-1"] = &store.ThreadConfig{
-			Platform: "discord", ThreadID: "thread-1", Model: "openai/gpt-4o",
+		threadConfigsOf(r).configs["discord:parent:thread-1"] = &store.ThreadConfig{
+			Platform: "discord", ChannelID: "parent", ThreadID: "thread-1", Model: "openai/gpt-4o",
 		}
 		st.overrideRepo.overrides["discord:parent:user1"] = &store.UserOverride{
 			ChannelID: "parent", Platform: "discord", UserID: "user1", Role: "admin", Model: "zai-coding-plan/glm-5.2",
@@ -432,7 +432,7 @@ func TestNewThreadAfterChannelChangeInheritsNewValue(t *testing.T) {
 	if !strings.Contains(reply.sends[0], "anthropic/claude-3") {
 		t.Fatalf("new thread did not inherit the new channel model: %q", reply.sends[0])
 	}
-	tc := threadConfigsOf(r).configs["discord:thread-2"]
+	tc := threadConfigsOf(r).configs["discord:parent:thread-2"]
 	if tc == nil || tc.Model != "anthropic/claude-3" {
 		t.Fatalf("thread-2 snapshot = %+v, want anthropic/claude-3", tc)
 	}
@@ -441,8 +441,8 @@ func TestNewThreadAfterChannelChangeInheritsNewValue(t *testing.T) {
 func TestModelBrowserSetInThreadWritesThreadConfig(t *testing.T) {
 	r, client := newThreadTestRouter()
 	client.providers = browseProviders()
-	threadConfigsOf(r).configs["discord:thread-1"] = &store.ThreadConfig{
-		Platform: "discord", ThreadID: "thread-1",
+	threadConfigsOf(r).configs["discord:parent:thread-1"] = &store.ThreadConfig{
+		Platform: "discord", ChannelID: "parent", ThreadID: "thread-1",
 	}
 	token, err := r.modelBrowser.register(modelBrowseAction{kind: "set", providerID: "openai", modelID: "gpt-4o"})
 	if err != nil {
@@ -462,8 +462,129 @@ func TestModelBrowserSetInThreadWritesThreadConfig(t *testing.T) {
 	if text != "✅ Thread model set: openai/gpt-4o" {
 		t.Fatalf("text = %q", text)
 	}
-	tc := threadConfigsOf(r).configs["discord:thread-1"]
+	tc := threadConfigsOf(r).configs["discord:parent:thread-1"]
 	if tc.Model != "openai/gpt-4o" {
 		t.Fatalf("thread model = %q, want openai/gpt-4o", tc.Model)
+	}
+}
+
+func telegramTopicMsg(chatID, threadID, text string, reply *fakeReplyCtx) channel.IncomingMessage {
+	return channel.IncomingMessage{
+		Platform:  "telegram",
+		ChannelID: chatID,
+		ThreadID:  threadID,
+		UserID:    "user1",
+		Text:      text,
+		IsThread:  true,
+		IsMention: true,
+		ReplyCtx:  reply,
+	}
+}
+
+// TestSameThreadIDDifferentChatsIsolated proves Telegram forum topic ids are
+// scoped to their parent chat: two chats that happen to use the same bare
+// topic id (555) must not share a workdir/model/listen snapshot.
+func TestSameThreadIDDifferentChatsIsolated(t *testing.T) {
+	r, client := newThreadTestRouter()
+	client.providers = modelTestProviders()
+	ctx := context.Background()
+	st := r.store.(*fakeStore)
+	st.overrideRepo.overrides["telegram:chat-a:user1"] = &store.UserOverride{
+		ChannelID: "chat-a", Platform: "telegram", UserID: "user1", Role: "admin",
+	}
+	st.overrideRepo.overrides["telegram:chat-b:user1"] = &store.UserOverride{
+		ChannelID: "chat-b", Platform: "telegram", UserID: "user1", Role: "admin",
+	}
+	st.channelRepo.channels["telegram:chat-a"] = &store.Channel{
+		ChannelID: "chat-a", Platform: "telegram", Model: "anthropic/claude-3", ListenMode: "all",
+	}
+	st.channelRepo.channels["telegram:chat-b"] = &store.Channel{
+		ChannelID: "chat-b", Platform: "telegram", Model: "zai-coding-plan/glm-5.2", ListenMode: "mention",
+	}
+
+	if err := r.Route(ctx, telegramTopicMsg("chat-a", "555", "/model openai/gpt-4o", &fakeReplyCtx{})); err != nil {
+		t.Fatalf("Route chat-a: %v", err)
+	}
+	tcA := threadConfigsOf(r).configs["telegram:chat-a:555"]
+	if tcA == nil || tcA.Model != "openai/gpt-4o" {
+		t.Fatalf("chat-a topic row = %+v, want openai/gpt-4o", tcA)
+	}
+	if tcB := threadConfigsOf(r).configs["telegram:chat-b:555"]; tcB != nil {
+		t.Fatalf("chat-b topic row must stay untouched, got %+v", tcB)
+	}
+
+	modelA, err := r.effectiveModel(ctx, telegramTopicMsg("chat-a", "555", "", &fakeReplyCtx{}))
+	if err != nil {
+		t.Fatalf("effectiveModel chat-a: %v", err)
+	}
+	if modelA == nil || modelA.ProviderID != "openai" || modelA.ID != "gpt-4o" {
+		t.Fatalf("chat-a effective model = %+v, want openai/gpt-4o", modelA)
+	}
+	modelB, err := r.effectiveModel(ctx, telegramTopicMsg("chat-b", "555", "", &fakeReplyCtx{}))
+	if err != nil {
+		t.Fatalf("effectiveModel chat-b: %v", err)
+	}
+	if modelB == nil || modelB.ProviderID != "zai-coding-plan" || modelB.ID != "glm-5.2" {
+		t.Fatalf("chat-b effective model = %+v, want zai-coding-plan/glm-5.2", modelB)
+	}
+}
+
+// TestNonThreadResolutionSkipsThreadConfig proves the no-thread-config-read
+// boundary: plain (non-thread) workdir/listen/model resolution and set
+// commands must never touch the thread-config repository.
+func TestNonThreadResolutionSkipsThreadConfig(t *testing.T) {
+	r, client, _ := newTestRouter()
+	client.providers = modelTestProviders()
+	ctx := context.Background()
+	st := r.store.(*fakeStore)
+	st.channelRepo.channels["telegram:chat1"] = &store.Channel{
+		ChannelID: "chat1", Platform: "telegram", Workdir: "/repo", Model: "openai/gpt-4o", ListenMode: "all",
+	}
+	plain := msg("hello", &fakeReplyCtx{})
+	tc := threadConfigsOf(r)
+
+	if got := r.effectiveWorkdir(ctx, plain); got != "/repo" {
+		t.Fatalf("plain workdir = %q, want /repo", got)
+	}
+	if got := r.effectiveListenMode(ctx, plain); got != "all" {
+		t.Fatalf("plain listen mode = %q, want all", got)
+	}
+	if _, err := r.effectiveModel(ctx, plain); err != nil {
+		t.Fatalf("effectiveModel: %v", err)
+	}
+	if tc.getCalls != 0 {
+		t.Fatalf("non-thread resolution made %d thread-config reads, want 0", tc.getCalls)
+	}
+
+	if err := r.Route(ctx, plain); err != nil {
+		t.Fatalf("Route plain passthrough: %v", err)
+	}
+	waitForDispatch(t, client)
+	waitForResponse(t, r)
+	if tc.getCalls != 0 {
+		t.Fatalf("non-thread passthrough made %d thread-config reads, want 0", tc.getCalls)
+	}
+	if tc.writeCalls != 0 {
+		t.Fatalf("non-thread passthrough made %d thread-config writes, want 0", tc.writeCalls)
+	}
+
+	dir := t.TempDir()
+	for _, tt := range []struct{ text string }{
+		{text: "/model openai/gpt-4o"},
+		{text: "/channel all"},
+		{text: "/dir " + dir},
+	} {
+		if err := r.Route(ctx, msg(tt.text, &fakeReplyCtx{})); err != nil {
+			t.Fatalf("Route %q: %v", tt.text, err)
+		}
+	}
+	if tc.getCalls != 0 {
+		t.Fatalf("non-thread set commands made %d thread-config reads, want 0", tc.getCalls)
+	}
+	if tc.writeCalls != 0 {
+		t.Fatalf("non-thread set commands made %d thread-config writes, want 0", tc.writeCalls)
+	}
+	if len(tc.configs) != 0 {
+		t.Fatalf("non-thread activity materialized thread-config rows: %+v", tc.configs)
 	}
 }

@@ -12,21 +12,31 @@ func isOwnedThreadMessage(msg channel.IncomingMessage) bool {
 	return msg.IsThread && msg.ThreadID != "" && msg.ChannelID != msg.ThreadID
 }
 
+// threadScopeChannelID returns the parent chat/channel identity that scopes a
+// thread. Telegram forum topic ids and Discord thread ids are only unique
+// within their parent channel, so the thread-config key must include it.
+func threadScopeChannelID(msg channel.IncomingMessage) string {
+	if msg.ParentChannelID != "" {
+		return msg.ParentChannelID
+	}
+	return msg.ChannelID
+}
+
 func (r *Router) ensureThreadConfig(ctx context.Context, msg channel.IncomingMessage) error {
 	if !isOwnedThreadMessage(msg) {
 		return nil
 	}
-	channelID := msg.ChannelID
-	if msg.ParentChannelID != "" {
-		channelID = msg.ParentChannelID
-	}
-	return r.store.ThreadConfigRepo().SnapshotFromChannel(ctx, msg.Platform, msg.ThreadID, channelID, r.defaultWorkdir)
+	return r.store.ThreadConfigRepo().SnapshotFromChannel(ctx, msg.Platform, threadScopeChannelID(msg), msg.ThreadID, r.defaultWorkdir)
 }
 
 func (r *Router) threadRow(ctx context.Context, msg channel.IncomingMessage) *store.ThreadConfig {
-	row, err := r.store.ThreadConfigRepo().Get(ctx, msg.Platform, msg.ThreadID)
+	if !isOwnedThreadMessage(msg) {
+		return nil
+	}
+	channelID := threadScopeChannelID(msg)
+	row, err := r.store.ThreadConfigRepo().Get(ctx, msg.Platform, channelID, msg.ThreadID)
 	if err != nil {
-		slog.Warn("router: read thread config failed", "platform", msg.Platform, "thread_id", msg.ThreadID, "error", err)
+		slog.Warn("router: read thread config failed", "platform", msg.Platform, "channel_id", channelID, "thread_id", msg.ThreadID, "error", err)
 		return nil
 	}
 	return row

@@ -34,6 +34,7 @@ func addThreadConfig(s *SQLiteStore, tx *sql.Tx) error {
 CREATE TABLE IF NOT EXISTS thread_config (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	platform TEXT NOT NULL,
+	channel_id TEXT NOT NULL,
 	thread_id TEXT NOT NULL,
 	workdir TEXT NOT NULL DEFAULT '',
 	model TEXT NOT NULL DEFAULT '',
@@ -41,7 +42,7 @@ CREATE TABLE IF NOT EXISTS thread_config (
 	created_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_thread_config_key ON thread_config (platform, thread_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_thread_config_key ON thread_config (platform, channel_id, thread_id);
 `
 	if _, err := tx.Exec(ddl); err != nil {
 		return fmt.Errorf("store: migrate thread config: %w", err)
@@ -49,13 +50,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_thread_config_key ON thread_config (platfo
 
 	now := time.Now().Unix()
 	_, err := tx.Exec(`
-INSERT OR IGNORE INTO thread_config (platform, thread_id, workdir, model, listen_mode, created_at, updated_at)
-SELECT s.platform, s.thread_id,
+INSERT OR IGNORE INTO thread_config (platform, channel_id, thread_id, workdir, model, listen_mode, created_at, updated_at)
+SELECT s.platform, s.channel_id, s.thread_id,
 	COALESCE((SELECT ch.workdir FROM channel ch WHERE ch.platform = s.platform AND ch.channel_id = s.channel_id), ?),
 	COALESCE((SELECT ch.model FROM channel ch WHERE ch.platform = s.platform AND ch.channel_id = s.channel_id), ''),
 	COALESCE((SELECT ch.listen_mode FROM channel ch WHERE ch.platform = s.platform AND ch.channel_id = s.channel_id), 'mention'),
 	?, ?
-FROM (SELECT DISTINCT platform, thread_id, channel_id FROM session WHERE thread_id != '' AND channel_id != thread_id) s`,
+FROM (SELECT DISTINCT platform, channel_id, thread_id FROM session WHERE thread_id != '' AND channel_id != thread_id) s`,
 		s.defaultWorkdir, now, now,
 	)
 	if err != nil {

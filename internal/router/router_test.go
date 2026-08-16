@@ -432,52 +432,59 @@ func (f *fakeProgressNoticeRepo) Delete(_ context.Context, platform, channelID, 
 var _ store.ProgressNoticeRepo = (*fakeProgressNoticeRepo)(nil)
 
 type fakeThreadConfigRepo struct {
-	configs  map[string]*store.ThreadConfig
-	channels *fakeChannelRepo
+	configs    map[string]*store.ThreadConfig
+	channels   *fakeChannelRepo
+	getCalls   int
+	writeCalls int
 }
 
 func newFakeThreadConfigRepo(channels *fakeChannelRepo) *fakeThreadConfigRepo {
 	return &fakeThreadConfigRepo{configs: make(map[string]*store.ThreadConfig), channels: channels}
 }
 
-func (f *fakeThreadConfigRepo) key(platform, threadID string) string {
-	return platform + ":" + threadID
+func (f *fakeThreadConfigRepo) key(platform, channelID, threadID string) string {
+	return platform + ":" + channelID + ":" + threadID
 }
 
-func (f *fakeThreadConfigRepo) Get(_ context.Context, platform, threadID string) (*store.ThreadConfig, error) {
-	return f.configs[f.key(platform, threadID)], nil
+func (f *fakeThreadConfigRepo) Get(_ context.Context, platform, channelID, threadID string) (*store.ThreadConfig, error) {
+	f.getCalls++
+	return f.configs[f.key(platform, channelID, threadID)], nil
 }
 
-func (f *fakeThreadConfigRepo) threadConfig(platform, threadID string) *store.ThreadConfig {
-	k := f.key(platform, threadID)
+func (f *fakeThreadConfigRepo) threadConfig(platform, channelID, threadID string) *store.ThreadConfig {
+	k := f.key(platform, channelID, threadID)
 	tc := f.configs[k]
 	if tc == nil {
-		tc = &store.ThreadConfig{Platform: platform, ThreadID: threadID}
+		tc = &store.ThreadConfig{Platform: platform, ChannelID: channelID, ThreadID: threadID}
 		f.configs[k] = tc
 	}
 	return tc
 }
 
-func (f *fakeThreadConfigRepo) UpsertWorkdir(_ context.Context, platform, threadID, workdir string) error {
-	f.threadConfig(platform, threadID).Workdir = workdir
+func (f *fakeThreadConfigRepo) UpsertWorkdir(_ context.Context, platform, channelID, threadID, workdir string) error {
+	f.writeCalls++
+	f.threadConfig(platform, channelID, threadID).Workdir = workdir
 	return nil
 }
 
-func (f *fakeThreadConfigRepo) UpsertModel(_ context.Context, platform, threadID, model string) error {
-	f.threadConfig(platform, threadID).Model = model
+func (f *fakeThreadConfigRepo) UpsertModel(_ context.Context, platform, channelID, threadID, model string) error {
+	f.writeCalls++
+	f.threadConfig(platform, channelID, threadID).Model = model
 	return nil
 }
 
-func (f *fakeThreadConfigRepo) UpsertListenMode(_ context.Context, platform, threadID, mode string) error {
-	f.threadConfig(platform, threadID).ListenMode = mode
+func (f *fakeThreadConfigRepo) UpsertListenMode(_ context.Context, platform, channelID, threadID, mode string) error {
+	f.writeCalls++
+	f.threadConfig(platform, channelID, threadID).ListenMode = mode
 	return nil
 }
 
-func (f *fakeThreadConfigRepo) SnapshotFromChannel(_ context.Context, platform, threadID, channelID, defaultWorkdir string) error {
-	if f.configs[f.key(platform, threadID)] != nil {
+func (f *fakeThreadConfigRepo) SnapshotFromChannel(_ context.Context, platform, channelID, threadID, defaultWorkdir string) error {
+	f.writeCalls++
+	if f.configs[f.key(platform, channelID, threadID)] != nil {
 		return nil
 	}
-	tc := f.threadConfig(platform, threadID)
+	tc := f.threadConfig(platform, channelID, threadID)
 	var ch *store.Channel
 	if f.channels != nil {
 		ch = f.channels.channels[f.channels.key(platform, channelID)]
