@@ -576,6 +576,21 @@ func (rc *replyContext) Send(text string) (channel.MessageRef, error) {
 }
 
 func (rc *replyContext) SendWithButtons(text string, buttons []channel.Button) (channel.MessageRef, error) {
+	if rc.interaction != nil {
+		content := text
+		components := componentRows(buttons)
+		msg, err := rc.session.InteractionResponseEdit(rc.interaction, &discordgo.WebhookEdit{
+			Content:         &content,
+			Components:      &components,
+			AllowedMentions: &discordgo.MessageAllowedMentions{},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("discord: interaction response edit: %w", err)
+		}
+		rc.interaction = nil
+		return messageRef{id: msg.ID}, nil
+	}
+
 	msg, err := rc.session.ChannelMessageSendComplex(rc.channelID, &discordgo.MessageSend{
 		Content:         text,
 		Components:      componentRows(buttons),

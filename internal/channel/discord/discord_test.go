@@ -504,3 +504,88 @@ func TestComponentRowsBrowserPageWithinCap(t *testing.T) {
 		}
 	}
 }
+
+// TestSendWithButtonsResolvesInteraction covers the deferred-interaction
+// fix: when the reply context holds a pending interaction, SendWithButtons
+// edits the deferred response (content + buttons) instead of sending a new
+// channel message, consumes the interaction, and returns the edited ref.
+func TestSendWithButtonsResolvesInteraction(t *testing.T) {
+	var paths []string
+	var bodies []string
+	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
+		body, _ := io.ReadAll(r.Body)
+		paths = append(paths, r.URL.Path)
+		bodies = append(bodies, string(body))
+		return []byte(`{"id":"edited-1"}`), http.StatusOK
+	})
+
+	rc := &replyContext{
+		session:     session,
+		channelID:   "ch-1",
+		interaction: &discordgo.Interaction{AppID: "app-1", Token: "tok-1"},
+	}
+	ref, err := rc.SendWithButtons("resolve me", []channel.Button{{Label: "Allow", Value: "allow"}})
+	if err != nil {
+		t.Fatalf("SendWithButtons: %v", err)
+	}
+	if ref.ID() != "edited-1" {
+		t.Fatalf("ref id = %q, want %q", ref.ID(), "edited-1")
+	}
+	if rc.interaction != nil {
+		t.Fatal("interaction must be consumed after the edit")
+	}
+	if len(paths) != 1 || !strings.Contains(paths[0], "/webhooks/app-1/tok-1/messages/@original") {
+		t.Fatalf("expected one interaction response edit, got paths %v", paths)
+	}
+	if len(bodies) != 1 || !strings.Contains(bodies[0], `"content":"resolve me"`) || !strings.Contains(bodies[0], `"custom_id":"allow"`) {
+		t.Fatalf("edit body must carry content and buttons, got %s", bodies)
+	}
+}
+
+// TestSendWithButtonsFallbackAfterInteraction covers the fallback: once the
+// pending interaction is consumed by the first call, a second
+// SendWithButtons sends a regular channel message.
+func TestSendWithButtonsFallbackAfterInteraction(t *testing.T) {
+	var paths []string
+	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
+		paths = append(paths, r.URL.Path)
+		return []byte(`{"id":"new-1"}`), http.StatusOK
+	})
+
+	rc := &replyContext{
+		session:     session,
+		channelID:   "ch-1",
+		interaction: &discordgo.Interaction{AppID: "app-1", Token: "tok-1"},
+	}
+	if _, err := rc.SendWithButtons("first", []channel.Button{{Label: "Allow", Value: "allow"}}); err != nil {
+		t.Fatalf("first SendWithButtons: %v", err)
+	}
+	ref, err := rc.SendWithButtons("second", []channel.Button{{Label: "Deny", Value: "deny"}})
+	if err != nil {
+		t.Fatalf("second SendWithButtons: %v", err)
+	}
+	if ref.ID() != "new-1" {
+		t.Fatalf("ref id = %q, want %q", ref.ID(), "new-1")
+	}
+	if len(paths) != 2 || !strings.Contains(paths[0], "/webhooks/app-1/tok-1/messages/@original") || !strings.Contains(paths[1], "/channels/ch-1/messages") {
+		t.Fatalf("expected edit then channel send, got paths %v", paths)
+	}
+}
+
+// TestSendWithButtonsNoInteraction covers the unchanged path: without a
+// pending interaction SendWithButtons sends a new channel message and
+// returns its ref.
+func TestSendWithButtonsNoInteraction(t *testing.T) {
+	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
+		return []byte(`{"id":"plain-1"}`), http.StatusOK
+	})
+
+	rc := &replyContext{session: session, channelID: "ch-1"}
+	ref, err := rc.SendWithButtons("no interaction", []channel.Button{{Label: "Allow", Value: "allow"}})
+	if err != nil {
+		t.Fatalf("SendWithButtons: %v", err)
+	}
+	if ref.ID() != "plain-1" {
+		t.Fatalf("ref id = %q, want %q", ref.ID(), "plain-1")
+	}
+}
