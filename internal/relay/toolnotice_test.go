@@ -79,8 +79,8 @@ func TestToolBubbleDistinctTools(t *testing.T) {
 
 // TestToolBubbleCapShowsWorkingIndicator: after 5 distinct bubbles in a phase,
 // further new tools stop creating bubbles and a single working indicator appears.
-// An EventSegment (text block) resets the bubble count so subsequent tools start
-// fresh bubbles again.
+// A substantial text block (EventSegment carrying >= maxToolBubbleResetRunes)
+// resets the bubble count so subsequent tools start fresh bubbles again.
 func TestToolBubbleCapShowsWorkingIndicator(t *testing.T) {
 	got := runToolEvents(t,
 		Event{Type: EventTool, Delta: "a"},
@@ -89,6 +89,7 @@ func TestToolBubbleCapShowsWorkingIndicator(t *testing.T) {
 		Event{Type: EventTool, Delta: "d"},
 		Event{Type: EventTool, Delta: "e"},
 		Event{Type: EventTool, Delta: "f"},
+		Event{Type: EventDelta, Delta: strings.Repeat("x", 60)},
 		Event{Type: EventSegment},
 		Event{Type: EventTool, Delta: "g"},
 		Event{Type: EventTool, Delta: "h"},
@@ -113,6 +114,182 @@ func TestToolBubbleCapShowsWorkingIndicator(t *testing.T) {
 			t.Fatalf("notices[%d] = %q, want %q (got: %v)", i, got[i], want[i], got)
 		}
 	}
+}
+
+// TestToolBubbleCapNotResetByEmptySegment: an EventSegment carrying no text
+// never resets the budget, so a burst of 10 distinct tools still caps at 5
+// bubbles plus a single working indicator.
+func TestToolBubbleCapNotResetByEmptySegment(t *testing.T) {
+	got := runToolEvents(t,
+		Event{Type: EventTool, Delta: "a"},
+		Event{Type: EventSegment},
+		Event{Type: EventTool, Delta: "b"},
+		Event{Type: EventSegment},
+		Event{Type: EventTool, Delta: "c"},
+		Event{Type: EventSegment},
+		Event{Type: EventTool, Delta: "d"},
+		Event{Type: EventSegment},
+		Event{Type: EventTool, Delta: "e"},
+		Event{Type: EventSegment},
+		Event{Type: EventTool, Delta: "f"},
+		Event{Type: EventSegment},
+		Event{Type: EventTool, Delta: "g"},
+		Event{Type: EventSegment},
+		Event{Type: EventTool, Delta: "h"},
+		Event{Type: EventSegment},
+		Event{Type: EventTool, Delta: "i"},
+		Event{Type: EventSegment},
+		Event{Type: EventTool, Delta: "j"},
+	)
+
+	want := []string{
+		"⚙️ a",
+		"⚙️ b",
+		"⚙️ c",
+		"⚙️ d",
+		"⚙️ e",
+		"🔄 Working…",
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("notices len = %d, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("notices[%d] = %q, want %q (got: %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+// TestToolBubbleCapNotResetByShortText: an EventSegment carrying fewer runes
+// than the threshold does not reset the budget, so later tools still collapse
+// to the working indicator.
+func TestToolBubbleCapNotResetByShortText(t *testing.T) {
+	got := runToolEvents(t,
+		Event{Type: EventTool, Delta: "a"},
+		Event{Type: EventTool, Delta: "b"},
+		Event{Type: EventTool, Delta: "c"},
+		Event{Type: EventTool, Delta: "d"},
+		Event{Type: EventTool, Delta: "e"},
+		Event{Type: EventDelta, Delta: strings.Repeat("x", 20)},
+		Event{Type: EventSegment},
+		Event{Type: EventTool, Delta: "f"},
+	)
+
+	want := []string{
+		"⚙️ a",
+		"⚙️ b",
+		"⚙️ c",
+		"⚙️ d",
+		"⚙️ e",
+		"🔄 Working…",
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("notices len = %d, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("notices[%d] = %q, want %q (got: %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+// TestToolBubbleCapResetBySubstantialText: an EventSegment carrying text at or
+// above the threshold resets the budget, so later tools render fresh bubbles.
+func TestToolBubbleCapResetBySubstantialText(t *testing.T) {
+	got := runToolEvents(t,
+		Event{Type: EventTool, Delta: "a"},
+		Event{Type: EventTool, Delta: "b"},
+		Event{Type: EventTool, Delta: "c"},
+		Event{Type: EventTool, Delta: "d"},
+		Event{Type: EventTool, Delta: "e"},
+		Event{Type: EventTool, Delta: "f"},
+		Event{Type: EventDelta, Delta: strings.Repeat("x", 60)},
+		Event{Type: EventSegment},
+		Event{Type: EventTool, Delta: "g"},
+		Event{Type: EventTool, Delta: "h"},
+	)
+
+	want := []string{
+		"⚙️ a",
+		"⚙️ b",
+		"⚙️ c",
+		"⚙️ d",
+		"⚙️ e",
+		"🔄 Working…",
+		"⚙️ g",
+		"⚙️ h",
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("notices len = %d, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("notices[%d] = %q, want %q (got: %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+// TestToolBubbleCapThresholdBoundary: text of exactly maxToolBubbleResetRunes
+// resets the budget; one rune fewer does not.
+func TestToolBubbleCapThresholdBoundary(t *testing.T) {
+	run := func(t *testing.T, textLen int) []string {
+		t.Helper()
+		return runToolEvents(t,
+			Event{Type: EventTool, Delta: "a"},
+			Event{Type: EventTool, Delta: "b"},
+			Event{Type: EventTool, Delta: "c"},
+			Event{Type: EventTool, Delta: "d"},
+			Event{Type: EventTool, Delta: "e"},
+			Event{Type: EventTool, Delta: "f"},
+			Event{Type: EventDelta, Delta: strings.Repeat("x", textLen)},
+			Event{Type: EventSegment},
+			Event{Type: EventTool, Delta: "g"},
+		)
+	}
+
+	t.Run("at threshold resets", func(t *testing.T) {
+		got := run(t, maxToolBubbleResetRunes)
+		want := []string{
+			"⚙️ a",
+			"⚙️ b",
+			"⚙️ c",
+			"⚙️ d",
+			"⚙️ e",
+			"🔄 Working…",
+			"⚙️ g",
+		}
+		if len(got) != len(want) {
+			t.Fatalf("notices len = %d, want %d: %v", len(got), len(want), got)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("notices[%d] = %q, want %q (got: %v)", i, got[i], want[i], got)
+			}
+		}
+	})
+
+	t.Run("below threshold does not reset", func(t *testing.T) {
+		got := run(t, maxToolBubbleResetRunes-1)
+		want := []string{
+			"⚙️ a",
+			"⚙️ b",
+			"⚙️ c",
+			"⚙️ d",
+			"⚙️ e",
+			"🔄 Working…",
+		}
+		if len(got) != len(want) {
+			t.Fatalf("notices len = %d, want %d: %v", len(got), len(want), got)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("notices[%d] = %q, want %q (got: %v)", i, got[i], want[i], got)
+			}
+		}
+	})
 }
 
 // TestToolBubbleEmptyNameFallback: tool parts without a name fall back to a

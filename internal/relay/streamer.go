@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/render"
@@ -105,7 +106,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 	// A tool phase covers consecutive runs of the same tool: repeats edit the
 	// current bubble in place. Any other tool or a text block starts a new
 	// phase. bubbleCount/workingShown bound a single phase's tool bubbles and
-	// reset whenever the agent emits a text block (EventSegment).
+	// reset only when the agent emits a substantial text block (EventSegment).
 	var (
 		curTool      string
 		curContext   string
@@ -186,8 +187,10 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 			case EventSegment:
 				curTool = ""
 				curContext = ""
-				bubbleCount = 0
-				workingShown = false
+				if utf8.RuneCountInString(buf.String()) >= maxToolBubbleResetRunes {
+					bubbleCount = 0
+					workingShown = false
+				}
 				if buf.Len() > 0 {
 					slog.Debug("streaming: segment break", "finalized_len", buf.Len())
 					s.finalizeSegment(&refs, &lastChunks, buf.String())
@@ -312,6 +315,12 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 // maxToolBubbles bounds the live tool bubbles per text segment before the
 // working indicator takes over.
 const maxToolBubbles = 5
+
+// maxToolBubbleResetRunes is the minimum text (runes) accumulated since the
+// last phase break before an EventSegment resets the tool-bubble budget.
+// Reasoning models interleave empty/short text parts between tool calls;
+// resetting on those would give every tool a fresh phase and defeat the cap.
+const maxToolBubbleResetRunes = 60
 
 const workingIndicator = "🔄 Working…"
 
