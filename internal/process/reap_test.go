@@ -12,23 +12,23 @@ import (
 	"time"
 )
 
-// spawnFakeOpenCode starts a helper process whose argv looks like
-// "opencode serve --port <p> --hostname 127.0.0.1" and which listens on the
-// port, so the reaper treats it as an orphaned agent.
-func spawnFakeOpenCode(t *testing.T, port int) *exec.Cmd {
+// spawnArgvLike starts a helper process whose argv looks like
+// "<binName> serve --port <p> --hostname 127.0.0.1" and which listens on the
+// port, so the reaper treats it as a process of that identity.
+func spawnArgvLike(t *testing.T, binName string, port int) *exec.Cmd {
 	t.Helper()
 	target, err := filepath.Abs(os.Args[0])
 	if err != nil {
 		t.Fatalf("abs test binary: %v", err)
 	}
-	bin := filepath.Join(t.TempDir(), "opencode")
+	bin := filepath.Join(t.TempDir(), binName)
 	if err := os.Symlink(target, bin); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
 	cmd := exec.Command(bin, "-test.run=TestAgentHelperProcess", "serve", "--port", strconv.Itoa(port), "--hostname", "127.0.0.1")
 	cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
 	if err := cmd.Start(); err != nil {
-		t.Fatalf("start fake opencode: %v", err)
+		t.Fatalf("start fake %s: %v", binName, err)
 	}
 	t.Cleanup(func() {
 		if cmd.ProcessState == nil {
@@ -37,6 +37,13 @@ func spawnFakeOpenCode(t *testing.T, port int) *exec.Cmd {
 		}
 	})
 	return cmd
+}
+
+// spawnFakeOpenCode starts a helper process whose argv looks like
+// "opencode serve --port <p> --hostname 127.0.0.1" and which listens on the
+// port, so the reaper treats it as an orphaned agent.
+func spawnFakeOpenCode(t *testing.T, port int) *exec.Cmd {
+	return spawnArgvLike(t, "opencode", port)
 }
 
 func waitPortOccupied(t *testing.T, port int) {
@@ -110,6 +117,32 @@ func TestReapOrphansSkipsForeignProcess(t *testing.T) {
 	}
 }
 
+// TestReapOrphansSkipsForeignOpenCodeSubstring is the regression case for the
+// strict executable-identity rule: a listener whose executable basename merely
+// CONTAINS the "opencode" substring (not-opencode) and whose argv otherwise
+// satisfies the serve + port checks must NOT be matched or killed. The sweep
+// leaves it running and continues.
+func TestReapOrphansSkipsForeignOpenCodeSubstring(t *testing.T) {
+	port := freePort(t)
+	cmd := spawnArgvLike(t, "not-opencode", port)
+	waitPortOccupied(t, port)
+
+	m := newTestManager(t, testConfig(1, fmt.Sprintf("%d-%d", port, port), time.Minute), newFakeSpawner())
+	reaped, err := m.ReapOrphans(context.Background())
+	if err != nil {
+		t.Fatalf("ReapOrphans: %v", err)
+	}
+	if reaped != 0 {
+		t.Fatalf("reaped = %d, want 0", reaped)
+	}
+	if !processAlive(cmd.Process.Pid) {
+		t.Fatal("foreign listener with opencode substring was killed")
+	}
+	if probePort(port) == nil {
+		t.Fatal("foreign listener with opencode substring was killed")
+	}
+}
+
 func TestOpenCodeOnPortMatch(t *testing.T) {
 	serve := []string{"/home/ubuntu/.opencode/bin/opencode", "serve", "--port", "4096", "--hostname", "127.0.0.1"}
 	cases := []struct {
@@ -123,6 +156,9 @@ func TestOpenCodeOnPortMatch(t *testing.T) {
 		{"different port", serve, 4097, false},
 		{"not serve", []string{"opencode", "run", "--port", "4096"}, 4096, false},
 		{"no opencode binary", []string{"node", "serve", "--port", "4096"}, 4096, false},
+		{"foreign binary with opencode substring", []string{"/usr/local/bin/not-opencode", "serve", "--port", "4096"}, 4096, false},
+		{"opencode substring in argument", []string{"node", "opencode-agent.js", "serve", "--port", "4096"}, 4096, false},
+		{"empty argv", nil, 4096, false},
 		{"unrelated process", []string{"nginx"}, 4096, false},
 	}
 	for _, tc := range cases {

@@ -161,23 +161,29 @@ func readCmdline(pid int) ([]string, error) {
 }
 
 func openCodeServeOnPort(argv []string, port int) bool {
+	// Executable identity is strict: the basename of argv[0] must be exactly
+	// "opencode" (covers the real install path and symlinks whose basename is
+	// opencode). A substring match anywhere else — arguments, or longer
+	// executable names like "not-opencode" — must NOT match, so a foreign
+	// listener is never adopted or killed.
+	if len(argv) == 0 || filepath.Base(argv[0]) != "opencode" {
+		return false
+	}
 	portStr := strconv.Itoa(port)
-	var hasOpenCode, hasServe, hasPort bool
-	for i := 0; i < len(argv); i++ {
-		switch {
-		case strings.Contains(argv[i], "opencode"):
-			hasOpenCode = true
-		case argv[i] == "serve":
+	var hasServe, hasPort bool
+	for i := 1; i < len(argv); i++ {
+		switch argv[i] {
+		case "serve":
 			hasServe = true
-		case argv[i] == "--port":
+		case "--port":
 			if i+1 < len(argv) && argv[i+1] == portStr {
 				hasPort = true
 			}
-		case argv[i] == "--port="+portStr:
+		case "--port=" + portStr:
 			hasPort = true
 		}
 	}
-	return hasOpenCode && hasServe && hasPort
+	return hasServe && hasPort
 }
 
 func killPID(pid int) error {
