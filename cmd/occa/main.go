@@ -273,6 +273,25 @@ func main() {
 		go runChannel(ctx, ch, rt)
 	}
 
+	go func() {
+		select {
+		case <-time.After(2 * time.Second):
+		case <-ctx.Done():
+			return
+		}
+		swept, err := router.SweepStaleProgressNotices(ctx, db.ProgressNoticeRepo(), func(platform string) channel.MessageDeleter {
+			for _, ch := range channels {
+				if ch.Name() == platform {
+					if d, ok := ch.(channel.MessageDeleter); ok {
+						return d
+					}
+				}
+			}
+			return nil
+		})
+		slog.Info("progress notice sweep complete", "swept", swept, "error", err)
+	}()
+
 	slog.Info("occa started", "default_workdir", cfg.Agent.DefaultWorkdir, "max_instances", cfg.Agent.MaxInstances)
 
 	<-ctx.Done()

@@ -354,17 +354,75 @@ func (f *fakeChannelRepo) UpsertWorkdir(_ context.Context, platform, channelID, 
 }
 
 type fakeStore struct {
-	sessionRepo  *fakeSessionRepo
-	channelRepo  *fakeChannelRepo
-	overrideRepo *fakeOverrideRepo
-	scheduleRepo *fakeScheduleRepo
+	sessionRepo     *fakeSessionRepo
+	channelRepo     *fakeChannelRepo
+	overrideRepo    *fakeOverrideRepo
+	scheduleRepo    *fakeScheduleRepo
+	progressNotices *fakeProgressNoticeRepo
 }
 
 func (f *fakeStore) SessionRepo() store.SessionRepo   { return f.sessionRepo }
 func (f *fakeStore) ChannelRepo() store.ChannelRepo   { return f.channelRepo }
 func (f *fakeStore) OverrideRepo() store.OverrideRepo { return f.overrideRepo }
 func (f *fakeStore) ScheduleRepo() store.ScheduleRepo { return f.scheduleRepo }
-func (f *fakeStore) Close() error                     { return nil }
+func (f *fakeStore) ProgressNoticeRepo() store.ProgressNoticeRepo {
+	if f.progressNotices == nil {
+		return newFakeProgressNoticeRepo()
+	}
+	return f.progressNotices
+}
+func (f *fakeStore) Close() error { return nil }
+
+type fakeProgressNoticeRepo struct {
+	mu      sync.Mutex
+	notices []store.ProgressNotice
+	puts    []progressNoticePut
+	deletes []progressNoticeDelete
+	listErr error
+}
+
+type progressNoticePut struct {
+	platform, channelID, threadID, messageID string
+}
+
+type progressNoticeDelete struct {
+	platform, channelID, threadID, messageID string
+}
+
+func newFakeProgressNoticeRepo() *fakeProgressNoticeRepo {
+	return &fakeProgressNoticeRepo{}
+}
+
+func (f *fakeProgressNoticeRepo) Put(_ context.Context, platform, channelID, threadID, messageID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.puts = append(f.puts, progressNoticePut{platform, channelID, threadID, messageID})
+	return nil
+}
+
+func (f *fakeProgressNoticeRepo) List(_ context.Context) ([]store.ProgressNotice, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return append([]store.ProgressNotice(nil), f.notices...), nil
+}
+
+func (f *fakeProgressNoticeRepo) Delete(_ context.Context, platform, channelID, threadID, messageID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deletes = append(f.deletes, progressNoticeDelete{platform, channelID, threadID, messageID})
+	for i := range f.notices {
+		if f.notices[i].Platform == platform && f.notices[i].ChannelID == channelID && f.notices[i].ThreadID == threadID && f.notices[i].MessageID == messageID {
+			f.notices = append(f.notices[:i], f.notices[i+1:]...)
+			break
+		}
+	}
+	return nil
+}
+
+var _ store.ProgressNoticeRepo = (*fakeProgressNoticeRepo)(nil)
 
 type fakeScheduleRepo struct{}
 

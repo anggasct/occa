@@ -326,6 +326,17 @@ func (a *Adapter) Notify(channelID string, text string) error {
 	return nil
 }
 
+func (a *Adapter) DeleteMessage(channelID, messageID string) error {
+	if a.session == nil {
+		return fmt.Errorf("discord: delete message: session not ready")
+	}
+	err := a.session.ChannelMessageDelete(channelID, messageID)
+	if restErr, ok := err.(*discordgo.RESTError); ok && restErr.Response != nil && restErr.Response.StatusCode == http.StatusNotFound {
+		return channel.ErrMessageNotFound
+	}
+	return err
+}
+
 func (a *Adapter) normalizeMessage(m *discordgo.Message) channel.IncomingMessage {
 	isMention := false
 	if m.GuildID == "" {
@@ -679,6 +690,7 @@ func (rc *replyContext) Delete(ref channel.MessageRef) error {
 
 var (
 	_ channel.Channel           = (*Adapter)(nil)
+	_ channel.MessageDeleter    = (*Adapter)(nil)
 	_ channel.ReplyContext      = (*replyContext)(nil)
 	_ channel.MessageRemover    = (*replyContext)(nil)
 	_ channel.ChatCommandSetter = (*replyContext)(nil)

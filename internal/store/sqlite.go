@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	schemaVersion    = 4
+	schemaVersion    = 5
 	busyTimeoutMilli = 5000
 )
 
@@ -18,6 +18,25 @@ var migrations = []func(tx *sql.Tx) error{
 	addConversationKeys,
 	addSessionAgentPID,
 	addSessionTitle,
+	addProgressNotices,
+}
+
+func addProgressNotices(tx *sql.Tx) error {
+	ddl := `
+CREATE TABLE IF NOT EXISTS progress_notice (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	platform TEXT NOT NULL,
+	channel_id TEXT NOT NULL,
+	thread_id TEXT NOT NULL DEFAULT '',
+	message_id TEXT NOT NULL,
+	created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_progress_notice_lookup ON progress_notice (platform, channel_id, thread_id);
+`
+	if _, err := tx.Exec(ddl); err != nil {
+		return fmt.Errorf("store: migrate progress notices: %w", err)
+	}
+	return nil
 }
 
 func addSessionTitle(tx *sql.Tx) error {
@@ -112,11 +131,12 @@ CREATE INDEX IF NOT EXISTS idx_schedule_enabled ON schedule (enabled);
 }
 
 type SQLiteStore struct {
-	db        *sql.DB
-	sessions  *sqliteSessionRepo
-	channels  *sqliteChannelRepo
-	overrides *sqliteOverrideRepo
-	schedules *sqliteScheduleRepo
+	db              *sql.DB
+	sessions        *sqliteSessionRepo
+	channels        *sqliteChannelRepo
+	overrides       *sqliteOverrideRepo
+	schedules       *sqliteScheduleRepo
+	progressNotices *sqliteProgressNoticeRepo
 }
 
 func Open(path string) (*SQLiteStore, error) {
@@ -157,6 +177,7 @@ func Open(path string) (*SQLiteStore, error) {
 	s.channels = &sqliteChannelRepo{db: db}
 	s.overrides = &sqliteOverrideRepo{db: db}
 	s.schedules = &sqliteScheduleRepo{db: db}
+	s.progressNotices = &sqliteProgressNoticeRepo{db: db}
 	return s, nil
 }
 
@@ -185,10 +206,11 @@ func (s *SQLiteStore) migrate() error {
 	return nil
 }
 
-func (s *SQLiteStore) SessionRepo() SessionRepo   { return s.sessions }
-func (s *SQLiteStore) ChannelRepo() ChannelRepo   { return s.channels }
-func (s *SQLiteStore) OverrideRepo() OverrideRepo { return s.overrides }
-func (s *SQLiteStore) ScheduleRepo() ScheduleRepo { return s.schedules }
+func (s *SQLiteStore) SessionRepo() SessionRepo               { return s.sessions }
+func (s *SQLiteStore) ChannelRepo() ChannelRepo               { return s.channels }
+func (s *SQLiteStore) OverrideRepo() OverrideRepo             { return s.overrides }
+func (s *SQLiteStore) ScheduleRepo() ScheduleRepo             { return s.schedules }
+func (s *SQLiteStore) ProgressNoticeRepo() ProgressNoticeRepo { return s.progressNotices }
 
 func (s *SQLiteStore) Close() error {
 	return s.db.Close()

@@ -18,6 +18,7 @@ type responseReply struct {
 	mu       sync.Mutex
 	sends    []string
 	edits    []string
+	deleted  []channel.MessageRef
 	activity chan struct{}
 }
 
@@ -54,6 +55,15 @@ func (r *responseReply) Edit(_ channel.MessageRef, text string) error {
 func (r *responseReply) EditWithButtons(_ channel.MessageRef, text string, _ []channel.Button) error {
 	return r.Edit(nil, text)
 }
+
+func (r *responseReply) Delete(ref channel.MessageRef) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.deleted = append(r.deleted, ref)
+	return nil
+}
+
+var _ channel.MessageRemover = (*responseReply)(nil)
 
 func (r *responseReply) signalActivity() {
 	select {
@@ -541,54 +551,202 @@ func TestResponseCoordinatorAllowsDifferentChannels(t *testing.T) {
 	}
 }
 
-type removerReply struct {
-	*responseReply
-	deleted []channel.MessageRef
-}
-
-func (r *removerReply) Delete(ref channel.MessageRef) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.deleted = append(r.deleted, ref)
-	return nil
-}
-
-var _ channel.MessageRemover = (*removerReply)(nil)
-
-func TestProgressTickerDeletesNoticeOnStop(t *testing.T) {
-	reply := &removerReply{responseReply: newResponseReply()}
-	stopCh := make(chan struct{})
-
-	go startProgressTicker(context.Background(), reply, stopCh, 5*time.Millisecond)
-
+func waitForNoticeSend(t *testing.T, reply *responseReply) {
+	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		reply.mu.Lock()
 		sends := len(reply.sends)
 		reply.mu.Unlock()
 		if sends > 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("progress notice was not sent")
+}
+
+func waitForNoticeDelete(t *testing.T, reply *responseReply) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		reply.mu.Lock()
+		deleted := len(reply.deleted)
+		reply.mu.Unlock()
+		if deleted > 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("progress notice was not deleted")
+}
+
+func TestProgressTickerQuietOnly(t *testing.T) {
+	reply := newResponseReply()
+	activityCh := make(chan struct{}, 1)
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+
+	go startProgressTicker(context.Background(), reply, activityCh, stopCh, 2*time.Millisecond, 20*time.Millisecond, nil, "", "", "")
+
+	activityDone := make(chan struct{})
+	go func() {
+		defer close(activityDone)
+		feed := time.NewTicker(4 * time.Millisecond)
+		defer feed.Stop()
+		timeout := time.NewTimer(50 * time.Millisecond)
+		defer timeout.Stop()
+		for {
+			select {
+			case <-feed.C:
+				select {
+				case activityCh <- struct{}{}:
+				default:
+				}
+			case <-timeout.C:
+				return
+			}
+		}
+	}()
+	<-activityDone
+
+	reply.mu.Lock()
+	sends := len(reply.sends)
+	reply.mu.Unlock()
+	if sends != 0 {
+		t.Fatalf("notice sent while activity kept arriving: %v", reply.sends)
+	}
+
+	waitForNoticeSend(t, reply)
+
+	reply.mu.Lock()
+	defer reply.mu.Unlock()
+	if len(reply.sends) != 1 {
+		t.Fatalf("expected exactly one notice after quiet, got %d: %v", len(reply.sends), reply.sends)
+	}
+	if reply.sends[0] != "⏳ Still working... (1m)" {
+		t.Fatalf("notice text = %q, want %q", reply.sends[0], "⏳ Still working... (1m)")
+	}
+}
+
+func TestProgressTickerEditsInPlace(t *testing.T) {
+	reply := newResponseReply()
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+
+	go startProgressTicker(context.Background(), reply, make(chan struct{}, 1), stopCh, 2*time.Millisecond, 5*time.Millisecond, nil, "", "", "")
+
+	waitForNoticeSend(t, reply)
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		reply.mu.Lock()
+		edits := len(reply.edits)
+		reply.mu.Unlock()
+		if edits >= 2 {
 			break
 		}
 		time.Sleep(time.Millisecond)
 	}
 
 	reply.mu.Lock()
-	if len(reply.sends) == 0 {
-		reply.mu.Unlock()
-		t.Fatal("ticker did not send progress notice")
+	defer reply.mu.Unlock()
+	if len(reply.sends) != 1 {
+		t.Fatalf("expected exactly one send, got %d: %v", len(reply.sends), reply.sends)
 	}
-	reply.mu.Unlock()
+	if len(reply.edits) < 2 {
+		t.Fatalf("expected the notice edited in place, got %d edits", len(reply.edits))
+	}
+}
 
-	close(stopCh)
-	time.Sleep(20 * time.Millisecond)
+func TestProgressTickerResumeDeletesNotice(t *testing.T) {
+	reply := newResponseReply()
+	activityCh := make(chan struct{}, 1)
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+
+	go startProgressTicker(context.Background(), reply, activityCh, stopCh, 2*time.Millisecond, 5*time.Millisecond, nil, "", "", "")
+
+	waitForNoticeSend(t, reply)
+	activityCh <- struct{}{}
+
+	waitForNoticeDelete(t, reply)
 
 	reply.mu.Lock()
-	deletedCount := len(reply.deleted)
-	reply.mu.Unlock()
-
-	if deletedCount != 1 {
-		t.Fatalf("expected Delete called once, got %d", deletedCount)
+	defer reply.mu.Unlock()
+	if len(reply.deleted) != 1 {
+		t.Fatalf("expected Delete once on resume, got %d", len(reply.deleted))
 	}
+}
+
+func TestProgressTickerStopDeletesNotice(t *testing.T) {
+	reply := newResponseReply()
+	stopCh := make(chan struct{})
+
+	go startProgressTicker(context.Background(), reply, make(chan struct{}, 1), stopCh, 5*time.Millisecond, 0, nil, "", "", "")
+
+	waitForNoticeSend(t, reply)
+	close(stopCh)
+
+	waitForNoticeDelete(t, reply)
+}
+
+func TestProgressTickerPersistsAndClears(t *testing.T) {
+	notices := newFakeProgressNoticeRepo()
+	reply := newResponseReply()
+	activityCh := make(chan struct{}, 1)
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+
+	go startProgressTicker(context.Background(), reply, activityCh, stopCh, 2*time.Millisecond, 5*time.Millisecond, notices, "telegram", "chat1", "")
+
+	waitForNoticeSend(t, reply)
+
+	notices.mu.Lock()
+	puts := len(notices.puts)
+	var put progressNoticePut
+	if puts > 0 {
+		put = notices.puts[0]
+	}
+	notices.mu.Unlock()
+	if puts != 1 {
+		t.Fatalf("expected 1 Put, got %d", puts)
+	}
+	if put.platform != "telegram" || put.channelID != "chat1" || put.messageID != "response" {
+		t.Fatalf("unexpected Put: %+v", put)
+	}
+
+	activityCh <- struct{}{}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		notices.mu.Lock()
+		removed := len(notices.deletes)
+		notices.mu.Unlock()
+		if removed == 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	notices.mu.Lock()
+	defer notices.mu.Unlock()
+	if len(notices.deletes) != 1 {
+		t.Fatalf("expected 1 repo Delete on removal, got %d", len(notices.deletes))
+	}
+	if len(notices.deletes) == 1 && (notices.deletes[0].platform != "telegram" || notices.deletes[0].channelID != "chat1" || notices.deletes[0].messageID != "response") {
+		t.Fatalf("unexpected repo Delete: %+v", notices.deletes[0])
+	}
+}
+
+func TestProgressTickerNilNoticesRepoSkipsPersist(t *testing.T) {
+	reply := newResponseReply()
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+
+	go startProgressTicker(context.Background(), reply, make(chan struct{}, 1), stopCh, 5*time.Millisecond, 0, nil, "", "", "")
+
+	waitForNoticeSend(t, reply)
 }
 
 func TestResponseCoordinatorQueueMethods(t *testing.T) {

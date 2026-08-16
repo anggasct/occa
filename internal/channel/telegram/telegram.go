@@ -210,6 +210,30 @@ func (a *Adapter) Notify(channelID string, text string) error {
 	return nil
 }
 
+func (a *Adapter) DeleteMessage(channelID, messageID string) error {
+	if a.bot == nil {
+		return fmt.Errorf("telegram: delete message: bot not ready")
+	}
+	var chatID int64
+	if _, err := fmt.Sscanf(channelID, "%d", &chatID); err != nil {
+		return fmt.Errorf("telegram: parse chat id %q: %w", channelID, err)
+	}
+	msgID := 0
+	if _, err := fmt.Sscanf(messageID, "%d", &msgID); err != nil {
+		return fmt.Errorf("telegram: parse message id %q: %w", messageID, err)
+	}
+
+	params := tgbotapi.Params{
+		"chat_id":    strconv.FormatInt(chatID, 10),
+		"message_id": strconv.Itoa(msgID),
+	}
+	_, err := a.bot.MakeRequest("deleteMessage", params)
+	if apiErr, ok := err.(*tgbotapi.Error); ok && strings.Contains(apiErr.Message, "not found") {
+		return channel.ErrMessageNotFound
+	}
+	return err
+}
+
 func (a *Adapter) normalize(update tgbotapi.Update, threadID int64) channel.IncomingMessage {
 	msg := update.Message
 	chatID := fmt.Sprintf("%d", msg.Chat.ID)
@@ -556,6 +580,7 @@ func (rc *replyContext) Delete(ref channel.MessageRef) error {
 
 var (
 	_ channel.Channel           = (*Adapter)(nil)
+	_ channel.MessageDeleter    = (*Adapter)(nil)
 	_ channel.ReplyContext      = (*replyContext)(nil)
 	_ channel.MessageRemover    = (*replyContext)(nil)
 	_ channel.ChatCommandSetter = (*replyContext)(nil)
