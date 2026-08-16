@@ -11,7 +11,7 @@ import (
 func tempStore(t *testing.T) *SQLiteStore {
 	t.Helper()
 	dir := t.TempDir()
-	s, err := Open(filepath.Join(dir, "test.db"))
+	s, err := OpenWithDefaultWorkdir(filepath.Join(dir, "test.db"), "")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -23,7 +23,7 @@ func TestSchemaAutoCreated(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "fresh.db")
 
-	s, err := Open(path)
+	s, err := OpenWithDefaultWorkdir(path, "")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestSessionRestartRoundTrip(t *testing.T) {
 	path := filepath.Join(dir, "restart.db")
 	ctx := context.Background()
 
-	s1, err := Open(path)
+	s1, err := OpenWithDefaultWorkdir(path, "")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestSessionRestartRoundTrip(t *testing.T) {
 	}
 	s1.Close()
 
-	s2, err := Open(path)
+	s2, err := OpenWithDefaultWorkdir(path, "")
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -594,7 +594,7 @@ func TestProgressNoticeMigrationFromV4(t *testing.T) {
 	path := filepath.Join(dir, "upgrade.db")
 	ctx := context.Background()
 
-	s1, err := Open(path)
+	s1, err := OpenWithDefaultWorkdir(path, "")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -609,7 +609,7 @@ func TestProgressNoticeMigrationFromV4(t *testing.T) {
 	}
 	_ = s1.Close()
 
-	s2, err := Open(path)
+	s2, err := OpenWithDefaultWorkdir(path, "")
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -765,7 +765,7 @@ func TestSessionModelMigrationFromV5(t *testing.T) {
 	path := filepath.Join(dir, "upgrade.db")
 	ctx := context.Background()
 
-	s1, err := Open(path)
+	s1, err := OpenWithDefaultWorkdir(path, "")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -780,7 +780,7 @@ func TestSessionModelMigrationFromV5(t *testing.T) {
 	}
 	_ = s1.Close()
 
-	s2, err := Open(path)
+	s2, err := OpenWithDefaultWorkdir(path, "")
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}

@@ -184,10 +184,6 @@ type SQLiteStore struct {
 	defaultWorkdir  string
 }
 
-func Open(path string) (*SQLiteStore, error) {
-	return OpenWithDefaultWorkdir(path, "")
-}
-
 func OpenWithDefaultWorkdir(path, defaultWorkdir string) (*SQLiteStore, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {

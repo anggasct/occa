@@ -71,14 +71,14 @@ func TestPoolExplicitlyConfigured(t *testing.T) {
 func TestSchemaVersionAndReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "v1.db")
 
-	s, err := Open(path)
+	s, err := OpenWithDefaultWorkdir(path, "")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	assertVersion(t, s, schemaVersion)
 	_ = s.Close()
 
-	s2, err := Open(path)
+	s2, err := OpenWithDefaultWorkdir(path, "")
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -143,7 +143,7 @@ VALUES ('chat-legacy', 'telegram', 'agent-sess-1', 1, 1, 1);
 	}
 	_ = legacyDB.Close()
 
-	s, err := Open(path)
+	s, err := OpenWithDefaultWorkdir(path, "")
 	if err != nil {
 		t.Fatalf("adopt open: %v", err)
 	}
