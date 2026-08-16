@@ -73,6 +73,9 @@ func main() {
 	}
 	defer db.Close()
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	manager, err := process.DefaultManager(cfg.Agent)
 	if err != nil {
 		slog.Error("failed to start process manager", "error", err)
@@ -80,10 +83,10 @@ func main() {
 	}
 	defer manager.Close()
 
-	rt := router.New(managerProvider{manager}, db, cfg.Agent.DefaultWorkdir, cfg.AdminID)
+	reaped, err := manager.ReapOrphans(ctx)
+	slog.Info("agent orphan sweep complete", "reaped", reaped, "error", err)
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	rt := router.New(managerProvider{manager}, db, cfg.Agent.DefaultWorkdir, cfg.AdminID)
 
 	discoverAgent(ctx, manager, cfg.Agent.DefaultWorkdir)
 

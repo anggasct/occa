@@ -56,9 +56,10 @@ func productionFactory(binary string, readinessTimeout, stopGrace time.Duration)
 	}
 	return func(ctx context.Context, workdir string, port int) (*Instance, error) {
 		addr := fmt.Sprintf("http://127.0.0.1:%d", port)
-		cmd := exec.Command(binary, "serve", "--port", strconv.Itoa(port), "--hostname", "127.0.0.1")
-		cmd.Dir = workdir
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		if err := ensurePortFree(ctx, port, stopGrace); err != nil {
+			return nil, fmt.Errorf("process: port %d: %w", port, err)
+		}
+		cmd := openCodeCommand(binary, port, workdir)
 		if err := cmd.Start(); err != nil {
 			return nil, fmt.Errorf("process: spawn %q in %q: %w", binary, workdir, err)
 		}
@@ -96,6 +97,20 @@ func productionFactory(binary string, readinessTimeout, stopGrace time.Duration)
 		inst.Touch()
 		return inst, nil
 	}
+}
+
+// openCodeCommand builds the opencode serve command. Pdeathsig is SIGKILL (not
+// TERM): the agent is a server with no graceful shutdown work, so it must
+// vanish with occa on any exit path, while Setpgid keeps the group kill for
+// graceful stop().
+func openCodeCommand(binary string, port int, workdir string) *exec.Cmd {
+	cmd := exec.Command(binary, "serve", "--port", strconv.Itoa(port), "--hostname", "127.0.0.1")
+	cmd.Dir = workdir
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid:   true,
+		Pdeathsig: syscall.SIGKILL,
+	}
+	return cmd
 }
 
 func waitReady(ctx context.Context, addr string, timeout time.Duration) error {
