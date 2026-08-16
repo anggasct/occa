@@ -702,6 +702,17 @@ func TestProgressTickerPersistsAndClears(t *testing.T) {
 
 	waitForNoticeSend(t, reply)
 
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		notices.mu.Lock()
+		puts := len(notices.puts)
+		notices.mu.Unlock()
+		if puts > 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
 	notices.mu.Lock()
 	puts := len(notices.puts)
 	var put progressNoticePut
@@ -718,7 +729,7 @@ func TestProgressTickerPersistsAndClears(t *testing.T) {
 
 	activityCh <- struct{}{}
 
-	deadline := time.Now().Add(time.Second)
+	deadline = time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		notices.mu.Lock()
 		removed := len(notices.deletes)
