@@ -19,15 +19,7 @@ func (r *Router) handleChannel(ctx context.Context, msg channel.IncomingMessage,
 }
 
 func (r *Router) viewChannel(ctx context.Context, msg channel.IncomingMessage) (string, error) {
-	ch, err := r.store.ChannelRepo().Get(ctx, msg.Platform, msg.ChannelID)
-	if err != nil {
-		return "", fmt.Errorf("channel: %w", err)
-	}
-	listenMode := "mention"
-	if ch != nil && ch.ListenMode != "" {
-		listenMode = ch.ListenMode
-	}
-	return fmt.Sprintf("📡 Listen mode: %s", listenMode), nil
+	return fmt.Sprintf("📡 Listen mode: %s", r.effectiveListenMode(ctx, msg)), nil
 }
 
 func (r *Router) setChannel(ctx context.Context, msg channel.IncomingMessage, mode string) (string, error) {
@@ -35,8 +27,14 @@ func (r *Router) setChannel(ctx context.Context, msg channel.IncomingMessage, mo
 		return "Usage: /channel [mention|all|thread]", nil
 	}
 
-	if err := r.store.ChannelRepo().UpsertListenMode(ctx, msg.Platform, msg.ChannelID, mode); err != nil {
-		return "", fmt.Errorf("channel: %w", err)
+	if isOwnedThreadMessage(msg) {
+		if err := r.store.ThreadConfigRepo().UpsertListenMode(ctx, msg.Platform, msg.ThreadID, mode); err != nil {
+			return "", fmt.Errorf("channel: %w", err)
+		}
+	} else {
+		if err := r.store.ChannelRepo().UpsertListenMode(ctx, msg.Platform, msg.ChannelID, mode); err != nil {
+			return "", fmt.Errorf("channel: %w", err)
+		}
 	}
 	return fmt.Sprintf("✅ Listen mode set: %s", mode), nil
 }

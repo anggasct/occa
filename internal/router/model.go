@@ -8,7 +8,6 @@ import (
 
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/relay"
-	"github.com/anggasct/occa/internal/store"
 )
 
 var errChannelScopeUnresolved = errors.New("channel scope unresolved")
@@ -25,61 +24,31 @@ func (r *Router) handleModel(ctx context.Context, msg channel.IncomingMessage, a
 		return r.viewModel(ctx, msg)
 	}
 
-	if parts[0] == "channel" {
-		if len(parts) != 2 {
-			return "Usage: /model channel <provider>/<model-id>[@variant]", nil
+	if parts[0] == "default" {
+		if len(parts) != 1 {
+			return "Usage: /model [provider/model-id[@variant]] | default", nil
 		}
-		if !r.isAdmin(ctx, msg) {
-			return "⚠️ Admin access required.", nil
-		}
-		ref, err := parseModelRef(parts[1])
-		if err != nil {
-			return "", err
-		}
-		modelChannelID, err := modelScopeChannelID(msg)
-		if err != nil {
-			return "", safeReplyError("Channel information unavailable. Please try again.", err)
-		}
-		if err := r.validateModel(ctx, msg, ref); err != nil {
-			return "", err
-		}
-
-		if err := r.store.ChannelRepo().UpsertModel(ctx, msg.Platform, modelChannelID, formatModelRef(ref)); err != nil {
-			return "", fmt.Errorf("model: set channel: %w", err)
-		}
-		return fmt.Sprintf("✅ Channel model set: %s", formatModelRef(ref)), nil
+		return r.clearModel(ctx, msg)
 	}
 
-	if parts[0] == "session" {
-		if len(parts) != 2 {
-			return "Usage: /model session <provider>/<model-id>[@variant] | default", nil
-		}
-		threadID, userID := conversationKey(msg)
-		if parts[1] == "default" {
-			if err := r.setSessionModel(ctx, msg, threadID, userID, ""); err != nil {
-				return "", err
-			}
-			return "✅ Session model cleared.", nil
-		}
-		ref, err := parseModelRef(parts[1])
-		if err != nil {
-			return "", err
-		}
-		if err := r.validateModel(ctx, msg, ref); err != nil {
-			return "", err
-		}
-		if err := r.setSessionModel(ctx, msg, threadID, userID, formatModelRef(ref)); err != nil {
-			return "", err
-		}
-		return fmt.Sprintf("✅ Session model set: %s", formatModelRef(ref)), nil
+	if parts[0] == "channel" || parts[0] == "session" {
+		return "Usage: /model [provider/model-id[@variant]] | default", nil
 	}
-
 	if len(parts) != 1 {
-		return "Usage: /model [channel] [provider/model-id[@variant]]", nil
+		return "Usage: /model [provider/model-id[@variant]] | default", nil
 	}
 	ref, err := parseModelRef(parts[0])
 	if err != nil {
 		return "", err
+	}
+	if isOwnedThreadMessage(msg) {
+		if err := r.validateModel(ctx, msg, ref); err != nil {
+			return "", err
+		}
+		if err := r.store.ThreadConfigRepo().UpsertModel(ctx, msg.Platform, msg.ThreadID, formatModelRef(ref)); err != nil {
+			return "", fmt.Errorf("model: set thread: %w", err)
+		}
+		return fmt.Sprintf("✅ Thread model set: %s", formatModelRef(ref)), nil
 	}
 	modelChannelID, err := modelScopeChannelID(msg)
 	if err != nil {
@@ -88,20 +57,39 @@ func (r *Router) handleModel(ctx context.Context, msg channel.IncomingMessage, a
 	if err := r.validateModel(ctx, msg, ref); err != nil {
 		return "", err
 	}
+	if r.isAdmin(ctx, msg) {
+		if err := r.store.ChannelRepo().UpsertModel(ctx, msg.Platform, modelChannelID, formatModelRef(ref)); err != nil {
+			return "", fmt.Errorf("model: set channel: %w", err)
+		}
+		return fmt.Sprintf("✅ Channel model set: %s", formatModelRef(ref)), nil
+	}
 	if err := r.store.OverrideRepo().UpsertModel(ctx, msg.Platform, modelChannelID, msg.UserID, formatModelRef(ref)); err != nil {
 		return "", fmt.Errorf("model: set personal: %w", err)
 	}
 	return fmt.Sprintf("✅ Personal model set: %s", formatModelRef(ref)), nil
 }
 
-func (r *Router) setSessionModel(ctx context.Context, msg channel.IncomingMessage, threadID, userID, model string) error {
-	if err := r.store.SessionRepo().SetModel(ctx, msg.Platform, msg.ChannelID, threadID, userID, model); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return safeReplyError("No active session to configure — start a conversation first.", nil)
+func (r *Router) clearModel(ctx context.Context, msg channel.IncomingMessage) (string, error) {
+	if isOwnedThreadMessage(msg) {
+		if err := r.store.ThreadConfigRepo().UpsertModel(ctx, msg.Platform, msg.ThreadID, ""); err != nil {
+			return "", fmt.Errorf("model: clear thread: %w", err)
 		}
-		return fmt.Errorf("model: set session: %w", err)
+		return "✅ Thread model cleared.", nil
 	}
-	return nil
+	modelChannelID, err := modelScopeChannelID(msg)
+	if err != nil {
+		return "", safeReplyError("Channel information unavailable. Please try again.", err)
+	}
+	if r.isAdmin(ctx, msg) {
+		if err := r.store.ChannelRepo().UpsertModel(ctx, msg.Platform, modelChannelID, ""); err != nil {
+			return "", fmt.Errorf("model: clear channel: %w", err)
+		}
+		return "✅ Channel model cleared.", nil
+	}
+	if err := r.store.OverrideRepo().UpsertModel(ctx, msg.Platform, modelChannelID, msg.UserID, ""); err != nil {
+		return "", fmt.Errorf("model: clear personal: %w", err)
+	}
+	return "✅ Personal model cleared.", nil
 }
 
 func (r *Router) viewModel(ctx context.Context, msg channel.IncomingMessage) (string, error) {
@@ -141,12 +129,9 @@ func (r *Router) effectiveModel(ctx context.Context, msg channel.IncomingMessage
 	if o != nil && o.Model != "" {
 		model = o.Model
 	} else {
-		ch, err := r.store.ChannelRepo().Get(ctx, msg.Platform, modelChannelID)
+		model, err = r.modelAfterPersonal(ctx, msg, modelChannelID)
 		if err != nil {
-			return nil, fmt.Errorf("model: get channel: %w", err)
-		}
-		if ch != nil {
-			model = ch.Model
+			return nil, err
 		}
 	}
 	if model == "" {
@@ -157,6 +142,20 @@ func (r *Router) effectiveModel(ctx context.Context, msg channel.IncomingMessage
 		return nil, fmt.Errorf("model: invalid stored model %q: %w", model, err)
 	}
 	return &ref, nil
+}
+
+func (r *Router) modelAfterPersonal(ctx context.Context, msg channel.IncomingMessage, channelID string) (string, error) {
+	if row := r.threadRow(ctx, msg); row != nil {
+		return row.Model, nil
+	}
+	ch, err := r.store.ChannelRepo().Get(ctx, msg.Platform, channelID)
+	if err != nil {
+		return "", fmt.Errorf("model: get channel: %w", err)
+	}
+	if ch == nil {
+		return "", nil
+	}
+	return ch.Model, nil
 }
 
 func modelScopeChannelID(msg channel.IncomingMessage) (string, error) {

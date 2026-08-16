@@ -66,7 +66,7 @@ func main() {
 	}
 	slog.SetDefault(slog.New(logging.NewRedactHandler(handler, telegramToken, discordToken)))
 
-	db, err := store.Open(cfg.Database.Path)
+	db, err := store.OpenWithDefaultWorkdir(cfg.Database.Path, cfg.Agent.DefaultWorkdir)
 	if err != nil {
 		slog.Error("failed to open store", "error", err)
 		os.Exit(1)

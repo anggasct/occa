@@ -224,9 +224,21 @@ func (r *Router) modelBrowserSet(ctx context.Context, msg channel.IncomingMessag
 		return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, text, buttons)
 	}
 
+	if isOwnedThreadMessage(msg) {
+		if err := r.store.ThreadConfigRepo().UpsertModel(ctx, msg.Platform, msg.ThreadID, formatModelRef(ref)); err != nil {
+			return err
+		}
+		return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "✅ Thread model set: "+formatModelRef(ref), nil)
+	}
 	modelChannelID, err := modelScopeChannelID(msg)
 	if err != nil {
 		return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "⚠️ Channel information unavailable. Please try again.", nil)
+	}
+	if r.isAdmin(ctx, msg) {
+		if err := r.store.ChannelRepo().UpsertModel(ctx, msg.Platform, modelChannelID, formatModelRef(ref)); err != nil {
+			return err
+		}
+		return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "✅ Channel model set: "+formatModelRef(ref), nil)
 	}
 	if err := r.store.OverrideRepo().UpsertModel(ctx, msg.Platform, modelChannelID, msg.UserID, formatModelRef(ref)); err != nil {
 		return err

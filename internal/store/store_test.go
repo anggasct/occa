@@ -619,8 +619,8 @@ func TestProgressNoticeMigrationFromV4(t *testing.T) {
 	if err := s2.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatalf("read schema version: %v", err)
 	}
-	if version != 6 {
-		t.Fatalf("schema version = %d, want 6", version)
+	if version != 7 {
+		t.Fatalf("schema version = %d, want 7", version)
 	}
 
 	if err := s2.ProgressNoticeRepo().Put(ctx, "telegram", "chat1", "", "m1"); err != nil {
@@ -790,8 +790,8 @@ func TestSessionModelMigrationFromV5(t *testing.T) {
 	if err := s2.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatalf("read schema version: %v", err)
 	}
-	if version != 6 {
-		t.Fatalf("schema version = %d, want 6", version)
+	if version != 7 {
+		t.Fatalf("schema version = %d, want 7", version)
 	}
 
 	model, err := s2.SessionRepo().ActiveModel(ctx, "telegram", "chat1", "", "user1")
@@ -811,5 +811,184 @@ func TestSessionModelMigrationFromV5(t *testing.T) {
 	}
 	if model != "openai/gpt-4o" {
 		t.Fatalf("model after migration write = %q, want openai/gpt-4o", model)
+	}
+}
+
+func TestThreadConfigMigrationBackfillsOwnedThreads(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "upgrade.db")
+	ctx := context.Background()
+
+	s1, err := OpenWithDefaultWorkdir(path, "/default-workdir")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := s1.SessionRepo().SetActive(ctx, "discord", "parent-1", "thread-1", "", "sess-1", 100); err != nil {
+		t.Fatalf("SetActive owned thread-1: %v", err)
+	}
+	if err := s1.SessionRepo().SetActive(ctx, "discord", "parent-2", "thread-2", "", "sess-2", 100); err != nil {
+		t.Fatalf("SetActive owned thread-2: %v", err)
+	}
+	if err := s1.SessionRepo().SetActive(ctx, "discord", "user-thread", "user-thread", "", "sess-3", 100); err != nil {
+		t.Fatalf("SetActive self-scoped thread: %v", err)
+	}
+	if err := s1.ChannelRepo().UpsertWorkdir(ctx, "discord", "parent-1", "/repo"); err != nil {
+		t.Fatalf("UpsertWorkdir parent-1: %v", err)
+	}
+	if err := s1.ChannelRepo().UpsertModel(ctx, "discord", "parent-1", "anthropic/claude-3"); err != nil {
+		t.Fatalf("UpsertModel parent-1: %v", err)
+	}
+	if err := s1.ChannelRepo().UpsertListenMode(ctx, "discord", "parent-1", "all"); err != nil {
+		t.Fatalf("UpsertListenMode parent-1: %v", err)
+	}
+	if _, err := s1.db.Exec("DROP TABLE thread_config"); err != nil {
+		t.Fatalf("drop thread_config: %v", err)
+	}
+	if _, err := s1.db.Exec("PRAGMA user_version=6"); err != nil {
+		t.Fatalf("stamp user_version=6: %v", err)
+	}
+	_ = s1.Close()
+
+	s2, err := OpenWithDefaultWorkdir(path, "/default-workdir")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = s2.Close() }()
+
+	var version int
+	if err := s2.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatalf("read schema version: %v", err)
+	}
+	if version != 7 {
+		t.Fatalf("schema version = %d, want 7", version)
+	}
+
+	repo := s2.ThreadConfigRepo()
+	tc, err := repo.Get(ctx, "discord", "thread-1")
+	if err != nil {
+		t.Fatalf("Get thread-1: %v", err)
+	}
+	if tc == nil || tc.Workdir != "/repo" || tc.Model != "anthropic/claude-3" || tc.ListenMode != "all" {
+		t.Fatalf("thread-1 backfill = %+v, want channel effective values", tc)
+	}
+
+	tc2, err := repo.Get(ctx, "discord", "thread-2")
+	if err != nil {
+		t.Fatalf("Get thread-2: %v", err)
+	}
+	if tc2 == nil || tc2.Workdir != "/default-workdir" || tc2.Model != "" || tc2.ListenMode != "mention" {
+		t.Fatalf("thread-2 backfill = %+v, want defaults", tc2)
+	}
+
+	self, err := repo.Get(ctx, "discord", "user-thread")
+	if err != nil {
+		t.Fatalf("Get user-thread: %v", err)
+	}
+	if self != nil {
+		t.Fatalf("self-scoped thread must not be backfilled, got %+v", self)
+	}
+}
+
+func TestThreadConfigRoundTrip(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+	repo := s.ThreadConfigRepo()
+
+	tc, err := repo.Get(ctx, "discord", "thread-1")
+	if err != nil {
+		t.Fatalf("Get missing: %v", err)
+	}
+	if tc != nil {
+		t.Fatal("expected nil for missing row")
+	}
+
+	if err := repo.UpsertWorkdir(ctx, "discord", "thread-1", "/repo"); err != nil {
+		t.Fatalf("UpsertWorkdir: %v", err)
+	}
+	if err := repo.UpsertModel(ctx, "discord", "thread-1", "openai/gpt-4o"); err != nil {
+		t.Fatalf("UpsertModel: %v", err)
+	}
+	if err := repo.UpsertListenMode(ctx, "discord", "thread-1", "all"); err != nil {
+		t.Fatalf("UpsertListenMode: %v", err)
+	}
+
+	tc, err = repo.Get(ctx, "discord", "thread-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if tc == nil || tc.Workdir != "/repo" || tc.Model != "openai/gpt-4o" || tc.ListenMode != "all" {
+		t.Fatalf("unexpected row: %+v", tc)
+	}
+
+	if err := repo.UpsertModel(ctx, "discord", "thread-1", "anthropic/claude-3"); err != nil {
+		t.Fatalf("UpsertModel update: %v", err)
+	}
+	tc, err = repo.Get(ctx, "discord", "thread-1")
+	if err != nil {
+		t.Fatalf("Get after update: %v", err)
+	}
+	if tc.Workdir != "/repo" || tc.Model != "anthropic/claude-3" || tc.ListenMode != "all" {
+		t.Fatalf("model update changed another field: %+v", tc)
+	}
+
+	other, err := repo.Get(ctx, "telegram", "thread-1")
+	if err != nil {
+		t.Fatalf("Get other platform: %v", err)
+	}
+	if other != nil {
+		t.Fatalf("expected no cross-platform leak, got %+v", other)
+	}
+}
+
+func TestThreadConfigSnapshotFromChannel(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+	repo := s.ThreadConfigRepo()
+	chRepo := s.ChannelRepo()
+
+	if err := chRepo.UpsertWorkdir(ctx, "discord", "parent", "/repo"); err != nil {
+		t.Fatalf("UpsertWorkdir parent: %v", err)
+	}
+	if err := chRepo.UpsertModel(ctx, "discord", "parent", "openai/gpt-4o"); err != nil {
+		t.Fatalf("UpsertModel parent: %v", err)
+	}
+	if err := chRepo.UpsertListenMode(ctx, "discord", "parent", "all"); err != nil {
+		t.Fatalf("UpsertListenMode parent: %v", err)
+	}
+
+	if err := repo.SnapshotFromChannel(ctx, "discord", "thread-1", "parent", "/default"); err != nil {
+		t.Fatalf("SnapshotFromChannel: %v", err)
+	}
+	tc, err := repo.Get(ctx, "discord", "thread-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if tc == nil || tc.Workdir != "/repo" || tc.Model != "openai/gpt-4o" || tc.ListenMode != "all" {
+		t.Fatalf("snapshot = %+v, want channel effective values", tc)
+	}
+
+	if err := chRepo.UpsertModel(ctx, "discord", "parent", "anthropic/claude-3"); err != nil {
+		t.Fatalf("UpsertModel parent after snapshot: %v", err)
+	}
+	if err := repo.SnapshotFromChannel(ctx, "discord", "thread-1", "parent", "/default"); err != nil {
+		t.Fatalf("second snapshot: %v", err)
+	}
+	tc, err = repo.Get(ctx, "discord", "thread-1")
+	if err != nil {
+		t.Fatalf("Get after channel change: %v", err)
+	}
+	if tc.Model != "openai/gpt-4o" {
+		t.Fatalf("existing thread row must not be overwritten by a later snapshot, got %q", tc.Model)
+	}
+
+	if err := repo.SnapshotFromChannel(ctx, "discord", "thread-2", "missing-parent", "/default"); err != nil {
+		t.Fatalf("SnapshotFromChannel missing channel: %v", err)
+	}
+	tc2, err := repo.Get(ctx, "discord", "thread-2")
+	if err != nil {
+		t.Fatalf("Get thread-2: %v", err)
+	}
+	if tc2 == nil || tc2.Workdir != "/default" || tc2.Model != "" || tc2.ListenMode != "mention" {
+		t.Fatalf("missing-channel snapshot = %+v, want defaults", tc2)
 	}
 }

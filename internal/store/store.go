@@ -51,6 +51,17 @@ type ProgressNotice struct {
 	CreatedAt int64
 }
 
+type ThreadConfig struct {
+	ID         int64
+	Platform   string
+	ThreadID   string
+	Workdir    string
+	Model      string
+	ListenMode string
+	CreatedAt  int64
+	UpdatedAt  int64
+}
+
 type SessionRepo interface {
 	Active(ctx context.Context, platform, channelID, threadID, userID string) (sessionID string, agentPID int, err error)
 	SetActive(ctx context.Context, platform, channelID, threadID, userID, sessionID string, agentPID int) error
@@ -85,11 +96,20 @@ type ProgressNoticeRepo interface {
 	Delete(ctx context.Context, platform, channelID, threadID, messageID string) error
 }
 
+type ThreadConfigRepo interface {
+	Get(ctx context.Context, platform, threadID string) (*ThreadConfig, error)
+	UpsertWorkdir(ctx context.Context, platform, threadID, workdir string) error
+	UpsertModel(ctx context.Context, platform, threadID, model string) error
+	UpsertListenMode(ctx context.Context, platform, threadID, mode string) error
+	SnapshotFromChannel(ctx context.Context, platform, threadID, channelID, defaultWorkdir string) error
+}
+
 type Store interface {
 	SessionRepo() SessionRepo
 	ChannelRepo() ChannelRepo
 	OverrideRepo() OverrideRepo
 	ScheduleRepo() ScheduleRepo
 	ProgressNoticeRepo() ProgressNoticeRepo
+	ThreadConfigRepo() ThreadConfigRepo
 	Close() error
 }

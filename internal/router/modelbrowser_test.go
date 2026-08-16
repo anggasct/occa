@@ -500,11 +500,11 @@ func TestModelBrowserVariantSelection(t *testing.T) {
 		}
 
 		setText, _ := setReply.editSnapshot()
-		if setText != "✅ Personal model set: zai/glm-5.2@high" {
+		if setText != "✅ Channel model set: zai/glm-5.2@high" {
 			t.Fatalf("setText = %q", setText)
 		}
-		if o := overrideRepo.overrides["telegram:chat1:user1"]; o == nil || o.Model != "zai/glm-5.2@high" {
-			t.Fatalf("user1 stored model = %+v, want zai/glm-5.2@high", o)
+		if ch := r.store.(*fakeStore).channelRepo.channels["telegram:chat1"]; ch == nil || ch.Model != "zai/glm-5.2@high" {
+			t.Fatalf("channel stored model = %+v, want zai/glm-5.2@high", ch)
 		}
 	})
 
@@ -520,11 +520,11 @@ func TestModelBrowserVariantSelection(t *testing.T) {
 		}
 
 		setText, _ := setReply.editSnapshot()
-		if setText != "✅ Personal model set: zai/glm-5" {
+		if setText != "✅ Channel model set: zai/glm-5" {
 			t.Fatalf("setText = %q", setText)
 		}
-		if o := overrideRepo.overrides["telegram:chat1:user1"]; o == nil || o.Model != "zai/glm-5" {
-			t.Fatalf("user1 stored model = %+v, want zai/glm-5", o)
+		if ch := r.store.(*fakeStore).channelRepo.channels["telegram:chat1"]; ch == nil || ch.Model != "zai/glm-5" {
+			t.Fatalf("channel stored model = %+v, want zai/glm-5", ch)
 		}
 	})
 }
