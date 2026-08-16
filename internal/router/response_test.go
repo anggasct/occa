@@ -587,7 +587,7 @@ func TestProgressTickerQuietOnly(t *testing.T) {
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 
-	go startProgressTicker(context.Background(), reply, activityCh, stopCh, 2*time.Millisecond, 20*time.Millisecond, nil, "", "", "")
+	go startProgressTicker(context.Background(), reply, activityCh, stopCh, 2*time.Millisecond, 20*time.Millisecond, nil, "", "", "", nil)
 
 	activityDone := make(chan struct{})
 	go func() {
@@ -629,21 +629,45 @@ func TestProgressTickerQuietOnly(t *testing.T) {
 	}
 }
 
-func TestProgressTickerEditsInPlace(t *testing.T) {
+func TestProgressTickerSkipsIdenticalEdits(t *testing.T) {
 	reply := newResponseReply()
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 
-	go startProgressTicker(context.Background(), reply, make(chan struct{}, 1), stopCh, 2*time.Millisecond, 5*time.Millisecond, nil, "", "", "")
+	var offsetMu sync.Mutex
+	var offset time.Duration
+	nowFunc := func() time.Time {
+		offsetMu.Lock()
+		defer offsetMu.Unlock()
+		return time.Now().Add(offset)
+	}
+
+	go startProgressTicker(context.Background(), reply, make(chan struct{}, 1), stopCh, 2*time.Millisecond, 5*time.Millisecond, nil, "", "", "", nowFunc)
 
 	waitForNoticeSend(t, reply)
 
+	// Ticks within the same whole-minute band must NOT re-edit: the text is
+	// identical, and Telegram rejects it with 400 "message is not modified"
+	// (observed live as `progress notice edit failed` WARN spam).
+	time.Sleep(30 * time.Millisecond)
+	reply.mu.Lock()
+	edits := len(reply.edits)
+	reply.mu.Unlock()
+	if edits != 0 {
+		t.Fatalf("same-text tick edited the notice: %d edits %v", edits, reply.edits)
+	}
+
+	// Crossing into the next minute band edits the SAME notice in place with
+	// the new text — exactly one send, one edit.
+	offsetMu.Lock()
+	offset += 121 * time.Second
+	offsetMu.Unlock()
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		reply.mu.Lock()
-		edits := len(reply.edits)
+		edits = len(reply.edits)
 		reply.mu.Unlock()
-		if edits >= 2 {
+		if edits > 0 {
 			break
 		}
 		time.Sleep(time.Millisecond)
@@ -654,8 +678,11 @@ func TestProgressTickerEditsInPlace(t *testing.T) {
 	if len(reply.sends) != 1 {
 		t.Fatalf("expected exactly one send, got %d: %v", len(reply.sends), reply.sends)
 	}
-	if len(reply.edits) < 2 {
-		t.Fatalf("expected the notice edited in place, got %d edits", len(reply.edits))
+	if edits != 1 {
+		t.Fatalf("expected exactly one edit after the minute band changed, got %d", edits)
+	}
+	if reply.edits[0] != "⏳ Still working... (2m)" {
+		t.Fatalf("edit text = %q, want %q", reply.edits[0], "⏳ Still working... (2m)")
 	}
 }
 
@@ -665,7 +692,7 @@ func TestProgressTickerResumeDeletesNotice(t *testing.T) {
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 
-	go startProgressTicker(context.Background(), reply, activityCh, stopCh, 2*time.Millisecond, 5*time.Millisecond, nil, "", "", "")
+	go startProgressTicker(context.Background(), reply, activityCh, stopCh, 2*time.Millisecond, 5*time.Millisecond, nil, "", "", "", nil)
 
 	waitForNoticeSend(t, reply)
 	activityCh <- struct{}{}
@@ -683,7 +710,7 @@ func TestProgressTickerStopDeletesNotice(t *testing.T) {
 	reply := newResponseReply()
 	stopCh := make(chan struct{})
 
-	go startProgressTicker(context.Background(), reply, make(chan struct{}, 1), stopCh, 5*time.Millisecond, 0, nil, "", "", "")
+	go startProgressTicker(context.Background(), reply, make(chan struct{}, 1), stopCh, 5*time.Millisecond, 0, nil, "", "", "", nil)
 
 	waitForNoticeSend(t, reply)
 	close(stopCh)
@@ -698,7 +725,7 @@ func TestProgressTickerPersistsAndClears(t *testing.T) {
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 
-	go startProgressTicker(context.Background(), reply, activityCh, stopCh, 2*time.Millisecond, 5*time.Millisecond, notices, "telegram", "chat1", "")
+	go startProgressTicker(context.Background(), reply, activityCh, stopCh, 2*time.Millisecond, 5*time.Millisecond, notices, "telegram", "chat1", "", nil)
 
 	waitForNoticeSend(t, reply)
 
@@ -755,7 +782,7 @@ func TestProgressTickerNilNoticesRepoSkipsPersist(t *testing.T) {
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 
-	go startProgressTicker(context.Background(), reply, make(chan struct{}, 1), stopCh, 5*time.Millisecond, 0, nil, "", "", "")
+	go startProgressTicker(context.Background(), reply, make(chan struct{}, 1), stopCh, 5*time.Millisecond, 0, nil, "", "", "", nil)
 
 	waitForNoticeSend(t, reply)
 }

@@ -173,7 +173,7 @@ func (r *Router) runResponse(
 		notices = r.store.ProgressNoticeRepo()
 	}
 
-	go startProgressTicker(ctx, msg.ReplyCtx, progressActivityCh, progressStopCh, progressTickerInterval, progressQuietThreshold, notices, key.platform, key.channelID, key.threadID)
+	go startProgressTicker(ctx, msg.ReplyCtx, progressActivityCh, progressStopCh, progressTickerInterval, progressQuietThreshold, notices, key.platform, key.channelID, key.threadID, nil)
 
 	observedEvents := make(chan relay.Event, 64)
 	go func() {
@@ -280,12 +280,17 @@ func startProgressTicker(
 	interval, quietThreshold time.Duration,
 	notices store.ProgressNoticeRepo,
 	platform, channelID, threadID string,
+	now func() time.Time,
 ) {
+	if now == nil {
+		now = time.Now
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	lastActivity := time.Now()
+	lastActivity := now()
 	var noticeRef channel.MessageRef
+	var lastText string
 
 	removeNotice := func() {
 		if noticeRef == nil {
@@ -302,6 +307,7 @@ func startProgressTicker(
 			}
 		}
 		noticeRef = nil
+		lastText = ""
 	}
 	defer removeNotice()
 
@@ -312,10 +318,10 @@ func startProgressTicker(
 		case <-stopCh:
 			return
 		case <-activityCh:
-			lastActivity = time.Now()
+			lastActivity = now()
 			removeNotice()
 		case <-ticker.C:
-			quiet := time.Since(lastActivity)
+			quiet := now().Sub(lastActivity)
 			if quiet < quietThreshold {
 				if noticeRef != nil {
 					removeNotice()
@@ -334,15 +340,23 @@ func startProgressTicker(
 					continue
 				}
 				noticeRef = ref
+				lastText = text
 				if notices != nil {
 					if err := notices.Put(ctx, platform, channelID, threadID, ref.ID()); err != nil {
 						slog.Warn("progress notice persist failed", "error", err)
 					}
 				}
 			} else {
+				if text == lastText {
+					// Telegram rejects identical edits with 400 "message is
+					// not modified"; skip until the minute band changes.
+					continue
+				}
 				if err := reply.Edit(noticeRef, text); err != nil {
 					slog.Warn("progress notice edit failed", "error", err)
+					continue
 				}
+				lastText = text
 			}
 		}
 	}
