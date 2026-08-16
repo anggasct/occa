@@ -1,6 +1,11 @@
 package channel
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+var ErrMessageNotFound = errors.New("channel: message not found")
 
 type Attachment struct {
 	Filename string
@@ -47,6 +52,10 @@ type ReplyContext interface {
 
 type MessageRemover interface {
 	Delete(ref MessageRef) error
+}
+
+type MessageDeleter interface {
+	DeleteMessage(channelID, messageID string) error
 }
 
 type ChatCommandSetter interface {

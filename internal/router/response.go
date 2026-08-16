@@ -12,6 +12,7 @@ import (
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/relay"
 	"github.com/anggasct/occa/internal/render"
+	"github.com/anggasct/occa/internal/store"
 )
 
 const busyResponseMessage = "⚠️ A response is already running in this conversation. Wait for it to finish or check /occa:status."
@@ -165,19 +166,29 @@ func (r *Router) runResponse(
 	}
 	defer stopProgress()
 
-	go startProgressTicker(ctx, msg.ReplyCtx, progressStopCh, progressTickerInterval)
+	progressActivityCh := make(chan struct{}, 1)
+
+	var notices store.ProgressNoticeRepo
+	if r.store != nil {
+		notices = r.store.ProgressNoticeRepo()
+	}
+
+	go startProgressTicker(ctx, msg.ReplyCtx, progressActivityCh, progressStopCh, progressTickerInterval, progressQuietThreshold, notices, key.platform, key.channelID, key.threadID)
 
 	observedEvents := make(chan relay.Event, 64)
 	go func() {
-		defer close(observedEvents)
 		for ev := range events {
-			stopProgress()
+			select {
+			case progressActivityCh <- struct{}{}:
+			default:
+			}
 			select {
 			case observedEvents <- ev:
 			case <-ctx.Done():
 				return
 			}
 		}
+		close(observedEvents)
 	}()
 
 	dispatchDone := make(chan error, 1)
@@ -256,23 +267,41 @@ func progressNotice(seconds int64) string {
 	return fmt.Sprintf("⏳ Still working... (%dm)", minutes)
 }
 
-var progressTickerInterval = 60 * time.Second
+var (
+	progressQuietThreshold = 90 * time.Second
+	progressTickerInterval = 15 * time.Second
+)
 
-func startProgressTicker(ctx context.Context, reply channel.ReplyContext, stopCh <-chan struct{}, interval time.Duration) {
+func startProgressTicker(
+	ctx context.Context,
+	reply channel.ReplyContext,
+	activityCh <-chan struct{},
+	stopCh <-chan struct{},
+	interval, quietThreshold time.Duration,
+	notices store.ProgressNoticeRepo,
+	platform, channelID, threadID string,
+) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	var elapsed int64
+	lastActivity := time.Now()
 	var noticeRef channel.MessageRef
-	var removed bool
 
 	removeNotice := func() {
-		if !removed && noticeRef != nil {
-			removed = true
-			if remover, ok := reply.(channel.MessageRemover); ok {
-				_ = remover.Delete(noticeRef)
+		if noticeRef == nil {
+			return
+		}
+		if remover, ok := reply.(channel.MessageRemover); ok {
+			if err := remover.Delete(noticeRef); err != nil {
+				slog.Warn("progress notice delete failed", "error", err)
 			}
 		}
+		if notices != nil {
+			if err := notices.Delete(ctx, platform, channelID, threadID, noticeRef.ID()); err != nil {
+				slog.Warn("progress notice persist delete failed", "error", err)
+			}
+		}
+		noticeRef = nil
 	}
 	defer removeNotice()
 
@@ -282,16 +311,38 @@ func startProgressTicker(ctx context.Context, reply channel.ReplyContext, stopCh
 			return
 		case <-stopCh:
 			return
+		case <-activityCh:
+			lastActivity = time.Now()
+			removeNotice()
 		case <-ticker.C:
-			elapsed += 60
-			text := progressNotice(elapsed)
+			quiet := time.Since(lastActivity)
+			if quiet < quietThreshold {
+				if noticeRef != nil {
+					removeNotice()
+				}
+				continue
+			}
+			minutes := quiet / time.Minute
+			if minutes < 1 {
+				minutes = 1
+			}
+			text := progressNotice(int64(minutes) * 60)
 			if noticeRef == nil {
 				ref, err := reply.Send(text)
-				if err == nil {
-					noticeRef = ref
+				if err != nil {
+					slog.Warn("progress notice send failed", "error", err)
+					continue
+				}
+				noticeRef = ref
+				if notices != nil {
+					if err := notices.Put(ctx, platform, channelID, threadID, ref.ID()); err != nil {
+						slog.Warn("progress notice persist failed", "error", err)
+					}
 				}
 			} else {
-				_ = reply.Edit(noticeRef, text)
+				if err := reply.Edit(noticeRef, text); err != nil {
+					slog.Warn("progress notice edit failed", "error", err)
+				}
 			}
 		}
 	}

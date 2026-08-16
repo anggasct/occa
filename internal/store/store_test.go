@@ -588,3 +588,78 @@ func TestScheduleSweepPending(t *testing.T) {
 		t.Fatalf("unexpected remaining schedules after sweep: %+v", all)
 	}
 }
+
+func TestProgressNoticeMigrationFromV4(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "upgrade.db")
+	ctx := context.Background()
+
+	s1, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := s1.db.Exec("DROP TABLE progress_notice"); err != nil {
+		t.Fatalf("drop progress_notice: %v", err)
+	}
+	if _, err := s1.db.Exec("PRAGMA user_version=4"); err != nil {
+		t.Fatalf("stamp user_version=4: %v", err)
+	}
+	_ = s1.Close()
+
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = s2.Close() }()
+
+	var version int
+	if err := s2.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatalf("read schema version: %v", err)
+	}
+	if version != 5 {
+		t.Fatalf("schema version = %d, want 5", version)
+	}
+
+	if err := s2.ProgressNoticeRepo().Put(ctx, "telegram", "chat1", "", "m1"); err != nil {
+		t.Fatalf("Put after migration: %v", err)
+	}
+	notices, err := s2.ProgressNoticeRepo().List(ctx)
+	if err != nil {
+		t.Fatalf("List after migration: %v", err)
+	}
+	if len(notices) != 1 || notices[0].MessageID != "m1" {
+		t.Fatalf("unexpected notices after migration: %+v", notices)
+	}
+}
+
+func TestProgressNoticeRoundTrip(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+	repo := s.ProgressNoticeRepo()
+
+	if err := repo.Put(ctx, "discord", "parent", "thread1", "m1"); err != nil {
+		t.Fatalf("Put discord: %v", err)
+	}
+	if err := repo.Put(ctx, "telegram", "chat1", "", "m2"); err != nil {
+		t.Fatalf("Put telegram: %v", err)
+	}
+
+	notices, err := repo.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(notices) != 2 {
+		t.Fatalf("List len = %d, want 2", len(notices))
+	}
+
+	if err := repo.Delete(ctx, "discord", "parent", "thread1", "m1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	notices, err = repo.List(ctx)
+	if err != nil {
+		t.Fatalf("List after delete: %v", err)
+	}
+	if len(notices) != 1 || notices[0].MessageID != "m2" {
+		t.Fatalf("unexpected notices after delete: %+v", notices)
+	}
+}

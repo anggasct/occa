@@ -42,6 +42,15 @@ type UserOverride struct {
 	UpdatedAt int64
 }
 
+type ProgressNotice struct {
+	ID        int64
+	Platform  string
+	ChannelID string
+	ThreadID  string
+	MessageID string
+	CreatedAt int64
+}
+
 type SessionRepo interface {
 	Active(ctx context.Context, platform, channelID, threadID, userID string) (sessionID string, agentPID int, err error)
 	SetActive(ctx context.Context, platform, channelID, threadID, userID, sessionID string, agentPID int) error
@@ -68,10 +77,17 @@ type OverrideRepo interface {
 	ListByChannel(ctx context.Context, platform, channelID string) ([]UserOverride, error)
 }
 
+type ProgressNoticeRepo interface {
+	Put(ctx context.Context, platform, channelID, threadID, messageID string) error
+	List(ctx context.Context) ([]ProgressNotice, error)
+	Delete(ctx context.Context, platform, channelID, threadID, messageID string) error
+}
+
 type Store interface {
 	SessionRepo() SessionRepo
 	ChannelRepo() ChannelRepo
 	OverrideRepo() OverrideRepo
 	ScheduleRepo() ScheduleRepo
+	ProgressNoticeRepo() ProgressNoticeRepo
 	Close() error
 }
