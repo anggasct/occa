@@ -53,6 +53,12 @@ func (m *mockSessionRepo) ThreadChannel(_ context.Context, platform, threadID st
 
 func (m *mockSessionRepo) SetTitle(_ context.Context, _ int64, _ string) error { return nil }
 
+func (m *mockSessionRepo) SetModel(_ context.Context, _, _, _, _, _ string) error { return nil }
+
+func (m *mockSessionRepo) ActiveModel(_ context.Context, _, _, _, _ string) (string, error) {
+	return "", nil
+}
+
 func (m *mockSessionRepo) Delete(_ context.Context, id int64) error { return nil }
 
 type mockClient struct {

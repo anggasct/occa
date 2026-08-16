@@ -444,6 +444,7 @@ type fakeSessionRepo struct {
 	activeBy map[string]string
 	titles   map[string]string
 	sessions []store.Session
+	models   map[string]string
 }
 
 func (f *fakeSessionRepo) sessionKey(platform, channelID, threadID, userID string) string {
@@ -597,6 +598,39 @@ func (f *fakeSessionRepo) ThreadChannel(_ context.Context, platform, threadID st
 }
 
 func (f *fakeSessionRepo) Delete(_ context.Context, id int64) error { return nil }
+
+func (f *fakeSessionRepo) SetModel(_ context.Context, platform, channelID, threadID, userID, model string) error {
+	id := f.activeID
+	if f.activeBy != nil {
+		var ok bool
+		if id, ok = f.activeBy[f.sessionKey(platform, channelID, threadID, userID)]; !ok {
+			return store.ErrNotFound
+		}
+	}
+	if id == "" {
+		return store.ErrNotFound
+	}
+	if f.models == nil {
+		f.models = make(map[string]string)
+	}
+	f.models[id] = model
+	return nil
+}
+
+func (f *fakeSessionRepo) ActiveModel(_ context.Context, platform, channelID, threadID, userID string) (string, error) {
+	id := f.activeID
+	if f.activeBy != nil {
+		var ok bool
+		id, ok = f.activeBy[f.sessionKey(platform, channelID, threadID, userID)]
+		if !ok || id == "" {
+			return "", nil
+		}
+	}
+	if id == "" {
+		return "", nil
+	}
+	return f.models[id], nil
+}
 
 type fakeInstance struct {
 	client  relay.Client
