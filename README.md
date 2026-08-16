@@ -35,22 +35,16 @@ provider state.
 
 ## Install
 
-```sh
-curl -fsSL https://github.com/anggasct/occa/releases/latest/download/occa_$(uname -s)_$(uname -m) | bash
-```
-
-The installer detects your OS/arch, installs the matching release binary, and
-runs OpenCode's official installer if `opencode` is not on `PATH`. To pin a
-specific release:
-
-```sh
-OCCA_VERSION=v1.0.0 curl -fsSL https://github.com/anggasct/occa/releases/latest/download/occa_$(uname -s)_$(uname -m) | bash
-```
-
-Or build from source:
+Build from source:
 
 ```sh
 go build -o occa ./cmd/occa
+```
+
+To make `occa` available on your PATH:
+
+```sh
+go install ./cmd/occa
 ```
 
 Quick start:
