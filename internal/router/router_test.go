@@ -313,6 +313,7 @@ func (f *fakeOverrideRepo) ListByChannel(_ context.Context, platform, channelID 
 type fakeChannelRepo struct {
 	channels map[string]*store.Channel
 	getErr   error
+	getCalls int
 }
 
 func newFakeChannelRepo() *fakeChannelRepo {
@@ -322,6 +323,7 @@ func newFakeChannelRepo() *fakeChannelRepo {
 func (f *fakeChannelRepo) key(platform, channelID string) string { return platform + ":" + channelID }
 
 func (f *fakeChannelRepo) Get(_ context.Context, platform, channelID string) (*store.Channel, error) {
+	f.getCalls++
 	if f.getErr != nil {
 		return nil, f.getErr
 	}

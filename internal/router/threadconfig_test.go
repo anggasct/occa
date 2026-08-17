@@ -195,6 +195,8 @@ func TestThreadConfigReadErrorFailsClosed(t *testing.T) {
 	}
 	fake := threadConfigsOf(r)
 	fake.getErr = errors.New("isolation store unavailable")
+	chRepo := r.store.(*fakeStore).channelRepo
+	channelReads := chRepo.getCalls
 
 	thread := ownedThreadMsg("thread-1", "", &fakeReplyCtx{})
 
@@ -209,6 +211,9 @@ func TestThreadConfigReadErrorFailsClosed(t *testing.T) {
 	}
 	if r.listenModeAllows(ctx, thread) {
 		t.Fatal("listenModeAllows must fail closed on thread-config read error")
+	}
+	if chRepo.getCalls != channelReads {
+		t.Fatalf("channel repo consulted on thread-config read error: %d -> %d reads, want no fallback", channelReads, chRepo.getCalls)
 	}
 }
 
@@ -590,6 +595,24 @@ func TestSameThreadIDDifferentChatsIsolated(t *testing.T) {
 	if modelB == nil || modelB.ProviderID != "zai-coding-plan" || modelB.ID != "glm-5.2" {
 		t.Fatalf("chat-b effective model = %+v, want zai-coding-plan/glm-5.2", modelB)
 	}
+
+	// Workdir and listen-mode writes must stay scoped too: setting them in
+	// chat-a's topic must not overwrite chat-b's row with the same topic id.
+	wd := t.TempDir()
+	if err := r.Route(ctx, telegramTopicMsg("chat-a", "555", "/channel all", &fakeReplyCtx{})); err != nil {
+		t.Fatalf("Route chat-a /channel: %v", err)
+	}
+	if err := r.Route(ctx, telegramTopicMsg("chat-a", "555", "/dir "+wd, &fakeReplyCtx{})); err != nil {
+		t.Fatalf("Route chat-a /dir: %v", err)
+	}
+	tcA = threadConfigsOf(r).configs["telegram:chat-a:555"]
+	if tcA == nil || tcA.ListenMode != "all" || tcA.Workdir != wd {
+		t.Fatalf("chat-a topic row after set = %+v, want listen all + workdir %q", tcA, wd)
+	}
+	tcB := threadConfigsOf(r).configs["telegram:chat-b:555"]
+	if tcB != nil && (tcB.ListenMode != "" || tcB.Workdir != "") {
+		t.Fatalf("chat-b topic row leaked chat-a writes: %+v", tcB)
+	}
 }
 
 // TestNonThreadResolutionSkipsThreadConfig proves the no-thread-config-read
@@ -632,6 +655,16 @@ func TestNonThreadResolutionSkipsThreadConfig(t *testing.T) {
 	}
 
 	dir := t.TempDir()
+	discordCmd := func(text string) channel.IncomingMessage {
+		return channel.IncomingMessage{
+			Platform:  "discord",
+			ChannelID: "text-channel",
+			UserID:    "user1",
+			Text:      text,
+			IsMention: true,
+			ReplyCtx:  &fakeReplyCtx{},
+		}
+	}
 	for _, tt := range []struct{ text string }{
 		{text: "/model openai/gpt-4o"},
 		{text: "/channel all"},
@@ -646,6 +679,53 @@ func TestNonThreadResolutionSkipsThreadConfig(t *testing.T) {
 	}
 	if tc.writeCalls != 0 {
 		t.Fatalf("non-thread set commands made %d thread-config writes, want 0", tc.writeCalls)
+	}
+
+	// Plain Discord (non-thread) messages must hit the same boundary: zero
+	// thread-config reads/writes through view, set, and resolution paths.
+	st.overrideRepo.overrides["discord:text-channel:user1"] = &store.UserOverride{
+		ChannelID: "text-channel", Platform: "discord", UserID: "user1", Role: "admin",
+	}
+	st.channelRepo.channels["discord:text-channel"] = &store.Channel{
+		ChannelID: "text-channel", Platform: "discord", Workdir: "/repo-discord", Model: "openai/gpt-4o", ListenMode: "all",
+	}
+	discordPlain := discordCmd("hello discord")
+	if got, err := r.effectiveWorkdir(ctx, discordPlain); err != nil || got != "/repo-discord" {
+		t.Fatalf("discord plain workdir = %q, err %v, want /repo-discord", got, err)
+	}
+	if got, err := r.effectiveListenMode(ctx, discordPlain); err != nil || got != "all" {
+		t.Fatalf("discord plain listen mode = %q, err %v, want all", got, err)
+	}
+	if _, err := r.effectiveModel(ctx, discordPlain); err != nil {
+		t.Fatalf("discord effectiveModel: %v", err)
+	}
+	if tc.getCalls != 0 {
+		t.Fatalf("discord non-thread resolution made %d thread-config reads, want 0", tc.getCalls)
+	}
+
+	if err := r.Route(ctx, discordPlain); err != nil {
+		t.Fatalf("Route discord plain passthrough: %v", err)
+	}
+	waitForDispatch(t, client)
+	waitForResponse(t, r)
+	if tc.getCalls != 0 {
+		t.Fatalf("discord non-thread passthrough made %d thread-config reads, want 0", tc.getCalls)
+	}
+
+	for _, tt := range []struct{ text string }{
+		{text: "/model openai/gpt-4o"},
+		{text: "/channel all"},
+		{text: "/dir " + dir},
+	} {
+		if err := r.Route(ctx, discordCmd(tt.text)); err != nil {
+			t.Fatalf("Route discord %q: %v", tt.text, err)
+		}
+	}
+	if tc.getCalls != 0 {
+		t.Fatalf("discord non-thread set commands made %d thread-config reads, want 0", tc.getCalls)
+	}
+	if tc.writeCalls != 0 {
+		t.Fatalf("discord non-thread set commands made %d thread-config writes, want 0", tc.writeCalls)
 	}
 	if len(tc.configs) != 0 {
 		t.Fatalf("non-thread activity materialized thread-config rows: %+v", tc.configs)
