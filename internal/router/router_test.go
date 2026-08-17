@@ -436,6 +436,7 @@ type fakeThreadConfigRepo struct {
 	channels   *fakeChannelRepo
 	getCalls   int
 	writeCalls int
+	getErr     error
 }
 
 func newFakeThreadConfigRepo(channels *fakeChannelRepo) *fakeThreadConfigRepo {
@@ -448,6 +449,9 @@ func (f *fakeThreadConfigRepo) key(platform, channelID, threadID string) string 
 
 func (f *fakeThreadConfigRepo) Get(_ context.Context, platform, channelID, threadID string) (*store.ThreadConfig, error) {
 	f.getCalls++
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
 	return f.configs[f.key(platform, channelID, threadID)], nil
 }
 

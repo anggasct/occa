@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -94,24 +95,40 @@ func TestEffectiveWorkdirIsolation(t *testing.T) {
 	threadConfigsOf(r).configs["discord:parent:thread-1"] = &store.ThreadConfig{
 		Platform: "discord", ChannelID: "parent", ThreadID: "thread-1", Workdir: "/thread-wd",
 	}
-	if got := r.effectiveWorkdir(context.Background(), threadWithRow); got != "/thread-wd" {
+	got, err := r.effectiveWorkdir(context.Background(), threadWithRow)
+	if err != nil {
+		t.Fatalf("effectiveWorkdir: %v", err)
+	}
+	if got != "/thread-wd" {
 		t.Fatalf("thread workdir = %q, want /thread-wd", got)
 	}
 
 	st.channelRepo.channels["discord:parent"].Workdir = "/channel-wd-2"
-	if got := r.effectiveWorkdir(context.Background(), threadWithRow); got != "/thread-wd" {
+	got, err = r.effectiveWorkdir(context.Background(), threadWithRow)
+	if err != nil {
+		t.Fatalf("effectiveWorkdir: %v", err)
+	}
+	if got != "/thread-wd" {
 		t.Fatalf("thread workdir after channel change = %q, want /thread-wd", got)
 	}
 
 	threadNoRow := ownedThreadMsg("thread-2", "", &fakeReplyCtx{})
-	if got := r.effectiveWorkdir(context.Background(), threadNoRow); got != "/channel-wd-2" {
+	got, err = r.effectiveWorkdir(context.Background(), threadNoRow)
+	if err != nil {
+		t.Fatalf("effectiveWorkdir: %v", err)
+	}
+	if got != "/channel-wd-2" {
 		t.Fatalf("no-row thread workdir = %q, want channel /channel-wd-2", got)
 	}
 
 	threadConfigsOf(r).configs["discord:parent:thread-2"] = &store.ThreadConfig{
 		Platform: "discord", ChannelID: "parent", ThreadID: "thread-2", Workdir: "",
 	}
-	if got := r.effectiveWorkdir(context.Background(), threadNoRow); got != "/default-workdir" {
+	got, err = r.effectiveWorkdir(context.Background(), threadNoRow)
+	if err != nil {
+		t.Fatalf("effectiveWorkdir: %v", err)
+	}
+	if got != "/default-workdir" {
 		t.Fatalf("empty-row thread workdir = %q, want agent default", got)
 	}
 }
@@ -127,25 +144,71 @@ func TestEffectiveListenModeIsolation(t *testing.T) {
 	threadConfigsOf(r).configs["discord:parent:thread-1"] = &store.ThreadConfig{
 		Platform: "discord", ChannelID: "parent", ThreadID: "thread-1", ListenMode: "mention",
 	}
-	if got := r.effectiveListenMode(context.Background(), threadWithRow); got != "mention" {
+	got, err := r.effectiveListenMode(context.Background(), threadWithRow)
+	if err != nil {
+		t.Fatalf("effectiveListenMode: %v", err)
+	}
+	if got != "mention" {
 		t.Fatalf("thread listen mode = %q, want mention", got)
 	}
 
 	st.channelRepo.channels["discord:parent"].ListenMode = "thread"
-	if got := r.effectiveListenMode(context.Background(), threadWithRow); got != "mention" {
+	got, err = r.effectiveListenMode(context.Background(), threadWithRow)
+	if err != nil {
+		t.Fatalf("effectiveListenMode: %v", err)
+	}
+	if got != "mention" {
 		t.Fatalf("thread listen mode after channel change = %q, want mention", got)
 	}
 
 	threadNoRow := ownedThreadMsg("thread-2", "", &fakeReplyCtx{})
-	if got := r.effectiveListenMode(context.Background(), threadNoRow); got != "thread" {
+	got, err = r.effectiveListenMode(context.Background(), threadNoRow)
+	if err != nil {
+		t.Fatalf("effectiveListenMode: %v", err)
+	}
+	if got != "thread" {
 		t.Fatalf("no-row thread listen mode = %q, want channel thread", got)
 	}
 
 	threadConfigsOf(r).configs["discord:parent:thread-2"] = &store.ThreadConfig{
 		Platform: "discord", ChannelID: "parent", ThreadID: "thread-2", ListenMode: "",
 	}
-	if got := r.effectiveListenMode(context.Background(), threadNoRow); got != "mention" {
+	got, err = r.effectiveListenMode(context.Background(), threadNoRow)
+	if err != nil {
+		t.Fatalf("effectiveListenMode: %v", err)
+	}
+	if got != "mention" {
 		t.Fatalf("empty-row thread listen mode = %q, want mention default", got)
+	}
+}
+
+// TestThreadConfigReadErrorFailsClosed proves the snapshot boundary holds when
+// the isolation store read fails: workdir / listen / model resolution must
+// propagate the error instead of falling back to the parent channel, and
+// listenModeAllows must fail closed (not process the message).
+func TestThreadConfigReadErrorFailsClosed(t *testing.T) {
+	r, _ := newThreadTestRouter()
+	ctx := context.Background()
+	st := r.store.(*fakeStore)
+	st.channelRepo.channels["discord:parent"] = &store.Channel{
+		ChannelID: "parent", Platform: "discord", Workdir: "/channel-wd", Model: "openai/gpt-4o", ListenMode: "all",
+	}
+	fake := threadConfigsOf(r)
+	fake.getErr = errors.New("isolation store unavailable")
+
+	thread := ownedThreadMsg("thread-1", "", &fakeReplyCtx{})
+
+	if _, err := r.effectiveWorkdir(ctx, thread); err == nil {
+		t.Fatal("effectiveWorkdir must fail closed on thread-config read error")
+	}
+	if _, err := r.effectiveListenMode(ctx, thread); err == nil {
+		t.Fatal("effectiveListenMode must fail closed on thread-config read error")
+	}
+	if _, err := r.effectiveModel(ctx, thread); err == nil {
+		t.Fatal("effectiveModel must fail closed on thread-config read error")
+	}
+	if r.listenModeAllows(ctx, thread) {
+		t.Fatal("listenModeAllows must fail closed on thread-config read error")
 	}
 }
 
@@ -543,11 +606,11 @@ func TestNonThreadResolutionSkipsThreadConfig(t *testing.T) {
 	plain := msg("hello", &fakeReplyCtx{})
 	tc := threadConfigsOf(r)
 
-	if got := r.effectiveWorkdir(ctx, plain); got != "/repo" {
-		t.Fatalf("plain workdir = %q, want /repo", got)
+	if got, err := r.effectiveWorkdir(ctx, plain); err != nil || got != "/repo" {
+		t.Fatalf("plain workdir = %q, err %v, want /repo", got, err)
 	}
-	if got := r.effectiveListenMode(ctx, plain); got != "all" {
-		t.Fatalf("plain listen mode = %q, want all", got)
+	if got, err := r.effectiveListenMode(ctx, plain); err != nil || got != "all" {
+		t.Fatalf("plain listen mode = %q, err %v, want all", got, err)
 	}
 	if _, err := r.effectiveModel(ctx, plain); err != nil {
 		t.Fatalf("effectiveModel: %v", err)

@@ -19,7 +19,11 @@ func (r *Router) handleChannel(ctx context.Context, msg channel.IncomingMessage,
 }
 
 func (r *Router) viewChannel(ctx context.Context, msg channel.IncomingMessage) (string, error) {
-	return fmt.Sprintf("📡 Listen mode: %s", r.effectiveListenMode(ctx, msg)), nil
+	mode, err := r.effectiveListenMode(ctx, msg)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("📡 Listen mode: %s", mode), nil
 }
 
 func (r *Router) setChannel(ctx context.Context, msg channel.IncomingMessage, mode string) (string, error) {

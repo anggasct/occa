@@ -20,7 +20,10 @@ func (r *Router) handleDir(ctx context.Context, msg channel.IncomingMessage, arg
 }
 
 func (r *Router) viewDir(ctx context.Context, msg channel.IncomingMessage) (string, error) {
-	wd := r.effectiveWorkdir(ctx, msg)
+	wd, err := r.effectiveWorkdir(ctx, msg)
+	if err != nil {
+		return "", err
+	}
 	status := "(exists)"
 	if fi, err := os.Stat(wd); err != nil || !fi.IsDir() {
 		status = "(missing on disk)"

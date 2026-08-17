@@ -209,7 +209,12 @@ func (r *Router) inline(platform, text string) string {
 }
 
 func (r *Router) listenModeAllows(ctx context.Context, msg channel.IncomingMessage) bool {
-	switch r.effectiveListenMode(ctx, msg) {
+	mode, err := r.effectiveListenMode(ctx, msg)
+	if err != nil {
+		slog.Warn("router: listen mode resolution failed; message not processed", "platform", msg.Platform, "channel_id", msg.ChannelID, "thread_id", msg.ThreadID, "error", err)
+		return false
+	}
+	switch mode {
 	case "all":
 		return true
 	case "thread":
@@ -302,7 +307,10 @@ func (r *Router) handleCommand(ctx context.Context, msg channel.IncomingMessage)
 }
 
 func (r *Router) clientFor(ctx context.Context, msg channel.IncomingMessage) (AgentInstance, error) {
-	workdir := r.effectiveWorkdir(ctx, msg)
+	workdir, err := r.effectiveWorkdir(ctx, msg)
+	if err != nil {
+		return nil, fmt.Errorf("router: resolve workdir: %w", err)
+	}
 	return r.instances.Instance(ctx, workdir)
 }
 
@@ -617,7 +625,10 @@ func (r *Router) handleStatus(ctx context.Context, msg channel.IncomingMessage, 
 	}
 
 	uptime := time.Since(r.startedAt).Truncate(time.Second)
-	workdir := r.effectiveWorkdir(ctx, msg)
+	workdir, err := r.effectiveWorkdir(ctx, msg)
+	if err != nil {
+		return "", fmt.Errorf("router: status workdir: %w", err)
+	}
 
 	sessionLine := sessionID
 	if sessions, err := r.store.SessionRepo().ListConversation(ctx, msg.Platform, msg.ChannelID, threadID, userID); err == nil {

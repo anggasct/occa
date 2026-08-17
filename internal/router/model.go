@@ -145,7 +145,11 @@ func (r *Router) effectiveModel(ctx context.Context, msg channel.IncomingMessage
 }
 
 func (r *Router) modelAfterPersonal(ctx context.Context, msg channel.IncomingMessage, channelID string) (string, error) {
-	if row := r.threadRow(ctx, msg); row != nil {
+	row, err := r.threadRow(ctx, msg)
+	if err != nil {
+		return "", fmt.Errorf("model: get thread: %w", err)
+	}
+	if row != nil {
 		return row.Model, nil
 	}
 	ch, err := r.store.ChannelRepo().Get(ctx, msg.Platform, channelID)
