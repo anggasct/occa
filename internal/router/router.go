@@ -128,6 +128,12 @@ func (r *Router) Route(ctx context.Context, msg channel.IncomingMessage) error {
 		return nil
 	}
 
+	if isOwnedThreadMessage(msg) {
+		if err := r.ensureThreadConfig(ctx, msg); err != nil {
+			slog.Warn("router: materialize thread config failed", "platform", msg.Platform, "thread_id", msg.ThreadID, "error", err)
+		}
+	}
+
 	if msg.IsCallback {
 		return r.handleCallback(ctx, msg)
 	}
@@ -203,12 +209,12 @@ func (r *Router) inline(platform, text string) string {
 }
 
 func (r *Router) listenModeAllows(ctx context.Context, msg channel.IncomingMessage) bool {
-	ch, err := r.store.ChannelRepo().Get(ctx, msg.Platform, msg.ChannelID)
-	if err != nil || ch == nil {
-		return msg.IsMention
+	mode, err := r.effectiveListenMode(ctx, msg)
+	if err != nil {
+		slog.Warn("router: listen mode resolution failed; message not processed", "platform", msg.Platform, "channel_id", msg.ChannelID, "thread_id", msg.ThreadID, "error", err)
+		return false
 	}
-
-	switch ch.ListenMode {
+	switch mode {
 	case "all":
 		return true
 	case "thread":
@@ -301,7 +307,10 @@ func (r *Router) handleCommand(ctx context.Context, msg channel.IncomingMessage)
 }
 
 func (r *Router) clientFor(ctx context.Context, msg channel.IncomingMessage) (AgentInstance, error) {
-	workdir := r.effectiveWorkdir(ctx, msg.Platform, msg.ChannelID)
+	workdir, err := r.effectiveWorkdir(ctx, msg)
+	if err != nil {
+		return nil, fmt.Errorf("router: resolve workdir: %w", err)
+	}
 	return r.instances.Instance(ctx, workdir)
 }
 
@@ -358,6 +367,12 @@ func (r *Router) passthroughQueued(qmsg queuedMessage) bool {
 func (r *Router) executePassthrough(taskCtx context.Context, cancel context.CancelFunc, key responseKey, msg channel.IncomingMessage) error {
 	ctx := taskCtx
 	threadID, userID := key.threadID, key.userID
+
+	if isOwnedThreadMessage(msg) {
+		if err := r.ensureThreadConfig(ctx, msg); err != nil {
+			slog.Warn("router: materialize thread config at session activation failed", "platform", msg.Platform, "thread_id", msg.ThreadID, "error", err)
+		}
+	}
 
 	inst, err := r.clientFor(ctx, msg)
 	if err != nil {
@@ -550,9 +565,9 @@ func (r *Router) helpText() string {
 		"• /compact — compact the current session context\n" +
 		"• /undo — undo the last turn (message + file changes)\n" +
 		"• /redo — restore a reverted turn\n" +
-		"• /dir [path] — view or set this channel's working directory\n" +
-		"• /channel [mention|all|thread] — view or set listen mode\n" +
-		"• /model [channel] [provider/model-id[@variant]] — view or set model\n" +
+		"• /dir [path] — view or set working directory (per location)\n" +
+		"• /channel [mention|all|thread] — view or set listen mode (per location)\n" +
+		"• /model [provider/model-id[@variant]] — view or set model (per location)\n" +
 		"• /variants [provider/model-id] — list and set model reasoning variants\n" +
 		"• /schedules [delete <id>] — view or delete scheduled tasks\n" +
 		"• /reset — clear current session and start fresh\n\n" +
@@ -610,7 +625,10 @@ func (r *Router) handleStatus(ctx context.Context, msg channel.IncomingMessage, 
 	}
 
 	uptime := time.Since(r.startedAt).Truncate(time.Second)
-	workdir := r.effectiveWorkdir(ctx, msg.Platform, msg.ChannelID)
+	workdir, err := r.effectiveWorkdir(ctx, msg)
+	if err != nil {
+		return "", fmt.Errorf("router: status workdir: %w", err)
+	}
 
 	sessionLine := sessionID
 	if sessions, err := r.store.SessionRepo().ListConversation(ctx, msg.Platform, msg.ChannelID, threadID, userID); err == nil {

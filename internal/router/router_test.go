@@ -313,6 +313,7 @@ func (f *fakeOverrideRepo) ListByChannel(_ context.Context, platform, channelID 
 type fakeChannelRepo struct {
 	channels map[string]*store.Channel
 	getErr   error
+	getCalls int
 }
 
 func newFakeChannelRepo() *fakeChannelRepo {
@@ -322,6 +323,7 @@ func newFakeChannelRepo() *fakeChannelRepo {
 func (f *fakeChannelRepo) key(platform, channelID string) string { return platform + ":" + channelID }
 
 func (f *fakeChannelRepo) Get(_ context.Context, platform, channelID string) (*store.Channel, error) {
+	f.getCalls++
 	if f.getErr != nil {
 		return nil, f.getErr
 	}
@@ -359,6 +361,7 @@ type fakeStore struct {
 	overrideRepo    *fakeOverrideRepo
 	scheduleRepo    *fakeScheduleRepo
 	progressNotices *fakeProgressNoticeRepo
+	threadConfigs   *fakeThreadConfigRepo
 }
 
 func (f *fakeStore) SessionRepo() store.SessionRepo   { return f.sessionRepo }
@@ -370,6 +373,12 @@ func (f *fakeStore) ProgressNoticeRepo() store.ProgressNoticeRepo {
 		return newFakeProgressNoticeRepo()
 	}
 	return f.progressNotices
+}
+func (f *fakeStore) ThreadConfigRepo() store.ThreadConfigRepo {
+	if f.threadConfigs == nil {
+		f.threadConfigs = newFakeThreadConfigRepo(f.channelRepo)
+	}
+	return f.threadConfigs
 }
 func (f *fakeStore) Close() error { return nil }
 
@@ -423,6 +432,81 @@ func (f *fakeProgressNoticeRepo) Delete(_ context.Context, platform, channelID, 
 }
 
 var _ store.ProgressNoticeRepo = (*fakeProgressNoticeRepo)(nil)
+
+type fakeThreadConfigRepo struct {
+	configs    map[string]*store.ThreadConfig
+	channels   *fakeChannelRepo
+	getCalls   int
+	writeCalls int
+	getErr     error
+}
+
+func newFakeThreadConfigRepo(channels *fakeChannelRepo) *fakeThreadConfigRepo {
+	return &fakeThreadConfigRepo{configs: make(map[string]*store.ThreadConfig), channels: channels}
+}
+
+func (f *fakeThreadConfigRepo) key(platform, channelID, threadID string) string {
+	return platform + ":" + channelID + ":" + threadID
+}
+
+func (f *fakeThreadConfigRepo) Get(_ context.Context, platform, channelID, threadID string) (*store.ThreadConfig, error) {
+	f.getCalls++
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	return f.configs[f.key(platform, channelID, threadID)], nil
+}
+
+func (f *fakeThreadConfigRepo) threadConfig(platform, channelID, threadID string) *store.ThreadConfig {
+	k := f.key(platform, channelID, threadID)
+	tc := f.configs[k]
+	if tc == nil {
+		tc = &store.ThreadConfig{Platform: platform, ChannelID: channelID, ThreadID: threadID}
+		f.configs[k] = tc
+	}
+	return tc
+}
+
+func (f *fakeThreadConfigRepo) UpsertWorkdir(_ context.Context, platform, channelID, threadID, workdir string) error {
+	f.writeCalls++
+	f.threadConfig(platform, channelID, threadID).Workdir = workdir
+	return nil
+}
+
+func (f *fakeThreadConfigRepo) UpsertModel(_ context.Context, platform, channelID, threadID, model string) error {
+	f.writeCalls++
+	f.threadConfig(platform, channelID, threadID).Model = model
+	return nil
+}
+
+func (f *fakeThreadConfigRepo) UpsertListenMode(_ context.Context, platform, channelID, threadID, mode string) error {
+	f.writeCalls++
+	f.threadConfig(platform, channelID, threadID).ListenMode = mode
+	return nil
+}
+
+func (f *fakeThreadConfigRepo) SnapshotFromChannel(_ context.Context, platform, channelID, threadID, defaultWorkdir string) error {
+	f.writeCalls++
+	if f.configs[f.key(platform, channelID, threadID)] != nil {
+		return nil
+	}
+	tc := f.threadConfig(platform, channelID, threadID)
+	var ch *store.Channel
+	if f.channels != nil {
+		ch = f.channels.channels[f.channels.key(platform, channelID)]
+	}
+	if ch != nil {
+		tc.Workdir = ch.Workdir
+		tc.Model = ch.Model
+		tc.ListenMode = ch.ListenMode
+	} else {
+		tc.Workdir = defaultWorkdir
+		tc.ListenMode = "mention"
+	}
+	return nil
+}
+
+var _ store.ThreadConfigRepo = (*fakeThreadConfigRepo)(nil)
 
 type fakeScheduleRepo struct{}
 
@@ -816,7 +900,7 @@ func TestRouteLegacyColonAlias(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
-	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Personal model set: openai/gpt-4o") {
+	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Channel model set: openai/gpt-4o") {
 		t.Fatalf("expected model set via legacy colon alias, got %v", reply.sends)
 	}
 }
@@ -1831,9 +1915,9 @@ func TestShortFormCommandsAndLegacyAliases(t *testing.T) {
 		{input: "/deny user2", wantSend: "Denied user: user2"},
 		{input: "/admin user2", wantSend: "Granted admin: user2"},
 		{input: "/channel all", wantSend: "Listen mode set: all"},
-		{input: "/model openai/gpt-4o", wantSend: "Personal model set: openai/gpt-4o"},
-		{input: "/occa:model openai/gpt-4o", wantSend: "Personal model set: openai/gpt-4o"},
-		{input: "/occa_model openai/gpt-4o", wantSend: "Personal model set: openai/gpt-4o"},
+		{input: "/model openai/gpt-4o", wantSend: "Channel model set: openai/gpt-4o"},
+		{input: "/occa:model openai/gpt-4o", wantSend: "Channel model set: openai/gpt-4o"},
+		{input: "/occa_model openai/gpt-4o", wantSend: "Channel model set: openai/gpt-4o"},
 		{input: "/schedules", wantSend: "Scheduler not available"},
 		{input: "/unknown_cmd arg", wantPassthru: "/unknown_cmd arg"},
 	}

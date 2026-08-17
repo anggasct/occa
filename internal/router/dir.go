@@ -19,16 +19,11 @@ func (r *Router) handleDir(ctx context.Context, msg channel.IncomingMessage, arg
 	return r.setDir(ctx, msg, path)
 }
 
-func (r *Router) effectiveWorkdir(ctx context.Context, platform, channelID string) string {
-	ch, err := r.store.ChannelRepo().Get(ctx, platform, channelID)
-	if err == nil && ch != nil && ch.Workdir != "" {
-		return ch.Workdir
-	}
-	return r.defaultWorkdir
-}
-
 func (r *Router) viewDir(ctx context.Context, msg channel.IncomingMessage) (string, error) {
-	wd := r.effectiveWorkdir(ctx, msg.Platform, msg.ChannelID)
+	wd, err := r.effectiveWorkdir(ctx, msg)
+	if err != nil {
+		return "", err
+	}
 	status := "(exists)"
 	if fi, err := os.Stat(wd); err != nil || !fi.IsDir() {
 		status = "(missing on disk)"
@@ -47,8 +42,14 @@ func (r *Router) setDir(ctx context.Context, msg channel.IncomingMessage, path s
 		return fmt.Sprintf("⚠️ Not a directory: %s", dir), nil
 	}
 
-	if err := r.store.ChannelRepo().UpsertWorkdir(ctx, msg.Platform, msg.ChannelID, dir); err != nil {
-		return "", fmt.Errorf("dir: %w", err)
+	if isOwnedThreadMessage(msg) {
+		if err := r.store.ThreadConfigRepo().UpsertWorkdir(ctx, msg.Platform, threadScopeChannelID(msg), msg.ThreadID, dir); err != nil {
+			return "", fmt.Errorf("dir: %w", err)
+		}
+	} else {
+		if err := r.store.ChannelRepo().UpsertWorkdir(ctx, msg.Platform, msg.ChannelID, dir); err != nil {
+			return "", fmt.Errorf("dir: %w", err)
+		}
 	}
 
 	threadID, userID := conversationKey(msg)

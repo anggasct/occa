@@ -4,30 +4,68 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
 
 const (
-	schemaVersion    = 6
+	schemaVersion    = 7
 	busyTimeoutMilli = 5000
 )
 
-var migrations = []func(tx *sql.Tx) error{
+var migrations = []func(s *SQLiteStore, tx *sql.Tx) error{
 	createInitialSchema,
 	addConversationKeys,
 	addSessionAgentPID,
 	addSessionTitle,
 	addProgressNotices,
 	addSessionModel,
+	addThreadConfig,
 }
 
-func addSessionModel(tx *sql.Tx) error {
+func addSessionModel(s *SQLiteStore, tx *sql.Tx) error {
 	_, err := tx.Exec(`ALTER TABLE session ADD COLUMN model TEXT NOT NULL DEFAULT '';`)
 	return err
 }
 
-func addProgressNotices(tx *sql.Tx) error {
+func addThreadConfig(s *SQLiteStore, tx *sql.Tx) error {
+	ddl := `
+CREATE TABLE IF NOT EXISTS thread_config (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	platform TEXT NOT NULL,
+	channel_id TEXT NOT NULL,
+	thread_id TEXT NOT NULL,
+	workdir TEXT NOT NULL DEFAULT '',
+	model TEXT NOT NULL DEFAULT '',
+	listen_mode TEXT NOT NULL DEFAULT '',
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_thread_config_key ON thread_config (platform, channel_id, thread_id);
+`
+	if _, err := tx.Exec(ddl); err != nil {
+		return fmt.Errorf("store: migrate thread config: %w", err)
+	}
+
+	now := time.Now().Unix()
+	_, err := tx.Exec(`
+INSERT OR IGNORE INTO thread_config (platform, channel_id, thread_id, workdir, model, listen_mode, created_at, updated_at)
+SELECT s.platform, s.channel_id, s.thread_id,
+	COALESCE((SELECT ch.workdir FROM channel ch WHERE ch.platform = s.platform AND ch.channel_id = s.channel_id), ?),
+	COALESCE((SELECT ch.model FROM channel ch WHERE ch.platform = s.platform AND ch.channel_id = s.channel_id), ''),
+	COALESCE((SELECT ch.listen_mode FROM channel ch WHERE ch.platform = s.platform AND ch.channel_id = s.channel_id), 'mention'),
+	?, ?
+FROM (SELECT DISTINCT platform, channel_id, thread_id FROM session WHERE thread_id != '' AND channel_id != thread_id) s`,
+		s.defaultWorkdir, now, now,
+	)
+	if err != nil {
+		return fmt.Errorf("store: backfill thread config: %w", err)
+	}
+	return nil
+}
+
+func addProgressNotices(s *SQLiteStore, tx *sql.Tx) error {
 	ddl := `
 CREATE TABLE IF NOT EXISTS progress_notice (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,17 +83,17 @@ CREATE INDEX IF NOT EXISTS idx_progress_notice_lookup ON progress_notice (platfo
 	return nil
 }
 
-func addSessionTitle(tx *sql.Tx) error {
+func addSessionTitle(s *SQLiteStore, tx *sql.Tx) error {
 	_, err := tx.Exec(`ALTER TABLE session ADD COLUMN title TEXT NOT NULL DEFAULT '';`)
 	return err
 }
 
-func addSessionAgentPID(tx *sql.Tx) error {
+func addSessionAgentPID(s *SQLiteStore, tx *sql.Tx) error {
 	_, err := tx.Exec(`ALTER TABLE session ADD COLUMN agent_pid INTEGER NOT NULL DEFAULT 0;`)
 	return err
 }
 
-func addConversationKeys(tx *sql.Tx) error {
+func addConversationKeys(s *SQLiteStore, tx *sql.Tx) error {
 	ddl := `
 ALTER TABLE session ADD COLUMN thread_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE session ADD COLUMN user_id TEXT NOT NULL DEFAULT '';
@@ -74,7 +112,7 @@ ALTER TABLE channel ADD COLUMN auto_thread INTEGER NOT NULL DEFAULT 1;
 	return nil
 }
 
-func createInitialSchema(tx *sql.Tx) error {
+func createInitialSchema(s *SQLiteStore, tx *sql.Tx) error {
 	ddl := `
 CREATE TABLE IF NOT EXISTS session (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -143,9 +181,11 @@ type SQLiteStore struct {
 	overrides       *sqliteOverrideRepo
 	schedules       *sqliteScheduleRepo
 	progressNotices *sqliteProgressNoticeRepo
+	threadConfigs   *sqliteThreadConfigRepo
+	defaultWorkdir  string
 }
 
-func Open(path string) (*SQLiteStore, error) {
+func OpenWithDefaultWorkdir(path, defaultWorkdir string) (*SQLiteStore, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("store: open: %w", err)
@@ -167,7 +207,7 @@ func Open(path string) (*SQLiteStore, error) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 
-	s := &SQLiteStore{db: db}
+	s := &SQLiteStore{db: db, defaultWorkdir: defaultWorkdir}
 	if err := s.migrate(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -184,6 +224,7 @@ func Open(path string) (*SQLiteStore, error) {
 	s.overrides = &sqliteOverrideRepo{db: db}
 	s.schedules = &sqliteScheduleRepo{db: db}
 	s.progressNotices = &sqliteProgressNoticeRepo{db: db}
+	s.threadConfigs = &sqliteThreadConfigRepo{db: db}
 	return s, nil
 }
 
@@ -197,7 +238,7 @@ func (s *SQLiteStore) migrate() error {
 		if err != nil {
 			return fmt.Errorf("store: begin migration %d: %w", i+1, err)
 		}
-		if err := migrations[i](tx); err != nil {
+		if err := migrations[i](s, tx); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("store: migration %d: %w", i+1, err)
 		}
@@ -217,6 +258,7 @@ func (s *SQLiteStore) ChannelRepo() ChannelRepo               { return s.channel
 func (s *SQLiteStore) OverrideRepo() OverrideRepo             { return s.overrides }
 func (s *SQLiteStore) ScheduleRepo() ScheduleRepo             { return s.schedules }
 func (s *SQLiteStore) ProgressNoticeRepo() ProgressNoticeRepo { return s.progressNotices }
+func (s *SQLiteStore) ThreadConfigRepo() ThreadConfigRepo     { return s.threadConfigs }
 
 func (s *SQLiteStore) Close() error {
 	return s.db.Close()

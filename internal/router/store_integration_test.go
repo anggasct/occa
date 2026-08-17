@@ -14,7 +14,7 @@ import (
 // shape every /occa:allow and admin bootstrap produces.
 func newSQLiteBackedRouter(t *testing.T, adminID string) (*Router, *fakeRelayClient, *fakeReplyCtx, store.Store) {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "router.db"))
+	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "router.db"), "")
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
