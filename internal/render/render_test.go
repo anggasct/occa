@@ -576,3 +576,78 @@ func max(a, b int) int {
 	}
 	return b
 }
+
+func TestClamp(t *testing.T) {
+	long := strings.Repeat("a", 5000)
+
+	cases := []struct {
+		name  string
+		s     string
+		limit int
+	}{
+		{"short unchanged", "hello", 2000},
+		{"at limit unchanged", strings.Repeat("a", 2000), 2000},
+		{"long ascii", long, 2000},
+		{"long multibyte", strings.Repeat("é", 3000), 2000},
+		{"astral no rune split", strings.Repeat("😀", 1500), 2000},
+		{"tagged balanced", "<b>" + long + "</b>", 2000},
+		{"tag open hard cut", "<blockquote>" + long, 2000},
+		{"link tag open", `<a href="https://example.com/very/long/destination">` + long + `</a>`, 2000},
+		{"tiny limit", "abcdef", 1},
+		{"telegram limit", long, 4096},
+		{"exact telegram limit", strings.Repeat("é", 4096), 4096},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Clamp(tc.s, tc.limit)
+			if !utf8.ValidString(got) {
+				t.Fatalf("Clamp produced invalid UTF-8: %q", got)
+			}
+			if measure(got) > tc.limit {
+				t.Fatalf("Clamp(%d) produced %d units: %q", tc.limit, measure(got), got)
+			}
+			if !htmlBalanced(got) {
+				t.Fatalf("Clamp produced tag-unbalanced text: %q", got)
+			}
+			if measure(tc.s) <= tc.limit && got != tc.s {
+				t.Fatalf("Clamp changed an in-limit input: got %q", got)
+			}
+		})
+	}
+
+	if got := Clamp("hello", 10); got != "hello" {
+		t.Fatalf("Clamp changed short input: %q", got)
+	}
+
+	// Non-positive limits are ignored, matching Split's convention: the
+	// input passes through unchanged.
+	if got := Clamp("abcdef", 0); got != "abcdef" {
+		t.Fatalf("Clamp(0) changed input: %q", got)
+	}
+
+	got := Clamp("<b>hello world</b> this is a long tail "+strings.Repeat("x", 300), 64)
+	if got == "<b>hello world</b> this is a long tail "+strings.Repeat("x", 300) {
+		t.Fatalf("Clamp did not truncate long input: %q", got)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Fatalf("Clamp did not append the marker: %q", got)
+	}
+	if measure(got) > 64 {
+		t.Fatalf("Clamp exceeded limit: %d units", measure(got))
+	}
+
+	// Long tag span with no balanced break inside the budget: the hard cut
+	// must close the open tag so Telegram parse mode accepts the message.
+	hard := Clamp("<b>"+strings.Repeat("x", 300), 64)
+	if !strings.HasSuffix(hard, "</b>…") {
+		t.Fatalf("Clamp hard cut did not close the open tag: %q", hard)
+	}
+
+	for i := 1; i < 2000; i += 7 {
+		got := Clamp(long, i)
+		if measure(got) > i {
+			t.Fatalf("Clamp(%d) exceeded: %d units", i, measure(got))
+		}
+	}
+}

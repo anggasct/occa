@@ -603,7 +603,7 @@ func (rc *replyContext) SendWithButtons(text string, buttons []channel.Button) (
 	}
 
 	msg, err := rc.session.ChannelMessageSendComplex(rc.channelID, &discordgo.MessageSend{
-		Content:         text,
+		Content:         render.Clamp(text, render.DiscordLimit),
 		Components:      componentRows(buttons),
 		AllowedMentions: &discordgo.MessageAllowedMentions{},
 	})
@@ -624,7 +624,7 @@ func (rc *replyContext) Edit(ref channel.MessageRef, text string) error {
 }
 
 func (rc *replyContext) EditWithButtons(ref channel.MessageRef, text string, buttons []channel.Button) error {
-	content := text
+	content := render.Clamp(text, render.DiscordLimit)
 	components := componentRows(buttons)
 	_, err := rc.session.ChannelMessageEditComplex(&discordgo.MessageEdit{
 		ID:              ref.ID(),

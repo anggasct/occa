@@ -122,6 +122,53 @@ func Split(s string, limit int) []string {
 	return chunks
 }
 
+// Clamp returns s unchanged when it measures at most limit; otherwise it
+// returns a single-message-safe prefix of s that measures at most limit:
+// rune-safe, HTML-tag-balanced (open tags closed at a hard cut), with "…"
+// appended so the truncation is visible. It is the button-message
+// counterpart to Split: a message carrying buttons cannot be split across
+// multiple messages, so its content must instead be clamped to the platform
+// limit (Discord 2000, Telegram 4096).
+func Clamp(s string, limit int) string {
+	if limit <= 0 || measure(s) <= limit {
+		return s
+	}
+
+	const marker = "…"
+
+	end := maxPrefix(s, limit)
+	if idx, ok := danglingTagStart(s[:end]); ok && idx > 0 {
+		end = idx
+	}
+
+	// Prefer the largest tag-balanced boundary that still leaves room for
+	// the marker; otherwise hard-cut and close any tags left open.
+	cut := -1
+	for _, idx := range candidateBreaks(s[:end]) {
+		if measure(s[:idx])+measure(marker) <= limit && htmlBalanced(s[:idx]) {
+			cut = idx
+		}
+	}
+	if cut >= 0 {
+		return s[:cut] + marker
+	}
+
+	closes := closeTags(openTagStack(s[:end]))
+	budget := limit - measure(closes) - measure(marker)
+	if budget <= 0 {
+		closes = ""
+		budget = limit - measure(marker)
+	}
+	var prefix string
+	if budget > 0 {
+		prefix = s[:maxPrefix(s, budget)]
+		if idx, ok := danglingTagStart(prefix); ok && idx > 0 {
+			prefix = prefix[:idx]
+		}
+	}
+	return prefix + closes + marker
+}
+
 func findSafeBreak(s string, limit int) (int, bool) {
 	end := maxPrefix(s, limit)
 	// A cut can land mid-formation of a tag itself (e.g. after "<a" but
