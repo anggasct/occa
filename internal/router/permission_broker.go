@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -247,7 +248,14 @@ func (b *permissionBroker) handle(ctx context.Context, msg channel.IncomingMessa
 		succeededCount++
 	}
 
-	if firstErr != nil {
+	// A 404 after at least one successful reply in the same batch means the
+	// agent already resolved the whole permission group on the first reply —
+	// the remaining IDs are gone server-side and retrying them can never
+	// succeed. Treat that as a resolved batch and render the terminal label;
+	// retry only when nothing in the batch succeeded (agent gone / transient).
+	batchResolved := firstErr == nil ||
+		(succeededCount > 0 && errors.Is(firstErr, relay.ErrNotFound))
+	if !batchResolved {
 		if b.retry(record, attempt, requestIDs[succeededCount:]) {
 			slog.Warn("permission callback retryable failure", "platform", msg.Platform, "channel_id", msg.ChannelID, "error", firstErr)
 			if updateErr := reply.EditWithButtons(origin, permissionRetryMessage, buttons); updateErr != nil {
