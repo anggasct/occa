@@ -588,7 +588,10 @@ func (rc *replyContext) Send(text string) (channel.MessageRef, error) {
 
 func (rc *replyContext) SendWithButtons(text string, buttons []channel.Button) (channel.MessageRef, error) {
 	if rc.interaction != nil {
-		content := text
+		// A deferred interaction response is still subject to Discord's
+		// 2000-unit content limit, so clamp even though we carry buttons —
+		// same as the channel-message path below.
+		content := render.Clamp(text, render.DiscordLimit)
 		components := componentRows(buttons)
 		msg, err := rc.session.InteractionResponseEdit(rc.interaction, &discordgo.WebhookEdit{
 			Content:         &content,

@@ -1,6 +1,7 @@
 package discord
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -539,6 +540,42 @@ func TestSendWithButtonsResolvesInteraction(t *testing.T) {
 	}
 	if len(bodies) != 1 || !strings.Contains(bodies[0], `"content":"resolve me"`) || !strings.Contains(bodies[0], `"custom_id":"allow"`) {
 		t.Fatalf("edit body must carry content and buttons, got %s", bodies)
+	}
+}
+
+// TestSendWithButtonsClampsInteractionContent covers review finding 1: the
+// deferred-interaction path must clamp the content to Discord's limit just
+// like the channel-message path, so a long permission/question prompt cannot
+// exceed 2000 units and fail with BASE_TYPE_MAX_LENGTH.
+func TestSendWithButtonsClampsInteractionContent(t *testing.T) {
+	var body string
+	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
+		b, _ := io.ReadAll(r.Body)
+		body = string(b)
+		return []byte(`{"id":"edited-1"}`), http.StatusOK
+	})
+
+	rc := &replyContext{
+		session:     session,
+		channelID:   "ch-1",
+		interaction: &discordgo.Interaction{AppID: "app-1", Token: "tok-1"},
+	}
+	long := strings.Repeat("x", render.DiscordLimit+500)
+	if _, err := rc.SendWithButtons(long, []channel.Button{{Label: "Allow", Value: "allow"}}); err != nil {
+		t.Fatalf("SendWithButtons: %v", err)
+	}
+
+	var edit struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(body), &edit); err != nil {
+		t.Fatalf("decode edit body %q: %v", body, err)
+	}
+	if len([]rune(edit.Content)) > render.DiscordLimit {
+		t.Fatalf("edited content is %d runes, over DiscordLimit %d", len([]rune(edit.Content)), render.DiscordLimit)
+	}
+	if !strings.HasSuffix(edit.Content, "…") {
+		t.Fatalf("edited content must end with the clamp marker, got %q", edit.Content)
 	}
 }
 

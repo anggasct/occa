@@ -142,7 +142,10 @@ func Clamp(s string, limit int) string {
 	}
 
 	// Prefer the largest tag-balanced boundary that still leaves room for
-	// the marker; otherwise hard-cut and close any tags left open.
+	// the marker; otherwise hard-cut and close any tags left open. The hard
+	// cut never emits a partial or un-closed opening tag: if an open span
+	// cannot be closed (with the marker) within the limit, its content is
+	// dropped back toward plain text.
 	cut := -1
 	for _, idx := range candidateBreaks(s[:end]) {
 		if measure(s[:idx])+measure(marker) <= limit && htmlBalanced(s[:idx]) {
@@ -153,20 +156,50 @@ func Clamp(s string, limit int) string {
 		return s[:cut] + marker
 	}
 
-	closes := closeTags(openTagStack(s[:end]))
-	budget := limit - measure(closes) - measure(marker)
-	if budget <= 0 {
-		closes = ""
-		budget = limit - measure(marker)
-	}
-	var prefix string
-	if budget > 0 {
-		prefix = s[:maxPrefix(s, budget)]
-		if idx, ok := danglingTagStart(prefix); ok && idx > 0 {
-			prefix = prefix[:idx]
+	return clampHardCut(s, end, limit, marker)
+}
+
+// clampHardCut builds the longest rune-safe result it can from a prefix of s
+// (plus closing tags and the … marker) that measures at most limit and is
+// tag-balanced. It walks the candidate end point backward, closing any open
+// spans when they fit and omitting them when they do not — so a tag too big
+// to fit with its close and the marker is dropped rather than left dangling
+// (e.g. Clamp("<b>xstring", 2) == "…" instead of "<…"). The marker alone is
+// the guaranteed floor, so the result is always balanced and within limit.
+func clampHardCut(s string, end, limit int, marker string) string {
+	best := ""
+	for e := end; e >= 0; e = prevRuneBoundary(s, e) {
+		cand := s[:e] + closeTags(openTagStack(s[:e])) + marker
+		if measure(cand) > limit || !htmlBalanced(cand) {
+			continue
+		}
+		if measure(cand) > measure(best) {
+			best = cand
+		}
+		if e == 0 {
+			break
 		}
 	}
-	return prefix + closes + marker
+	if best == "" {
+		return marker
+	}
+	return best
+}
+
+// prevRuneBoundary returns the byte index of the rune boundary that precedes
+// i. i must itself be a rune boundary (maxPrefix guarantees this); the
+// returned index is the start of the previous rune (0 when i is 0).
+func prevRuneBoundary(s string, i int) int {
+	if i <= 0 {
+		return 0
+	}
+	for i > 0 {
+		i--
+		if s[i]&0xC0 != 0x80 { // not a UTF-8 continuation byte
+			break
+		}
+	}
+	return i
 }
 
 func findSafeBreak(s string, limit int) (int, bool) {

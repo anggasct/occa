@@ -651,3 +651,68 @@ func TestClamp(t *testing.T) {
 		}
 	}
 }
+
+// TestClampBalancedAtEveryLimit covers review finding 2: for every positive
+// limit Clamp must return rune-safe, tag-balanced output that stays within
+// the limit — including inputs whose opening tag alone cannot fit with its
+// close and the marker (which previously produced "<…" and "<b>…").
+func TestClampBalancedAtEveryLimit(t *testing.T) {
+	inputs := []struct {
+		name string
+		s    string
+		max  int
+	}{
+		{"tiny bold", "<b>xstring", 10},
+		{"oversized link", `<a href="https://example.com/very/long/destination/path">` + strings.Repeat("a", 400) + "</a>", 2000},
+		{"link plus tail", `<a href="https://example.com">click here</a> ` + strings.Repeat("b", 400), 2000},
+		{"nested tags", "<b><code>" + strings.Repeat("c", 300) + "</code></b>", 2000},
+		{"open bold tail", "<blockquote>" + strings.Repeat("d", 200), 2000},
+	}
+
+	for _, in := range inputs {
+		in := in
+		t.Run(in.name, func(t *testing.T) {
+			for limit := 1; limit <= in.max; limit++ {
+				got := Clamp(in.s, limit)
+				if !utf8.ValidString(got) {
+					t.Fatalf("limit %d: invalid UTF-8: %q", limit, got)
+				}
+				if measure(got) > limit {
+					t.Fatalf("limit %d: produced %d units %q", limit, measure(got), got)
+				}
+				// Clamp is documented to pass input through unchanged when it
+				// already fits; balancing is only its job on truncation.
+				if measure(in.s) <= limit {
+					if got != in.s {
+						t.Fatalf("limit %d: changed an in-limit input to %q", limit, got)
+					}
+					continue
+				}
+				if !htmlBalanced(got) {
+					t.Fatalf("limit %d: unbalanced %q", limit, got)
+				}
+				if idx, ok := danglingTagStart(got); ok && idx == 0 {
+					t.Fatalf("limit %d: dangling tag at 0: %q", limit, got)
+				}
+			}
+		})
+	}
+
+	// The two review examples must now be balanced and within their limits,
+	// with the un-closeable opening tag omitted rather than left dangling.
+	for _, tc := range []struct {
+		s     string
+		limit int
+	}{
+		{"<b>xstring", 2},
+		{"<b>xstring", 4},
+	} {
+		got := Clamp(tc.s, tc.limit)
+		if measure(got) > tc.limit || !htmlBalanced(got) {
+			t.Fatalf("Clamp(%q,%d) = %q: unbalanced or over limit", tc.s, tc.limit, got)
+		}
+		if _, ok := danglingTagStart(got); ok {
+			t.Fatalf("Clamp(%q,%d) = %q: still has a dangling tag", tc.s, tc.limit, got)
+		}
+	}
+}
