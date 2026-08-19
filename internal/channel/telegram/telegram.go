@@ -437,7 +437,7 @@ func (rc *replyContext) Send(text string) (channel.MessageRef, error) {
 
 func (rc *replyContext) SendWithButtons(text string, buttons []channel.Button) (channel.MessageRef, error) {
 	params := rc.baseParams()
-	params["text"] = text
+	params["text"] = render.Clamp(text, render.TelegramLimit)
 	params["reply_markup"] = inlineKeyboardJSON(buttons)
 
 	sent, err := rc.request("sendMessage", params)
@@ -471,7 +471,7 @@ func (rc *replyContext) EditWithButtons(ref channel.MessageRef, text string, but
 	params := tgbotapi.Params{
 		"chat_id":                  strconv.FormatInt(rc.chatID, 10),
 		"message_id":               strconv.Itoa(msgID),
-		"text":                     text,
+		"text":                     render.Clamp(text, render.TelegramLimit),
 		"parse_mode":               "HTML",
 		"disable_web_page_preview": "true",
 		"reply_markup":             inlineKeyboardJSON(buttons),
