@@ -797,3 +797,154 @@ func TestPermissionBrokerBatchRetryOnlyUnresolvedIDs(t *testing.T) {
 		t.Fatalf("resolved view = %+v", resolvedView)
 	}
 }
+
+func newPermissionBatchPrompt(t *testing.T, client relay.Client, ids ...string) (*permissionBroker, *permissionReply, string, channel.MessageRef) {
+	t.Helper()
+	broker := newPermissionBroker()
+	owner := &permissionOwner{}
+	reply := &permissionReply{}
+	handler := &permissionPromptHandler{
+		broker:    broker,
+		owner:     owner,
+		client:    client,
+		platform:  "telegram",
+		channelID: "chat1",
+		sessionID: "session-1",
+		reply:     reply,
+	}
+	for _, id := range ids {
+		if err := handler.Prompt(context.Background(), relay.PermissionRequest{
+			ID:         id,
+			SessionID:  "session-1",
+			Permission: "external_directory",
+			Tool:       "bash",
+			Patterns:   []string{"/path/*"},
+		}); err != nil {
+			t.Fatalf("Prompt %s: %v", id, err)
+		}
+	}
+
+	waitForSends(reply)
+
+	if len(reply.sends) != 1 || len(reply.sends[0].buttons) != 3 {
+		t.Fatalf("prompt view = %+v", reply.sends)
+	}
+	token, _, ok := parsePermissionCallback(reply.sends[0].buttons[0].Value)
+	if !ok {
+		t.Fatalf("invalid callback value: %q", reply.sends[0].buttons[0].Value)
+	}
+	return broker, reply, token, reply.sends[0].ref
+}
+
+func TestPermissionBrokerBatchSecondReplyNotFoundResolves(t *testing.T) {
+	client := &permissionClient{errors: []error{nil, relay.ErrNotFound}}
+	broker, reply, token, origin := newPermissionBatchPrompt(t, client, "request-1", "request-2")
+
+	// One tap: request-1 succeeds, request-2 404s because opencode already
+	// resolved the whole group on the first reply. The batch must resolve
+	// with the terminal label instead of falling into the retry view.
+	if err := broker.handle(context.Background(), permissionCallback(token, origin, reply)); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+
+	calls := client.callSnapshot()
+	if len(calls) != 2 {
+		t.Fatalf("client calls = %d, want 2: %+v", len(calls), calls)
+	}
+	if calls[0].requestID != "request-1" || calls[1].requestID != "request-2" {
+		t.Fatalf("client calls = %+v, want request-1 then request-2", calls)
+	}
+
+	view := reply.lastEdit()
+	if view.text != "✅ Allowed once" || len(view.buttons) != 0 {
+		t.Fatalf("terminal view = %+v", view)
+	}
+
+	reply.mu.Lock()
+	var renderedRetry bool
+	retryEditIndex := -1
+	for i, edit := range reply.edits {
+		if edit.text == permissionRetryMessage {
+			renderedRetry = true
+			retryEditIndex = i
+		}
+	}
+	reply.mu.Unlock()
+	if renderedRetry {
+		t.Fatalf("retry message rendered after partial 404 (edit %d): %+v", retryEditIndex, reply.edits)
+	}
+
+	broker.mu.Lock()
+	record := broker.records[token]
+	broker.mu.Unlock()
+	if record == nil {
+		t.Fatal("record missing after resolve")
+	}
+	if record.state != permissionResolved {
+		t.Fatalf("record state = %v, want resolved", stateName(record.state))
+	}
+}
+
+func TestPermissionBrokerBatchFirstReplyNotFoundRetries(t *testing.T) {
+	client := &permissionClient{errors: []error{relay.ErrNotFound}}
+	broker, reply, token, origin := newPermissionBatchPrompt(t, client, "request-1", "request-2")
+
+	// Zero successes: the first reply 404s, so retry behavior is unchanged —
+	// retry view with buttons retained and all IDs kept for re-tap.
+	if err := broker.handle(context.Background(), permissionCallback(token, origin, reply)); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+
+	calls := client.callSnapshot()
+	if len(calls) != 1 {
+		t.Fatalf("client calls = %d, want 1 (first 404 breaks the loop)", len(calls))
+	}
+
+	view := reply.lastEdit()
+	if view.text != permissionRetryMessage || len(view.buttons) != 3 {
+		t.Fatalf("retry view = %+v, want retry message with buttons retained", view)
+	}
+
+	broker.mu.Lock()
+	record := broker.records[token]
+	broker.mu.Unlock()
+	if record == nil {
+		t.Fatal("record missing after retry")
+	}
+	if record.state != permissionPending {
+		t.Fatalf("record state = %v, want pending", stateName(record.state))
+	}
+	if len(record.requestIDs) != 2 || record.requestIDs[0] != "request-1" || record.requestIDs[1] != "request-2" {
+		t.Fatalf("remaining request IDs = %v, want both kept for re-tap", record.requestIDs)
+	}
+}
+
+func TestPermissionBrokerBatchAllRepliesSucceedResolves(t *testing.T) {
+	client := &permissionClient{}
+	broker, reply, token, origin := newPermissionBatchPrompt(t, client, "request-1", "request-2")
+
+	// Full success batch keeps the existing behavior: terminal resolve.
+	if err := broker.handle(context.Background(), permissionCallback(token, origin, reply)); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+
+	calls := client.callSnapshot()
+	if len(calls) != 2 {
+		t.Fatalf("client calls = %d, want 2", len(calls))
+	}
+
+	view := reply.lastEdit()
+	if view.text != "✅ Allowed once" || len(view.buttons) != 0 {
+		t.Fatalf("terminal view = %+v", view)
+	}
+
+	broker.mu.Lock()
+	record := broker.records[token]
+	broker.mu.Unlock()
+	if record == nil {
+		t.Fatal("record missing after resolve")
+	}
+	if record.state != permissionResolved {
+		t.Fatalf("record state = %v, want resolved", stateName(record.state))
+	}
+}
