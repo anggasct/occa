@@ -1120,23 +1120,14 @@ func TestSessionPickerTitles(t *testing.T) {
 }
 
 func TestStatusContextMeter(t *testing.T) {
-	t.Run("with session info and limit", func(t *testing.T) {
+	t.Run("renders model + cumulative input with cache read", func(t *testing.T) {
 		r, client, reply := newTestRouter()
 		client.sessionInfo = &relay.SessionInfo{
 			Cost:  0.05,
-			Model: relay.ModelRef{ProviderID: "openai", ID: "gpt-4o"},
+			Model: relay.ModelRef{ProviderID: "openai", ID: "gpt-4o", Variant: "max"},
 			Tokens: relay.SessionTokens{
-				Input: 12000,
-			},
-		}
-		client.providers = relay.Providers{
-			All: []relay.Provider{
-				{
-					ID: "openai",
-					Models: map[string]json.RawMessage{
-						"gpt-4o": json.RawMessage(`{"limit":{"context":128000}}`),
-					},
-				},
+				Input:     12000,
+				CacheRead: 19400000,
 			},
 		}
 
@@ -1148,12 +1139,47 @@ func TestStatusContextMeter(t *testing.T) {
 			t.Fatal("expected status response")
 		}
 		out := reply.sends[0]
-		if !strings.Contains(out, "Context: 12.0k / 128.0k tokens (9%) · cost: $0.05") {
+		if !strings.Contains(out, "Model: openai/gpt-4o@max") {
+			t.Fatalf("expected model line with variant, got: %q", out)
+		}
+		if !strings.Contains(out, "Input: 12.0k tokens (cumulative) · cache read: 19.4M · cost: $0.05") {
 			t.Fatalf("unexpected status output: %q", out)
+		}
+		if strings.Contains(out, "Context:") {
+			t.Fatalf("expected no misleading Context line, got: %q", out)
+		}
+		if strings.Contains(out, "tokens (9%)") {
+			t.Fatalf("expected no percent usage comparison, got: %q", out)
 		}
 	})
 
-	t.Run("with unknown limit", func(t *testing.T) {
+	t.Run("model line without variant", func(t *testing.T) {
+		r, client, reply := newTestRouter()
+		client.sessionInfo = &relay.SessionInfo{
+			Cost:  0.05,
+			Model: relay.ModelRef{ProviderID: "openai", ID: "gpt-4o"},
+			Tokens: relay.SessionTokens{
+				Input: 12000,
+			},
+		}
+
+		err := r.Route(context.Background(), msg("/status", reply))
+		if err != nil {
+			t.Fatalf("Route: %v", err)
+		}
+		if len(reply.sends) == 0 {
+			t.Fatal("expected status response")
+		}
+		out := reply.sends[0]
+		if !strings.Contains(out, "Model: openai/gpt-4o") {
+			t.Fatalf("expected model line without variant, got: %q", out)
+		}
+		if strings.Contains(out, "Model: openai/gpt-4o@") {
+			t.Fatalf("expected no @variant when empty, got: %q", out)
+		}
+	})
+
+	t.Run("model line omitted and no cache read when unavailable", func(t *testing.T) {
 		r, client, reply := newTestRouter()
 		client.sessionInfo = &relay.SessionInfo{
 			Cost: 0.05,
@@ -1170,8 +1196,14 @@ func TestStatusContextMeter(t *testing.T) {
 			t.Fatal("expected status response")
 		}
 		out := reply.sends[0]
-		if !strings.Contains(out, "Context: 12.0k tokens used · cost: $0.05") {
+		if !strings.Contains(out, "Input: 12.0k tokens (cumulative) · cost: $0.05") {
 			t.Fatalf("unexpected status output: %q", out)
+		}
+		if strings.Contains(out, "Model:") {
+			t.Fatalf("expected no model line when none active, got: %q", out)
+		}
+		if strings.Contains(out, "cache read:") {
+			t.Fatalf("expected cache read omitted when unavailable, got: %q", out)
 		}
 	})
 
@@ -1187,11 +1219,11 @@ func TestStatusContextMeter(t *testing.T) {
 			t.Fatal("expected status response")
 		}
 		out := reply.sends[0]
-		if strings.Contains(out, "Context:") {
-			t.Fatalf("expected Context line omitted on error, got: %q", out)
+		if strings.Contains(out, "Input:") || strings.Contains(out, "Model:") {
+			t.Fatalf("expected context and model lines omitted on error, got: %q", out)
 		}
 		if !strings.Contains(out, "Agent connected") {
-			t.Fatalf("expected status to succeed without Context line, got: %q", out)
+			t.Fatalf("expected status to succeed without context lines, got: %q", out)
 		}
 	})
 }
