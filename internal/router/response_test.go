@@ -998,3 +998,87 @@ func TestRouterStatusIncludesQueueLine(t *testing.T) {
 	close(release)
 	waitForAllResponses(t, r)
 }
+
+func TestResponseTimeoutGenericCopy(t *testing.T) {
+	client := newResponseClient(func(ctx context.Context, events chan<- relay.Event) error {
+		events <- relay.Event{Type: "delta", Delta: "partial"}
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	r, _ := newResponseRouter(client)
+	r.streamerNoEventTimeout = 100 * time.Millisecond
+	reply := newResponseReply()
+
+	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "hello", reply)); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	want := "⚠️ Task timed out (no response for 15 minutes). Send a message to resume or check /status."
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if reply.contains(want) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !reply.contains(want) {
+		t.Fatalf("expected generic timeout copy, got: %v", reply.texts())
+	}
+	for _, text := range reply.texts() {
+		if strings.Contains(text, "may still be running") {
+			t.Fatalf("timeout message contains false 'may still be running': %v", reply.texts())
+		}
+	}
+	waitForResponse(t, r)
+}
+
+func TestResponseTimeoutPermissionCopy(t *testing.T) {
+	client := newResponseClient(func(ctx context.Context, events chan<- relay.Event) error {
+		events <- relay.Event{
+			Type: "permission_asked",
+			Permission: &relay.PermissionRequest{
+				ID:         "req1",
+				Permission: "shell",
+				Tool:       "bash",
+			},
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	r, _ := newResponseRouter(client)
+	// Longer than the permission flush window so the pending record exists
+	// before the no-event timeout fires.
+	r.streamerNoEventTimeout = 3000 * time.Millisecond
+	reply := newResponseReply()
+
+	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "hello", reply)); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if reply.contains("Permission requested") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !reply.contains("Permission requested") {
+		t.Fatalf("permission prompt was not registered: %v", reply.texts())
+	}
+
+	want := "⚠️ Task timed out waiting for your permission (no response for 15 minutes). Send a message to resume or check /status."
+	deadline = time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		if reply.contains(want) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !reply.contains(want) {
+		t.Fatalf("expected permission-caused timeout copy, got: %v", reply.texts())
+	}
+	for _, text := range reply.texts() {
+		if strings.Contains(text, "may still be running") {
+			t.Fatalf("timeout message contains false 'may still be running': %v", reply.texts())
+		}
+	}
+	waitForResponse(t, r)
+}

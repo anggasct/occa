@@ -19,6 +19,11 @@ const (
 	typingInterval = 4 * time.Second
 )
 
+const (
+	taskTimeoutMessage           = "⚠️ Task timed out (no response for 15 minutes). Send a message to resume or check /status."
+	taskTimeoutPermissionMessage = "⚠️ Task timed out waiting for your permission (no response for 15 minutes). Send a message to resume or check /status."
+)
+
 var (
 	ErrIncompleteStream = errors.New("response stream ended before completion")
 	ErrStreamFailed     = errors.New("response stream failed")
@@ -43,6 +48,7 @@ type Streamer struct {
 	firstRef                   channel.MessageRef
 	noEventTimeout             time.Duration
 	typingInterval             time.Duration
+	permissionPendingFunc      func() bool
 }
 
 type PermissionPromptHandler interface {
@@ -77,6 +83,19 @@ func (s *Streamer) SetScheduleAttributionHandler(handler func(input map[string]a
 
 func (s *Streamer) SetReactionSetter(setter channel.ReactionSetter) {
 	s.reactionSetter = setter
+}
+
+func (s *Streamer) SetNoEventTimeout(d time.Duration) {
+	if d > 0 {
+		s.noEventTimeout = d
+	}
+}
+
+// SetPermissionPendingFunc wires a live check consulted when the no-event
+// timeout fires, so the notice can say the stall was caused by a still-pending
+// permission approval instead of the generic copy.
+func (s *Streamer) SetPermissionPendingFunc(fn func() bool) {
+	s.permissionPendingFunc = fn
 }
 
 // setReaction drives the reply's status reaction. Failures are logged and
@@ -144,7 +163,11 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 			}
 
 		case <-timeoutTimer.C:
-			s.notice("⚠️ Task timed out (no events for 15 minutes). It may still be running, check /status")
+			msg := taskTimeoutMessage
+			if s.permissionPendingFunc != nil && s.permissionPendingFunc() {
+				msg = taskTimeoutPermissionMessage
+			}
+			s.notice(msg)
 			s.setReaction(channel.ReactionError)
 			return ErrTimeout
 

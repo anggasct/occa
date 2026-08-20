@@ -345,6 +345,20 @@ func (b *permissionBroker) resolve(record *permissionRecord, attempt uint64, ter
 	return true
 }
 
+// HasPendingFor reports whether owner still has an unresolved permission
+// registered in the broker; runResponse uses it to pick the permission-caused
+// timeout copy when a response ends while an approval is still waiting.
+func (b *permissionBroker) HasPendingFor(owner *permissionOwner) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, record := range b.records {
+		if record.owner == owner && (record.state == permissionPending || record.state == permissionHandling) {
+			return true
+		}
+	}
+	return false
+}
+
 func (b *permissionBroker) cleanupLocked(now time.Time) {
 	for token, record := range b.records {
 		if (record.state == permissionResolved || record.state == permissionExpired) && !record.expiresAt.After(now) {

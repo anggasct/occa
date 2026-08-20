@@ -66,19 +66,20 @@ type InstanceProvider interface {
 }
 
 type Router struct {
-	commands       map[string]Command
-	instances      InstanceProvider
-	store          store.Store
-	defaultWorkdir string
-	adminID        string
-	startedAt      time.Time
-	sched          ScheduleStore
-	attrib         *attribution.Store
-	responses      *responseCoordinator
-	permissions    *permissionBroker
-	questions      *questionBroker
-	modelBrowser   *modelBrowserBroker
-	renderer       render.Renderer
+	commands               map[string]Command
+	instances              InstanceProvider
+	store                  store.Store
+	defaultWorkdir         string
+	adminID                string
+	startedAt              time.Time
+	sched                  ScheduleStore
+	attrib                 *attribution.Store
+	responses              *responseCoordinator
+	permissions            *permissionBroker
+	questions              *questionBroker
+	modelBrowser           *modelBrowserBroker
+	renderer               render.Renderer
+	streamerNoEventTimeout time.Duration
 }
 
 type ScheduleStore interface {
