@@ -951,7 +951,7 @@ func TestPermissionBrokerBatchAllRepliesSucceedResolves(t *testing.T) {
 
 // blockingPermissionReply delays SendWithButtons until the caller closes
 // release, so a test can interleave an expiry into the create-record →
-// send-return window that flushBatch previously mishandled (IMP-018).
+// send-return window that flushBatch previously mishandled.
 type blockingPermissionReply struct {
 	*permissionReply
 	started chan struct{}
@@ -965,8 +965,9 @@ func (r *blockingPermissionReply) SendWithButtons(text string, buttons []channel
 	return r.permissionReply.SendWithButtons(text, buttons)
 }
 
-// TestPermissionBrokerFreshSendNeverExpires is the IMP-018 regression test:
-// a fresh prompt must never be edited to "⌛ Permission request expired." with
+// TestPermissionBrokerFreshSendNeverExpires is the regression test for the
+// fresh-send never-expires behavior: a fresh prompt must never be edited to
+// "⌛ Permission request expired." with
 // nil buttons in the send path, even when the record leaves the pending state
 // while the send is still in flight. Origin is still recorded.
 func TestPermissionBrokerFreshSendNeverExpires(t *testing.T) {
@@ -1025,7 +1026,7 @@ func TestPermissionBrokerFreshSendNeverExpires(t *testing.T) {
 		t.Fatal("prompt was not sent")
 	}
 
-	// AC-01: origin must still be recorded on the record.
+	// origin must still be recorded on the record.
 	var originID string
 	for time.Now().Before(deadline) {
 		broker.mu.Lock()
@@ -1042,7 +1043,7 @@ func TestPermissionBrokerFreshSendNeverExpires(t *testing.T) {
 		t.Fatal("origin ref was not recorded on the fresh send")
 	}
 
-	// AC-01: zero expired edits (nil buttons) must be issued in the send path.
+	// zero expired edits (nil buttons) must be issued in the send path.
 	base.mu.Lock()
 	defer base.mu.Unlock()
 	for _, edit := range base.edits {
