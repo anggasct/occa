@@ -591,37 +591,33 @@ func (r *Router) handleStatus(ctx context.Context, msg channel.IncomingMessage, 
 	}
 	latency := time.Since(start).Truncate(time.Millisecond)
 
-	var contextLine string
+	var modelLine, contextLine string
 	if sessInfo, err := inst.Client().GetSession(ctx, sessionID); err != nil {
 		slog.Warn("router: status get session failed", "session_id", sessionID, "error", err)
 	} else if sessInfo != nil {
-		var providerID, modelID string
+		var providerID, modelID, variant string
 		if sessInfo.Model.ProviderID != "" && sessInfo.Model.ID != "" {
 			providerID = sessInfo.Model.ProviderID
 			modelID = sessInfo.Model.ID
+			variant = sessInfo.Model.Variant
 		} else if effModel, effErr := r.effectiveModel(ctx, msg); effErr == nil && effModel != nil {
 			providerID = effModel.ProviderID
 			modelID = effModel.ID
+			variant = effModel.Variant
 		}
-		var limit int64
-		var hasLimit bool
 		if providerID != "" && modelID != "" {
-			if providers, pErr := inst.Client().Providers(ctx); pErr == nil {
-				limit, hasLimit = providers.ContextLimit(providerID, modelID)
+			modelName := providerID + "/" + modelID
+			if variant != "" {
+				modelName += "@" + variant
 			}
+			modelLine = "\nModel: " + modelName
 		}
 		inputK := float64(sessInfo.Tokens.Input) / 1000.0
-		if hasLimit && limit > 0 {
-			limitK := float64(limit) / 1000.0
-			pct := sessInfo.Tokens.Input * 100 / limit
-			pctStr := fmt.Sprintf("%d", pct)
-			if pct > 100 {
-				pctStr = "100+"
-			}
-			contextLine = fmt.Sprintf("\nContext: %.1fk / %.1fk tokens (%s%%) · cost: $%.2f", inputK, limitK, pctStr, sessInfo.Cost)
-		} else {
-			contextLine = fmt.Sprintf("\nContext: %.1fk tokens used · cost: $%.2f", inputK, sessInfo.Cost)
+		cachePart := ""
+		if sessInfo.Tokens.CacheRead > 0 {
+			cachePart = " · cache read: " + formatMetric(sessInfo.Tokens.CacheRead)
 		}
+		contextLine = fmt.Sprintf("\nInput: %.1fk tokens (cumulative)%s · cost: $%.2f", inputK, cachePart, sessInfo.Cost)
 	}
 
 	uptime := time.Since(r.startedAt).Truncate(time.Second)
@@ -640,13 +636,22 @@ func (r *Router) handleStatus(ctx context.Context, msg channel.IncomingMessage, 
 		}
 	}
 
-	status := fmt.Sprintf("✅ Agent connected\nSession: %s%s\nUptime: %s\nWorkdir: %s\nLatency: %s",
-		sessionLine, contextLine, uptime, workdir, latency)
+	status := fmt.Sprintf("✅ Agent connected\nSession: %s%s%s\nUptime: %s\nWorkdir: %s\nLatency: %s",
+		sessionLine, modelLine, contextLine, uptime, workdir, latency)
 	key := responseKey{platform: msg.Platform, channelID: msg.ChannelID, threadID: threadID, userID: userID}
 	if qLen := r.responses.queueDepth(key); qLen > 0 {
 		status += fmt.Sprintf("\nQueue: %d message(s)", qLen)
 	}
 	return status, nil
+}
+
+// formatMetric renders a raw token count in a human-friendly k/M suffix
+// (e.g. 19400000 -> "19.4M", 12000 -> "12.0k"), used by the /status cache readout.
+func formatMetric(n int64) string {
+	if n >= 1_000_000 {
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000.0)
+	}
+	return fmt.Sprintf("%.1fk", float64(n)/1000.0)
 }
 
 func relativeAge(createdAt int64) string {
