@@ -543,3 +543,46 @@ func TestStreamerScheduleAttributionLateInput(t *testing.T) {
 		t.Fatalf("unexpected input in attribution handler: %+v", capturedInput)
 	}
 }
+
+func TestStreamerTimeoutGenericCopy(t *testing.T) {
+	reply := newFakeReplyContext()
+	renderer := render.New()
+	s := NewStreamer(reply, renderer, render.Telegram)
+	s.noEventTimeout = 20 * time.Millisecond
+
+	events := make(chan Event, 2)
+	events <- Event{Type: EventDelta, Delta: "partial"}
+
+	if err := s.Run(context.Background(), events); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("Run error = %v, want ErrTimeout", err)
+	}
+	msg := reply.lastOutput()
+	if msg != taskTimeoutMessage {
+		t.Fatalf("timeout notice = %q, want %q", msg, taskTimeoutMessage)
+	}
+	if strings.Contains(msg, "may still be running") {
+		t.Fatalf("timeout notice contains false 'may still be running': %q", msg)
+	}
+}
+
+func TestStreamerTimeoutPermissionCopy(t *testing.T) {
+	reply := newFakeReplyContext()
+	renderer := render.New()
+	s := NewStreamer(reply, renderer, render.Telegram)
+	s.noEventTimeout = 20 * time.Millisecond
+	s.SetPermissionPendingFunc(func() bool { return true })
+
+	events := make(chan Event, 2)
+	events <- Event{Type: EventDelta, Delta: "partial"}
+
+	if err := s.Run(context.Background(), events); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("Run error = %v, want ErrTimeout", err)
+	}
+	msg := reply.lastOutput()
+	if msg != taskTimeoutPermissionMessage {
+		t.Fatalf("timeout notice = %q, want %q", msg, taskTimeoutPermissionMessage)
+	}
+	if strings.Contains(msg, "may still be running") {
+		t.Fatalf("timeout notice contains false 'may still be running': %q", msg)
+	}
+}

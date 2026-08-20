@@ -201,6 +201,12 @@ func (r *Router) runResponse(
 		streamer := relay.NewStreamer(msg.ReplyCtx, r.renderer, render.PlatformFor(msg.Platform))
 		streamer.SetPermissionPromptHandler(permissionHandler)
 		streamer.SetQuestionPromptHandler(questionHandler)
+		streamer.SetPermissionPendingFunc(func() bool {
+			return r.permissions.HasPendingFor(owner)
+		})
+		if r.streamerNoEventTimeout > 0 {
+			streamer.SetNoEventTimeout(r.streamerNoEventTimeout)
+		}
 		if r.attrib != nil {
 			streamer.SetScheduleAttributionHandler(func(input map[string]any) error {
 				cronExpr, _ := input["cron_expression"].(string)
