@@ -173,14 +173,14 @@ func (b *permissionBroker) flushBatch(batch *pendingBatch) {
 	}
 
 	b.mu.Lock()
-	if record.state == permissionPending {
-		record.origin = ref
-		b.mu.Unlock()
-	} else {
-		record.origin = ref
-		b.mu.Unlock()
-		_ = h.reply.EditWithButtons(ref, permissionExpiredMessage, nil)
-	}
+	// A freshly-created record is always permissionPending by the time the send
+	// returns. The old else-branch that edited the just-sent prompt to the
+	// expired view (nil buttons) here was a send-window race that stripped the
+	// approve buttons in the same second they were sent. Origin is recorded
+	// unconditionally; a prompt reaches "⌛ expired" only through its real
+	// lifecycle: response-end expireOwner or a callback scope-mismatch.
+	record.origin = ref
+	b.mu.Unlock()
 
 	slog.Info("permission prompt registered", "platform", record.platform, "channel_id", record.channelID, "count", len(requestIDs))
 }
