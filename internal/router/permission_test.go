@@ -948,3 +948,110 @@ func TestPermissionBrokerBatchAllRepliesSucceedResolves(t *testing.T) {
 		t.Fatalf("record state = %v, want resolved", stateName(record.state))
 	}
 }
+
+// blockingPermissionReply delays SendWithButtons until the caller closes
+// release, so a test can interleave an expiry into the create-record →
+// send-return window that flushBatch previously mishandled.
+type blockingPermissionReply struct {
+	*permissionReply
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (r *blockingPermissionReply) SendWithButtons(text string, buttons []channel.Button) (channel.MessageRef, error) {
+	r.once.Do(func() { close(r.started) })
+	<-r.release
+	return r.permissionReply.SendWithButtons(text, buttons)
+}
+
+// TestPermissionBrokerFreshSendNeverExpires is the regression test for the
+// fresh-send never-expires behavior: a fresh prompt must never be edited to
+// "⌛ Permission request expired." with
+// nil buttons in the send path, even when the record leaves the pending state
+// while the send is still in flight. Origin is still recorded.
+func TestPermissionBrokerFreshSendNeverExpires(t *testing.T) {
+	client := &permissionClient{}
+	broker := newPermissionBroker()
+	owner := &permissionOwner{}
+	base := &permissionReply{}
+	reply := &blockingPermissionReply{
+		permissionReply: base,
+		started:         make(chan struct{}),
+		release:         make(chan struct{}),
+	}
+	handler := &permissionPromptHandler{
+		broker:    broker,
+		owner:     owner,
+		client:    client,
+		platform:  "telegram",
+		channelID: "chat1",
+		sessionID: "session-1",
+		reply:     reply,
+	}
+	batch := &pendingBatch{
+		owner:    owner,
+		handler:  handler,
+		requests: []relay.PermissionRequest{{ID: "request-1", SessionID: "session-1", Permission: "external_directory", Tool: "bash"}},
+	}
+	broker.mu.Lock()
+	broker.batches[owner] = batch
+	broker.mu.Unlock()
+
+	go broker.flushBatch(batch)
+
+	// Wait for the send to begin, then expire the owner while the prompt send is
+	// still in flight — the race that used to strip the buttons.
+	<-reply.started
+	broker.expireOwner(owner)
+	close(reply.release)
+
+	// Wait for flushBatch to finish recording the origin.
+	deadline := time.Now().Add(2 * time.Second)
+	var token string
+	for time.Now().Before(deadline) {
+		base.mu.Lock()
+		if len(base.sends) > 0 && len(base.sends[0].buttons) > 0 {
+			var ok bool
+			token, _, ok = parsePermissionCallback(base.sends[0].buttons[0].Value)
+			if ok {
+				base.mu.Unlock()
+				break
+			}
+		}
+		base.mu.Unlock()
+		time.Sleep(5 * time.Millisecond)
+	}
+	if token == "" {
+		t.Fatal("prompt was not sent")
+	}
+
+	// origin must still be recorded on the record.
+	var originID string
+	for time.Now().Before(deadline) {
+		broker.mu.Lock()
+		if rec := broker.records[token]; rec != nil && rec.origin != nil && rec.origin.ID() != "" {
+			originID = rec.origin.ID()
+		}
+		broker.mu.Unlock()
+		if originID != "" {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if originID == "" {
+		t.Fatal("origin ref was not recorded on the fresh send")
+	}
+
+	// zero expired edits (nil buttons) must be issued in the send path.
+	base.mu.Lock()
+	defer base.mu.Unlock()
+	for _, edit := range base.edits {
+		if edit.text == permissionExpiredMessage && len(edit.buttons) == 0 {
+			t.Fatalf("fresh send issued an expired edit: %+v", edit)
+		}
+	}
+	if len(base.edits) != 0 {
+		t.Fatalf("unexpected edits in send path: %+v", base.edits)
+	}
+}
