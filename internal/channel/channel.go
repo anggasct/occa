@@ -38,8 +38,12 @@ type IncomingMessage struct {
 	IsCallback             bool
 	CallbackData           string
 	CallbackRef            MessageRef
-	Attachments            []Attachment
-	ReplyCtx               ReplyContext
+	// SourceRef is the original user message that triggered this interaction
+	// (nil for callbacks, which use CallbackRef). Reaction setters can target
+	// it for read-receipts.
+	SourceRef   MessageRef
+	Attachments []Attachment
+	ReplyCtx    ReplyContext
 }
 
 type ReplyContext interface {

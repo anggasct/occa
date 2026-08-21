@@ -338,6 +338,12 @@ func (a *Adapter) DeleteMessage(channelID, messageID string) error {
 }
 
 func (a *Adapter) normalizeMessage(m *discordgo.Message) channel.IncomingMessage {
+	// The channel that hosts the user's triggering message. It is captured
+	// before any auto-thread reassignment so reactions can target the source
+	// message in its own channel (a read-receipt) even when the reply lands in
+	// a freshly created thread.
+	sourceChannelID := m.ChannelID
+
 	isMention := false
 	if m.GuildID == "" {
 		isMention = true
@@ -393,8 +399,9 @@ func (a *Adapter) normalizeMessage(m *discordgo.Message) channel.IncomingMessage
 		Text:                   m.Content,
 		IsMention:              isMention,
 		IsThread:               isThread,
+		SourceRef:              messageRef{id: m.ID},
 		Attachments:            a.downloadAttachments(m),
-		ReplyCtx:               &replyContext{session: a.session, channelID: replyChannelID, guildID: m.GuildID, appID: a.appIDValue()},
+		ReplyCtx:               &replyContext{session: a.session, channelID: replyChannelID, reactionChannelID: sourceChannelID, guildID: m.GuildID, appID: a.appIDValue()},
 	}
 }
 
@@ -504,12 +511,13 @@ func isThreadType(channelType discordgo.ChannelType) bool {
 }
 
 type replyContext struct {
-	session         *discordgo.Session
-	channelID       string
-	guildID         string
-	appID           string
-	interaction     *discordgo.Interaction
-	currentReaction map[string]string
+	session           *discordgo.Session
+	channelID         string
+	reactionChannelID string
+	guildID           string
+	appID             string
+	interaction       *discordgo.Interaction
+	currentReaction   map[string]string
 }
 
 func (rc *replyContext) SendTyping() error {
@@ -521,15 +529,22 @@ func (rc *replyContext) SetReaction(ref channel.MessageRef, state channel.Reacti
 	if rc.currentReaction == nil {
 		rc.currentReaction = make(map[string]string)
 	}
+	// React on the source message's own channel (the read-receipt target) when
+	// known, falling back to the reply channel so the auto-thread case reacts
+	// on the parent channel where the user's message lives.
+	reactionChannelID := rc.channelID
+	if rc.reactionChannelID != "" {
+		reactionChannelID = rc.reactionChannelID
+	}
 	if prev, ok := rc.currentReaction[ref.ID()]; ok {
 		if prev == emoji {
 			return nil
 		}
-		if err := rc.session.MessageReactionRemove(rc.channelID, ref.ID(), prev, "@me"); err != nil {
+		if err := rc.session.MessageReactionRemove(reactionChannelID, ref.ID(), prev, "@me"); err != nil {
 			return fmt.Errorf("discord: remove reaction %s: %w", prev, err)
 		}
 	}
-	if err := rc.session.MessageReactionAdd(rc.channelID, ref.ID(), emoji); err != nil {
+	if err := rc.session.MessageReactionAdd(reactionChannelID, ref.ID(), emoji); err != nil {
 		return fmt.Errorf("discord: add reaction %s: %w", emoji, err)
 	}
 	rc.currentReaction[ref.ID()] = emoji

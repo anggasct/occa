@@ -14,12 +14,14 @@ import (
 type fakeReactionSetter struct {
 	mu     sync.Mutex
 	states []channel.ReactionState
+	refs   []string
 }
 
-func (f *fakeReactionSetter) SetReaction(_ channel.MessageRef, state channel.ReactionState) error {
+func (f *fakeReactionSetter) SetReaction(ref channel.MessageRef, state channel.ReactionState) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.states = append(f.states, state)
+	f.refs = append(f.refs, ref.ID())
 	return nil
 }
 
@@ -27,6 +29,12 @@ func (f *fakeReactionSetter) record() []channel.ReactionState {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]channel.ReactionState(nil), f.states...)
+}
+
+func (f *fakeReactionSetter) recordRefs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.refs...)
 }
 
 // waitReactions polls the fake setter until it has seen the given number of
@@ -176,5 +184,64 @@ func TestStreamerReactionNoSetterIsNoOp(t *testing.T) {
 	msgs := reply.finalMessages()
 	if len(msgs) != 1 || msgs[0] != "hello" {
 		t.Fatalf("messages = %v, want the reply unchanged", msgs)
+	}
+}
+
+// TestStreamerReactionTargetsSourceMessage: with a source target set via
+// SetReactionTarget, the 👀→✅ lifecycle lands on the source message (a
+// read-receipt) and never on the reply.
+func TestStreamerReactionTargetsSourceMessage(t *testing.T) {
+	reply := newFakeReplyContext()
+	s := NewStreamer(reply, render.New(), render.Discord)
+	reactions := &fakeReactionSetter{}
+	s.SetReactionSetter(reactions)
+	s.SetReactionTarget(fakeRef{id: "source-1"})
+
+	events := make(chan Event, 4)
+	events <- Event{Type: EventDelta, Delta: "hello"}
+	events <- Event{Type: EventDone}
+	close(events)
+
+	if err := s.Run(context.Background(), events); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	got := reactions.record()
+	if len(got) != 2 || got[0] != channel.ReactionProcessing || got[1] != channel.ReactionSuccess {
+		t.Fatalf("reactions = %v, want [processing success]", got)
+	}
+	for i, ref := range reactions.recordRefs() {
+		if ref != "source-1" {
+			t.Fatalf("reaction %d targeted %q, want the source message", i, ref)
+		}
+	}
+}
+
+// TestStreamerReactionFallsBackToReplyRef: without a source target the
+// 👀→✅ lifecycle falls back onto the first reply message.
+func TestStreamerReactionFallsBackToReplyRef(t *testing.T) {
+	reply := newFakeReplyContext()
+	s := NewStreamer(reply, render.New(), render.Discord)
+	reactions := &fakeReactionSetter{}
+	s.SetReactionSetter(reactions)
+
+	events := make(chan Event, 4)
+	events <- Event{Type: EventDelta, Delta: "hello"}
+	events <- Event{Type: EventDone}
+	close(events)
+
+	if err := s.Run(context.Background(), events); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	got := reactions.record()
+	if len(got) != 2 || got[0] != channel.ReactionProcessing || got[1] != channel.ReactionSuccess {
+		t.Fatalf("reactions = %v, want [processing success]", got)
+	}
+	// The reply context issues message refs starting at "msg-1".
+	for i, ref := range reactions.recordRefs() {
+		if ref != "msg-1" {
+			t.Fatalf("reaction %d targeted %q, want the first reply ref", i, ref)
+		}
 	}
 }

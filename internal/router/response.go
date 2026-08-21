@@ -220,6 +220,9 @@ func (r *Router) runResponse(
 		if setter, ok := msg.ReplyCtx.(channel.ReactionSetter); ok {
 			streamer.SetReactionSetter(setter)
 		}
+		if msg.SourceRef != nil {
+			streamer.SetReactionTarget(msg.SourceRef)
+		}
 		streamDone <- streamer.Run(ctx, observedEvents)
 	}()
 
