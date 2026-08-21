@@ -626,3 +626,93 @@ func TestSendWithButtonsNoInteraction(t *testing.T) {
 		t.Fatalf("ref id = %q, want %q", ref.ID(), "plain-1")
 	}
 }
+
+// TestNormalizeMessageSetsSourceRef: an ordinary user message carries a
+// SourceRef pointing at the triggering message for read-receipt reactions.
+func TestNormalizeMessageSetsSourceRef(t *testing.T) {
+	a := &Adapter{
+		channelLookup: func(channelID string) (*discordgo.Channel, error) {
+			return &discordgo.Channel{ID: channelID, Type: discordgo.ChannelTypeGuildText}, nil
+		},
+	}
+	a.setBotID("bot")
+
+	got := a.normalizeMessage(&discordgo.Message{
+		GuildID:   "guild",
+		ChannelID: "channel-1",
+		ID:        "msg-1",
+		Author:    &discordgo.User{ID: "user"},
+		Content:   "<@bot> hello",
+		Mentions:  []*discordgo.User{{ID: "bot"}},
+	})
+
+	if got.SourceRef == nil || got.SourceRef.ID() != "msg-1" {
+		t.Fatalf("SourceRef = %+v, want message ref msg-1", got.SourceRef)
+	}
+}
+
+// TestAutoThreadReactionTargetsSourceChannel: in the auto-thread case the
+// reaction channel stays on the parent channel that hosts the user's message,
+// and SourceRef points at the triggering message.
+func TestAutoThreadReactionTargetsSourceChannel(t *testing.T) {
+	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/threads") {
+			return []byte(`{"id":"thread-9","name":"summarize the repo","type":12}`), http.StatusOK
+		}
+		return []byte(`{"id":"channel-1","type":0}`), http.StatusOK
+	})
+
+	a := &Adapter{session: session}
+	a.setBotID("bot1")
+	a.SetAutoThreadPolicy(func(channelID string) (bool, error) { return true, nil })
+
+	got := a.normalizeMessage(&discordgo.Message{
+		GuildID:   "guild",
+		ChannelID: "channel-1",
+		ID:        "msg-1",
+		Author:    &discordgo.User{ID: "user-1"},
+		Content:   "<@bot1> summarize the repo",
+		Mentions:  []*discordgo.User{{ID: "bot1"}},
+	})
+
+	rc, ok := got.ReplyCtx.(*replyContext)
+	if !ok {
+		t.Fatalf("reply context type: %T", got.ReplyCtx)
+	}
+	// Reply lands in the thread, but reactions must target the parent channel.
+	if rc.channelID != "thread-9" {
+		t.Fatalf("reply channelID = %q, want thread-9", rc.channelID)
+	}
+	if rc.reactionChannelID != "channel-1" {
+		t.Fatalf("reactionChannelID = %q, want source channel-1", rc.reactionChannelID)
+	}
+	if got.SourceRef == nil || got.SourceRef.ID() != "msg-1" {
+		t.Fatalf("SourceRef = %+v, want msg-1", got.SourceRef)
+	}
+}
+
+// TestInteractionMessagesHaveNoSourceRef: interaction-driven messages (slash
+// commands) carry no SourceRef — there is no ordinary user message to react on.
+func TestInteractionMessagesHaveNoSourceRef(t *testing.T) {
+	s := newUnconnectedSession(t)
+	s.Client = &http.Client{Transport: fakeRoundTripper{do: func(*http.Request) (*http.Response, error) {
+		return jsonResponse(200, "{}"), nil
+	}}}
+
+	a := New("fake-token", nil)
+	interaction := &discordgo.InteractionCreate{Interaction: &discordgo.Interaction{
+		ID:        "int-1",
+		Token:     "int-token",
+		Type:      discordgo.InteractionApplicationCommand,
+		ChannelID: "chan-1",
+		Data:      discordgo.ApplicationCommandInteractionData{Name: "help"},
+		User:      &discordgo.User{ID: "user-1"},
+	}}
+
+	var got channel.IncomingMessage
+	a.handleApplicationCommandInteraction(s, interaction, func(m channel.IncomingMessage) { got = m })
+
+	if got.SourceRef != nil {
+		t.Fatalf("interaction message must not carry a source ref, got %+v", got.SourceRef)
+	}
+}

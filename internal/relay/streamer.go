@@ -45,6 +45,7 @@ type Streamer struct {
 	questionHandler            QuestionPromptHandler
 	scheduleAttributionHandler func(input map[string]any) error
 	reactionSetter             channel.ReactionSetter
+	reactionTarget             channel.MessageRef
 	firstRef                   channel.MessageRef
 	noEventTimeout             time.Duration
 	typingInterval             time.Duration
@@ -85,6 +86,14 @@ func (s *Streamer) SetReactionSetter(setter channel.ReactionSetter) {
 	s.reactionSetter = setter
 }
 
+// SetReactionTarget redirects the 👀/✅/❌ lifecycle reactions onto the
+// triggering source message (a genuine read-receipt) instead of occa's own
+// first reply. When set, setReaction targets it; otherwise it falls back to
+// the first reply ref.
+func (s *Streamer) SetReactionTarget(ref channel.MessageRef) {
+	s.reactionTarget = ref
+}
+
 func (s *Streamer) SetNoEventTimeout(d time.Duration) {
 	if d > 0 {
 		s.noEventTimeout = d
@@ -98,23 +107,33 @@ func (s *Streamer) SetPermissionPendingFunc(fn func() bool) {
 	s.permissionPendingFunc = fn
 }
 
-// setReaction drives the reply's status reaction. Failures are logged and
-// never fail the stream; a missing setter is a silent no-op.
+// setReaction drives the status reaction, targeting the source message
+// (read-receipt) when a target is set, else the first reply. Failures are
+// logged and never fail the stream; a missing setter is a silent no-op.
 func (s *Streamer) setReaction(state channel.ReactionState) {
-	if s.reactionSetter == nil || s.firstRef == nil {
+	if s.reactionSetter == nil {
 		return
 	}
-	if err := s.reactionSetter.SetReaction(s.firstRef, state); err != nil {
+	target := s.reactionTarget
+	if target == nil {
+		target = s.firstRef
+	}
+	if target == nil {
+		return
+	}
+	if err := s.reactionSetter.SetReaction(target, state); err != nil {
 		slog.Warn("streaming: reaction failed", "state", state, "error", err)
 	}
 }
 
 // trackFirstRef records the first reply message once it exists so status
-// reactions can attach to it.
+// reactions can attach to it when no source target is set.
 func (s *Streamer) trackFirstRef(ref channel.MessageRef) {
 	if s.firstRef == nil && ref != nil {
 		s.firstRef = ref
-		s.setReaction(channel.ReactionProcessing)
+		if s.reactionTarget == nil {
+			s.setReaction(channel.ReactionProcessing)
+		}
 	}
 }
 
@@ -151,6 +170,12 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 	defer timeoutTimer.Stop()
 
 	dirty := false
+
+	// A read-receipt: when a source message target is set, signal "received,
+	// processing" (👀) on it before the first reply is emitted.
+	if s.reactionTarget != nil {
+		s.setReaction(channel.ReactionProcessing)
+	}
 
 	for {
 		select {
