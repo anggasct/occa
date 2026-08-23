@@ -33,6 +33,7 @@ type Adapter struct {
 	downloadClient *http.Client
 	autoThread     ThreadPolicy
 	ownedThread    OwnedThreadCheck
+	connected      atomic.Bool
 
 	threadsMu sync.Mutex
 	threads   map[string]struct{}
@@ -45,6 +46,13 @@ func New(token string, menu []channel.MenuCommand) *Adapter {
 }
 
 func (a *Adapter) Name() string { return "discord" }
+
+func (a *Adapter) Connected() (bool, string) {
+	if a.connected.Load() {
+		return true, ""
+	}
+	return false, "gateway not connected"
+}
 
 func (a *Adapter) SetAutoThreadPolicy(policy ThreadPolicy) {
 	a.autoThread = policy
@@ -110,11 +118,13 @@ func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessag
 	if err := s.Open(); err != nil {
 		return fmt.Errorf("discord: open gateway: %w", err)
 	}
+	a.connected.Store(true)
 
 	slog.Info("discord adapter started")
 
 	go func() {
 		<-ctx.Done()
+		a.connected.Store(false)
 		_ = s.Close()
 	}()
 
@@ -308,6 +318,7 @@ func (a *Adapter) onMessage(m *discordgo.MessageCreate, handler func(channel.Inc
 }
 
 func (a *Adapter) Stop() error {
+	a.connected.Store(false)
 	if a.session != nil {
 		return a.session.Close()
 	}

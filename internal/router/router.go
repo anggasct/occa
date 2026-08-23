@@ -11,6 +11,7 @@ import (
 
 	"github.com/anggasct/occa/internal/attribution"
 	"github.com/anggasct/occa/internal/channel"
+	"github.com/anggasct/occa/internal/health"
 	"github.com/anggasct/occa/internal/relay"
 	"github.com/anggasct/occa/internal/render"
 	"github.com/anggasct/occa/internal/store"
@@ -35,6 +36,7 @@ func (r *Router) MenuCommands() []channel.MenuCommand {
 	return []channel.MenuCommand{
 		{Alias: "help", Description: "Show available commands"},
 		{Alias: "status", Description: "Agent health and session info"},
+		{Alias: "health", Description: "Show system health"},
 		{Alias: "session", Description: "Manage sessions: new, switch, or delete", HasArgs: true},
 		{Alias: "stop", Description: "Stop the running response (session kept)"},
 		{Alias: "steer", Description: "Stop and redirect the agent (session kept)", HasArgs: true},
@@ -70,6 +72,7 @@ type Router struct {
 	commands               map[string]Command
 	instances              InstanceProvider
 	store                  store.Store
+	health                 *health.Reporter
 	defaultWorkdir         string
 	adminID                string
 	startedAt              time.Time
@@ -428,6 +431,7 @@ func (r *Router) executePassthrough(taskCtx context.Context, cancel context.Canc
 
 	inst, err := r.clientFor(ctx, msg)
 	if err != nil {
+		r.recordHealthError("agent unreachable")
 		r.responses.release(key)
 		r.reply(msg, "⚠️ Agent unreachable")
 		r.dispatchDrained(key, r.responses.drain(key))
@@ -440,6 +444,7 @@ func (r *Router) executePassthrough(taskCtx context.Context, cancel context.Canc
 	sessionID, err := resolver.Resolve(ctx, msg.Platform, msg.ChannelID, threadID, userID, inst.PID())
 	if err != nil {
 		inst.End()
+		r.recordHealthError("agent unreachable")
 		r.responses.release(key)
 		r.reply(msg, "⚠️ Agent unreachable")
 		r.dispatchDrained(key, r.responses.drain(key))
@@ -489,6 +494,7 @@ func (r *Router) executePassthrough(taskCtx context.Context, cancel context.Canc
 	if err != nil || events == nil {
 		cancel()
 		inst.End()
+		r.recordHealthError("agent unreachable")
 		r.responses.release(key)
 		r.reply(msg, "⚠️ Agent unreachable")
 		r.dispatchDrained(key, r.responses.drain(key))
@@ -514,6 +520,10 @@ func (r *Router) registerDefaults() {
 	r.commands["status"] = Command{
 		Name:    "status",
 		Handler: r.handleStatus,
+	}
+	r.commands["health"] = Command{
+		Name:    "health",
+		Handler: r.handleHealth,
 	}
 	r.commands["session"] = Command{
 		Name:    "session",
@@ -615,6 +625,7 @@ func (r *Router) helpText() string {
 	return "OCCA commands:\n" +
 		"• /help — show this message\n" +
 		"• /status — agent health + session info\n" +
+		"• /health — show system health\n" +
 		"• /session [new|switch <id|#|title>|delete <id>] — manage sessions\n" +
 		"• /stop — stop the running response (session kept)\n" +
 		"• /steer <direction> — stop and redirect the agent (session kept)\n" +
@@ -635,6 +646,7 @@ func (r *Router) helpText() string {
 func (r *Router) handleStatus(ctx context.Context, msg channel.IncomingMessage, _ string) (string, error) {
 	inst, err := r.clientFor(ctx, msg)
 	if err != nil {
+		r.recordHealthError("agent unreachable")
 		return "⚠️ Agent unreachable", nil
 	}
 	defer inst.End()

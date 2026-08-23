@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -10,7 +11,7 @@ import (
 )
 
 const (
-	schemaVersion    = 8
+	SchemaVersion    = 8
 	busyTimeoutMilli = 5000
 )
 
@@ -290,5 +291,17 @@ func (s *SQLiteStore) Close() error {
 }
 
 func (s *SQLiteStore) DB() *sql.DB { return s.db }
+
+// Ping verifies the database is reachable.
+func (s *SQLiteStore) Ping(ctx context.Context) error {
+	return s.db.PingContext(ctx)
+}
+
+// SchemaVersion reads the current PRAGMA user_version.
+func (s *SQLiteStore) SchemaVersion(ctx context.Context) (int, error) {
+	var version int
+	err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version)
+	return version, err
+}
 
 var _ Store = (*SQLiteStore)(nil)

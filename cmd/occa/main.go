@@ -17,6 +17,7 @@ import (
 	"github.com/anggasct/occa/internal/channel/discord"
 	"github.com/anggasct/occa/internal/channel/telegram"
 	"github.com/anggasct/occa/internal/config"
+	"github.com/anggasct/occa/internal/health"
 	"github.com/anggasct/occa/internal/logging"
 	"github.com/anggasct/occa/internal/mcpserver"
 	"github.com/anggasct/occa/internal/process"
@@ -37,6 +38,19 @@ func (p managerProvider) Instance(ctx context.Context, workdir string) (router.A
 func (p managerProvider) ForceStop(workdir string) {
 	p.m.ForceStop(workdir)
 }
+
+type agentProbe struct {
+	manager *process.Manager
+	workdir string
+}
+
+func (p agentProbe) Running(_ context.Context) (int, bool, error) {
+	pid, ok := p.manager.Running(p.workdir)
+	return pid, ok, nil
+}
+
+// version is overridden at build time via -ldflags "-X main.version=...".
+var version = "dev"
 
 func main() {
 	var configPath string
@@ -204,6 +218,7 @@ func main() {
 
 	registerMCP(ctx, manager, mcpSrv, cfg.Agent.DefaultWorkdir)
 
+	var webhookSrv *webhook.Server
 	if len(cfg.Webhooks.Endpoints) > 0 {
 		webhookExecutor := func(ctx context.Context, platform, channelID, prompt string) {
 			for _, ch := range channels {
@@ -259,7 +274,7 @@ func main() {
 			slog.Warn("webhook: no channel adapter", "platform", platform, "channel_id", channelID)
 		}
 
-		webhookSrv := webhook.New(cfg.Webhooks, webhookExecutor)
+		webhookSrv = webhook.New(cfg.Webhooks, webhookExecutor)
 		if err := webhookSrv.Start(ctx); err != nil {
 			slog.Error("failed to start webhook server", "error", err)
 		}
@@ -271,6 +286,23 @@ func main() {
 			}
 		}()
 	}
+
+	var channelProbes []health.Channel
+	for _, ch := range channels {
+		if hp, ok := ch.(health.Channel); ok {
+			channelProbes = append(channelProbes, hp)
+		}
+	}
+	healthReporter := health.New(
+		health.WithStore(db),
+		health.WithAgent(agentProbe{manager: manager, workdir: cfg.Agent.DefaultWorkdir}),
+		health.WithChannels(channelProbes...),
+		health.WithWebhook(webhookSrv),
+		health.WithVersion(version),
+		health.WithExpectedSchema(store.SchemaVersion),
+		health.WithLastError(health.NewLastError(logging.NewStringScrubber(healthSecrets(cfg, telegramToken, discordToken)...))),
+	)
+	rt.SetHealthReporter(healthReporter)
 
 	for _, ch := range channels {
 		go runChannel(ctx, ch, rt)
@@ -302,6 +334,14 @@ func main() {
 	for _, ch := range channels {
 		ch.Stop()
 	}
+}
+
+func healthSecrets(cfg config.Config, telegramToken, discordToken string) []string {
+	secrets := []string{telegramToken, discordToken}
+	for _, endpoint := range cfg.Webhooks.Endpoints {
+		secrets = append(secrets, endpoint.Secret)
+	}
+	return secrets
 }
 
 var outboundRenderer = render.New()

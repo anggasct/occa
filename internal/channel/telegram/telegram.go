@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -22,6 +23,7 @@ type Adapter struct {
 	token          string
 	menu           []channel.MenuCommand
 	downloadClient *http.Client
+	connected      atomic.Bool
 }
 
 const (
@@ -66,12 +68,20 @@ func initBotWithRetry(token, apiEndpoint string, client *http.Client, attemptDel
 
 func (a *Adapter) Name() string { return "telegram" }
 
+func (a *Adapter) Connected() (bool, string) {
+	if a.connected.Load() {
+		return true, ""
+	}
+	return false, "bot not initialized"
+}
+
 func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessage)) error {
 	bot, err := initBotWithRetry(a.token, tgbotapi.APIEndpoint, &http.Client{Timeout: initBotTimeout}, initBotBackoff)
 	if err != nil {
 		return fmt.Errorf("telegram: init bot: %w", err)
 	}
 	a.bot = bot
+	a.connected.Store(true)
 
 	a.registerCommands()
 
@@ -84,6 +94,7 @@ func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessag
 	for {
 		select {
 		case <-ctx.Done():
+			a.connected.Store(false)
 			return nil
 		default:
 		}
@@ -190,6 +201,7 @@ func sanitizeDescription(desc string) string {
 }
 
 func (a *Adapter) Stop() error {
+	a.connected.Store(false)
 	if a.bot != nil {
 		a.bot.StopReceivingUpdates()
 	}

@@ -20,6 +20,19 @@ type RedactHandler struct {
 }
 
 func NewRedactHandler(next slog.Handler, secrets ...string) *RedactHandler {
+	return &RedactHandler{next: next, secrets: sortedSecrets(secrets)}
+}
+
+// NewStringScrubber returns a function that replaces every registered secret
+// with [REDACTED], longest-first to avoid partial-match ordering bugs.
+func NewStringScrubber(secrets ...string) func(string) string {
+	registered := sortedSecrets(secrets)
+	return func(s string) string {
+		return scrubSecrets(s, registered)
+	}
+}
+
+func sortedSecrets(secrets []string) []string {
 	registered := make([]string, 0, len(secrets))
 	for _, s := range secrets {
 		if s != "" {
@@ -27,7 +40,16 @@ func NewRedactHandler(next slog.Handler, secrets ...string) *RedactHandler {
 		}
 	}
 	sort.Slice(registered, func(i, j int) bool { return len(registered[i]) > len(registered[j]) })
-	return &RedactHandler{next: next, secrets: registered}
+	return registered
+}
+
+func scrubSecrets(s string, secrets []string) string {
+	for _, secret := range secrets {
+		if strings.Contains(s, secret) {
+			s = strings.ReplaceAll(s, secret, redacted)
+		}
+	}
+	return s
 }
 
 func (h *RedactHandler) Enabled(ctx context.Context, level slog.Level) bool {

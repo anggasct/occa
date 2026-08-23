@@ -154,6 +154,26 @@ func (m *Manager) discardLocked(workdir string, e *entry) {
 	delete(m.pool, workdir)
 }
 
+// Running reports whether a live agent instance for the workdir is currently
+// in the pool. It never spawns, so it is safe for model-free health probes.
+func (m *Manager) Running(workdir string) (int, bool) {
+	workdir = NormalizeWorkdir(workdir)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.pool[workdir]
+	if !ok {
+		return 0, false
+	}
+	select {
+	case <-e.ready:
+		if e.err == nil && e.inst != nil && !e.inst.dead.Load() && e.inst.PID() > 0 {
+			return e.inst.PID(), true
+		}
+	default:
+	}
+	return 0, false
+}
+
 func (m *Manager) ForceStop(workdir string) {
 	workdir = NormalizeWorkdir(workdir)
 	m.mu.Lock()

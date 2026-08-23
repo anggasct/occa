@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"text/template"
 	"time"
 
@@ -41,6 +42,7 @@ type Server struct {
 	readTimeout       time.Duration
 	writeTimeout      time.Duration
 	idleTimeout       time.Duration
+	listening         atomic.Bool
 }
 
 func New(cfg config.WebhookConfig, executor Executor) *Server {
@@ -90,10 +92,12 @@ func (s *Server) Start(ctx context.Context) error {
 		WriteTimeout:      s.writeTimeout,
 		IdleTimeout:       s.idleTimeout,
 	}
+	s.listening.Store(true)
 
 	go func() {
 		<-ctx.Done()
-		s.httpSrv.Close()
+		s.listening.Store(false)
+		_ = s.httpSrv.Close()
 	}()
 
 	go func() {
@@ -108,10 +112,14 @@ func (s *Server) Start(ctx context.Context) error {
 
 func (s *Server) Addr() string { return s.bindAddr }
 
+// Healthy reports whether the listener is up.
+func (s *Server) Healthy() bool { return s.listening.Load() }
+
 func (s *Server) Stop(ctx context.Context) error {
 	if s.httpSrv == nil {
 		return nil
 	}
+	s.listening.Store(false)
 	return s.httpSrv.Shutdown(ctx)
 }
 
