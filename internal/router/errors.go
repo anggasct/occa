@@ -1,6 +1,17 @@
 package router
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+// errPassthroughCanceled reports that executePassthrough dropped the message
+// because its task context was canceled between slot acquisition and
+// execution (shutdown race). It is not a routing failure: passthrough
+// swallows it so shutdown stays quiet, while passthroughQueued uses it to
+// distinguish a real dispatch from a canceled drop instead of treating the
+// nil return as success.
+var errPassthroughCanceled = errors.New("router: passthrough canceled before dispatch")
 
 type replyError struct {
 	message string
