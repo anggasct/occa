@@ -39,6 +39,7 @@ func (r *Router) MenuCommands() []channel.MenuCommand {
 	return []channel.MenuCommand{
 		{Alias: "help", Description: "Show available commands"},
 		{Alias: "status", Description: "Agent health and session info"},
+		{Alias: "usage", Description: "Show token usage and estimated cost", HasArgs: true},
 		{Alias: "session", Description: "Manage sessions: new, switch, or delete", HasArgs: true},
 		{Alias: "stop", Description: "Stop the running response (session kept)"},
 		{Alias: "steer", Description: "Stop and redirect the agent (session kept)", HasArgs: true},
@@ -520,6 +521,10 @@ func (r *Router) registerDefaults() {
 		Name:    "status",
 		Handler: r.handleStatus,
 	}
+	r.commands["usage"] = Command{
+		Name:    "usage",
+		Handler: r.handleUsage,
+	}
 	r.commands["session"] = Command{
 		Name:    "session",
 		Handler: r.handleSession,
@@ -622,6 +627,7 @@ func (r *Router) helpText() string {
 	return "OCCA commands:\n" +
 		"• /help — show this message\n" +
 		"• /status — agent health + session info\n" +
+		"• /usage [today|7d|session] — token usage and estimated cost\n" +
 		"• /session [new|switch <id|#|title>|delete <id>] — manage sessions\n" +
 		"• /stop — stop the running response (session kept)\n" +
 		"• /steer <direction> — stop and redirect the agent (session kept)\n" +

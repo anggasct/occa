@@ -140,7 +140,9 @@ const (
 type SessionInfo struct {
 	Tokens SessionTokens
 	Cost   float64
-	Model  ModelRef
+	// CostKnown is false when the backend cannot provide provider pricing.
+	CostKnown bool
+	Model     ModelRef
 	// ContextTokens holds the prompt size (input + cache read) of the most
 	// recent completed assistant request: the current window occupancy,
 	// as opposed to the cumulative Tokens counters.
@@ -286,7 +288,7 @@ func (c *HTTPClient) GetSession(ctx context.Context, sessionID string) (*Session
 	}
 
 	var raw struct {
-		Cost  float64 `json:"cost"`
+		Cost  json.RawMessage `json:"cost"`
 		Model struct {
 			ID         string `json:"id"`
 			ProviderID string `json:"providerID"`
@@ -304,6 +306,12 @@ func (c *HTTPClient) GetSession(ctx context.Context, sessionID string) (*Session
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return nil, fmt.Errorf("relay: get session: decode response: %w", err)
+	}
+	var cost float64
+	if len(raw.Cost) > 0 && string(raw.Cost) != "null" {
+		if err := json.Unmarshal(raw.Cost, &cost); err != nil {
+			return nil, fmt.Errorf("relay: get session: decode cost: %w", err)
+		}
 	}
 
 	var contextTokens int64
@@ -359,7 +367,8 @@ func (c *HTTPClient) GetSession(ctx context.Context, sessionID string) (*Session
 			CacheRead:  raw.Tokens.Cache.Read,
 			CacheWrite: raw.Tokens.Cache.Write,
 		},
-		Cost:             raw.Cost,
+		Cost:             cost,
+		CostKnown:        cost > 0,
 		ContextTokens:    contextTokens,
 		ContextSource:    contextSource,
 		ContextUpdatedAt: contextUpdatedAt,

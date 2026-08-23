@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	schemaVersion    = 9
+	schemaVersion    = 10
 	busyTimeoutMilli = 5000
 )
 
@@ -23,11 +23,46 @@ var migrations = []func(s *SQLiteStore, tx *sql.Tx) error{
 	addSessionModel,
 	addThreadConfig,
 	addPermissionRules,
-	addWebhookDeliveries,
+	ensureUsageAndWebhookTables,
+	ensureUsageAndWebhookTables,
 }
 
-func addWebhookDeliveries(s *SQLiteStore, tx *sql.Tx) error {
+func ensureUsageAndWebhookTables(s *SQLiteStore, tx *sql.Tx) error {
 	ddl := `
+CREATE TABLE IF NOT EXISTS usage_projection (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		platform TEXT NOT NULL,
+		channel_id TEXT NOT NULL,
+		thread_id TEXT NOT NULL DEFAULT '',
+		user_id TEXT NOT NULL DEFAULT '',
+		session_id TEXT NOT NULL,
+		model TEXT NOT NULL DEFAULT '',
+		workdir TEXT NOT NULL DEFAULT '',
+		input_tokens INTEGER NOT NULL,
+		output_tokens INTEGER NOT NULL,
+		reasoning_tokens INTEGER NOT NULL,
+		cache_read_tokens INTEGER NOT NULL,
+		cache_write_tokens INTEGER NOT NULL,
+		input_total INTEGER NOT NULL,
+		output_total INTEGER NOT NULL,
+		reasoning_total INTEGER NOT NULL,
+		cache_read_total INTEGER NOT NULL,
+		cache_write_total INTEGER NOT NULL,
+		cost REAL,
+		cost_known INTEGER NOT NULL DEFAULT 0,
+		recorded_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_usage_scope_time
+	ON usage_projection (platform, channel_id, thread_id, user_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_usage_session_time
+	ON usage_projection (session_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_usage_time
+	ON usage_projection (recorded_at);
+`
+	if _, err := tx.Exec(ddl); err != nil {
+		return fmt.Errorf("store: migrate usage projection: %w", err)
+	}
+	webhookDDL := `
 CREATE TABLE IF NOT EXISTS webhook_delivery (
 	id            INTEGER PRIMARY KEY AUTOINCREMENT,
 	endpoint      TEXT NOT NULL,
@@ -45,7 +80,7 @@ CREATE TABLE IF NOT EXISTS webhook_delivery (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_webhook_delivery_key ON webhook_delivery (endpoint, delivery_id);
 CREATE INDEX IF NOT EXISTS idx_webhook_delivery_created ON webhook_delivery (created_at);
 `
-	if _, err := tx.Exec(ddl); err != nil {
+	if _, err := tx.Exec(webhookDDL); err != nil {
 		return fmt.Errorf("store: migrate webhook deliveries: %w", err)
 	}
 	return nil
@@ -231,6 +266,7 @@ type SQLiteStore struct {
 	progressNotices   *sqliteProgressNoticeRepo
 	threadConfigs     *sqliteThreadConfigRepo
 	permissionRules   *sqlitePermissionRuleRepo
+	usage             *sqliteUsageRepo
 	webhookDeliveries *sqliteWebhookDeliveryRepo
 	defaultWorkdir    string
 }
@@ -276,6 +312,7 @@ func OpenWithDefaultWorkdir(path, defaultWorkdir string) (*SQLiteStore, error) {
 	s.progressNotices = &sqliteProgressNoticeRepo{db: db}
 	s.threadConfigs = &sqliteThreadConfigRepo{db: db}
 	s.permissionRules = &sqlitePermissionRuleRepo{db: db}
+	s.usage = &sqliteUsageRepo{db: db}
 	s.webhookDeliveries = &sqliteWebhookDeliveryRepo{db: db}
 	return s, nil
 }
@@ -312,6 +349,7 @@ func (s *SQLiteStore) ScheduleRepo() ScheduleRepo               { return s.sched
 func (s *SQLiteStore) ProgressNoticeRepo() ProgressNoticeRepo   { return s.progressNotices }
 func (s *SQLiteStore) ThreadConfigRepo() ThreadConfigRepo       { return s.threadConfigs }
 func (s *SQLiteStore) PermissionRuleRepo() PermissionRuleRepo   { return s.permissionRules }
+func (s *SQLiteStore) UsageRepo() UsageRepo                     { return s.usage }
 func (s *SQLiteStore) WebhookDeliveryRepo() WebhookDeliveryRepo { return s.webhookDeliveries }
 
 func (s *SQLiteStore) Close() error {
@@ -321,3 +359,4 @@ func (s *SQLiteStore) Close() error {
 func (s *SQLiteStore) DB() *sql.DB { return s.db }
 
 var _ Store = (*SQLiteStore)(nil)
+var _ UsageStore = (*SQLiteStore)(nil)

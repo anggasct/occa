@@ -592,6 +592,9 @@ func TestGetSession(t *testing.T) {
 		if info.Cost != 0.05 {
 			t.Fatalf("cost = %v, want 0.05", info.Cost)
 		}
+		if !info.CostKnown {
+			t.Fatal("expected positive provider cost to be marked known")
+		}
 		if info.Model.ProviderID != "anthropic" || info.Model.ID != "claude-3-5-sonnet-20241022" || info.Model.Variant != "max" {
 			t.Fatalf("unexpected model: %+v", info.Model)
 		}
