@@ -4,7 +4,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 )
 
 const maxLastErrorRunes = 200
@@ -28,6 +27,7 @@ func (l *LastError) Set(msg string) {
 	if l.scrub != nil {
 		cleaned = l.scrub(cleaned)
 	}
+	cleaned = truncate(cleaned)
 	l.mu.Lock()
 	l.msg = cleaned
 	l.at = time.Now()
@@ -41,8 +41,7 @@ func (l *LastError) Get() (string, time.Time) {
 	return l.msg, l.at
 }
 
-// sanitize flattens control characters, collapses whitespace, and truncates
-// so a recorded error fits comfortably in a chat reply.
+// sanitize flattens control characters and collapses whitespace.
 func sanitize(msg string) string {
 	msg = strings.Map(func(r rune) rune {
 		if r == '\n' || r == '\r' || r == '\t' {
@@ -53,9 +52,13 @@ func sanitize(msg string) string {
 		}
 		return r
 	}, msg)
-	msg = strings.Join(strings.Fields(msg), " ")
-	if utf8.RuneCountInString(msg) <= maxLastErrorRunes {
+	return strings.Join(strings.Fields(msg), " ")
+}
+
+func truncate(msg string) string {
+	runes := []rune(msg)
+	if len(runes) <= maxLastErrorRunes {
 		return msg
 	}
-	return string([]rune(msg)[:maxLastErrorRunes]) + "…"
+	return string(runes[:maxLastErrorRunes-1]) + "…"
 }

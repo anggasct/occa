@@ -37,6 +37,7 @@ type Server struct {
 	endpoints         map[string]config.EndpointConfig
 	executor          Executor
 	httpSrv           *http.Server
+	listener          net.Listener
 	eventSlots        chan struct{}
 	readHeaderTimeout time.Duration
 	readTimeout       time.Duration
@@ -84,6 +85,7 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("webhook: listen %s: %w", s.bind, err)
 	}
 	s.bindAddr = ln.Addr().String()
+	s.listener = ln
 
 	s.httpSrv = &http.Server{
 		Handler:           mux,
@@ -101,6 +103,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}()
 
 	go func() {
+		defer s.listening.Store(false)
 		if err := s.httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			slog.Error("webhook: serve error", "error", err)
 		}

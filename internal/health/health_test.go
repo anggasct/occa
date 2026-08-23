@@ -265,6 +265,28 @@ func TestRecordErrorRedactsSecrets(t *testing.T) {
 	}
 }
 
+func TestRecordErrorScrubsBeforeTruncating(t *testing.T) {
+	const secret = "super-secret-token-abc"
+	scrub := func(s string) string { return strings.ReplaceAll(s, secret, "[REDACTED]") }
+	rep := New(
+		WithStore(fakeStore{ver: 8}),
+		WithAgent(fakeAgent{pid: 1, ok: true}),
+		WithLastError(NewLastError(scrub)),
+	)
+	rep.RecordError(strings.Repeat("x", maxLastErrorRunes-15) + secret + " trailing detail")
+
+	lastError, _ := rep.lastErr.Get()
+	if strings.Contains(lastError, secret) {
+		t.Fatalf("last error leaked secret across truncation boundary: %q", lastError)
+	}
+	if !strings.Contains(lastError, "[REDACTED]") {
+		t.Fatalf("last error was truncated before scrubbing: %q", lastError)
+	}
+	if len([]rune(lastError)) > maxLastErrorRunes {
+		t.Fatalf("last error exceeds bound: %d runes", len([]rune(lastError)))
+	}
+}
+
 func TestRecordErrorTruncates(t *testing.T) {
 	rep := New(WithStore(fakeStore{ver: 8}), WithAgent(fakeAgent{pid: 1, ok: true}))
 	rep.RecordError(strings.Repeat("x", 1000))
