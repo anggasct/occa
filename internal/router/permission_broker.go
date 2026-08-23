@@ -166,12 +166,44 @@ func autoAllowedNotice(req relay.PermissionRequest) string {
 	return fmt.Sprintf("⚡ Auto-allowed (rule: %s — %s).", displayTool(req.Tool), describePatterns(req.Patterns))
 }
 
+var permissionToolLabels = map[string]string{
+	"bash":      "Bash",
+	"write":     "Write",
+	"edit":      "Edit",
+	"read":      "Read",
+	"grep":      "Grep",
+	"glob":      "Glob",
+	"list":      "List",
+	"webfetch":  "Web fetch",
+	"websearch": "Web search",
+	"todowrite": "Todo write",
+	"task":      "Task",
+}
+
 func displayTool(tool string) string {
+	tool = strings.TrimSpace(tool)
+	if label, ok := permissionToolLabels[strings.ToLower(tool)]; ok {
+		return label
+	}
 	if tool == "" {
 		return "tool"
 	}
-	r, size := utf8.DecodeRuneInString(tool)
-	return string(unicode.ToUpper(r)) + tool[size:]
+
+	identifier := tool
+	if strings.HasPrefix(strings.ToLower(identifier), "mcp__") {
+		identifier = identifier[len("mcp__"):]
+	}
+	words := strings.FieldsFunc(identifier, func(r rune) bool {
+		return r == '_' || r == '-' || r == ':'
+	})
+	if len(words) == 0 {
+		return "tool"
+	}
+	for i, word := range words {
+		r, size := utf8.DecodeRuneInString(strings.ToLower(word))
+		words[i] = string(unicode.ToUpper(r)) + strings.ToLower(word)[size:]
+	}
+	return strings.Join(words, " ")
 }
 
 func describePatterns(patterns []string) string {
