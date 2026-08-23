@@ -508,7 +508,7 @@ func (r *Router) executePassthrough(taskCtx context.Context, cancel context.Canc
 		}
 	}
 
-	msg.ReplyCtx.SendTyping()
+	_ = msg.ReplyCtx.SendTyping()
 	events, err := inst.Client().Events(taskCtx, sessionID)
 	if err != nil || events == nil {
 		cancel()
@@ -877,7 +877,7 @@ func (r *Router) buildSessionPickerPage(ctx context.Context, msg channel.Incomin
 	totalPages := sessionPickerTotalPages(len(sessions))
 	start, end, clampedPage := sessionPickerPageBounds(len(sessions), page)
 
-	header := "Sessions:"
+	var header string
 	if len(headerOverride) > 0 && headerOverride[0] != "" {
 		header = headerOverride[0]
 	} else {

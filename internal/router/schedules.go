@@ -43,7 +43,7 @@ func (r *Router) handleSchedules(ctx context.Context, msg channel.IncomingMessag
 		if human == "" {
 			human = s.CronExpression
 		}
-		sb.WriteString(fmt.Sprintf("• [%d] %s — %s\n", s.ID, human, s.Prompt))
+		fmt.Fprintf(&sb, "• [%d] %s — %s\n", s.ID, human, s.Prompt)
 	}
 	return strings.TrimRight(sb.String(), "\n"), nil
 }
