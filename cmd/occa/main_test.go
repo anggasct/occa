@@ -126,6 +126,16 @@ func TestNotifyPassesThroughDiscord(t *testing.T) {
 	}
 }
 
+func TestDBSubcommandHelpExitsSuccessfully(t *testing.T) {
+	for _, command := range []string{"backup", "restore"} {
+		t.Run(command, func(t *testing.T) {
+			if got := runDBCommand([]string{command, "--help"}); got != 0 {
+				t.Fatalf("runDBCommand(%q, --help) = %d, want 0", command, got)
+			}
+		})
+	}
+}
+
 func TestOpenStoreWithLockSerializesStartupAndRestore(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "occa.db")

@@ -43,6 +43,9 @@ func runDBBackup(args []string) int {
 	fs.BoolVar(&force, "force", false, "overwrite an existing backup file")
 	fs.BoolVar(&force, "f", false, "overwrite an existing backup file (shorthand)")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 2
 	}
 	if output == "" {
@@ -76,6 +79,9 @@ func runDBRestore(args []string) int {
 	fs.BoolVar(&force, "force", false, "restore over a newer schema database (creates a pre-restore backup either way)")
 	fs.BoolVar(&force, "f", false, "restore over a newer schema database (shorthand)")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 2
 	}
 	if input == "" {
