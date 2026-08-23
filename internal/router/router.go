@@ -51,6 +51,7 @@ func (r *Router) MenuCommands() []channel.MenuCommand {
 		{Alias: "variants", Description: "List and set model reasoning variants", HasArgs: true},
 		{Alias: "permissions", Description: "List / delete saved always-allow rules", HasArgs: true},
 		{Alias: "schedules", Description: "View or delete scheduled tasks", HasArgs: true},
+		{Alias: "webhooks", Description: "Recent webhook delivery diagnostics (admin)"},
 	}
 }
 
@@ -584,6 +585,11 @@ func (r *Router) registerDefaults() {
 		Name:    "schedules",
 		Admin:   true,
 		Handler: r.handleSchedules,
+	}
+	r.commands["webhooks"] = Command{
+		Name:    "webhooks",
+		Admin:   true,
+		Handler: r.handleWebhooks,
 	}
 }
 

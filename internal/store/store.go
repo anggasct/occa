@@ -74,6 +74,32 @@ type PermissionRule struct {
 	CreatedAt int64
 }
 
+type WebhookStatus string
+
+const (
+	WebhookStatusReceived   WebhookStatus = "received"
+	WebhookStatusAccepted   WebhookStatus = "accepted"
+	WebhookStatusProcessing WebhookStatus = "processing"
+	WebhookStatusCompleted  WebhookStatus = "completed"
+	WebhookStatusSkipped    WebhookStatus = "skipped"
+	WebhookStatusFailed     WebhookStatus = "failed"
+)
+
+type WebhookDelivery struct {
+	ID           int64
+	Endpoint     string
+	DeliveryID   string
+	EventType    string
+	PayloadHash  string
+	Status       WebhookStatus
+	Attempt      int
+	ErrorSummary string
+	CreatedAt    int64
+	UpdatedAt    int64
+	StartedAt    int64
+	CompletedAt  int64
+}
+
 type SessionRepo interface {
 	Active(ctx context.Context, platform, channelID, threadID, userID string) (sessionID string, agentPID int, err error)
 	SetActive(ctx context.Context, platform, channelID, threadID, userID, sessionID string, agentPID int) error
@@ -124,6 +150,25 @@ type PermissionRuleRepo interface {
 	Match(ctx context.Context, owner PermissionOwner, tool string, patterns []string) (*PermissionRule, error)
 }
 
+type WebhookDeliveryRepo interface {
+	// Create inserts a receipt for a validated delivery. It returns whether a
+	// new row was created; a duplicate (same endpoint + delivery ID) bumps the
+	// attempt count and reports created=false.
+	Create(ctx context.Context, d WebhookDelivery) (bool, error)
+	// Get returns the current receipt, or nil when the key is unknown.
+	Get(ctx context.Context, endpoint, deliveryID string) (*WebhookDelivery, error)
+	// Transition moves a receipt between statuses only when it currently holds
+	// one of the from statuses (compare-and-swap) and returns whether it moved.
+	Transition(ctx context.Context, id int64, from []WebhookStatus, to WebhookStatus, summary string) (bool, error)
+	// List returns the most recent deliveries, newest first, capped at limit.
+	List(ctx context.Context, limit int) ([]WebhookDelivery, error)
+	// Prune deletes rows older than cutoff and caps newer rows at keep entries.
+	Prune(ctx context.Context, cutoff int64, keep int) (int, error)
+	// FailStale marks in-flight receipts (received/accepted/processing) whose
+	// last update predates cutoff as failed — startup recovery after a crash.
+	FailStale(ctx context.Context, cutoff int64, summary string) (int, error)
+}
+
 type Store interface {
 	SessionRepo() SessionRepo
 	ChannelRepo() ChannelRepo
@@ -132,5 +177,6 @@ type Store interface {
 	ProgressNoticeRepo() ProgressNoticeRepo
 	ThreadConfigRepo() ThreadConfigRepo
 	PermissionRuleRepo() PermissionRuleRepo
+	WebhookDeliveryRepo() WebhookDeliveryRepo
 	Close() error
 }

@@ -387,7 +387,8 @@ func (f *fakeStore) PermissionRuleRepo() store.PermissionRuleRepo {
 	}
 	return f.permissionRules
 }
-func (f *fakeStore) Close() error { return nil }
+func (f *fakeStore) WebhookDeliveryRepo() store.WebhookDeliveryRepo { return nil }
+func (f *fakeStore) Close() error                                   { return nil }
 
 type fakePermissionRuleRepo struct {
 	mu        sync.Mutex
