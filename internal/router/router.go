@@ -160,7 +160,13 @@ func (r *Router) Route(ctx context.Context, msg channel.IncomingMessage) error {
 		return r.handleCommand(ctx, msg)
 	}
 
-	if !r.listenModeAllows(ctx, msg) {
+	allowed, mode, err := r.listenModeDecision(ctx, msg)
+	if err != nil {
+		slog.Warn("router: listen mode resolution failed; message not processed", "platform", msg.Platform, "channel_id", msg.ChannelID, "thread_id", msg.ThreadID, "error", err)
+		return nil
+	}
+	if !allowed {
+		slog.Info("message ignored", "reason", "listen_mode", "location", listenModeLocation(msg), "mode", mode, "platform", msg.Platform, "channel_id", msg.ChannelID, "thread_id", msg.ThreadID)
 		return nil
 	}
 
@@ -227,18 +233,25 @@ func (r *Router) inline(platform, text string) string {
 }
 
 func (r *Router) listenModeAllows(ctx context.Context, msg channel.IncomingMessage) bool {
+	allowed, _, err := r.listenModeDecision(ctx, msg)
+	if err != nil {
+		return false
+	}
+	return allowed
+}
+
+func (r *Router) listenModeDecision(ctx context.Context, msg channel.IncomingMessage) (bool, string, error) {
 	mode, err := r.effectiveListenMode(ctx, msg)
 	if err != nil {
-		slog.Warn("router: listen mode resolution failed; message not processed", "platform", msg.Platform, "channel_id", msg.ChannelID, "thread_id", msg.ThreadID, "error", err)
-		return false
+		return false, "", err
 	}
 	switch mode {
 	case "all":
-		return true
+		return true, mode, nil
 	case "thread":
-		return msg.IsThread || msg.IsMention
+		return msg.IsMention || (msg.IsThread && (msg.ThreadID == "" || isOwnedThreadMessage(msg))), mode, nil
 	default:
-		return msg.IsMention
+		return msg.IsMention, mode, nil
 	}
 }
 
@@ -495,7 +508,7 @@ func (r *Router) executePassthrough(taskCtx context.Context, cancel context.Canc
 		}
 	}
 
-	msg.ReplyCtx.SendTyping()
+	_ = msg.ReplyCtx.SendTyping()
 	events, err := inst.Client().Events(taskCtx, sessionID)
 	if err != nil || events == nil {
 		cancel()
@@ -657,10 +670,14 @@ func (r *Router) helpText() string {
 }
 
 func (r *Router) handleStatus(ctx context.Context, msg channel.IncomingMessage, _ string) (string, error) {
+	listenView, listenErr := r.listenModeView(ctx, msg)
+	if listenErr != nil {
+		return "", fmt.Errorf("router: status listen mode: %w", listenErr)
+	}
 	inst, err := r.clientFor(ctx, msg)
 	if err != nil {
 		r.recordHealthError("agent unreachable")
-		return "⚠️ Agent unreachable", nil
+		return "⚠️ Agent unreachable\n" + listenView, nil
 	}
 	defer inst.End()
 
@@ -677,22 +694,32 @@ func (r *Router) handleStatus(ctx context.Context, msg channel.IncomingMessage, 
 	if sessInfo, err := inst.Client().GetSession(ctx, sessionID); err != nil {
 		slog.Warn("router: status get session failed", "session_id", sessionID, "error", err)
 	} else if sessInfo != nil {
+		resolution, resolveErr := r.resolveModel(ctx, msg)
+		if resolveErr != nil {
+			slog.Warn("router: status model resolution failed", "error", resolveErr)
+		}
+		var statusModel *relay.ModelRef
+		source := modelSourceDefault
+		if resolveErr == nil && resolution.model != nil {
+			statusModel = resolution.model
+			source = resolution.source
+		} else if sessInfo.Model.ProviderID != "" && sessInfo.Model.ID != "" {
+			model := sessInfo.Model
+			statusModel = &model
+		}
+
 		var providerID, modelID, variant string
-		if sessInfo.Model.ProviderID != "" && sessInfo.Model.ID != "" {
-			providerID = sessInfo.Model.ProviderID
-			modelID = sessInfo.Model.ID
-			variant = sessInfo.Model.Variant
-		} else if effModel, effErr := r.effectiveModel(ctx, msg); effErr == nil && effModel != nil {
-			providerID = effModel.ProviderID
-			modelID = effModel.ID
-			variant = effModel.Variant
+		if statusModel != nil {
+			providerID = statusModel.ProviderID
+			modelID = statusModel.ID
+			variant = statusModel.Variant
 		}
 		if providerID != "" && modelID != "" {
 			modelName := providerID + "/" + modelID
 			if variant != "" {
 				modelName += "@" + variant
 			}
-			modelLine = "\nModel: " + modelName
+			modelLine = "\nModel: " + modelName + "\nSource: " + string(source)
 		}
 		inputK := float64(sessInfo.Tokens.Input) / 1000.0
 		cachePart := ""
@@ -744,8 +771,8 @@ func (r *Router) handleStatus(ctx context.Context, msg channel.IncomingMessage, 
 		}
 	}
 
-	status := fmt.Sprintf("✅ Agent connected\nSession: %s%s%s\nUptime: %s\nWorkdir: %s\nLatency: %s",
-		sessionLine, modelLine, infoLines, uptime, workdir, latency)
+	status := fmt.Sprintf("✅ Agent connected\nSession: %s%s%s\nUptime: %s\nWorkdir: %s\nLatency: %s\n%s",
+		sessionLine, modelLine, infoLines, uptime, workdir, latency, listenView)
 	key := responseKey{platform: msg.Platform, channelID: msg.ChannelID, threadID: threadID, userID: userID}
 	if qLen := r.responses.queueDepth(key); qLen > 0 {
 		status += fmt.Sprintf("\nQueue: %d message(s)", qLen)
@@ -850,7 +877,7 @@ func (r *Router) buildSessionPickerPage(ctx context.Context, msg channel.Incomin
 	totalPages := sessionPickerTotalPages(len(sessions))
 	start, end, clampedPage := sessionPickerPageBounds(len(sessions), page)
 
-	header := "Sessions:"
+	var header string
 	if len(headerOverride) > 0 && headerOverride[0] != "" {
 		header = headerOverride[0]
 	} else {

@@ -1829,16 +1829,16 @@ func TestIngressAuthorizationMatrix(t *testing.T) {
 				if len(reply.sends) > 0 && reply.sends[0] == accessDeniedMessage {
 					t.Fatalf("authorized request was denied: %v", reply.sends)
 				}
-				switch {
-				case action.name == "ordinary":
+				switch action.name {
+				case "ordinary":
 					if client.lastMsg != "hello" {
 						t.Fatalf("ordinary message = %q, want hello", client.lastMsg)
 					}
-				case action.name == "non-admin command":
+				case "non-admin command":
 					if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "/help") {
 						t.Fatalf("non-admin command response = %v", reply.sends)
 					}
-				case action.name == "admin command":
+				case "admin command":
 					if role.role == "admin" {
 						if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Allowed user: user2") {
 							t.Fatalf("admin command response = %v", reply.sends)
@@ -1846,7 +1846,7 @@ func TestIngressAuthorizationMatrix(t *testing.T) {
 					} else if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Admin access required") {
 						t.Fatalf("non-admin command response = %v", reply.sends)
 					}
-				case action.name == "permission callback":
+				case "permission callback":
 					if provider.calls != 0 {
 						t.Fatalf("callback instance provider calls = %d, want 0", provider.calls)
 					}

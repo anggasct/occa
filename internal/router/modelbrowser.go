@@ -228,7 +228,7 @@ func (r *Router) modelBrowserSet(ctx context.Context, msg channel.IncomingMessag
 		if err := r.store.ThreadConfigRepo().UpsertModel(ctx, msg.Platform, threadScopeChannelID(msg), msg.ThreadID, formatModelRef(ref)); err != nil {
 			return err
 		}
-		return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "✅ Thread model set: "+formatModelRef(ref), nil)
+		return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "✅ Thread model set: "+formatModelRef(ref)+"\nScope: this thread", nil)
 	}
 	modelChannelID, err := modelScopeChannelID(msg)
 	if err != nil {
@@ -238,13 +238,13 @@ func (r *Router) modelBrowserSet(ctx context.Context, msg channel.IncomingMessag
 		if err := r.store.ChannelRepo().UpsertModel(ctx, msg.Platform, modelChannelID, formatModelRef(ref)); err != nil {
 			return err
 		}
-		return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "✅ Channel model set: "+formatModelRef(ref), nil)
+		return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "✅ Channel model set: "+formatModelRef(ref)+"\nScope: this channel", nil)
 	}
 	if err := r.store.OverrideRepo().UpsertModel(ctx, msg.Platform, modelChannelID, msg.UserID, formatModelRef(ref)); err != nil {
 		return err
 	}
 	slog.Info("model browser: personal model set", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID, "model", formatModelRef(ref))
-	return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "✅ Personal model set: "+formatModelRef(ref), nil)
+	return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "✅ Personal model set: "+formatModelRef(ref)+"\nScope: personal override", nil)
 }
 
 // modelBrowserClose removes the buttons while preserving the current page's

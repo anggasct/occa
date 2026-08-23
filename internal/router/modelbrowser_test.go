@@ -188,7 +188,7 @@ func TestModelBrowserSetPersonalForCaller(t *testing.T) {
 		t.Fatalf("Route set: %v", err)
 	}
 	text, buttons := setReply.editSnapshot()
-	if text != "✅ Personal model set: openai/gpt-4o" {
+	if text != "✅ Personal model set: openai/gpt-4o\nScope: personal override" {
 		t.Fatalf("text = %q", text)
 	}
 	if len(buttons) != 0 {
@@ -277,7 +277,7 @@ func TestModelBrowserCloseAndStale(t *testing.T) {
 	if len(buttons) != 0 {
 		t.Fatalf("close must remove buttons, got %v", labelsOf(buttons))
 	}
-	if text != "🤖 Model: agent default\n\nSelect provider:" {
+	if text != "🤖 Model: agent default\nSource: agent default\n\nSelect provider:" {
 		t.Fatalf("close must keep the page text, got %q", text)
 	}
 
@@ -316,7 +316,7 @@ func TestModelBrowserBackToProviders(t *testing.T) {
 		t.Fatalf("Route back: %v", err)
 	}
 	text, buttons := backReply.editSnapshot()
-	if text != "🤖 Model: agent default\n\nSelect provider:" {
+	if text != "🤖 Model: agent default\nSource: agent default\n\nSelect provider:" {
 		t.Fatalf("back text = %q", text)
 	}
 	if buttonValue(buttons, "openai") == "" {
@@ -500,7 +500,7 @@ func TestModelBrowserVariantSelection(t *testing.T) {
 		}
 
 		setText, _ := setReply.editSnapshot()
-		if setText != "✅ Channel model set: zai/glm-5.2@high" {
+		if setText != "✅ Channel model set: zai/glm-5.2@high\nScope: this channel" {
 			t.Fatalf("setText = %q", setText)
 		}
 		if ch := r.store.(*fakeStore).channelRepo.channels["telegram:chat1"]; ch == nil || ch.Model != "zai/glm-5.2@high" {
@@ -520,7 +520,7 @@ func TestModelBrowserVariantSelection(t *testing.T) {
 		}
 
 		setText, _ := setReply.editSnapshot()
-		if setText != "✅ Channel model set: zai/glm-5" {
+		if setText != "✅ Channel model set: zai/glm-5\nScope: this channel" {
 			t.Fatalf("setText = %q", setText)
 		}
 		if ch := r.store.(*fakeStore).channelRepo.channels["telegram:chat1"]; ch == nil || ch.Model != "zai/glm-5" {
