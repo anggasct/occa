@@ -576,10 +576,7 @@ func (r *Router) registerDefaults() {
 		Name:    "variants",
 		Handler: r.handleVariants,
 	}
-	r.commands["permissions"] = Command{
-		Name:    "permissions",
-		Handler: r.handlePermissions,
-	}
+	r.registerPermissionCommand()
 	r.commands["schedules"] = Command{
 		Name:    "schedules",
 		Admin:   true,
