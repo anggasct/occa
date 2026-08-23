@@ -103,7 +103,7 @@ func main() {
 		slog.Error("failed to start process manager", "error", err)
 		os.Exit(1)
 	}
-	defer manager.Close()
+	defer func() { _ = manager.Close() }()
 
 	reaped, err := manager.ReapOrphans(ctx)
 	slog.Info("agent orphan sweep complete", "reaped", reaped, "error", err)
@@ -342,7 +342,7 @@ func main() {
 	<-ctx.Done()
 	slog.Info("shutting down")
 	for _, ch := range channels {
-		ch.Stop()
+		_ = ch.Stop()
 	}
 }
 
