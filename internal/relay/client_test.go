@@ -632,6 +632,41 @@ func TestGetSession(t *testing.T) {
 		}
 	})
 
+	t.Run("non-200 message tail with valid-looking array keeps context zero", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/session/ses-123" {
+				// Error body that still contains a valid-looking message array:
+				// it must NOT be decoded into ContextTokens.
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`[
+					{"info":{"role":"assistant","tokens":{"input":4829,"cache":{"read":236032}}}}
+				]`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{
+				"cost": 0.05,
+				"model": {"providerID": "anthropic", "id": "claude-3-5-sonnet-20241022", "variant": "max"},
+				"tokens": {"input": 12000, "output": 3000, "reasoning": 500, "cache": {"read": 1000, "write": 200}}
+			}`))
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		info, err := c.GetSession(context.Background(), "ses-123")
+		if err != nil {
+			t.Fatalf("GetSession: %v", err)
+		}
+		if info.ContextTokens != 0 {
+			t.Fatalf("context tokens = %d, want 0 when the message tail returns non-200 with a valid-looking array", info.ContextTokens)
+		}
+		if info.Tokens.Input != 12000 || info.Tokens.CacheRead != 1000 {
+			t.Fatalf("cumulative tokens = %+v, want 12000/1000 to survive a failed message tail", info.Tokens)
+		}
+	})
+
 	t.Run("not found 404", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusNotFound)

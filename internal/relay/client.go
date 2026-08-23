@@ -291,27 +291,34 @@ func (c *HTTPClient) GetSession(ctx context.Context, sessionID string) (*Session
 
 	var contextTokens int64
 	if msgs, mErr := c.get(ctx, "/session/"+sessionID+"/message?limit=20"); mErr == nil {
-		var list []struct {
-			Info struct {
-				Role   string `json:"role"`
-				Tokens struct {
-					Input int64 `json:"input"`
-					Cache struct {
-						Read int64 `json:"read"`
-					} `json:"cache"`
-				} `json:"tokens"`
-			} `json:"info"`
-		}
-		decodeErr := json.NewDecoder(msgs.Body).Decode(&list)
-		_ = msgs.Body.Close()
-		if decodeErr == nil {
-			for i := len(list) - 1; i >= 0; i-- {
-				if list[i].Info.Role != "assistant" {
-					continue
-				}
-				if occupancy := list[i].Info.Tokens.Input + list[i].Info.Tokens.Cache.Read; occupancy > 0 {
-					contextTokens = occupancy
-					break
+		if msgs.StatusCode != http.StatusOK {
+			// Non-200 tail: the fetch failed, so the current-window occupancy is
+			// unavailable. Never decode an error body — it may still contain a
+			// valid-looking message array that would render wrong data.
+			_ = msgs.Body.Close()
+		} else {
+			var list []struct {
+				Info struct {
+					Role   string `json:"role"`
+					Tokens struct {
+						Input int64 `json:"input"`
+						Cache struct {
+							Read int64 `json:"read"`
+						} `json:"cache"`
+					} `json:"tokens"`
+				} `json:"info"`
+			}
+			decodeErr := json.NewDecoder(msgs.Body).Decode(&list)
+			_ = msgs.Body.Close()
+			if decodeErr == nil {
+				for i := len(list) - 1; i >= 0; i-- {
+					if list[i].Info.Role != "assistant" {
+						continue
+					}
+					if occupancy := list[i].Info.Tokens.Input + list[i].Info.Tokens.Cache.Read; occupancy > 0 {
+						contextTokens = occupancy
+						break
+					}
 				}
 			}
 		}
