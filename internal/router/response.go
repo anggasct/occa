@@ -134,6 +134,8 @@ func (r *Router) runResponse(
 		client:    inst.Client(),
 		platform:  key.platform,
 		channelID: key.channelID,
+		threadID:  key.threadID,
+		userID:    key.userID,
 		sessionID: sessionID,
 		reply:     msg.ReplyCtx,
 	}

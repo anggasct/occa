@@ -63,6 +63,17 @@ type ThreadConfig struct {
 	UpdatedAt  int64
 }
 
+type PermissionRule struct {
+	ID        int64
+	Platform  string
+	ChannelID string
+	ThreadID  string
+	UserID    string
+	Tool      string
+	Patterns  string
+	CreatedAt int64
+}
+
 type SessionRepo interface {
 	Active(ctx context.Context, platform, channelID, threadID, userID string) (sessionID string, agentPID int, err error)
 	SetActive(ctx context.Context, platform, channelID, threadID, userID, sessionID string, agentPID int) error
@@ -105,6 +116,14 @@ type ThreadConfigRepo interface {
 	SnapshotFromChannel(ctx context.Context, platform, channelID, threadID, defaultWorkdir string) error
 }
 
+type PermissionRuleRepo interface {
+	Add(ctx context.Context, owner PermissionOwner, tool string, patterns []string) (int64, error)
+	ListByOwner(ctx context.Context, owner PermissionOwner) ([]PermissionRule, error)
+	DeleteByID(ctx context.Context, owner PermissionOwner, id int64) error
+	ClearByOwner(ctx context.Context, owner PermissionOwner) error
+	Match(ctx context.Context, owner PermissionOwner, tool string, patterns []string) (*PermissionRule, error)
+}
+
 type Store interface {
 	SessionRepo() SessionRepo
 	ChannelRepo() ChannelRepo
@@ -112,5 +131,6 @@ type Store interface {
 	ScheduleRepo() ScheduleRepo
 	ProgressNoticeRepo() ProgressNoticeRepo
 	ThreadConfigRepo() ThreadConfigRepo
+	PermissionRuleRepo() PermissionRuleRepo
 	Close() error
 }

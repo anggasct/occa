@@ -362,6 +362,7 @@ type fakeStore struct {
 	scheduleRepo    *fakeScheduleRepo
 	progressNotices *fakeProgressNoticeRepo
 	threadConfigs   *fakeThreadConfigRepo
+	permissionRules *fakePermissionRuleRepo
 }
 
 func (f *fakeStore) SessionRepo() store.SessionRepo   { return f.sessionRepo }
@@ -380,7 +381,111 @@ func (f *fakeStore) ThreadConfigRepo() store.ThreadConfigRepo {
 	}
 	return f.threadConfigs
 }
+func (f *fakeStore) PermissionRuleRepo() store.PermissionRuleRepo {
+	if f.permissionRules == nil {
+		f.permissionRules = newFakePermissionRuleRepo()
+	}
+	return f.permissionRules
+}
 func (f *fakeStore) Close() error { return nil }
+
+type fakePermissionRuleRepo struct {
+	mu        sync.Mutex
+	rules     []store.PermissionRule
+	nextID    int64
+	addErr    error
+	matchErr  error
+	listErr   error
+	deleteErr error
+}
+
+func newFakePermissionRuleRepo() *fakePermissionRuleRepo {
+	return &fakePermissionRuleRepo{}
+}
+
+func ownerKey(owner store.PermissionOwner) string {
+	return owner.Platform + "|" + owner.ChannelID + "|" + owner.ThreadID + "|" + owner.UserID
+}
+
+func (f *fakePermissionRuleRepo) Add(_ context.Context, owner store.PermissionOwner, tool string, patterns []string) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.addErr != nil {
+		return 0, f.addErr
+	}
+	canonical := store.CanonicalizePatterns(patterns)
+	for _, rule := range f.rules {
+		if ownerKey(owner) == ownerKey(store.PermissionOwner{Platform: rule.Platform, ChannelID: rule.ChannelID, ThreadID: rule.ThreadID, UserID: rule.UserID}) && rule.Tool == tool && rule.Patterns == canonical {
+			return rule.ID, nil
+		}
+	}
+	f.nextID++
+	rule := store.PermissionRule{ID: f.nextID, Platform: owner.Platform, ChannelID: owner.ChannelID, ThreadID: owner.ThreadID, UserID: owner.UserID, Tool: tool, Patterns: canonical}
+	f.rules = append([]store.PermissionRule{rule}, f.rules...)
+	return rule.ID, nil
+}
+
+func (f *fakePermissionRuleRepo) ListByOwner(_ context.Context, owner store.PermissionOwner) ([]store.PermissionRule, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	var out []store.PermissionRule
+	for _, rule := range f.rules {
+		if ownerKey(owner) == ownerKey(store.PermissionOwner{Platform: rule.Platform, ChannelID: rule.ChannelID, ThreadID: rule.ThreadID, UserID: rule.UserID}) {
+			out = append(out, rule)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakePermissionRuleRepo) DeleteByID(_ context.Context, owner store.PermissionOwner, id int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	for i := range f.rules {
+		rule := f.rules[i]
+		if rule.ID == id && ownerKey(owner) == ownerKey(store.PermissionOwner{Platform: rule.Platform, ChannelID: rule.ChannelID, ThreadID: rule.ThreadID, UserID: rule.UserID}) {
+			f.rules = append(f.rules[:i], f.rules[i+1:]...)
+			break
+		}
+	}
+	return nil
+}
+
+func (f *fakePermissionRuleRepo) ClearByOwner(_ context.Context, owner store.PermissionOwner) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var kept []store.PermissionRule
+	for _, rule := range f.rules {
+		if ownerKey(owner) != ownerKey(store.PermissionOwner{Platform: rule.Platform, ChannelID: rule.ChannelID, ThreadID: rule.ThreadID, UserID: rule.UserID}) {
+			kept = append(kept, rule)
+		}
+	}
+	f.rules = kept
+	return nil
+}
+
+func (f *fakePermissionRuleRepo) Match(_ context.Context, owner store.PermissionOwner, tool string, patterns []string) (*store.PermissionRule, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.matchErr != nil {
+		return nil, f.matchErr
+	}
+	canonical := store.CanonicalizePatterns(patterns)
+	for _, rule := range f.rules {
+		if ownerKey(owner) == ownerKey(store.PermissionOwner{Platform: rule.Platform, ChannelID: rule.ChannelID, ThreadID: rule.ThreadID, UserID: rule.UserID}) && rule.Tool == tool && rule.Patterns == canonical {
+			copy := rule
+			return &copy, nil
+		}
+	}
+	return nil, nil
+}
+
+var _ store.PermissionRuleRepo = (*fakePermissionRuleRepo)(nil)
 
 type fakeProgressNoticeRepo struct {
 	mu      sync.Mutex

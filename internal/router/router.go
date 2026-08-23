@@ -49,6 +49,7 @@ func (r *Router) MenuCommands() []channel.MenuCommand {
 		{Alias: "channel", Description: "View or set listen mode (mention, all, thread)", HasArgs: true},
 		{Alias: "model", Description: "View or set the active model", HasArgs: true},
 		{Alias: "variants", Description: "List and set model reasoning variants", HasArgs: true},
+		{Alias: "permissions", Description: "List / delete saved always-allow rules", HasArgs: true},
 		{Alias: "schedules", Description: "View or delete scheduled tasks", HasArgs: true},
 	}
 }
@@ -104,7 +105,7 @@ func New(instances InstanceProvider, st store.Store, defaultWorkdir string, admi
 		adminID:        adminID,
 		startedAt:      time.Now(),
 		responses:      newResponseCoordinator(),
-		permissions:    newPermissionBroker(),
+		permissions:    newPermissionBroker(st.PermissionRuleRepo()),
 		questions:      newQuestionBroker(),
 		modelBrowser:   newModelBrowserBroker(),
 		renderer:       render.New(),
@@ -525,6 +526,10 @@ func (r *Router) registerDefaults() {
 		Name:    "variants",
 		Handler: r.handleVariants,
 	}
+	r.commands["permissions"] = Command{
+		Name:    "permissions",
+		Handler: r.handlePermissions,
+	}
 	r.commands["schedules"] = Command{
 		Name:    "schedules",
 		Admin:   true,
@@ -570,6 +575,7 @@ func (r *Router) helpText() string {
 		"• /channel [mention|all|thread] — view or set listen mode (per location)\n" +
 		"• /model [provider/model-id[@variant]] — view or set model (per location)\n" +
 		"• /variants [provider/model-id] — list and set model reasoning variants\n" +
+		"• /permissions [delete <id>|clear] — list or delete saved always-allow rules\n" +
 		"• /schedules [delete <id>] — view or delete scheduled tasks\n" +
 		"• /reset — clear current session and start fresh\n\n" +
 		"(Legacy /occa: command aliases are also supported.)\n\n" +
