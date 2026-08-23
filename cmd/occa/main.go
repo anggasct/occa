@@ -40,6 +40,10 @@ func (p managerProvider) ForceStop(workdir string) {
 }
 
 func main() {
+	if len(os.Args) >= 2 && os.Args[1] == "db" {
+		os.Exit(runDBCommand(os.Args[2:]))
+	}
+
 	var configPath string
 	flag.StringVar(&configPath, "config", "", "path to config file (default ~/.occa/config.yaml)")
 	flag.StringVar(&configPath, "c", "", "path to config file (shorthand)")
@@ -67,12 +71,15 @@ func main() {
 	}
 	slog.SetDefault(slog.New(logging.NewRedactHandler(handler, telegramToken, discordToken)))
 
-	db, err := store.OpenWithDefaultWorkdir(cfg.Database.Path, cfg.Agent.DefaultWorkdir)
+	db, dbLock, err := openStoreWithLock(cfg.Database.Path, cfg.Agent.DefaultWorkdir)
 	if err != nil {
-		slog.Error("failed to open store", "error", err)
+		slog.Error("failed to lock or open store", "error", err)
 		os.Exit(1)
 	}
-	defer db.Close()
+	defer func() {
+		_ = db.Close()
+		_ = dbLock.Unlock()
+	}()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -305,6 +312,19 @@ func main() {
 	for _, ch := range channels {
 		ch.Stop()
 	}
+}
+
+func openStoreWithLock(dbPath, defaultWorkdir string) (*store.SQLiteStore, *store.DBLock, error) {
+	dbLock, err := store.LockDB(dbPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	db, err := store.OpenWithDefaultWorkdir(dbPath, defaultWorkdir)
+	if err != nil {
+		_ = dbLock.Unlock()
+		return nil, nil, err
+	}
+	return db, dbLock, nil
 }
 
 var outboundRenderer = render.New()
