@@ -363,6 +363,7 @@ type fakeStore struct {
 	progressNotices *fakeProgressNoticeRepo
 	threadConfigs   *fakeThreadConfigRepo
 	permissionRules *fakePermissionRuleRepo
+	usage           *fakeUsageRepo
 }
 
 func (f *fakeStore) SessionRepo() store.SessionRepo   { return f.sessionRepo }
@@ -387,7 +388,14 @@ func (f *fakeStore) PermissionRuleRepo() store.PermissionRuleRepo {
 	}
 	return f.permissionRules
 }
-func (f *fakeStore) Close() error { return nil }
+func (f *fakeStore) UsageRepo() store.UsageRepo {
+	if f.usage == nil {
+		return nil
+	}
+	return f.usage
+}
+func (f *fakeStore) WebhookDeliveryRepo() store.WebhookDeliveryRepo { return nil }
+func (f *fakeStore) Close() error                                   { return nil }
 
 type fakePermissionRuleRepo struct {
 	mu        sync.Mutex
@@ -1471,7 +1479,7 @@ func TestSessionPickerTitles(t *testing.T) {
 }
 
 func TestStatusContextMeter(t *testing.T) {
-	t.Run("renders model, cumulative input, and real context meter", func(t *testing.T) {
+	t.Run("renders model, cumulative input, context meter, and source freshness", func(t *testing.T) {
 		r, client, reply := newTestRouter()
 		client.sessionInfo = &relay.SessionInfo{
 			Cost:  0.05,
@@ -1480,7 +1488,9 @@ func TestStatusContextMeter(t *testing.T) {
 				Input:     12000,
 				CacheRead: 19400000,
 			},
-			ContextTokens: 23400,
+			ContextTokens:    23400,
+			ContextSource:    relay.ContextSourceMessageTail,
+			ContextUpdatedAt: time.Now().Add(-8 * time.Second),
 		}
 		client.providers = relay.Providers{All: []relay.Provider{
 			{ID: "openai", Models: map[string]json.RawMessage{
@@ -1499,14 +1509,25 @@ func TestStatusContextMeter(t *testing.T) {
 		if !strings.Contains(out, "Model: openai/gpt-4o@max") {
 			t.Fatalf("expected model line with variant, got: %q", out)
 		}
-		if !strings.Contains(out, "Input: 12.0k tokens (cumulative) · cache read: 19.4M · cost: $0.05") {
-			t.Fatalf("unexpected status output: %q", out)
-		}
 		if !strings.Contains(out, "Context: 23.4k / 131.0k (17.9%)") {
 			t.Fatalf("expected real context meter from current-window tokens, got: %q", out)
 		}
+		if !strings.Contains(out, "Context source: last message-tail usage · updated 8s ago") {
+			t.Fatalf("expected context source line with freshness, got: %q", out)
+		}
 		if strings.Contains(out, "9.2%") {
 			t.Fatalf("cumulative input leaked into the percentage, got: %q", out)
+		}
+		if !strings.Contains(out, "Input: 12.0k tokens (cumulative) · cache read: 19.4M · cost: $0.05") {
+			t.Fatalf("cumulative line must stay unchanged, got: %q", out)
+		}
+		// Current-window occupancy renders before cumulative accounting.
+		if ctxIdx := strings.Index(out, "Context:"); ctxIdx < 0 || strings.Index(out, "Input:") < ctxIdx {
+			t.Fatalf("expected Context lines before the cumulative Input line, got: %q", out)
+		}
+		// The status payload remains below the strictest platform limit.
+		if len(out) >= 2000 {
+			t.Fatalf("status output too long for chat rendering limits: %d chars", len(out))
 		}
 	})
 
@@ -1519,7 +1540,9 @@ func TestStatusContextMeter(t *testing.T) {
 				Input:     12000,
 				CacheRead: 19400000,
 			},
-			ContextTokens: 23400,
+			ContextTokens:    23400,
+			ContextSource:    relay.ContextSourceMessageTail,
+			ContextUpdatedAt: time.Now().Add(-8 * time.Second),
 		}
 
 		err := r.Route(context.Background(), msg("/status", reply))
@@ -1538,7 +1561,7 @@ func TestStatusContextMeter(t *testing.T) {
 		}
 	})
 
-	t.Run("context meter omitted when current-window value unavailable", func(t *testing.T) {
+	t.Run("missing current-window data renders unavailable", func(t *testing.T) {
 		r, client, reply := newTestRouter()
 		client.sessionInfo = &relay.SessionInfo{
 			Cost:  0.05,
@@ -1562,8 +1585,81 @@ func TestStatusContextMeter(t *testing.T) {
 			t.Fatal("expected status response")
 		}
 		out := reply.sends[0]
-		if strings.Contains(out, "Context:") {
-			t.Fatalf("expected no Context line when the current-window value is unknown, got: %q", out)
+		if !strings.Contains(out, "Context: unavailable (agent did not expose current-window usage)") {
+			t.Fatalf("expected unavailable context line when the current-window value is missing, got: %q", out)
+		}
+		if strings.Contains(out, "Context: 2") || strings.Contains(out, "updated ") {
+			t.Fatalf("missing data must not render a meter or freshness, got: %q", out)
+		}
+		if !strings.Contains(out, "Input: 12.0k tokens (cumulative) · cache read: 19.4M · cost: $0.05") {
+			t.Fatalf("cumulative line must stay, got: %q", out)
+		}
+	})
+
+	t.Run("unverified source with tokens renders unavailable", func(t *testing.T) {
+		r, client, reply := newTestRouter()
+		client.sessionInfo = &relay.SessionInfo{
+			Cost:  0.05,
+			Model: relay.ModelRef{ProviderID: "openai", ID: "gpt-4o", Variant: "max"},
+			Tokens: relay.SessionTokens{
+				Input: 12000,
+			},
+			ContextTokens: 23400,
+		}
+		client.providers = relay.Providers{All: []relay.Provider{
+			{ID: "openai", Models: map[string]json.RawMessage{
+				"gpt-4o": json.RawMessage(`{"limit":{"context":131000}}`),
+			}},
+		}}
+
+		err := r.Route(context.Background(), msg("/status", reply))
+		if err != nil {
+			t.Fatalf("Route: %v", err)
+		}
+		if len(reply.sends) == 0 {
+			t.Fatal("expected status response")
+		}
+		out := reply.sends[0]
+		if !strings.Contains(out, "Context: unavailable (agent did not expose current-window usage)") {
+			t.Fatalf("tokens without a verified source must render unavailable, got: %q", out)
+		}
+		if strings.Contains(out, "17.9%") || strings.Contains(out, "Context: 23.4k") {
+			t.Fatalf("unverified tokens must not render as a live percentage, got: %q", out)
+		}
+	})
+
+	t.Run("stale current-window data renders unavailable, never live", func(t *testing.T) {
+		r, client, reply := newTestRouter()
+		client.sessionInfo = &relay.SessionInfo{
+			Cost:  0.05,
+			Model: relay.ModelRef{ProviderID: "openai", ID: "gpt-4o", Variant: "max"},
+			Tokens: relay.SessionTokens{
+				Input:     12000,
+				CacheRead: 19400000,
+			},
+			ContextTokens:    23400,
+			ContextSource:    relay.ContextSourceMessageTail,
+			ContextUpdatedAt: time.Now().Add(-1 * time.Hour),
+		}
+		client.providers = relay.Providers{All: []relay.Provider{
+			{ID: "openai", Models: map[string]json.RawMessage{
+				"gpt-4o": json.RawMessage(`{"limit":{"context":131000}}`),
+			}},
+		}}
+
+		err := r.Route(context.Background(), msg("/status", reply))
+		if err != nil {
+			t.Fatalf("Route: %v", err)
+		}
+		if len(reply.sends) == 0 {
+			t.Fatal("expected status response")
+		}
+		out := reply.sends[0]
+		if !strings.Contains(out, "Context: unavailable (agent did not expose current-window usage)") {
+			t.Fatalf("stale current-window data must render unavailable, got: %q", out)
+		}
+		if strings.Contains(out, "Context: 23.4k") || strings.Contains(out, "17.9%") || strings.Contains(out, "updated ") {
+			t.Fatalf("stale data must not be presented as live, got: %q", out)
 		}
 	})
 
@@ -1618,6 +1714,11 @@ func TestStatusContextMeter(t *testing.T) {
 		}
 		if strings.Contains(out, "cache read:") {
 			t.Fatalf("expected cache read omitted when unavailable, got: %q", out)
+		}
+		// An empty SessionInfo has no verified current-window source, so the
+		// Context line must say unavailable rather than vanish.
+		if !strings.Contains(out, "Context: unavailable (agent did not expose current-window usage)") {
+			t.Fatalf("expected unavailable context line when no source is exposed, got: %q", out)
 		}
 	})
 

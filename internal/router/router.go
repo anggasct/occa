@@ -24,6 +24,10 @@ const (
 	maxPickerPages      = 5
 	accessDeniedMessage = "⚠️ Access denied. Ask an admin to /allow you."
 	accessVerifyMessage = "⚠️ Unable to verify access. Try again."
+	// contextMeterStaleAfter is the maximum age of the last completed assistant
+	// request before /status stops presenting its occupancy as live: stale
+	// current-window data renders unavailable instead of a misleading percentage.
+	contextMeterStaleAfter = 15 * time.Minute
 )
 
 type Command struct {
@@ -37,6 +41,7 @@ func (r *Router) MenuCommands() []channel.MenuCommand {
 		{Alias: "help", Description: "Show available commands"},
 		{Alias: "status", Description: "Agent health and session info"},
 		{Alias: "health", Description: "Show system health"},
+		{Alias: "usage", Description: "Show token usage and estimated cost", HasArgs: true},
 		{Alias: "session", Description: "Manage sessions: new, switch, or delete", HasArgs: true},
 		{Alias: "stop", Description: "Stop the running response (session kept)"},
 		{Alias: "steer", Description: "Stop and redirect the agent (session kept)", HasArgs: true},
@@ -53,6 +58,7 @@ func (r *Router) MenuCommands() []channel.MenuCommand {
 		{Alias: "variants", Description: "List and set model reasoning variants", HasArgs: true},
 		{Alias: "permissions", Description: "List / delete saved always-allow rules", HasArgs: true},
 		{Alias: "schedules", Description: "View or delete scheduled tasks", HasArgs: true},
+		{Alias: "webhooks", Description: "Recent webhook delivery diagnostics (admin)"},
 	}
 }
 
@@ -525,6 +531,10 @@ func (r *Router) registerDefaults() {
 		Name:    "health",
 		Handler: r.handleHealth,
 	}
+	r.commands["usage"] = Command{
+		Name:    "usage",
+		Handler: r.handleUsage,
+	}
 	r.commands["session"] = Command{
 		Name:    "session",
 		Handler: r.handleSession,
@@ -586,14 +596,16 @@ func (r *Router) registerDefaults() {
 		Name:    "variants",
 		Handler: r.handleVariants,
 	}
-	r.commands["permissions"] = Command{
-		Name:    "permissions",
-		Handler: r.handlePermissions,
-	}
+	r.registerPermissionCommand()
 	r.commands["schedules"] = Command{
 		Name:    "schedules",
 		Admin:   true,
 		Handler: r.handleSchedules,
+	}
+	r.commands["webhooks"] = Command{
+		Name:    "webhooks",
+		Admin:   true,
+		Handler: r.handleWebhooks,
 	}
 }
 
@@ -626,6 +638,7 @@ func (r *Router) helpText() string {
 		"• /help — show this message\n" +
 		"• /status — agent health + session info\n" +
 		"• /health — show system health\n" +
+		"• /usage [today|7d|session] — token usage and estimated cost\n" +
 		"• /session [new|switch <id|#|title>|delete <id>] — manage sessions\n" +
 		"• /stop — stop the running response (session kept)\n" +
 		"• /steer <direction> — stop and redirect the agent (session kept)\n" +
@@ -660,7 +673,7 @@ func (r *Router) handleStatus(ctx context.Context, msg channel.IncomingMessage, 
 	}
 	latency := time.Since(start).Truncate(time.Millisecond)
 
-	var modelLine, contextLine string
+	var modelLine, infoLines string
 	if sessInfo, err := inst.Client().GetSession(ctx, sessionID); err != nil {
 		slog.Warn("router: status get session failed", "session_id", sessionID, "error", err)
 	} else if sessInfo != nil {
@@ -686,15 +699,33 @@ func (r *Router) handleStatus(ctx context.Context, msg channel.IncomingMessage, 
 		if sessInfo.Tokens.CacheRead > 0 {
 			cachePart = " · cache read: " + formatMetric(sessInfo.Tokens.CacheRead)
 		}
-		contextLine = fmt.Sprintf("\nInput: %.1fk tokens (cumulative)%s · cost: $%.2f", inputK, cachePart, sessInfo.Cost)
-		if sessInfo.ContextTokens > 0 && providerID != "" && modelID != "" {
-			if providers, pErr := inst.Client().Providers(ctx); pErr == nil {
-				if limit, hasLimit := providers.ContextLimit(providerID, modelID); hasLimit && limit > 0 {
-					pct := float64(sessInfo.ContextTokens) * 100 / float64(limit)
-					contextLine += fmt.Sprintf("\nContext: %s / %s (%.1f%%)", formatMetric(sessInfo.ContextTokens), formatMetric(limit), pct)
+		inputLine := fmt.Sprintf("\nInput: %.1fk tokens (cumulative)%s · cost: $%.2f", inputK, cachePart, sessInfo.Cost)
+
+		// Current-window occupancy is rendered on its own lines, separated from
+		// the cumulative Input/cache/cost accounting line. A percentage is only
+		// shown for a verified, fresh message-tail source; missing or stale data
+		// renders unavailable — never a fabricated number.
+		contextLine := ""
+		fresh := sessInfo.ContextSource == relay.ContextSourceMessageTail &&
+			sessInfo.ContextTokens > 0 &&
+			!sessInfo.ContextUpdatedAt.IsZero() &&
+			time.Since(sessInfo.ContextUpdatedAt) <= contextMeterStaleAfter
+		switch {
+		case fresh:
+			if providerID != "" && modelID != "" {
+				if providers, pErr := inst.Client().Providers(ctx); pErr == nil {
+					if limit, hasLimit := providers.ContextLimit(providerID, modelID); hasLimit && limit > 0 {
+						pct := float64(sessInfo.ContextTokens) * 100 / float64(limit)
+						contextLine = fmt.Sprintf("\nContext: %s / %s (%.1f%%)\nContext source: last message-tail usage · updated %s",
+							formatMetric(sessInfo.ContextTokens), formatMetric(limit), pct,
+							freshnessAge(time.Since(sessInfo.ContextUpdatedAt)))
+					}
 				}
 			}
+		default:
+			contextLine = "\nContext: unavailable (agent did not expose current-window usage)"
 		}
+		infoLines = contextLine + inputLine
 	}
 
 	uptime := time.Since(r.startedAt).Truncate(time.Second)
@@ -714,7 +745,7 @@ func (r *Router) handleStatus(ctx context.Context, msg channel.IncomingMessage, 
 	}
 
 	status := fmt.Sprintf("✅ Agent connected\nSession: %s%s%s\nUptime: %s\nWorkdir: %s\nLatency: %s",
-		sessionLine, modelLine, contextLine, uptime, workdir, latency)
+		sessionLine, modelLine, infoLines, uptime, workdir, latency)
 	key := responseKey{platform: msg.Platform, channelID: msg.ChannelID, threadID: threadID, userID: userID}
 	if qLen := r.responses.queueDepth(key); qLen > 0 {
 		status += fmt.Sprintf("\nQueue: %d message(s)", qLen)
@@ -729,6 +760,24 @@ func formatMetric(n int64) string {
 		return fmt.Sprintf("%.1fM", float64(n)/1_000_000.0)
 	}
 	return fmt.Sprintf("%.1fk", float64(n)/1000.0)
+}
+
+// freshnessAge renders a duration as a short relative age (e.g. "8s ago",
+// "3m ago", "2h ago"), used by the /status context source freshness readout.
+func freshnessAge(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%ds ago", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	}
+	if d < 24*time.Hour {
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	}
+	return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 }
 
 func relativeAge(createdAt int64) string {

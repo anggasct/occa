@@ -189,6 +189,37 @@ func TestBootstrapCreatesDefault(t *testing.T) {
 	}
 }
 
+func TestDBPathFromConfig(t *testing.T) {
+	path := writeConfig(t, t.TempDir(), "database:\n  path: /var/lib/occa/occa.db\n")
+	got, err := DBPath(path)
+	if err != nil {
+		t.Fatalf("DBPath: %v", err)
+	}
+	if got != "/var/lib/occa/occa.db" {
+		t.Errorf("DBPath = %q, want /var/lib/occa/occa.db", got)
+	}
+}
+
+func TestDBPathEnvOverride(t *testing.T) {
+	path := writeConfig(t, t.TempDir(), "database:\n  path: /var/lib/occa/occa.db\n")
+	t.Setenv("OCCA_DB_PATH", "/tmp/env.db")
+	got, err := DBPath(path)
+	if err != nil {
+		t.Fatalf("DBPath: %v", err)
+	}
+	if got != "/tmp/env.db" {
+		t.Errorf("DBPath = %q, want /tmp/env.db (env must override YAML)", got)
+	}
+}
+
+func TestDBPathNoAdminRequired(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "")
+	path := writeConfig(t, t.TempDir(), "database:\n  path: /var/lib/occa/occa.db\n")
+	if _, err := DBPath(path); err != nil {
+		t.Fatalf("DBPath must not require OCCA_ADMIN_ID: %v", err)
+	}
+}
+
 func TestExpandHome(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {

@@ -126,14 +126,33 @@ type SessionTokens struct {
 	CacheWrite int64
 }
 
+// ContextSource identifies where the current-window occupancy value came from.
+// An empty ContextSource means no verified current-window value is available.
+type ContextSource string
+
+const (
+	// ContextSourceMessageTail is the per-message usage of the most recent
+	// completed assistant request in the session message tail: the current
+	// window occupancy, as opposed to the cumulative Tokens counters.
+	ContextSourceMessageTail ContextSource = "message-tail"
+)
+
 type SessionInfo struct {
 	Tokens SessionTokens
 	Cost   float64
-	Model  ModelRef
+	// CostKnown is false when the backend cannot provide provider pricing.
+	CostKnown bool
+	Model     ModelRef
 	// ContextTokens holds the prompt size (input + cache read) of the most
 	// recent completed assistant request: the current window occupancy,
 	// as opposed to the cumulative Tokens counters.
 	ContextTokens int64
+	// ContextSource records which verified source produced ContextTokens, and
+	// ContextUpdatedAt when that occupancy last changed (message completion
+	// time). Both are zero when no current-window value is available; the
+	// renderer must never present unverified or stale data as live.
+	ContextSource    ContextSource
+	ContextUpdatedAt time.Time
 }
 
 const (
@@ -269,7 +288,7 @@ func (c *HTTPClient) GetSession(ctx context.Context, sessionID string) (*Session
 	}
 
 	var raw struct {
-		Cost  float64 `json:"cost"`
+		Cost  json.RawMessage `json:"cost"`
 		Model struct {
 			ID         string `json:"id"`
 			ProviderID string `json:"providerID"`
@@ -288,8 +307,16 @@ func (c *HTTPClient) GetSession(ctx context.Context, sessionID string) (*Session
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return nil, fmt.Errorf("relay: get session: decode response: %w", err)
 	}
+	var cost float64
+	if len(raw.Cost) > 0 && string(raw.Cost) != "null" {
+		if err := json.Unmarshal(raw.Cost, &cost); err != nil {
+			return nil, fmt.Errorf("relay: get session: decode cost: %w", err)
+		}
+	}
 
 	var contextTokens int64
+	var contextSource ContextSource
+	var contextUpdatedAt time.Time
 	if msgs, mErr := c.get(ctx, "/session/"+sessionID+"/message?limit=20"); mErr == nil {
 		if msgs.StatusCode != http.StatusOK {
 			// Non-200 tail: the fetch failed, so the current-window occupancy is
@@ -306,6 +333,10 @@ func (c *HTTPClient) GetSession(ctx context.Context, sessionID string) (*Session
 							Read int64 `json:"read"`
 						} `json:"cache"`
 					} `json:"tokens"`
+					Time struct {
+						Created   int64 `json:"created"`
+						Completed int64 `json:"completed"`
+					} `json:"time"`
 				} `json:"info"`
 			}
 			decodeErr := json.NewDecoder(msgs.Body).Decode(&list)
@@ -316,8 +347,12 @@ func (c *HTTPClient) GetSession(ctx context.Context, sessionID string) (*Session
 						continue
 					}
 					if occupancy := list[i].Info.Tokens.Input + list[i].Info.Tokens.Cache.Read; occupancy > 0 {
-						contextTokens = occupancy
-						break
+						if ms := list[i].Info.Time.Completed; ms > 0 {
+							contextTokens = occupancy
+							contextSource = ContextSourceMessageTail
+							contextUpdatedAt = time.UnixMilli(ms)
+							break
+						}
 					}
 				}
 			}
@@ -332,8 +367,11 @@ func (c *HTTPClient) GetSession(ctx context.Context, sessionID string) (*Session
 			CacheRead:  raw.Tokens.Cache.Read,
 			CacheWrite: raw.Tokens.Cache.Write,
 		},
-		Cost:          raw.Cost,
-		ContextTokens: contextTokens,
+		Cost:             cost,
+		CostKnown:        cost > 0,
+		ContextTokens:    contextTokens,
+		ContextSource:    contextSource,
+		ContextUpdatedAt: contextUpdatedAt,
 		Model: ModelRef{
 			ProviderID: raw.Model.ProviderID,
 			ID:         raw.Model.ID,

@@ -150,6 +150,7 @@ func (r *Router) runResponse(
 	}
 	slog.Info("response started", "platform", key.platform, "channel_id", key.channelID, "thread_id", key.threadID, "user_id", key.userID)
 	defer func() {
+		r.recordUsage(msg, inst, sessionID)
 		r.permissions.expireOwner(owner)
 		cancel()
 		inst.End()

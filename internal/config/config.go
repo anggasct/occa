@@ -43,12 +43,13 @@ type WebhookConfig struct {
 }
 
 type EndpointConfig struct {
-	Name      string `yaml:"name"`
-	Path      string `yaml:"path"`
-	Secret    string `yaml:"secret"`
-	Platform  string `yaml:"platform"`
-	ChannelID string `yaml:"channel_id"`
-	Prompt    string `yaml:"prompt"`
+	Name       string   `yaml:"name"`
+	Path       string   `yaml:"path"`
+	Secret     string   `yaml:"secret"`
+	Platform   string   `yaml:"platform"`
+	ChannelID  string   `yaml:"channel_id"`
+	Prompt     string   `yaml:"prompt"`
+	SkipEvents []string `yaml:"skip_events,omitempty"`
 }
 
 type fileConfig struct {
@@ -91,11 +92,34 @@ func DefaultConfigPath() (string, error) {
 }
 
 func Load(configPath string) (Config, error) {
+	fc, err := loadFileConfig(configPath)
+	if err != nil {
+		return Config{}, err
+	}
+	adminID := os.Getenv("OCCA_ADMIN_ID")
+	if adminID == "" {
+		return Config{}, fmt.Errorf("config: OCCA_ADMIN_ID must be set")
+	}
+	return build(fc, adminID)
+}
+
+// DBPath resolves the configured database path without requiring the bot or
+// admin environment variables, so operator subcommands (db backup/restore)
+// can locate the database from config alone.
+func DBPath(configPath string) (string, error) {
+	fc, err := loadFileConfig(configPath)
+	if err != nil {
+		return "", err
+	}
+	return expandHome(fc.Database.Path)
+}
+
+func loadFileConfig(configPath string) (fileConfig, error) {
 	explicit := configPath != ""
 	if configPath == "" {
 		p, err := DefaultConfigPath()
 		if err != nil {
-			return Config{}, err
+			return fileConfig{}, err
 		}
 		configPath = p
 	}
@@ -105,25 +129,21 @@ func Load(configPath string) (Config, error) {
 	if _, err := os.Stat(configPath); err == nil {
 		data, err := os.ReadFile(configPath)
 		if err != nil {
-			return Config{}, fmt.Errorf("config: read %s: %w", configPath, err)
+			return fileConfig{}, fmt.Errorf("config: read %s: %w", configPath, err)
 		}
 		if err := yaml.Unmarshal(data, &fc); err != nil {
-			return Config{}, fmt.Errorf("config: parse %s: %w", configPath, err)
+			return fileConfig{}, fmt.Errorf("config: parse %s: %w", configPath, err)
 		}
 	} else if explicit {
-		return Config{}, fmt.Errorf("config: file not found: %s", configPath)
+		return fileConfig{}, fmt.Errorf("config: file not found: %s", configPath)
 	} else if err := bootstrap(configPath); err != nil {
-		return Config{}, err
+		return fileConfig{}, err
 	}
 
 	if err := applyEnv(&fc); err != nil {
-		return Config{}, err
+		return fileConfig{}, err
 	}
-	adminID := os.Getenv("OCCA_ADMIN_ID")
-	if adminID == "" {
-		return Config{}, fmt.Errorf("config: OCCA_ADMIN_ID must be set")
-	}
-	return build(fc, adminID)
+	return fc, nil
 }
 
 func defaultFileConfig() fileConfig {

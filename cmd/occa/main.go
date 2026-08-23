@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -53,6 +54,10 @@ func (p agentProbe) Running(_ context.Context) (int, bool, error) {
 var version = "dev"
 
 func main() {
+	if len(os.Args) >= 2 && os.Args[1] == "db" {
+		os.Exit(runDBCommand(os.Args[2:]))
+	}
+
 	var configPath string
 	flag.StringVar(&configPath, "config", "", "path to config file (default ~/.occa/config.yaml)")
 	flag.StringVar(&configPath, "c", "", "path to config file (shorthand)")
@@ -80,12 +85,15 @@ func main() {
 	}
 	slog.SetDefault(slog.New(logging.NewRedactHandler(handler, telegramToken, discordToken)))
 
-	db, err := store.OpenWithDefaultWorkdir(cfg.Database.Path, cfg.Agent.DefaultWorkdir)
+	db, dbLock, err := openStoreWithLock(cfg.Database.Path, cfg.Agent.DefaultWorkdir)
 	if err != nil {
-		slog.Error("failed to open store", "error", err)
+		slog.Error("failed to lock or open store", "error", err)
 		os.Exit(1)
 	}
-	defer db.Close()
+	defer func() {
+		_ = db.Close()
+		_ = dbLock.Unlock()
+	}()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -220,7 +228,7 @@ func main() {
 
 	var webhookSrv *webhook.Server
 	if len(cfg.Webhooks.Endpoints) > 0 {
-		webhookExecutor := func(ctx context.Context, platform, channelID, prompt string) {
+		webhookExecutor := func(ctx context.Context, platform, channelID, prompt string) error {
 			for _, ch := range channels {
 				if ch.Name() == platform {
 					send := func(text string) { notify(ch, channelID, text) }
@@ -229,7 +237,7 @@ func main() {
 					inst, err := manager.Instance(ctx, cfg.Agent.DefaultWorkdir)
 					if err != nil {
 						send("⚠️ Webhook analysis failed: agent unreachable")
-						return
+						return errors.New("webhook agent unavailable")
 					}
 					defer inst.End()
 
@@ -237,18 +245,18 @@ func main() {
 					sessionID, err := resolver.Resolve(ctx, platform, channelID, "", "", inst.PID())
 					if err != nil {
 						send("⚠️ Webhook analysis failed: session error")
-						return
+						return errors.New("webhook session unavailable")
 					}
 
 					if err := inst.Client().SendMessage(ctx, sessionID, prompt, nil, nil); err != nil {
-						send("⚠️ Webhook analysis failed: " + err.Error())
-						return
+						send("⚠️ Webhook analysis failed: agent request error")
+						return errors.New("webhook agent request failed")
 					}
 
 					events, err := inst.Client().Events(ctx, sessionID)
 					if err != nil {
 						send("⚠️ Webhook analysis failed: events error")
-						return
+						return errors.New("webhook event stream failed")
 					}
 
 					var buf strings.Builder
@@ -262,19 +270,21 @@ func main() {
 								result = "(no output)"
 							}
 							send(result)
-							return
+							return nil
 						case "error":
-							send("⚠️ " + ev.Delta)
-							return
+							send("⚠️ Webhook analysis failed: agent response error")
+							return errors.New("webhook agent response failed")
 						}
 					}
-					return
+					send("⚠️ Webhook analysis failed: incomplete response")
+					return errors.New("webhook response incomplete")
 				}
 			}
 			slog.Warn("webhook: no channel adapter", "platform", platform, "channel_id", channelID)
+			return errors.New("webhook channel adapter unavailable")
 		}
 
-		webhookSrv = webhook.New(cfg.Webhooks, webhookExecutor)
+		webhookSrv = webhook.New(cfg.Webhooks, webhookExecutor, db.WebhookDeliveryRepo())
 		if err := webhookSrv.Start(ctx); err != nil {
 			slog.Error("failed to start webhook server", "error", err)
 		}
@@ -342,6 +352,19 @@ func healthSecrets(cfg config.Config, telegramToken, discordToken string) []stri
 		secrets = append(secrets, endpoint.Secret)
 	}
 	return secrets
+}
+
+func openStoreWithLock(dbPath, defaultWorkdir string) (*store.SQLiteStore, *store.DBLock, error) {
+	dbLock, err := store.LockDB(dbPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	db, err := store.OpenWithDefaultWorkdir(dbPath, defaultWorkdir)
+	if err != nil {
+		_ = dbLock.Unlock()
+		return nil, nil, err
+	}
+	return db, dbLock, nil
 }
 
 var outboundRenderer = render.New()
