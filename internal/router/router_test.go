@@ -1120,7 +1120,7 @@ func TestSessionPickerTitles(t *testing.T) {
 }
 
 func TestStatusContextMeter(t *testing.T) {
-	t.Run("renders model + cumulative input with cache read", func(t *testing.T) {
+	t.Run("renders model, cumulative input, and real context meter", func(t *testing.T) {
 		r, client, reply := newTestRouter()
 		client.sessionInfo = &relay.SessionInfo{
 			Cost:  0.05,
@@ -1129,7 +1129,13 @@ func TestStatusContextMeter(t *testing.T) {
 				Input:     12000,
 				CacheRead: 19400000,
 			},
+			ContextTokens: 23400,
 		}
+		client.providers = relay.Providers{All: []relay.Provider{
+			{ID: "openai", Models: map[string]json.RawMessage{
+				"gpt-4o": json.RawMessage(`{"limit":{"context":131000}}`),
+			}},
+		}}
 
 		err := r.Route(context.Background(), msg("/status", reply))
 		if err != nil {
@@ -1145,11 +1151,68 @@ func TestStatusContextMeter(t *testing.T) {
 		if !strings.Contains(out, "Input: 12.0k tokens (cumulative) · cache read: 19.4M · cost: $0.05") {
 			t.Fatalf("unexpected status output: %q", out)
 		}
-		if strings.Contains(out, "Context:") {
-			t.Fatalf("expected no misleading Context line, got: %q", out)
+		if !strings.Contains(out, "Context: 23.4k / 131.0k (17.9%)") {
+			t.Fatalf("expected real context meter from current-window tokens, got: %q", out)
 		}
-		if strings.Contains(out, "tokens (9%)") {
-			t.Fatalf("expected no percent usage comparison, got: %q", out)
+		if strings.Contains(out, "9.2%") {
+			t.Fatalf("cumulative input leaked into the percentage, got: %q", out)
+		}
+	})
+
+	t.Run("context meter omitted when model limit unavailable", func(t *testing.T) {
+		r, client, reply := newTestRouter()
+		client.sessionInfo = &relay.SessionInfo{
+			Cost:  0.05,
+			Model: relay.ModelRef{ProviderID: "openai", ID: "gpt-4o", Variant: "max"},
+			Tokens: relay.SessionTokens{
+				Input:     12000,
+				CacheRead: 19400000,
+			},
+			ContextTokens: 23400,
+		}
+
+		err := r.Route(context.Background(), msg("/status", reply))
+		if err != nil {
+			t.Fatalf("Route: %v", err)
+		}
+		if len(reply.sends) == 0 {
+			t.Fatal("expected status response")
+		}
+		out := reply.sends[0]
+		if !strings.Contains(out, "Input: 12.0k tokens (cumulative) · cache read: 19.4M · cost: $0.05") {
+			t.Fatalf("cumulative line must stay, got: %q", out)
+		}
+		if strings.Contains(out, "Context:") {
+			t.Fatalf("expected no Context line when the model limit is unknown, got: %q", out)
+		}
+	})
+
+	t.Run("context meter omitted when current-window value unavailable", func(t *testing.T) {
+		r, client, reply := newTestRouter()
+		client.sessionInfo = &relay.SessionInfo{
+			Cost:  0.05,
+			Model: relay.ModelRef{ProviderID: "openai", ID: "gpt-4o", Variant: "max"},
+			Tokens: relay.SessionTokens{
+				Input:     12000,
+				CacheRead: 19400000,
+			},
+		}
+		client.providers = relay.Providers{All: []relay.Provider{
+			{ID: "openai", Models: map[string]json.RawMessage{
+				"gpt-4o": json.RawMessage(`{"limit":{"context":131000}}`),
+			}},
+		}}
+
+		err := r.Route(context.Background(), msg("/status", reply))
+		if err != nil {
+			t.Fatalf("Route: %v", err)
+		}
+		if len(reply.sends) == 0 {
+			t.Fatal("expected status response")
+		}
+		out := reply.sends[0]
+		if strings.Contains(out, "Context:") {
+			t.Fatalf("expected no Context line when the current-window value is unknown, got: %q", out)
 		}
 	})
 

@@ -619,6 +619,14 @@ func (r *Router) handleStatus(ctx context.Context, msg channel.IncomingMessage, 
 			cachePart = " · cache read: " + formatMetric(sessInfo.Tokens.CacheRead)
 		}
 		contextLine = fmt.Sprintf("\nInput: %.1fk tokens (cumulative)%s · cost: $%.2f", inputK, cachePart, sessInfo.Cost)
+		if sessInfo.ContextTokens > 0 && providerID != "" && modelID != "" {
+			if providers, pErr := inst.Client().Providers(ctx); pErr == nil {
+				if limit, hasLimit := providers.ContextLimit(providerID, modelID); hasLimit && limit > 0 {
+					pct := float64(sessInfo.ContextTokens) * 100 / float64(limit)
+					contextLine += fmt.Sprintf("\nContext: %s / %s (%.1f%%)", formatMetric(sessInfo.ContextTokens), formatMetric(limit), pct)
+				}
+			}
+		}
 	}
 
 	uptime := time.Since(r.startedAt).Truncate(time.Second)
