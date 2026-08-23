@@ -43,12 +43,13 @@ type WebhookConfig struct {
 }
 
 type EndpointConfig struct {
-	Name      string `yaml:"name"`
-	Path      string `yaml:"path"`
-	Secret    string `yaml:"secret"`
-	Platform  string `yaml:"platform"`
-	ChannelID string `yaml:"channel_id"`
-	Prompt    string `yaml:"prompt"`
+	Name       string   `yaml:"name"`
+	Path       string   `yaml:"path"`
+	Secret     string   `yaml:"secret"`
+	Platform   string   `yaml:"platform"`
+	ChannelID  string   `yaml:"channel_id"`
+	Prompt     string   `yaml:"prompt"`
+	SkipEvents []string `yaml:"skip_events,omitempty"`
 }
 
 type fileConfig struct {

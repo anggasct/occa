@@ -3,7 +3,10 @@ package webhook
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,13 +17,25 @@ import (
 	"strings"
 	"text/template"
 	"time"
+	"unicode/utf8"
 
 	"github.com/anggasct/occa/internal/config"
+	"github.com/anggasct/occa/internal/store"
 )
 
 const (
 	maxWebhookBodySize         int64 = 10 * 1024 * 1024
 	maxConcurrentWebhookEvents       = 16
+
+	maxDeliveryIDRunes   = 128
+	maxEventTypeRunes    = 64
+	maxErrorSummaryRunes = 240
+
+	retentionKeep     = 500
+	retentionAge      = 30 * 24 * time.Hour
+	pruneInterval     = 10 * time.Minute
+	processingTimeout = 10 * time.Minute
+	claimGrace        = processingTimeout + 2*time.Minute
 
 	readHeaderTimeout = 10 * time.Second
 	readTimeout       = 30 * time.Second
@@ -28,22 +43,35 @@ const (
 	idleTimeout       = 2 * time.Minute
 )
 
-type Executor func(ctx context.Context, platform, channelID, prompt string)
+// DeliveryStore is the durable receipt backend the server drives. The full
+// repo lives in internal/store; the server only needs the transitions below.
+type DeliveryStore interface {
+	Create(ctx context.Context, d store.WebhookDelivery) (bool, error)
+	Get(ctx context.Context, endpoint, deliveryID string) (*store.WebhookDelivery, error)
+	Transition(ctx context.Context, id int64, from []store.WebhookStatus, to store.WebhookStatus, summary string) (bool, error)
+	Prune(ctx context.Context, cutoff int64, keep int) (int, error)
+	FailStale(ctx context.Context, cutoff int64, summary string) (int, error)
+}
+
+type Executor func(ctx context.Context, platform, channelID, prompt string) error
 
 type Server struct {
 	bind              string
 	bindAddr          string
 	endpoints         map[string]config.EndpointConfig
 	executor          Executor
+	deliveries        DeliveryStore
 	httpSrv           *http.Server
 	eventSlots        chan struct{}
+	lastPrune         time.Time
+	pruneInterval     time.Duration
 	readHeaderTimeout time.Duration
 	readTimeout       time.Duration
 	writeTimeout      time.Duration
 	idleTimeout       time.Duration
 }
 
-func New(cfg config.WebhookConfig, executor Executor) *Server {
+func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) *Server {
 	endpoints := make(map[string]config.EndpointConfig)
 	for _, ep := range cfg.Endpoints {
 		endpoints[ep.Path] = ep
@@ -52,7 +80,9 @@ func New(cfg config.WebhookConfig, executor Executor) *Server {
 		bind:              cfg.Bind,
 		endpoints:         endpoints,
 		executor:          executor,
+		deliveries:        deliveries,
 		eventSlots:        make(chan struct{}, maxConcurrentWebhookEvents),
+		pruneInterval:     pruneInterval,
 		readHeaderTimeout: readHeaderTimeout,
 		readTimeout:       readTimeout,
 		writeTimeout:      writeTimeout,
@@ -73,7 +103,45 @@ func (s *Server) releaseEvent() {
 	<-s.eventSlots
 }
 
+// recoverStale marks deliveries a previous process left in flight as failed so
+// diagnostics never report a phantom running delivery after a crash. Pruning
+// bounds table growth at startup.
+func (s *Server) recoverStale(ctx context.Context) {
+	now := time.Now()
+	if failed, err := s.deliveries.FailStale(ctx, now.Add(-claimGrace).Unix(), "interrupted by restart"); err != nil {
+		slog.Error("webhook: restart recovery failed", "error", err)
+	} else if failed > 0 {
+		slog.Info("webhook: restart recovery", "failed_deliveries", failed)
+	}
+	if pruned, err := s.deliveries.Prune(ctx, now.Add(-retentionAge).Unix(), retentionKeep); err != nil {
+		slog.Error("webhook: prune failed", "error", err)
+	} else if pruned > 0 {
+		slog.Info("webhook: pruned old deliveries", "pruned", pruned)
+	}
+	s.lastPrune = now
+}
+
+func (s *Server) pruneIfDue() {
+	if time.Since(s.lastPrune) < s.pruneInterval {
+		return
+	}
+	s.lastPrune = time.Now()
+	pruned, err := s.deliveries.Prune(context.Background(), time.Now().Add(-retentionAge).Unix(), retentionKeep)
+	if err != nil {
+		if errors.Is(err, sql.ErrConnDone) {
+			return
+		}
+		slog.Error("webhook: prune failed", "error", err)
+		return
+	}
+	if pruned > 0 {
+		slog.Info("webhook: pruned old deliveries", "pruned", pruned)
+	}
+}
+
 func (s *Server) Start(ctx context.Context) error {
+	s.recoverStale(ctx)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleRequest)
 
@@ -161,15 +229,126 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	payloadHash := sha256Hex(body)
+	eventType := providerEventType(r, body)
+	deliveryID := providerDeliveryID(r, payloadHash)
+
+	receipt, shouldProcess, err := s.claimReceipt(r.Context(), ep, deliveryID, eventType, payloadHash)
+	if err != nil {
+		s.releaseEvent()
+		slog.Error("webhook: receipt claim failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
+		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	if !shouldProcess {
+		slog.Info("webhook: duplicate delivery", "endpoint", ep.Name, "delivery_id", deliveryID, "event_type", eventType, "observed_status", receipt.Status)
+		s.releaseEvent()
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if s.shouldSkip(ep, eventType) {
+		if ok, tErr := s.deliveries.Transition(r.Context(), receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived, store.WebhookStatusAccepted, store.WebhookStatusProcessing}, store.WebhookStatusSkipped, ""); tErr != nil {
+			slog.Error("webhook: skip transition failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", tErr)
+		} else if !ok {
+			slog.Warn("webhook: skip transition lost race", "endpoint", ep.Name, "delivery_id", deliveryID, "observed_status", receipt.Status)
+		} else {
+			slog.Info("webhook: delivery skipped", "endpoint", ep.Name, "delivery_id", deliveryID, "event_type", eventType)
+		}
+		s.releaseEvent()
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	claimed := s.claimProcessing(r.Context(), receipt, deliveryID)
+	if !claimed {
+		s.releaseEvent()
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	slog.Info("webhook: delivery accepted", "endpoint", ep.Name, "delivery_id", deliveryID, "event_type", eventType, "status", store.WebhookStatusProcessing)
 	w.WriteHeader(http.StatusOK)
 
 	go func() {
 		defer s.releaseEvent()
-		s.processAsync(ep, body)
+		s.processAsync(ep, body, receipt.ID, deliveryID, eventType)
+		s.pruneIfDue()
 	}()
 }
 
-func (s *Server) processAsync(ep config.EndpointConfig, body []byte) {
+// claimReceipt inserts a durable receipt for a validated delivery. A brand-new
+// delivery reports shouldProcess=true. A duplicate of a terminal delivery, or
+// one still being processed within the claim grace window, observes the
+// existing status and does not start a second session. A duplicate whose
+// in-flight attempt went stale (the earlier process died mid-request) is
+// re-claimed atomically so the event cannot be silently lost.
+func (s *Server) claimReceipt(ctx context.Context, ep config.EndpointConfig, deliveryID, eventType, payloadHash string) (*store.WebhookDelivery, bool, error) {
+	created, err := s.deliveries.Create(ctx, store.WebhookDelivery{
+		Endpoint:    ep.Name,
+		DeliveryID:  deliveryID,
+		EventType:   eventType,
+		PayloadHash: payloadHash,
+		Attempt:     1,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+
+	receipt, err := s.deliveries.Get(ctx, ep.Name, deliveryID)
+	if err != nil {
+		return nil, false, err
+	}
+	if receipt == nil {
+		return nil, false, errors.New("receipt missing after claim")
+	}
+	if created {
+		return receipt, true, nil
+	}
+
+	if isTerminal(receipt.Status) {
+		return receipt, false, nil
+	}
+	if time.Now().Unix()-receipt.UpdatedAt < int64(claimGrace.Seconds()) {
+		return receipt, false, nil
+	}
+
+	ok, tErr := s.deliveries.Transition(ctx, receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived, store.WebhookStatusAccepted, store.WebhookStatusProcessing}, store.WebhookStatusProcessing, "")
+	if tErr != nil {
+		return nil, false, tErr
+	}
+	if !ok {
+		return receipt, false, nil
+	}
+	receipt.Status = store.WebhookStatusProcessing
+	return receipt, true, nil
+}
+
+// claimProcessing walks a fresh receipt through accepted -> processing under
+// compare-and-swap so a concurrent request can never observe a half-claimed
+// state or start a second session.
+func (s *Server) claimProcessing(ctx context.Context, receipt *store.WebhookDelivery, deliveryID string) bool {
+	if receipt.Status == store.WebhookStatusProcessing {
+		return true
+	}
+	ok, err := s.deliveries.Transition(ctx, receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived}, store.WebhookStatusAccepted, "")
+	if err != nil {
+		slog.Error("webhook: accept transition failed", "endpoint", receipt.Endpoint, "delivery_id", deliveryID, "error", err)
+		return false
+	}
+	if !ok {
+		return false
+	}
+	ok, err = s.deliveries.Transition(ctx, receipt.ID, []store.WebhookStatus{store.WebhookStatusAccepted}, store.WebhookStatusProcessing, "")
+	if err != nil {
+		slog.Error("webhook: processing claim failed", "endpoint", receipt.Endpoint, "delivery_id", deliveryID, "error", err)
+		return false
+	}
+	return ok
+}
+
+func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, deliveryID, eventType string) {
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		payload = map[string]any{"raw": string(body)}
@@ -182,16 +361,110 @@ func (s *Server) processAsync(ep config.EndpointConfig, body []byte) {
 
 	rendered, err := renderTemplate(ep.Prompt, tmplData)
 	if err != nil {
-		slog.Error("webhook: template render failed", "endpoint", ep.Name, "payload_bytes", len(body), "error", err)
+		slog.Error("webhook: template render failed", "endpoint", ep.Name, "delivery_id", deliveryID, "payload_bytes", len(body), "error", err)
 		rendered = ep.Prompt + "\n\nRaw webhook payload:\n" + string(body)
 	}
 
 	rendered = strings.ReplaceAll(rendered, "</untrusted_payload>", "&lt;/untrusted_payload&gt;")
 	wrapped := fmt.Sprintf("<untrusted_payload>\n%s\n</untrusted_payload>", rendered)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), processingTimeout)
 	defer cancel()
-	s.executor(ctx, ep.Platform, ep.ChannelID, wrapped)
+	err = s.executor(ctx, ep.Platform, ep.ChannelID, wrapped)
+
+	switch {
+	case err == nil:
+		if _, tErr := s.deliveries.Transition(context.Background(), id, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusCompleted, ""); tErr != nil {
+			slog.Error("webhook: completed transition failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", tErr)
+		}
+		slog.Info("webhook: delivery completed", "endpoint", ep.Name, "delivery_id", deliveryID, "event_type", eventType)
+	case errors.Is(err, context.DeadlineExceeded), ctx.Err() == context.DeadlineExceeded:
+		s.failDelivery(ep, id, deliveryID, eventType, "timed out after "+processingTimeout.String())
+	default:
+		s.failDelivery(ep, id, deliveryID, eventType, redactSummary(err.Error(), maxErrorSummaryRunes, ep.Secret))
+	}
+}
+
+func (s *Server) failDelivery(ep config.EndpointConfig, id int64, deliveryID, eventType, summary string) {
+	if _, err := s.deliveries.Transition(context.Background(), id, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusFailed, summary); err != nil {
+		slog.Error("webhook: failed transition", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
+	}
+	slog.Warn("webhook: delivery failed", "endpoint", ep.Name, "delivery_id", deliveryID, "event_type", eventType, "error_summary", summary)
+}
+
+func (s *Server) shouldSkip(ep config.EndpointConfig, eventType string) bool {
+	if eventType == "" || len(ep.SkipEvents) == 0 {
+		return false
+	}
+	for _, e := range ep.SkipEvents {
+		if e == eventType {
+			return true
+		}
+	}
+	return false
+}
+
+func isTerminal(status store.WebhookStatus) bool {
+	switch status {
+	case store.WebhookStatusCompleted, store.WebhookStatusSkipped, store.WebhookStatusFailed:
+		return true
+	}
+	return false
+}
+
+func providerDeliveryID(r *http.Request, payloadHash string) string {
+	for _, header := range []string{"X-GitHub-Delivery", "X-Webhook-Delivery"} {
+		if id := r.Header.Get(header); id != "" {
+			return clipRunes(id, maxDeliveryIDRunes)
+		}
+	}
+	return fmt.Sprintf("gen-%d-%s", time.Now().UnixNano(), payloadHash[:12])
+}
+
+func providerEventType(r *http.Request, body []byte) string {
+	if typ := r.Header.Get("X-GitHub-Event"); typ != "" {
+		return clipRunes(typ, maxEventTypeRunes)
+	}
+	var payload struct {
+		EventType string `json:"event_type"`
+		Type      string `json:"type"`
+		Action    string `json:"action"`
+	}
+	if json.Unmarshal(body, &payload) != nil {
+		return ""
+	}
+	for _, v := range []string{payload.EventType, payload.Type, payload.Action} {
+		if v != "" {
+			return clipRunes(v, maxEventTypeRunes)
+		}
+	}
+	return ""
+}
+
+func sha256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+func clipRunes(s string, max int) string {
+	if max <= 0 || utf8.RuneCountInString(s) <= max {
+		return s
+	}
+	runes := []rune(s)
+	return string(runes[:max])
+}
+
+func redactSummary(s string, max int, secrets ...string) string {
+	for _, secret := range secrets {
+		if secret != "" {
+			s = strings.ReplaceAll(s, secret, "[redacted]")
+		}
+	}
+	s = strings.Join(strings.Fields(s), " ")
+	if max <= 0 {
+		max = maxErrorSummaryRunes
+	}
+	return clipRunes(s, max)
 }
 
 func renderTemplate(prompt string, data any) (string, error) {
