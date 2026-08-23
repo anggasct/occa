@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/anggasct/occa/internal/channel"
+	"github.com/anggasct/occa/internal/store"
 )
 
 type stubChannel struct {
@@ -120,5 +123,65 @@ func TestNotifyPassesThroughDiscord(t *testing.T) {
 
 	if got == "" || !strings.Contains(got, "<x>") {
 		t.Fatalf("discord content altered: %q", got)
+	}
+}
+
+func TestOpenStoreWithLockSerializesStartupAndRestore(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "occa.db")
+
+	first, firstLock, err := openStoreWithLock(dbPath, "")
+	if err != nil {
+		t.Fatalf("first startup: %v", err)
+	}
+	defer func() {
+		_ = first.Close()
+		_ = firstLock.Unlock()
+	}()
+
+	backupPath := filepath.Join(dir, "backup.db")
+	if _, err := store.BackupFile(dbPath, backupPath, false); err != nil {
+		t.Fatalf("backup during startup: %v", err)
+	}
+	if _, err := store.RestoreFile(dbPath, backupPath, false); !errors.Is(err, store.ErrDBInUse) {
+		t.Fatalf("restore during initialized service = %v, want ErrDBInUse", err)
+	}
+
+	second, secondLock, err := openStoreWithLock(dbPath, "")
+	if second != nil || secondLock != nil {
+		if second != nil {
+			_ = second.Close()
+		}
+		if secondLock != nil {
+			_ = secondLock.Unlock()
+		}
+		t.Fatal("second startup returned initialized store while first startup was active")
+	}
+	if !errors.Is(err, store.ErrDBInUse) {
+		t.Fatalf("second startup = %v, want ErrDBInUse", err)
+	}
+}
+
+func TestOpenStoreWithLockReleasesAfterInitializationFailure(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "occa.db")
+	if err := os.Mkdir(dbPath, 0o755); err != nil {
+		t.Fatalf("create invalid database path: %v", err)
+	}
+
+	db, lock, err := openStoreWithLock(dbPath, "")
+	if db != nil || lock != nil {
+		t.Fatal("failed startup returned resources")
+	}
+	if err == nil {
+		t.Fatal("startup unexpectedly succeeded against a directory")
+	}
+
+	lock, err = store.LockDB(dbPath)
+	if err != nil {
+		t.Fatalf("lock after failed startup: %v", err)
+	}
+	if err := lock.Unlock(); err != nil {
+		t.Fatalf("unlock after failed startup: %v", err)
 	}
 }

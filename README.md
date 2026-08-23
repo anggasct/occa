@@ -60,6 +60,31 @@ overridden with an `OCCA_*` environment variable (env var > config file >
 built-in default). Bot tokens are env-only and never written to the config
 file.
 
+## Database backup and restore
+
+Use the operator commands to protect the SQLite store during upgrades:
+
+```sh
+occa db backup --output ~/.occa/backups/occa.db
+occa db restore --input ~/.occa/backups/occa.db
+```
+
+The database path is resolved from `--config` (or `-c`), the default
+`~/.occa/config.yaml`, and the `OCCA_DB_PATH` environment override. Backups use
+a SQLite-consistent snapshot and can run while OCCA is live. Restore must be
+run with OCCA stopped; it refuses an active database, validates integrity and
+schema compatibility, creates a timestamped `<database>.pre-restore.*.db`
+safety copy, and atomically replaces the database. Restore failures leave the
+existing database unchanged.
+
+`--force` allows an existing backup output to be overwritten and permits an
+intentional restore from an older schema. It does not bypass integrity checks
+or the stopped-service requirement.
+
+Before a binary or schema upgrade, `scripts/backup-db.sh [output-dir]` resolves
+the configured database and writes a timestamped backup. Set `OCCA_CONFIG` for
+a non-default config file or `OCCA_BIN` for the OCCA binary path.
+
 ## Contributing
 
 Bug reports, feature requests, and pull requests are welcome. Please open an
