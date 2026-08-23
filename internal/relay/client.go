@@ -130,6 +130,10 @@ type SessionInfo struct {
 	Tokens SessionTokens
 	Cost   float64
 	Model  ModelRef
+	// ContextTokens holds the prompt size (input + cache read) of the most
+	// recent completed assistant request: the current window occupancy,
+	// as opposed to the cumulative Tokens counters.
+	ContextTokens int64
 }
 
 const (
@@ -285,6 +289,41 @@ func (c *HTTPClient) GetSession(ctx context.Context, sessionID string) (*Session
 		return nil, fmt.Errorf("relay: get session: decode response: %w", err)
 	}
 
+	var contextTokens int64
+	if msgs, mErr := c.get(ctx, "/session/"+sessionID+"/message?limit=20"); mErr == nil {
+		if msgs.StatusCode != http.StatusOK {
+			// Non-200 tail: the fetch failed, so the current-window occupancy is
+			// unavailable. Never decode an error body — it may still contain a
+			// valid-looking message array that would render wrong data.
+			_ = msgs.Body.Close()
+		} else {
+			var list []struct {
+				Info struct {
+					Role   string `json:"role"`
+					Tokens struct {
+						Input int64 `json:"input"`
+						Cache struct {
+							Read int64 `json:"read"`
+						} `json:"cache"`
+					} `json:"tokens"`
+				} `json:"info"`
+			}
+			decodeErr := json.NewDecoder(msgs.Body).Decode(&list)
+			_ = msgs.Body.Close()
+			if decodeErr == nil {
+				for i := len(list) - 1; i >= 0; i-- {
+					if list[i].Info.Role != "assistant" {
+						continue
+					}
+					if occupancy := list[i].Info.Tokens.Input + list[i].Info.Tokens.Cache.Read; occupancy > 0 {
+						contextTokens = occupancy
+						break
+					}
+				}
+			}
+		}
+	}
+
 	return &SessionInfo{
 		Tokens: SessionTokens{
 			Input:      raw.Tokens.Input,
@@ -293,7 +332,8 @@ func (c *HTTPClient) GetSession(ctx context.Context, sessionID string) (*Session
 			CacheRead:  raw.Tokens.Cache.Read,
 			CacheWrite: raw.Tokens.Cache.Write,
 		},
-		Cost: raw.Cost,
+		Cost:          raw.Cost,
+		ContextTokens: contextTokens,
 		Model: ModelRef{
 			ProviderID: raw.Model.ProviderID,
 			ID:         raw.Model.ID,

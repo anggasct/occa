@@ -554,21 +554,33 @@ func TestAbortSession(t *testing.T) {
 func TestGetSession(t *testing.T) {
 	t.Run("success 200", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodGet || r.URL.Path != "/session/ses-123" {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/session/ses-123":
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{
+					"cost": 0.05,
+					"model": {"providerID": "anthropic", "id": "claude-3-5-sonnet-20241022", "variant": "max"},
+					"tokens": {
+						"input": 12000,
+						"output": 3000,
+						"reasoning": 500,
+						"cache": {"read": 1000, "write": 200}
+					}
+				}`))
+			case "/session/ses-123/message":
+				if r.URL.RawQuery != "limit=20" {
+					t.Errorf("unexpected message query: %q", r.URL.RawQuery)
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[
+					{"info":{"role":"assistant","tokens":{"input":0,"cache":{"read":0}}}},
+					{"info":{"role":"assistant","tokens":{"input":4829,"cache":{"read":236032}}}},
+					{"info":{"role":"user","tokens":{}}}
+				]`))
+			default:
 				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{
-				"cost": 0.05,
-				"model": {"providerID": "anthropic", "id": "claude-3-5-sonnet-20241022", "variant": "max"},
-				"tokens": {
-					"input": 12000,
-					"output": 3000,
-					"reasoning": 500,
-					"cache": {"read": 1000, "write": 200}
-				}
-			}`))
 		}))
 		defer srv.Close()
 
@@ -585,6 +597,73 @@ func TestGetSession(t *testing.T) {
 		}
 		if info.Tokens.Input != 12000 || info.Tokens.Output != 3000 || info.Tokens.Reasoning != 500 || info.Tokens.CacheRead != 1000 || info.Tokens.CacheWrite != 200 {
 			t.Fatalf("unexpected tokens: %+v", info.Tokens)
+		}
+		if info.ContextTokens != 4829+236032 {
+			t.Fatalf("context tokens = %d, want %d (last assistant input + cache read; in-flight zero skipped)", info.ContextTokens, 4829+236032)
+		}
+	})
+
+	t.Run("message tail unavailable keeps context zero", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/session/ses-123" {
+				http.Error(w, "boom", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{
+				"cost": 0.05,
+				"model": {"providerID": "anthropic", "id": "claude-3-5-sonnet-20241022", "variant": "max"},
+				"tokens": {"input": 12000, "output": 3000, "reasoning": 500, "cache": {"read": 1000, "write": 200}}
+			}`))
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		info, err := c.GetSession(context.Background(), "ses-123")
+		if err != nil {
+			t.Fatalf("GetSession: %v", err)
+		}
+		if info.ContextTokens != 0 {
+			t.Fatalf("context tokens = %d, want 0 when the message tail fails", info.ContextTokens)
+		}
+		if info.Tokens.Input != 12000 {
+			t.Fatalf("cumulative input = %d, want 12000 even when the message tail fails", info.Tokens.Input)
+		}
+	})
+
+	t.Run("non-200 message tail with valid-looking array keeps context zero", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/session/ses-123" {
+				// Error body that still contains a valid-looking message array:
+				// it must NOT be decoded into ContextTokens.
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`[
+					{"info":{"role":"assistant","tokens":{"input":4829,"cache":{"read":236032}}}}
+				]`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{
+				"cost": 0.05,
+				"model": {"providerID": "anthropic", "id": "claude-3-5-sonnet-20241022", "variant": "max"},
+				"tokens": {"input": 12000, "output": 3000, "reasoning": 500, "cache": {"read": 1000, "write": 200}}
+			}`))
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		info, err := c.GetSession(context.Background(), "ses-123")
+		if err != nil {
+			t.Fatalf("GetSession: %v", err)
+		}
+		if info.ContextTokens != 0 {
+			t.Fatalf("context tokens = %d, want 0 when the message tail returns non-200 with a valid-looking array", info.ContextTokens)
+		}
+		if info.Tokens.Input != 12000 || info.Tokens.CacheRead != 1000 {
+			t.Fatalf("cumulative tokens = %+v, want 12000/1000 to survive a failed message tail", info.Tokens)
 		}
 	})
 
