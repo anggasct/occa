@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	schemaVersion    = 7
+	schemaVersion    = 8
 	busyTimeoutMilli = 5000
 )
 
@@ -22,6 +22,28 @@ var migrations = []func(s *SQLiteStore, tx *sql.Tx) error{
 	addProgressNotices,
 	addSessionModel,
 	addThreadConfig,
+	addPermissionRules,
+}
+
+func addPermissionRules(s *SQLiteStore, tx *sql.Tx) error {
+	ddl := `
+CREATE TABLE IF NOT EXISTS permission_rule (
+	id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	platform    TEXT NOT NULL,
+	channel_id  TEXT NOT NULL,
+	thread_id   TEXT NOT NULL DEFAULT '',
+	user_id     TEXT NOT NULL DEFAULT '',
+	tool        TEXT NOT NULL,
+	patterns    TEXT NOT NULL,
+	created_at  INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_permission_rule_owner_tool_patterns
+	ON permission_rule (platform, channel_id, thread_id, user_id, tool, patterns);
+`
+	if _, err := tx.Exec(ddl); err != nil {
+		return fmt.Errorf("store: migrate permission rules: %w", err)
+	}
+	return nil
 }
 
 func addSessionModel(s *SQLiteStore, tx *sql.Tx) error {
@@ -182,6 +204,7 @@ type SQLiteStore struct {
 	schedules       *sqliteScheduleRepo
 	progressNotices *sqliteProgressNoticeRepo
 	threadConfigs   *sqliteThreadConfigRepo
+	permissionRules *sqlitePermissionRuleRepo
 	defaultWorkdir  string
 }
 
@@ -225,6 +248,7 @@ func OpenWithDefaultWorkdir(path, defaultWorkdir string) (*SQLiteStore, error) {
 	s.schedules = &sqliteScheduleRepo{db: db}
 	s.progressNotices = &sqliteProgressNoticeRepo{db: db}
 	s.threadConfigs = &sqliteThreadConfigRepo{db: db}
+	s.permissionRules = &sqlitePermissionRuleRepo{db: db}
 	return s, nil
 }
 
@@ -259,6 +283,7 @@ func (s *SQLiteStore) OverrideRepo() OverrideRepo             { return s.overrid
 func (s *SQLiteStore) ScheduleRepo() ScheduleRepo             { return s.schedules }
 func (s *SQLiteStore) ProgressNoticeRepo() ProgressNoticeRepo { return s.progressNotices }
 func (s *SQLiteStore) ThreadConfigRepo() ThreadConfigRepo     { return s.threadConfigs }
+func (s *SQLiteStore) PermissionRuleRepo() PermissionRuleRepo { return s.permissionRules }
 
 func (s *SQLiteStore) Close() error {
 	return s.db.Close()

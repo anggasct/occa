@@ -24,6 +24,9 @@ func (r *Router) handleCallback(ctx context.Context, msg channel.IncomingMessage
 	if strings.HasPrefix(msg.CallbackData, "spage:") {
 		return r.handleSessionPageCallback(ctx, msg)
 	}
+	if strings.HasPrefix(msg.CallbackData, permCallbackPrefix) {
+		return r.handlePermissionCallback(ctx, msg)
+	}
 	if !strings.HasPrefix(msg.CallbackData, "permission:") {
 		return nil
 	}

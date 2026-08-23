@@ -10,9 +10,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/relay"
+	"github.com/anggasct/occa/internal/store"
 )
 
 const (
@@ -20,6 +23,7 @@ const (
 	permissionTombstoneTTL   = 10 * time.Minute
 	permissionRetryMessage   = "⚠️ Could not submit the permission choice. Try again."
 	permissionExpiredMessage = "⌛ Permission request expired."
+	permissionNotSavedLabel  = "✅ Always allowed (rule not saved — server issue, tell architect)"
 )
 
 type permissionOwner struct{}
@@ -39,8 +43,11 @@ type permissionRecord struct {
 	client     relay.Client
 	platform   string
 	channelID  string
+	threadID   string
+	userID     string
 	sessionID  string
 	requestIDs []string
+	requests   []relay.PermissionRequest
 	reply      channel.ReplyContext
 	origin     channel.MessageRef
 	buttons    []channel.Button
@@ -62,6 +69,7 @@ type permissionBroker struct {
 	mu      sync.Mutex
 	records map[string]*permissionRecord
 	batches map[*permissionOwner]*pendingBatch
+	rules   store.PermissionRuleRepo
 }
 
 type permissionPromptHandler struct {
@@ -71,20 +79,27 @@ type permissionPromptHandler struct {
 	client    relay.Client
 	platform  string
 	channelID string
+	threadID  string
+	userID    string
 	sessionID string
 	reply     channel.ReplyContext
 }
 
-func newPermissionBroker() *permissionBroker {
+func newPermissionBroker(rules store.PermissionRuleRepo) *permissionBroker {
 	return &permissionBroker{
 		records: make(map[string]*permissionRecord),
 		batches: make(map[*permissionOwner]*pendingBatch),
+		rules:   rules,
 	}
 }
 
 func (h *permissionPromptHandler) Prompt(ctx context.Context, request relay.PermissionRequest) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+
+	if h.autoApply(ctx, request) {
+		return nil
 	}
 
 	h.broker.mu.Lock()
@@ -106,6 +121,77 @@ func (h *permissionPromptHandler) Prompt(ctx context.Context, request relay.Perm
 	h.broker.batches[h.owner] = batch
 	h.broker.mu.Unlock()
 
+	return nil
+}
+
+// autoApply resolves an already-saved always-allow rule for the exact
+// conversation key + tool + pattern set and replies "always" without
+// rendering buttons. A store error or a missing rule falls through to the
+// normal prompt; only an exact rule match bypasses it.
+func (h *permissionPromptHandler) autoApply(ctx context.Context, request relay.PermissionRequest) bool {
+	rules := h.broker.rules
+	if rules == nil {
+		return false
+	}
+	rule, err := rules.Match(ctx, h.ownerKey(), request.Tool, request.Patterns)
+	if err != nil {
+		slog.Warn("permission: rule match failed; prompting instead", "platform", h.platform, "channel_id", h.channelID, "error", err)
+		return false
+	}
+	if rule == nil {
+		return false
+	}
+	if err := h.client.ReplyPermission(ctx, request.ID, relay.PermissionAlways); err != nil {
+		slog.Warn("permission: auto-allow reply failed; prompting instead", "rule_id", rule.ID, "error", err)
+		return false
+	}
+	slog.Info("permission auto-allowed", "rule_id", rule.ID, "platform", h.platform, "channel_id", h.channelID, "tool", request.Tool)
+	if h.reply != nil {
+		if _, err := h.reply.Send(autoAllowedNotice(request)); err != nil {
+			slog.Warn("permission: auto-allowed notice send failed", "error", err)
+		}
+	}
+	return true
+}
+
+func (h *permissionPromptHandler) ownerKey() store.PermissionOwner {
+	return store.PermissionOwner{Platform: h.platform, ChannelID: h.channelID, ThreadID: h.threadID, UserID: h.userID}
+}
+
+func (r *permissionRecord) ownerKey() store.PermissionOwner {
+	return store.PermissionOwner{Platform: r.platform, ChannelID: r.channelID, ThreadID: r.threadID, UserID: r.userID}
+}
+
+func autoAllowedNotice(req relay.PermissionRequest) string {
+	return fmt.Sprintf("⚡ Auto-allowed (rule: %s — %s).", displayTool(req.Tool), describePatterns(req.Patterns))
+}
+
+func displayTool(tool string) string {
+	if tool == "" {
+		return "tool"
+	}
+	r, size := utf8.DecodeRuneInString(tool)
+	return string(unicode.ToUpper(r)) + tool[size:]
+}
+
+func describePatterns(patterns []string) string {
+	if len(patterns) == 0 {
+		return "no pattern"
+	}
+	text := fmt.Sprintf("%q", patterns[0])
+	if len(patterns) > 1 {
+		text += fmt.Sprintf(" (+%d more)", len(patterns)-1)
+	}
+	return text
+}
+
+func persistRules(ctx context.Context, rules store.PermissionRuleRepo, record *permissionRecord) error {
+	owner := record.ownerKey()
+	for _, req := range record.requests {
+		if _, err := rules.Add(ctx, owner, req.Tool, req.Patterns); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -147,8 +233,11 @@ func (b *permissionBroker) flushBatch(batch *pendingBatch) {
 		client:     h.client,
 		platform:   h.platform,
 		channelID:  h.channelID,
+		threadID:   h.threadID,
+		userID:     h.userID,
 		sessionID:  sessionID,
 		requestIDs: requestIDs,
+		requests:   append([]relay.PermissionRequest(nil), requests...),
 		reply:      h.reply,
 		buttons:    permissionButtons(token),
 		state:      permissionPending,
@@ -266,6 +355,12 @@ func (b *permissionBroker) handle(ctx context.Context, msg channel.IncomingMessa
 	}
 
 	terminal := permissionTerminalLabel(decision)
+	if decision == relay.PermissionAlways && b.rules != nil {
+		if err := persistRules(ctx, b.rules, record); err != nil {
+			terminal = permissionNotSavedLabel
+			slog.Warn("permission: rule persist failed", "platform", record.platform, "channel_id", record.channelID, "error", err)
+		}
+	}
 	if b.resolve(record, attempt, terminal) {
 		slog.Info("permission callback resolved", "platform", msg.Platform, "channel_id", msg.ChannelID, "decision", decision, "latency", time.Since(record.createdAt).Truncate(time.Millisecond))
 		if err := reply.EditWithButtons(origin, terminal, nil); err != nil {
