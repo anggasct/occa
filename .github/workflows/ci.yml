@@ -45,6 +45,9 @@ jobs:
       - name: Test (race)
         run: go test ./... -race -count=1
 
+      - name: Govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.3.0 ./...
+
       - name: Shellcheck
         run: shellcheck install.sh scripts/install_test.sh
 
