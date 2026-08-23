@@ -84,7 +84,11 @@ func (r *Router) effectiveListenMode(ctx context.Context, msg channel.IncomingMe
 		}
 		return "mention", nil
 	}
-	ch, err := r.store.ChannelRepo().Get(ctx, msg.Platform, msg.ChannelID)
+	channelID := msg.ChannelID
+	if !msg.ChannelScopeUnresolved && msg.ParentChannelID != "" {
+		channelID = msg.ParentChannelID
+	}
+	ch, err := r.store.ChannelRepo().Get(ctx, msg.Platform, channelID)
 	if err == nil && ch != nil && ch.ListenMode != "" {
 		return ch.ListenMode, nil
 	}

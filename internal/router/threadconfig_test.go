@@ -411,7 +411,7 @@ func TestEffectiveModelIsolation(t *testing.T) {
 		}
 	})
 
-	t.Run("empty thread row means agent default", func(t *testing.T) {
+	t.Run("channel fallback", func(t *testing.T) {
 		threadConfigsOf(r).configs["discord:parent:thread-2"] = &store.ThreadConfig{
 			Platform: "discord", ChannelID: "parent", ThreadID: "thread-2", Model: "",
 		}
@@ -419,8 +419,8 @@ func TestEffectiveModelIsolation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("effectiveModel: %v", err)
 		}
-		if model != nil {
-			t.Fatalf("expected agent default, got %+v", model)
+		if model == nil || model.ProviderID != "anthropic" || model.ID != "claude-3" {
+			t.Fatalf("expected channel fallback, got %+v", model)
 		}
 	})
 
@@ -434,7 +434,7 @@ func TestEffectiveModelIsolation(t *testing.T) {
 		}
 	})
 
-	t.Run("personal beats thread", func(t *testing.T) {
+	t.Run("thread beats personal", func(t *testing.T) {
 		threadConfigsOf(r).configs["discord:parent:thread-1"] = &store.ThreadConfig{
 			Platform: "discord", ChannelID: "parent", ThreadID: "thread-1", Model: "openai/gpt-4o",
 		}
@@ -445,8 +445,8 @@ func TestEffectiveModelIsolation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("effectiveModel: %v", err)
 		}
-		if model == nil || model.ProviderID != "zai-coding-plan" || model.ID != "glm-5.2" {
-			t.Fatalf("personal model should beat thread, got %+v", model)
+		if model == nil || model.ProviderID != "openai" || model.ID != "gpt-4o" {
+			t.Fatalf("thread model should beat personal, got %+v", model)
 		}
 	})
 }
@@ -527,7 +527,7 @@ func TestModelBrowserSetInThreadWritesThreadConfig(t *testing.T) {
 		t.Fatalf("Route callback: %v", err)
 	}
 	text, _ := reply.editSnapshot()
-	if text != "✅ Thread model set: openai/gpt-4o" {
+	if text != "✅ Thread model set: openai/gpt-4o\nScope: this thread" {
 		t.Fatalf("text = %q", text)
 	}
 	tc := threadConfigsOf(r).configs["discord:parent:thread-1"]

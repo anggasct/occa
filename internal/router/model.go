@@ -12,6 +12,21 @@ import (
 
 var errChannelScopeUnresolved = errors.New("channel scope unresolved")
 
+type modelSource string
+
+const (
+	modelSourceThread   modelSource = "thread setting"
+	modelSourceChannel  modelSource = "channel setting"
+	modelSourcePersonal modelSource = "personal override"
+	modelSourceSession  modelSource = "legacy session setting"
+	modelSourceDefault  modelSource = "agent default"
+)
+
+type modelResolution struct {
+	model  *relay.ModelRef
+	source modelSource
+}
+
 func (r *Router) handleModel(ctx context.Context, msg channel.IncomingMessage, args string) (string, error) {
 	parts := strings.Fields(args)
 	if len(parts) == 0 {
@@ -48,7 +63,7 @@ func (r *Router) handleModel(ctx context.Context, msg channel.IncomingMessage, a
 		if err := r.store.ThreadConfigRepo().UpsertModel(ctx, msg.Platform, threadScopeChannelID(msg), msg.ThreadID, formatModelRef(ref)); err != nil {
 			return "", fmt.Errorf("model: set thread: %w", err)
 		}
-		return fmt.Sprintf("✅ Thread model set: %s", formatModelRef(ref)), nil
+		return fmt.Sprintf("✅ Thread model set: %s\nScope: this thread", formatModelRef(ref)), nil
 	}
 	modelChannelID, err := modelScopeChannelID(msg)
 	if err != nil {
@@ -61,12 +76,12 @@ func (r *Router) handleModel(ctx context.Context, msg channel.IncomingMessage, a
 		if err := r.store.ChannelRepo().UpsertModel(ctx, msg.Platform, modelChannelID, formatModelRef(ref)); err != nil {
 			return "", fmt.Errorf("model: set channel: %w", err)
 		}
-		return fmt.Sprintf("✅ Channel model set: %s", formatModelRef(ref)), nil
+		return fmt.Sprintf("✅ Channel model set: %s\nScope: this channel", formatModelRef(ref)), nil
 	}
 	if err := r.store.OverrideRepo().UpsertModel(ctx, msg.Platform, modelChannelID, msg.UserID, formatModelRef(ref)); err != nil {
 		return "", fmt.Errorf("model: set personal: %w", err)
 	}
-	return fmt.Sprintf("✅ Personal model set: %s", formatModelRef(ref)), nil
+	return fmt.Sprintf("✅ Personal model set: %s\nScope: personal override", formatModelRef(ref)), nil
 }
 
 func (r *Router) clearModel(ctx context.Context, msg channel.IncomingMessage) (string, error) {
@@ -93,73 +108,71 @@ func (r *Router) clearModel(ctx context.Context, msg channel.IncomingMessage) (s
 }
 
 func (r *Router) viewModel(ctx context.Context, msg channel.IncomingMessage) (string, error) {
-	model, err := r.effectiveModel(ctx, msg)
+	resolution, err := r.resolveModel(ctx, msg)
 	if err != nil {
 		return "", err
 	}
-	if model == nil {
-		return "🤖 Model: agent default", nil
+	if resolution.model == nil {
+		return "🤖 Model: agent default\nSource: agent default", nil
 	}
-	return fmt.Sprintf("🤖 Model: %s", formatModelRef(*model)), nil
+	return fmt.Sprintf("🤖 Model: %s\nSource: %s", formatModelRef(*resolution.model), resolution.source), nil
 }
 
 func (r *Router) effectiveModel(ctx context.Context, msg channel.IncomingMessage) (*relay.ModelRef, error) {
+	resolution, err := r.resolveModel(ctx, msg)
+	if err != nil {
+		return nil, err
+	}
+	return resolution.model, nil
+}
+
+func (r *Router) resolveModel(ctx context.Context, msg channel.IncomingMessage) (modelResolution, error) {
+	modelChannelID, err := modelScopeChannelID(msg)
+	if err != nil {
+		return modelResolution{}, safeReplyError("Channel information unavailable. Please try again.", err)
+	}
+
+	thread, err := r.threadRow(ctx, msg)
+	if err != nil {
+		return modelResolution{}, fmt.Errorf("model: get thread: %w", err)
+	}
+	if thread != nil && thread.Model != "" {
+		return r.parseStoredModel(thread.Model, modelSourceThread)
+	}
+
+	channelConfig, err := r.store.ChannelRepo().Get(ctx, msg.Platform, modelChannelID)
+	if err != nil {
+		return modelResolution{}, fmt.Errorf("model: get channel: %w", err)
+	}
+	if channelConfig != nil && channelConfig.Model != "" {
+		return r.parseStoredModel(channelConfig.Model, modelSourceChannel)
+	}
+
+	override, err := r.store.OverrideRepo().Get(ctx, msg.Platform, modelChannelID, msg.UserID)
+	if err != nil {
+		return modelResolution{}, fmt.Errorf("model: get personal override: %w", err)
+	}
+	if override != nil && override.Model != "" {
+		return r.parseStoredModel(override.Model, modelSourcePersonal)
+	}
+
 	threadID, userID := conversationKey(msg)
 	sessionModel, err := r.store.SessionRepo().ActiveModel(ctx, msg.Platform, msg.ChannelID, threadID, userID)
 	if err != nil {
-		return nil, fmt.Errorf("model: get session model: %w", err)
+		return modelResolution{}, fmt.Errorf("model: get session model: %w", err)
 	}
 	if sessionModel != "" {
-		ref, err := parseModelRef(sessionModel)
-		if err != nil {
-			return nil, fmt.Errorf("model: invalid stored session model %q: %w", sessionModel, err)
-		}
-		return &ref, nil
+		return r.parseStoredModel(sessionModel, modelSourceSession)
 	}
-
-	modelChannelID, err := modelScopeChannelID(msg)
-	if err != nil {
-		return nil, safeReplyError("Channel information unavailable. Please try again.", err)
-	}
-	o, err := r.store.OverrideRepo().Get(ctx, msg.Platform, modelChannelID, msg.UserID)
-	if err != nil {
-		return nil, fmt.Errorf("model: get personal override: %w", err)
-	}
-	var model string
-	if o != nil && o.Model != "" {
-		model = o.Model
-	} else {
-		model, err = r.modelAfterPersonal(ctx, msg, modelChannelID)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if model == "" {
-		return nil, nil
-	}
-	ref, err := parseModelRef(model)
-	if err != nil {
-		return nil, fmt.Errorf("model: invalid stored model %q: %w", model, err)
-	}
-	return &ref, nil
+	return modelResolution{source: modelSourceDefault}, nil
 }
 
-func (r *Router) modelAfterPersonal(ctx context.Context, msg channel.IncomingMessage, channelID string) (string, error) {
-	row, err := r.threadRow(ctx, msg)
+func (r *Router) parseStoredModel(model string, source modelSource) (modelResolution, error) {
+	ref, err := parseModelRef(model)
 	if err != nil {
-		return "", fmt.Errorf("model: get thread: %w", err)
+		return modelResolution{}, fmt.Errorf("model: invalid stored model %q: %w", model, err)
 	}
-	if row != nil {
-		return row.Model, nil
-	}
-	ch, err := r.store.ChannelRepo().Get(ctx, msg.Platform, channelID)
-	if err != nil {
-		return "", fmt.Errorf("model: get channel: %w", err)
-	}
-	if ch == nil {
-		return "", nil
-	}
-	return ch.Model, nil
+	return modelResolution{model: &ref, source: source}, nil
 }
 
 func modelScopeChannelID(msg channel.IncomingMessage) (string, error) {

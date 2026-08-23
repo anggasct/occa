@@ -19,11 +19,23 @@ func (r *Router) handleChannel(ctx context.Context, msg channel.IncomingMessage,
 }
 
 func (r *Router) viewChannel(ctx context.Context, msg channel.IncomingMessage) (string, error) {
+	return r.listenModeView(ctx, msg)
+}
+
+func (r *Router) listenModeView(ctx context.Context, msg channel.IncomingMessage) (string, error) {
 	mode, err := r.effectiveListenMode(ctx, msg)
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("📡 Listen mode: %s", mode), nil
+	location := listenModeLocation(msg)
+	return fmt.Sprintf("📡 Listen mode: %s · %s\n%s", location, mode, listenModeNextAction(location, mode)), nil
+}
+
+func listenModeLocation(msg channel.IncomingMessage) string {
+	if isOwnedThreadMessage(msg) {
+		return "this thread"
+	}
+	return "channel"
 }
 
 func (r *Router) setChannel(ctx context.Context, msg channel.IncomingMessage, mode string) (string, error) {
@@ -36,9 +48,34 @@ func (r *Router) setChannel(ctx context.Context, msg channel.IncomingMessage, mo
 			return "", fmt.Errorf("channel: %w", err)
 		}
 	} else {
-		if err := r.store.ChannelRepo().UpsertListenMode(ctx, msg.Platform, msg.ChannelID, mode); err != nil {
+		channelID, err := modelScopeChannelID(msg)
+		if err != nil {
+			return "", safeReplyError("Channel information unavailable. Please try again.", err)
+		}
+		if err := r.store.ChannelRepo().UpsertListenMode(ctx, msg.Platform, channelID, mode); err != nil {
 			return "", fmt.Errorf("channel: %w", err)
 		}
 	}
-	return fmt.Sprintf("✅ Listen mode set: %s", mode), nil
+	view, err := r.listenModeView(ctx, msg)
+	if err != nil {
+		return fmt.Sprintf("✅ Listen mode set: %s", mode), nil
+	}
+	return fmt.Sprintf("✅ Listen mode set: %s\n%s", mode, view), nil
+}
+
+func listenModeNextAction(location, mode string) string {
+	switch mode {
+	case "all":
+		return "Ordinary messages are forwarded."
+	case "thread":
+		if location == "this thread" {
+			return "Thread messages and mentions are accepted."
+		}
+		return "Owned-thread messages and mentions are forwarded."
+	default:
+		if location == "this thread" {
+			return "Thread messages are accepted; parent-channel policy remains isolated."
+		}
+		return "Plain channel messages are ignored; mention OCCA or use /channel all."
+	}
 }

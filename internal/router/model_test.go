@@ -27,7 +27,7 @@ func modelTestProviders() relay.Providers {
 	}}
 }
 
-func TestModelViewUsesPersonalThenChannelThenDefault(t *testing.T) {
+func TestModelViewUsesChannelThenPersonalThenDefault(t *testing.T) {
 	r, client, reply, overrides := newTestRouterWithAccess()
 	client.providers = modelTestProviders()
 	st := r.store.(*fakeStore)
@@ -41,8 +41,8 @@ func TestModelViewUsesPersonalThenChannelThenDefault(t *testing.T) {
 	if err := r.Route(context.Background(), msg("/model", reply)); err != nil {
 		t.Fatalf("Route personal model view: %v", err)
 	}
-	if !strings.Contains(reply.sends[0], "openai/gpt-4o") {
-		t.Fatalf("expected personal model, got %q", reply.sends[0])
+	if !strings.Contains(reply.sends[0], "anthropic/claude-3") || !strings.Contains(reply.sends[0], "Source: channel setting") {
+		t.Fatalf("expected channel model and source, got %q", reply.sends[0])
 	}
 
 	o := overrides.overrides["telegram:chat1:user1"]
@@ -52,7 +52,7 @@ func TestModelViewUsesPersonalThenChannelThenDefault(t *testing.T) {
 	if err := r.Route(context.Background(), msg("/model", reply2)); err != nil {
 		t.Fatalf("Route channel model view: %v", err)
 	}
-	if !strings.Contains(reply2.sends[0], "anthropic/claude-3") {
+	if !strings.Contains(reply2.sends[0], "anthropic/claude-3") || !strings.Contains(reply2.sends[0], "Source: channel setting") {
 		t.Fatalf("expected channel model, got %q", reply2.sends[0])
 	}
 
@@ -689,7 +689,7 @@ func TestVariantsCommand(t *testing.T) {
 		}
 
 		text, _ := setReply.editSnapshot()
-		if text != "✅ Personal model set: zai-coding-plan/glm-5.2@max" {
+		if text != "✅ Personal model set: zai-coding-plan/glm-5.2@max\nScope: personal override" {
 			t.Fatalf("text = %q, want ✅ Personal model set: zai-coding-plan/glm-5.2@max", text)
 		}
 
@@ -710,11 +710,11 @@ func TestModelPrecedenceSessionPersonalChannelDefault(t *testing.T) {
 		wantModel     string
 	}{
 		{name: "session only", sessionModel: "openai/gpt-4o", wantProvider: "openai", wantModel: "gpt-4o"},
-		{name: "session beats personal", sessionModel: "openai/gpt-4o", personalModel: "anthropic/claude-3", wantProvider: "openai", wantModel: "gpt-4o"},
-		{name: "session beats channel", sessionModel: "openai/gpt-4o", channelModel: "zai-coding-plan/glm-5.2", wantProvider: "openai", wantModel: "gpt-4o"},
-		{name: "session beats all", sessionModel: "openai/gpt-4o", personalModel: "anthropic/claude-3", channelModel: "zai-coding-plan/glm-5.2", wantProvider: "openai", wantModel: "gpt-4o"},
+		{name: "personal beats session", sessionModel: "openai/gpt-4o", personalModel: "anthropic/claude-3", wantProvider: "anthropic", wantModel: "claude-3"},
+		{name: "channel beats session", sessionModel: "openai/gpt-4o", channelModel: "zai-coding-plan/glm-5.2", wantProvider: "zai-coding-plan", wantModel: "glm-5.2"},
+		{name: "channel beats all lower scopes", sessionModel: "openai/gpt-4o", personalModel: "anthropic/claude-3", channelModel: "zai-coding-plan/glm-5.2", wantProvider: "zai-coding-plan", wantModel: "glm-5.2"},
 		{name: "personal only", personalModel: "anthropic/claude-3", wantProvider: "anthropic", wantModel: "claude-3"},
-		{name: "personal beats channel", personalModel: "anthropic/claude-3", channelModel: "zai-coding-plan/glm-5.2", wantProvider: "anthropic", wantModel: "claude-3"},
+		{name: "channel beats personal", personalModel: "anthropic/claude-3", channelModel: "zai-coding-plan/glm-5.2", wantProvider: "zai-coding-plan", wantModel: "glm-5.2"},
 		{name: "channel only", channelModel: "zai-coding-plan/glm-5.2", wantProvider: "zai-coding-plan", wantModel: "glm-5.2"},
 		{name: "agent default"},
 	}
@@ -779,10 +779,10 @@ func TestSessionModelThreadIsolation(t *testing.T) {
 		t.Fatalf("SetModel thread-b: %v", err)
 	}
 	st.channelRepo.channels["discord:parent"] = &store.Channel{
-		ChannelID: "parent", Platform: "discord", Model: "zai-coding-plan/glm-5.2", ListenMode: "mention",
+		ChannelID: "parent", Platform: "discord", ListenMode: "mention",
 	}
 	overrides.overrides["discord:parent:user1"] = &store.UserOverride{
-		ChannelID: "parent", Platform: "discord", UserID: "user1", Role: "admin", Model: "zai-coding-plan/glm-5.2@low",
+		ChannelID: "parent", Platform: "discord", UserID: "user1", Role: "admin",
 	}
 	overrides.overrides["discord:thread-a:user1"] = &store.UserOverride{
 		ChannelID: "thread-a", Platform: "discord", UserID: "user1", Role: "allow",
@@ -881,7 +881,7 @@ func TestModelViewIncludesSessionTier(t *testing.T) {
 	if err := r.Route(ctx, msg("/model", reply)); err != nil {
 		t.Fatalf("Route view: %v", err)
 	}
-	if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], "openai/gpt-4o") {
+	if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], "zai-coding-plan/glm-5.2") || !strings.Contains(reply.sends[0], "Source: channel setting") {
 		t.Fatalf("expected session model in view, got %v", reply.sends)
 	}
 }
