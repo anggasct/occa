@@ -39,6 +39,10 @@ func (p managerProvider) ForceStop(workdir string) {
 }
 
 func main() {
+	if len(os.Args) >= 2 && os.Args[1] == "db" {
+		os.Exit(runDBCommand(os.Args[2:]))
+	}
+
 	var configPath string
 	flag.StringVar(&configPath, "config", "", "path to config file (default ~/.occa/config.yaml)")
 	flag.StringVar(&configPath, "c", "", "path to config file (shorthand)")
@@ -72,6 +76,13 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
+
+	dbLock, err := store.LockDB(cfg.Database.Path)
+	if err != nil {
+		slog.Error("failed to lock database (is occa already running?)", "error", err)
+		os.Exit(1)
+	}
+	defer func() { _ = dbLock.Unlock() }()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
