@@ -575,7 +575,7 @@ func TestGetSession(t *testing.T) {
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write([]byte(`[
 					{"info":{"role":"assistant","tokens":{"input":0,"cache":{"read":0}}}},
-					{"info":{"role":"assistant","tokens":{"input":4829,"cache":{"read":236032}}}},
+					{"info":{"role":"assistant","tokens":{"input":4829,"cache":{"read":236032}},"time":{"created":1787478451877,"completed":1787478457781}}},
 					{"info":{"role":"user","tokens":{}}}
 				]`))
 			default:
@@ -604,6 +604,79 @@ func TestGetSession(t *testing.T) {
 		if info.ContextTokens != 4829+236032 {
 			t.Fatalf("context tokens = %d, want %d (last assistant input + cache read; in-flight zero skipped)", info.ContextTokens, 4829+236032)
 		}
+		if info.ContextSource != ContextSourceMessageTail {
+			t.Fatalf("context source = %q, want %q", info.ContextSource, ContextSourceMessageTail)
+		}
+		if want := time.UnixMilli(1787478457781); !info.ContextUpdatedAt.Equal(want) {
+			t.Fatalf("context updated at = %v, want %v (completion time)", info.ContextUpdatedAt, want)
+		}
+	})
+
+	t.Run("in-flight message is skipped for context", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/session/ses-123/message" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"cost":0.05,"model":{"providerID":"anthropic","id":"claude-3-5-sonnet-20241022","variant":"max"},"tokens":{"input":12000,"output":3000,"reasoning":500,"cache":{"read":1000,"write":200}}}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[
+				{"info":{"role":"assistant","tokens":{"input":4829,"cache":{"read":236032}},"time":{"created":1787478451877,"completed":1787478457781}}},
+				{"info":{"role":"assistant","tokens":{"input":9000,"cache":{"read":1000}},"time":{"created":1787478460000}}}
+			]`))
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		info, err := c.GetSession(context.Background(), "ses-123")
+		if err != nil {
+			t.Fatalf("GetSession: %v", err)
+		}
+		// The newest assistant message has no completion time, so it cannot be
+		// presented as live; the scan falls back to the older completed message.
+		if info.ContextTokens != 4829+236032 {
+			t.Fatalf("context tokens = %d, want %d (first timestamped assistant)", info.ContextTokens, 4829+236032)
+		}
+		if info.ContextSource != ContextSourceMessageTail {
+			t.Fatalf("context source = %q, want %q", info.ContextSource, ContextSourceMessageTail)
+		}
+		if want := time.UnixMilli(1787478457781); !info.ContextUpdatedAt.Equal(want) {
+			t.Fatalf("context updated at = %v, want %v", info.ContextUpdatedAt, want)
+		}
+	})
+
+	t.Run("occupancy without any timestamp renders context unavailable", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/session/ses-123/message" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"cost":0.05,"model":{"providerID":"anthropic","id":"claude-3-5-sonnet-20241022","variant":"max"},"tokens":{"input":12000,"output":3000,"reasoning":500,"cache":{"read":1000,"write":200}}}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[
+				{"info":{"role":"assistant","tokens":{"input":9000,"cache":{"read":1000}}}}
+			]`))
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		info, err := c.GetSession(context.Background(), "ses-123")
+		if err != nil {
+			t.Fatalf("GetSession: %v", err)
+		}
+		if info.ContextTokens != 0 {
+			t.Fatalf("context tokens = %d, want 0 when no timestamp is available", info.ContextTokens)
+		}
+		if info.ContextSource != "" {
+			t.Fatalf("context source = %q, want empty when unavailable", info.ContextSource)
+		}
+		if !info.ContextUpdatedAt.IsZero() {
+			t.Fatalf("context updated at = %v, want zero when unavailable", info.ContextUpdatedAt)
+		}
 	})
 
 	t.Run("message tail unavailable keeps context zero", func(t *testing.T) {
@@ -629,6 +702,12 @@ func TestGetSession(t *testing.T) {
 		}
 		if info.ContextTokens != 0 {
 			t.Fatalf("context tokens = %d, want 0 when the message tail fails", info.ContextTokens)
+		}
+		if info.ContextSource != "" {
+			t.Fatalf("context source = %q, want empty when the message tail fails", info.ContextSource)
+		}
+		if !info.ContextUpdatedAt.IsZero() {
+			t.Fatalf("context updated at = %v, want zero when the message tail fails", info.ContextUpdatedAt)
 		}
 		if info.Tokens.Input != 12000 {
 			t.Fatalf("cumulative input = %d, want 12000 even when the message tail fails", info.Tokens.Input)
@@ -664,6 +743,12 @@ func TestGetSession(t *testing.T) {
 		}
 		if info.ContextTokens != 0 {
 			t.Fatalf("context tokens = %d, want 0 when the message tail returns non-200 with a valid-looking array", info.ContextTokens)
+		}
+		if info.ContextSource != "" {
+			t.Fatalf("context source = %q, want empty when the message tail returns non-200", info.ContextSource)
+		}
+		if !info.ContextUpdatedAt.IsZero() {
+			t.Fatalf("context updated at = %v, want zero when the message tail returns non-200", info.ContextUpdatedAt)
 		}
 		if info.Tokens.Input != 12000 || info.Tokens.CacheRead != 1000 {
 			t.Fatalf("cumulative tokens = %+v, want 12000/1000 to survive a failed message tail", info.Tokens)

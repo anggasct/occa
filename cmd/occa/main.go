@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -205,7 +206,7 @@ func main() {
 	registerMCP(ctx, manager, mcpSrv, cfg.Agent.DefaultWorkdir)
 
 	if len(cfg.Webhooks.Endpoints) > 0 {
-		webhookExecutor := func(ctx context.Context, platform, channelID, prompt string) {
+		webhookExecutor := func(ctx context.Context, platform, channelID, prompt string) error {
 			for _, ch := range channels {
 				if ch.Name() == platform {
 					send := func(text string) { notify(ch, channelID, text) }
@@ -214,7 +215,7 @@ func main() {
 					inst, err := manager.Instance(ctx, cfg.Agent.DefaultWorkdir)
 					if err != nil {
 						send("⚠️ Webhook analysis failed: agent unreachable")
-						return
+						return errors.New("webhook agent unavailable")
 					}
 					defer inst.End()
 
@@ -222,18 +223,18 @@ func main() {
 					sessionID, err := resolver.Resolve(ctx, platform, channelID, "", "", inst.PID())
 					if err != nil {
 						send("⚠️ Webhook analysis failed: session error")
-						return
+						return errors.New("webhook session unavailable")
 					}
 
 					if err := inst.Client().SendMessage(ctx, sessionID, prompt, nil, nil); err != nil {
-						send("⚠️ Webhook analysis failed: " + err.Error())
-						return
+						send("⚠️ Webhook analysis failed: agent request error")
+						return errors.New("webhook agent request failed")
 					}
 
 					events, err := inst.Client().Events(ctx, sessionID)
 					if err != nil {
 						send("⚠️ Webhook analysis failed: events error")
-						return
+						return errors.New("webhook event stream failed")
 					}
 
 					var buf strings.Builder
@@ -247,19 +248,21 @@ func main() {
 								result = "(no output)"
 							}
 							send(result)
-							return
+							return nil
 						case "error":
-							send("⚠️ " + ev.Delta)
-							return
+							send("⚠️ Webhook analysis failed: agent response error")
+							return errors.New("webhook agent response failed")
 						}
 					}
-					return
+					send("⚠️ Webhook analysis failed: incomplete response")
+					return errors.New("webhook response incomplete")
 				}
 			}
 			slog.Warn("webhook: no channel adapter", "platform", platform, "channel_id", channelID)
+			return errors.New("webhook channel adapter unavailable")
 		}
 
-		webhookSrv := webhook.New(cfg.Webhooks, webhookExecutor)
+		webhookSrv := webhook.New(cfg.Webhooks, webhookExecutor, db.WebhookDeliveryRepo())
 		if err := webhookSrv.Start(ctx); err != nil {
 			slog.Error("failed to start webhook server", "error", err)
 		}

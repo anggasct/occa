@@ -2,15 +2,20 @@ package webhook
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/anggasct/occa/internal/config"
+	"github.com/anggasct/occa/internal/store"
 )
 
 func newTestServer(t *testing.T, endpoints []config.EndpointConfig) (*Server, *fakeExecutor) {
@@ -20,12 +25,20 @@ func newTestServer(t *testing.T, endpoints []config.EndpointConfig) (*Server, *f
 		Bind:      "127.0.0.1:0",
 		Endpoints: endpoints,
 	}
-	srv := New(cfg, exec.exec)
+	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	srv := New(cfg, exec.exec, st.WebhookDeliveryRepo())
 	return srv, exec
 }
 
 type fakeExecutor struct {
+	mu    sync.Mutex
 	calls []execCall
+	err   error
+	block chan struct{}
 }
 
 type execCall struct {
@@ -34,8 +47,27 @@ type execCall struct {
 	prompt    string
 }
 
-func (f *fakeExecutor) exec(_ context.Context, platform, channelID, prompt string) {
+func (f *fakeExecutor) exec(ctx context.Context, platform, channelID, prompt string) error {
+	if f.block != nil {
+		select {
+		case <-f.block:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if f.err != nil {
+		return f.err
+	}
+	f.mu.Lock()
 	f.calls = append(f.calls, execCall{platform, channelID, prompt})
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeExecutor) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.calls)
 }
 
 func TestWebhookValidSecret(t *testing.T) {
@@ -212,7 +244,7 @@ func TestWebhookTemplateRendering(t *testing.T) {
 	srv.processAsync(config.EndpointConfig{
 		Name: "github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1",
 		Prompt: `Analyze PR #{{.payload.number}} action={{.payload.action}}`,
-	}, []byte(`{"action":"opened","number":42}`))
+	}, []byte(`{"action":"opened","number":42}`), 0, "delivery-1", "pull_request")
 
 	if len(exec.calls) != 1 {
 		t.Fatalf("expected 1 executor call, got %d", len(exec.calls))
@@ -236,7 +268,7 @@ func TestWebhookUntrustedPayloadWrapper(t *testing.T) {
 
 	srv.processAsync(config.EndpointConfig{
 		Prompt: "static prompt", Platform: "telegram", ChannelID: "c1",
-	}, []byte(`{"foo":"bar"}`))
+	}, []byte(`{"foo":"bar"}`), 0, "delivery-1", "")
 
 	if len(exec.calls) != 1 {
 		t.Fatalf("expected 1 call, got %d", len(exec.calls))
@@ -254,7 +286,7 @@ func TestWebhookEscapesClosingPayloadWrapper(t *testing.T) {
 		{Name: "test", Path: "/test", Secret: "s", Platform: "telegram", ChannelID: "c1", Prompt: `{{.json}}`},
 	})
 
-	srv.processAsync(config.EndpointConfig{Prompt: `{{.json}}`}, []byte(`{"payload":"</untrusted_payload>"}`))
+	srv.processAsync(config.EndpointConfig{Prompt: `{{.json}}`}, []byte(`{"payload":"</untrusted_payload>"}`), 0, "delivery-1", "")
 
 	if len(exec.calls) != 1 {
 		t.Fatalf("expected 1 call, got %d", len(exec.calls))
@@ -273,7 +305,7 @@ func TestWebhookTemplateErrorPreservesPayload(t *testing.T) {
 	})
 	body := []byte(`{"foo":"bar"}`)
 
-	srv.processAsync(config.EndpointConfig{Prompt: "broken {{"}, body)
+	srv.processAsync(config.EndpointConfig{Prompt: "broken {{"}, body, 0, "delivery-1", "")
 
 	if len(exec.calls) != 1 {
 		t.Fatalf("expected 1 call, got %d", len(exec.calls))
@@ -360,7 +392,12 @@ func TestStartBindFailure(t *testing.T) {
 	}
 	defer func() { _ = ln.Close() }()
 
-	srv := New(config.WebhookConfig{Bind: ln.Addr().String()}, nil)
+	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+	srv := New(config.WebhookConfig{Bind: ln.Addr().String()}, nil, st.WebhookDeliveryRepo())
 	if err := srv.Start(context.Background()); err == nil {
 		t.Fatal("expected error when bind address is taken")
 	}
@@ -415,5 +452,389 @@ func TestReadHeaderTimeoutClosesSilentConnection(t *testing.T) {
 	buf := make([]byte, 1)
 	if _, err := conn.Read(buf); err == nil {
 		t.Fatal("server held a silent connection open past the header timeout")
+	}
+}
+
+func newTestServerFull(t *testing.T, endpoints []config.EndpointConfig) (*Server, *fakeExecutor, *store.SQLiteStore) {
+	t.Helper()
+	exec := &fakeExecutor{}
+	cfg := config.WebhookConfig{
+		Bind:      "127.0.0.1:0",
+		Endpoints: endpoints,
+	}
+	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return New(cfg, exec.exec, st.WebhookDeliveryRepo()), exec, st
+}
+
+func post(t *testing.T, url, deliveryID, eventType, body string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	if deliveryID != "" {
+		req.Header.Set("X-GitHub-Delivery", deliveryID)
+	}
+	if eventType != "" {
+		req.Header.Set("X-GitHub-Event", eventType)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	return resp
+}
+
+func waitForReceipt(t *testing.T, st *store.SQLiteStore, status store.WebhookStatus) *store.WebhookDelivery {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		deliveries, err := st.WebhookDeliveryRepo().List(context.Background(), 20)
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(deliveries) > 0 && deliveries[0].Status == status {
+			return &deliveries[0]
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("receipt never reached %s: %+v", status, mustList(t, st))
+	return nil
+}
+
+func mustList(t *testing.T, st *store.SQLiteStore) []store.WebhookDelivery {
+	t.Helper()
+	deliveries, err := st.WebhookDeliveryRepo().List(context.Background(), 50)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	return deliveries
+}
+
+func TestWebhookReceiptLifecycleAndReplay(t *testing.T) {
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-1", "pull_request", `{"action":"opened","number":42}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	receipt := waitForReceipt(t, st, store.WebhookStatusCompleted)
+	if receipt.DeliveryID != "delivery-1" || receipt.EventType != "pull_request" || receipt.Endpoint != "github" {
+		t.Fatalf("unexpected receipt: %+v", receipt)
+	}
+	if receipt.Status != store.WebhookStatusCompleted || receipt.CompletedAt == 0 || receipt.StartedAt == 0 {
+		t.Fatalf("receipt lifecycle incomplete: %+v", receipt)
+	}
+	if receipt.Attempt != 1 {
+		t.Fatalf("attempt = %d, want 1", receipt.Attempt)
+	}
+	if exec.callCount() != 1 {
+		t.Fatalf("executor calls = %d, want 1", exec.callCount())
+	}
+
+	// Replaying the same delivery id must ack idempotently without a second session.
+	resp = post(t, ts.URL+"/github?secret=s3cret", "delivery-1", "pull_request", `{"action":"opened","number":42}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("replay expected 200, got %d", resp.StatusCode)
+	}
+	if exec.callCount() != 1 {
+		t.Fatalf("replay started a second session: %d executor calls", exec.callCount())
+	}
+	receipt = waitForReceipt(t, st, store.WebhookStatusCompleted)
+	if receipt.Attempt != 2 || receipt.Status != store.WebhookStatusCompleted {
+		t.Fatalf("replay receipt: attempt=%d status=%s", receipt.Attempt, receipt.Status)
+	}
+	if len(mustList(t, st)) != 1 {
+		t.Fatalf("expected exactly one receipt row, got %d", len(mustList(t, st)))
+	}
+}
+
+func TestWebhookConcurrentDuplicateSuppression(t *testing.T) {
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	const workers = 8
+	start := make(chan struct{})
+	statuses := make(chan int, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			req, err := http.NewRequest(http.MethodPost, ts.URL+"/github?secret=s3cret", strings.NewReader(`{"action":"opened","number":42}`))
+			if err != nil {
+				t.Errorf("NewRequest: %v", err)
+				return
+			}
+			req.Header.Set("X-GitHub-Delivery", "same-delivery")
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Errorf("POST: %v", err)
+				return
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			statuses <- resp.StatusCode
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(statuses)
+
+	for code := range statuses {
+		if code != http.StatusOK {
+			t.Fatalf("concurrent duplicate returned %d, want 200", code)
+		}
+	}
+	waitForReceipt(t, st, store.WebhookStatusCompleted)
+	if exec.callCount() != 1 {
+		t.Fatalf("concurrent duplicates started %d sessions, want exactly 1", exec.callCount())
+	}
+	deliveries := mustList(t, st)
+	if len(deliveries) != 1 {
+		t.Fatalf("expected exactly one receipt, got %d", len(deliveries))
+	}
+	if deliveries[0].Attempt != workers {
+		t.Fatalf("attempt = %d, want %d", deliveries[0].Attempt, workers)
+	}
+}
+
+func TestWebhookInvalidSecretCreatesNoReceipt(t *testing.T) {
+	srv, _, st := newTestServerFull(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	resp := post(t, ts.URL+"/github?secret=wrong", "delivery-1", "pull_request", `{}`)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", resp.StatusCode)
+	}
+	if len(mustList(t, st)) != 0 {
+		t.Fatal("invalid signature must not create a receipt")
+	}
+}
+
+func TestWebhookUnknownPathCreatesNoReceipt(t *testing.T) {
+	srv, _, st := newTestServerFull(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	resp := post(t, ts.URL+"/unknown", "delivery-1", "pull_request", `{}`)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+	if len(mustList(t, st)) != 0 {
+		t.Fatal("unknown endpoint must not create a receipt")
+	}
+}
+
+func TestWebhookSkipEventNotProcessed(t *testing.T) {
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze", SkipEvents: []string{"ping"}},
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-ping", "ping", `{"zen":"keep it simple"}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for skipped event, got %d", resp.StatusCode)
+	}
+	receipt := waitForReceipt(t, st, store.WebhookStatusSkipped)
+	if receipt.Status != store.WebhookStatusSkipped || receipt.CompletedAt == 0 {
+		t.Fatalf("skipped receipt: %+v", receipt)
+	}
+	if exec.callCount() != 0 {
+		t.Fatalf("skipped event started a session: %d executor calls", exec.callCount())
+	}
+
+	resp = post(t, ts.URL+"/github?secret=s3cret", "delivery-pr", "pull_request", `{"action":"opened","number":7}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	waitForReceipt(t, st, store.WebhookStatusCompleted)
+	if exec.callCount() != 1 {
+		t.Fatalf("non-skipped event did not process: %d executor calls", exec.callCount())
+	}
+}
+
+func TestWebhookExecutorFailureRecordsRedactedSummary(t *testing.T) {
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github", Secret: "hunter2", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+	})
+	exec.err = errors.New("agent unreachable: dial timeout hunter2")
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	resp := post(t, ts.URL+"/github?secret=hunter2", "delivery-1", "pull_request", `{}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	receipt := waitForReceipt(t, st, store.WebhookStatusFailed)
+	if receipt.Status != store.WebhookStatusFailed || receipt.CompletedAt == 0 {
+		t.Fatalf("failed receipt: %+v", receipt)
+	}
+	if strings.Contains(receipt.ErrorSummary, "hunter2") {
+		t.Fatalf("secret leaked into diagnostics: %q", receipt.ErrorSummary)
+	}
+	if !strings.Contains(receipt.ErrorSummary, "[redacted]") {
+		t.Fatalf("expected redacted marker in summary, got %q", receipt.ErrorSummary)
+	}
+}
+
+func TestWebhookExecutorTimeoutRecordsTimedOut(t *testing.T) {
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+	})
+	exec.err = context.DeadlineExceeded
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-1", "pull_request", `{}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	receipt := waitForReceipt(t, st, store.WebhookStatusFailed)
+	if !strings.Contains(receipt.ErrorSummary, "timed out") {
+		t.Fatalf("timed-out delivery not distinguishable: %q", receipt.ErrorSummary)
+	}
+}
+
+func TestWebhookSyntheticDeliveryID(t *testing.T) {
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	resp := post(t, ts.URL+"/github?secret=s3cret", "", "", `{"action":"opened"}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	receipt := waitForReceipt(t, st, store.WebhookStatusCompleted)
+	if !strings.HasPrefix(receipt.DeliveryID, "gen-") {
+		t.Fatalf("delivery without provider id should get a synthetic id, got %q", receipt.DeliveryID)
+	}
+	if len(mustList(t, st)) != 1 {
+		t.Fatalf("expected exactly one receipt, got %d", len(mustList(t, st)))
+	}
+	if exec.callCount() != 1 {
+		t.Fatalf("executor calls = %d, want 1", exec.callCount())
+	}
+}
+
+func TestWebhookStartRecoversStaleInFlight(t *testing.T) {
+	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+	ctx := context.Background()
+
+	repo := st.WebhookDeliveryRepo()
+	if _, err := repo.Create(ctx, store.WebhookDelivery{Endpoint: "github", DeliveryID: "stuck", EventType: "pull_request", PayloadHash: "abc", Attempt: 1}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	stuck, _ := repo.Get(ctx, "github", "stuck")
+	if ok, err := repo.Transition(ctx, stuck.ID, []store.WebhookStatus{store.WebhookStatusReceived, store.WebhookStatusAccepted}, store.WebhookStatusProcessing, ""); err != nil || !ok {
+		t.Fatalf("claim stuck: ok=%v err=%v", ok, err)
+	}
+	if _, err := st.DB().Exec(`UPDATE webhook_delivery SET updated_at = ? WHERE id = ?`, time.Now().Add(-claimGrace).Unix(), stuck.ID); err != nil {
+		t.Fatalf("backdate stuck receipt: %v", err)
+	}
+	if _, err := repo.Create(ctx, store.WebhookDelivery{Endpoint: "github", DeliveryID: "done", EventType: "pull_request", PayloadHash: "def", Attempt: 1}); err != nil {
+		t.Fatalf("Create done: %v", err)
+	}
+	done, _ := repo.Get(ctx, "github", "done")
+	if ok, err := repo.Transition(ctx, done.ID, []store.WebhookStatus{store.WebhookStatusReceived, store.WebhookStatusAccepted}, store.WebhookStatusCompleted, ""); err != nil || !ok {
+		t.Fatalf("complete done: ok=%v err=%v", ok, err)
+	}
+
+	srv := New(config.WebhookConfig{Bind: "127.0.0.1:0"}, nil, repo)
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = srv.Stop(context.Background()) }()
+
+	recovered, _ := repo.Get(ctx, "github", "stuck")
+	if recovered.Status != store.WebhookStatusFailed || recovered.ErrorSummary != "interrupted by restart" {
+		t.Fatalf("stale in-flight receipt not recovered: %+v", recovered)
+	}
+	terminal, _ := repo.Get(ctx, "github", "done")
+	if terminal.Status != store.WebhookStatusCompleted {
+		t.Fatalf("terminal receipt disturbed by recovery: %+v", terminal)
+	}
+}
+
+func TestWebhookStartPrunesOldDeliveries(t *testing.T) {
+	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+	ctx := context.Background()
+	repo := st.WebhookDeliveryRepo()
+
+	old := time.Now().Add(-40 * 24 * time.Hour).Unix()
+	for i := 0; i < retentionKeep+1; i++ {
+		d := store.WebhookDelivery{
+			Endpoint:    "github",
+			DeliveryID:  fmt.Sprintf("old-%d", i),
+			EventType:   "pull_request",
+			PayloadHash: "abc",
+			Attempt:     1,
+			CreatedAt:   old,
+		}
+		if _, err := repo.Create(ctx, d); err != nil {
+			t.Fatalf("Create %d: %v", i, err)
+		}
+	}
+
+	srv := New(config.WebhookConfig{Bind: "127.0.0.1:0"}, nil, repo)
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = srv.Stop(context.Background()) }()
+
+	deliveries, err := st.WebhookDeliveryRepo().List(context.Background(), retentionKeep+10)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(deliveries) != 0 {
+		t.Fatalf("retention after prune = %d rows, want 0 rows older than retention age", len(deliveries))
 	}
 }

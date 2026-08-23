@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	schemaVersion    = 9
+	schemaVersion    = 10
 	busyTimeoutMilli = 5000
 )
 
@@ -23,10 +23,11 @@ var migrations = []func(s *SQLiteStore, tx *sql.Tx) error{
 	addSessionModel,
 	addThreadConfig,
 	addPermissionRules,
-	addUsageProjection,
+	ensureUsageAndWebhookTables,
+	ensureUsageAndWebhookTables,
 }
 
-func addUsageProjection(s *SQLiteStore, tx *sql.Tx) error {
+func ensureUsageAndWebhookTables(s *SQLiteStore, tx *sql.Tx) error {
 	ddl := `
 CREATE TABLE IF NOT EXISTS usage_projection (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,6 +61,27 @@ CREATE INDEX IF NOT EXISTS idx_usage_time
 `
 	if _, err := tx.Exec(ddl); err != nil {
 		return fmt.Errorf("store: migrate usage projection: %w", err)
+	}
+	webhookDDL := `
+CREATE TABLE IF NOT EXISTS webhook_delivery (
+	id            INTEGER PRIMARY KEY AUTOINCREMENT,
+	endpoint      TEXT NOT NULL,
+	delivery_id   TEXT NOT NULL,
+	event_type    TEXT NOT NULL DEFAULT '',
+	payload_hash  TEXT NOT NULL,
+	status        TEXT NOT NULL,
+	attempt       INTEGER NOT NULL DEFAULT 1,
+	error_summary TEXT NOT NULL DEFAULT '',
+	created_at    INTEGER NOT NULL,
+	updated_at    INTEGER NOT NULL,
+	started_at    INTEGER NOT NULL DEFAULT 0,
+	completed_at  INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_webhook_delivery_key ON webhook_delivery (endpoint, delivery_id);
+CREATE INDEX IF NOT EXISTS idx_webhook_delivery_created ON webhook_delivery (created_at);
+`
+	if _, err := tx.Exec(webhookDDL); err != nil {
+		return fmt.Errorf("store: migrate webhook deliveries: %w", err)
 	}
 	return nil
 }
@@ -236,16 +258,17 @@ CREATE INDEX IF NOT EXISTS idx_schedule_enabled ON schedule (enabled);
 }
 
 type SQLiteStore struct {
-	db              *sql.DB
-	sessions        *sqliteSessionRepo
-	channels        *sqliteChannelRepo
-	overrides       *sqliteOverrideRepo
-	schedules       *sqliteScheduleRepo
-	progressNotices *sqliteProgressNoticeRepo
-	threadConfigs   *sqliteThreadConfigRepo
-	permissionRules *sqlitePermissionRuleRepo
-	usage           *sqliteUsageRepo
-	defaultWorkdir  string
+	db                *sql.DB
+	sessions          *sqliteSessionRepo
+	channels          *sqliteChannelRepo
+	overrides         *sqliteOverrideRepo
+	schedules         *sqliteScheduleRepo
+	progressNotices   *sqliteProgressNoticeRepo
+	threadConfigs     *sqliteThreadConfigRepo
+	permissionRules   *sqlitePermissionRuleRepo
+	usage             *sqliteUsageRepo
+	webhookDeliveries *sqliteWebhookDeliveryRepo
+	defaultWorkdir    string
 }
 
 func OpenWithDefaultWorkdir(path, defaultWorkdir string) (*SQLiteStore, error) {
@@ -290,6 +313,7 @@ func OpenWithDefaultWorkdir(path, defaultWorkdir string) (*SQLiteStore, error) {
 	s.threadConfigs = &sqliteThreadConfigRepo{db: db}
 	s.permissionRules = &sqlitePermissionRuleRepo{db: db}
 	s.usage = &sqliteUsageRepo{db: db}
+	s.webhookDeliveries = &sqliteWebhookDeliveryRepo{db: db}
 	return s, nil
 }
 
@@ -318,14 +342,15 @@ func (s *SQLiteStore) migrate() error {
 	return nil
 }
 
-func (s *SQLiteStore) SessionRepo() SessionRepo               { return s.sessions }
-func (s *SQLiteStore) ChannelRepo() ChannelRepo               { return s.channels }
-func (s *SQLiteStore) OverrideRepo() OverrideRepo             { return s.overrides }
-func (s *SQLiteStore) ScheduleRepo() ScheduleRepo             { return s.schedules }
-func (s *SQLiteStore) ProgressNoticeRepo() ProgressNoticeRepo { return s.progressNotices }
-func (s *SQLiteStore) ThreadConfigRepo() ThreadConfigRepo     { return s.threadConfigs }
-func (s *SQLiteStore) PermissionRuleRepo() PermissionRuleRepo { return s.permissionRules }
-func (s *SQLiteStore) UsageRepo() UsageRepo                   { return s.usage }
+func (s *SQLiteStore) SessionRepo() SessionRepo                 { return s.sessions }
+func (s *SQLiteStore) ChannelRepo() ChannelRepo                 { return s.channels }
+func (s *SQLiteStore) OverrideRepo() OverrideRepo               { return s.overrides }
+func (s *SQLiteStore) ScheduleRepo() ScheduleRepo               { return s.schedules }
+func (s *SQLiteStore) ProgressNoticeRepo() ProgressNoticeRepo   { return s.progressNotices }
+func (s *SQLiteStore) ThreadConfigRepo() ThreadConfigRepo       { return s.threadConfigs }
+func (s *SQLiteStore) PermissionRuleRepo() PermissionRuleRepo   { return s.permissionRules }
+func (s *SQLiteStore) UsageRepo() UsageRepo                     { return s.usage }
+func (s *SQLiteStore) WebhookDeliveryRepo() WebhookDeliveryRepo { return s.webhookDeliveries }
 
 func (s *SQLiteStore) Close() error {
 	return s.db.Close()
