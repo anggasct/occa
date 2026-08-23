@@ -818,6 +818,91 @@ func TestRoutePassthrough(t *testing.T) {
 	}
 }
 
+// TestRouteDropsMessageWhenContextCanceled guards against the shutdown race
+// where a message is routed with a root context that was already canceled
+// (process shutting down): the message must be dropped quietly instead of
+// running store/agent work that fails with "context canceled" WARNs.
+func TestRouteDropsMessageWhenContextCanceled(t *testing.T) {
+	r, client, reply := newTestRouter()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := r.Route(ctx, msg("hello world", reply))
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if len(reply.sends) != 0 {
+		t.Fatalf("expected no reply, got %d sends", len(reply.sends))
+	}
+	if client.lastMsg != "" {
+		t.Fatalf("expected no dispatch, got %q", client.lastMsg)
+	}
+}
+
+// TestRouteDropsOwnedThreadMessageWhenContextCanceled ensures the
+// session-activation thread-config materialization is skipped entirely when
+// the context is canceled (the exact log line seen during shutdown).
+func TestRouteDropsOwnedThreadMessageWhenContextCanceled(t *testing.T) {
+	r, client := newThreadTestRouter()
+	reply := &fakeReplyCtx{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	threadMsg := ownedThreadMsg("thread-canceled", "hello world", reply)
+	err := r.Route(ctx, threadMsg)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if len(reply.sends) != 0 {
+		t.Fatalf("expected no reply, got %d sends", len(reply.sends))
+	}
+	if client.lastMsg != "" {
+		t.Fatalf("expected no dispatch, got %q", client.lastMsg)
+	}
+	if len(threadConfigsOf(r).configs) != 0 {
+		t.Fatalf("thread config materialized with canceled context: %d configs", len(threadConfigsOf(r).configs))
+	}
+}
+
+// TestPassthroughQueuedDropsCanceledContext ensures a queued message whose
+// context was canceled (shutdown mid-drain) is not dispatched.
+func TestPassthroughQueuedDropsCanceledContext(t *testing.T) {
+	r, client, _ := newTestRouter()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	qmsg := queuedMessage{ctx: ctx, msg: msg("hello queued", &fakeReplyCtx{})}
+	if r.passthroughQueued(qmsg) {
+		t.Fatal("passthroughQueued with canceled ctx must return false")
+	}
+	if client.lastMsg != "" {
+		t.Fatalf("expected no dispatch, got %q", client.lastMsg)
+	}
+}
+
+// TestExecutePassthroughDropsCanceledContext covers the defense-in-depth
+// guard: if the task context is canceled between acquire and execution, the
+// slot must be released and the message dropped.
+func TestExecutePassthroughDropsCanceledContext(t *testing.T) {
+	r, client, reply := newTestRouter()
+	key := responseKey{platform: "telegram", channelID: "chat1", threadID: "", userID: "user1"}
+	taskCtx, cancel := context.WithCancel(context.Background())
+	if !r.responses.acquire(key, cancel) {
+		t.Fatal("acquire failed before guard test")
+	}
+	cancel() // cancel after acquire to simulate shutdown-during-acquire
+	err := r.executePassthrough(taskCtx, cancel, key, msg("hello", reply))
+	if err != nil {
+		t.Fatalf("executePassthrough: %v", err)
+	}
+	if !r.responses.acquire(key, cancel) {
+		t.Fatal("slot was not released by the canceled-context guard")
+	}
+	if len(reply.sends) != 0 {
+		t.Fatalf("expected no reply, got %d sends", len(reply.sends))
+	}
+	if client.lastMsg != "" {
+		t.Fatalf("expected no dispatch, got %q", client.lastMsg)
+	}
+}
+
 func TestRoutePassthroughCommand(t *testing.T) {
 	r, client, reply := newTestRouter()
 	err := r.Route(context.Background(), msg("/plan build a thing", reply))

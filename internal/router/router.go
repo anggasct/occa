@@ -114,6 +114,13 @@ func New(instances InstanceProvider, st store.Store, defaultWorkdir string, admi
 }
 
 func (r *Router) Route(ctx context.Context, msg channel.IncomingMessage) error {
+	// Drop messages when the surrounding context is already canceled (process
+	// shutdown in progress): any store/agent work would only fail with
+	// "context canceled" and emit misleading WARNs while the channel adapters
+	// are being torn down.
+	if err := ctx.Err(); err != nil {
+		return nil
+	}
 	isOcca := r.isOccaCommand(msg.Text)
 	msg.Text = normalizeCommandAlias(msg.Text)
 	inputKind := r.routeInputKind(msg, isOcca)
@@ -323,6 +330,12 @@ func conversationKey(msg channel.IncomingMessage) (threadID, userID string) {
 }
 
 func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) error {
+	// Shutdown race guard: when the root context is already canceled (process
+	// shut down mid-drain), do not acquire a response slot or touch the store
+	// with a dead context — drop the message quietly.
+	if err := ctx.Err(); err != nil {
+		return nil
+	}
 	threadID, userID := conversationKey(msg)
 	key := responseKey{platform: msg.Platform, channelID: msg.ChannelID, threadID: threadID, userID: userID}
 	taskCtx, cancel := context.WithCancel(ctx)
@@ -352,6 +365,12 @@ func (r *Router) dispatchDrained(key responseKey, drained []queuedMessage) {
 }
 
 func (r *Router) passthroughQueued(qmsg queuedMessage) bool {
+	// Shutdown race guard: a queued message whose context is already canceled
+	// (process shutting down) must not be dispatched — the store/agent work
+	// would only fail with "context canceled" and emit misleading WARNs.
+	if err := qmsg.ctx.Err(); err != nil {
+		return false
+	}
 	threadID, userID := conversationKey(qmsg.msg)
 	key := responseKey{platform: qmsg.msg.Platform, channelID: qmsg.msg.ChannelID, threadID: threadID, userID: userID}
 	taskCtx, cancel := context.WithCancel(qmsg.ctx)
@@ -368,6 +387,16 @@ func (r *Router) passthroughQueued(qmsg queuedMessage) bool {
 func (r *Router) executePassthrough(taskCtx context.Context, cancel context.CancelFunc, key responseKey, msg channel.IncomingMessage) error {
 	ctx := taskCtx
 	threadID, userID := key.threadID, key.userID
+
+	// Shutdown race guard (defense in depth): if the task context was canceled
+	// between acquire and here (e.g. process shutdown began), release the slot
+	// and drop the message instead of running store/agent work that will fail
+	// with "context canceled".
+	if err := ctx.Err(); err != nil {
+		cancel()
+		r.responses.release(key)
+		return nil
+	}
 
 	if isOwnedThreadMessage(msg) {
 		if err := r.ensureThreadConfig(ctx, msg); err != nil {
