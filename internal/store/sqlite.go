@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	schemaVersion    = 8
+	schemaVersion    = 9
 	busyTimeoutMilli = 5000
 )
 
@@ -23,6 +23,45 @@ var migrations = []func(s *SQLiteStore, tx *sql.Tx) error{
 	addSessionModel,
 	addThreadConfig,
 	addPermissionRules,
+	addUsageProjection,
+}
+
+func addUsageProjection(s *SQLiteStore, tx *sql.Tx) error {
+	ddl := `
+CREATE TABLE IF NOT EXISTS usage_projection (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		platform TEXT NOT NULL,
+		channel_id TEXT NOT NULL,
+		thread_id TEXT NOT NULL DEFAULT '',
+		user_id TEXT NOT NULL DEFAULT '',
+		session_id TEXT NOT NULL,
+		model TEXT NOT NULL DEFAULT '',
+		workdir TEXT NOT NULL DEFAULT '',
+		input_tokens INTEGER NOT NULL,
+		output_tokens INTEGER NOT NULL,
+		reasoning_tokens INTEGER NOT NULL,
+		cache_read_tokens INTEGER NOT NULL,
+		cache_write_tokens INTEGER NOT NULL,
+		input_total INTEGER NOT NULL,
+		output_total INTEGER NOT NULL,
+		reasoning_total INTEGER NOT NULL,
+		cache_read_total INTEGER NOT NULL,
+		cache_write_total INTEGER NOT NULL,
+		cost REAL,
+		cost_known INTEGER NOT NULL DEFAULT 0,
+		recorded_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_usage_scope_time
+	ON usage_projection (platform, channel_id, thread_id, user_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_usage_session_time
+	ON usage_projection (session_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_usage_time
+	ON usage_projection (recorded_at);
+`
+	if _, err := tx.Exec(ddl); err != nil {
+		return fmt.Errorf("store: migrate usage projection: %w", err)
+	}
+	return nil
 }
 
 func addPermissionRules(s *SQLiteStore, tx *sql.Tx) error {
@@ -205,6 +244,7 @@ type SQLiteStore struct {
 	progressNotices *sqliteProgressNoticeRepo
 	threadConfigs   *sqliteThreadConfigRepo
 	permissionRules *sqlitePermissionRuleRepo
+	usage           *sqliteUsageRepo
 	defaultWorkdir  string
 }
 
@@ -249,6 +289,7 @@ func OpenWithDefaultWorkdir(path, defaultWorkdir string) (*SQLiteStore, error) {
 	s.progressNotices = &sqliteProgressNoticeRepo{db: db}
 	s.threadConfigs = &sqliteThreadConfigRepo{db: db}
 	s.permissionRules = &sqlitePermissionRuleRepo{db: db}
+	s.usage = &sqliteUsageRepo{db: db}
 	return s, nil
 }
 
@@ -284,6 +325,7 @@ func (s *SQLiteStore) ScheduleRepo() ScheduleRepo             { return s.schedul
 func (s *SQLiteStore) ProgressNoticeRepo() ProgressNoticeRepo { return s.progressNotices }
 func (s *SQLiteStore) ThreadConfigRepo() ThreadConfigRepo     { return s.threadConfigs }
 func (s *SQLiteStore) PermissionRuleRepo() PermissionRuleRepo { return s.permissionRules }
+func (s *SQLiteStore) UsageRepo() UsageRepo                   { return s.usage }
 
 func (s *SQLiteStore) Close() error {
 	return s.db.Close()
@@ -292,3 +334,4 @@ func (s *SQLiteStore) Close() error {
 func (s *SQLiteStore) DB() *sql.DB { return s.db }
 
 var _ Store = (*SQLiteStore)(nil)
+var _ UsageStore = (*SQLiteStore)(nil)

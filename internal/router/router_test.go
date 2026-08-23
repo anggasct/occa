@@ -363,6 +363,7 @@ type fakeStore struct {
 	progressNotices *fakeProgressNoticeRepo
 	threadConfigs   *fakeThreadConfigRepo
 	permissionRules *fakePermissionRuleRepo
+	usage           *fakeUsageRepo
 }
 
 func (f *fakeStore) SessionRepo() store.SessionRepo   { return f.sessionRepo }
@@ -386,6 +387,12 @@ func (f *fakeStore) PermissionRuleRepo() store.PermissionRuleRepo {
 		f.permissionRules = newFakePermissionRuleRepo()
 	}
 	return f.permissionRules
+}
+func (f *fakeStore) UsageRepo() store.UsageRepo {
+	if f.usage == nil {
+		return nil
+	}
+	return f.usage
 }
 func (f *fakeStore) Close() error { return nil }
 
