@@ -224,8 +224,8 @@ func TestPermissionRuleMigrationFromV7PreservesRows(t *testing.T) {
 	if err := s2.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatalf("read schema version: %v", err)
 	}
-	if version != schemaVersion {
-		t.Fatalf("schema version = %d, want %d", version, schemaVersion)
+	if version != SchemaVersion {
+		t.Fatalf("schema version = %d, want %d", version, SchemaVersion)
 	}
 
 	sessionID, _, err := s2.SessionRepo().Active(ctx, owner.Platform, owner.ChannelID, owner.ThreadID, owner.UserID)

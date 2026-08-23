@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"text/template"
 	"time"
 	"unicode/utf8"
@@ -62,6 +63,7 @@ type Server struct {
 	executor          Executor
 	deliveries        DeliveryStore
 	httpSrv           *http.Server
+	listener          net.Listener
 	eventSlots        chan struct{}
 	lastPrune         time.Time
 	pruneInterval     time.Duration
@@ -69,6 +71,7 @@ type Server struct {
 	readTimeout       time.Duration
 	writeTimeout      time.Duration
 	idleTimeout       time.Duration
+	listening         atomic.Bool
 }
 
 func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) *Server {
@@ -150,6 +153,7 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("webhook: listen %s: %w", s.bind, err)
 	}
 	s.bindAddr = ln.Addr().String()
+	s.listener = ln
 
 	s.httpSrv = &http.Server{
 		Handler:           mux,
@@ -158,13 +162,16 @@ func (s *Server) Start(ctx context.Context) error {
 		WriteTimeout:      s.writeTimeout,
 		IdleTimeout:       s.idleTimeout,
 	}
+	s.listening.Store(true)
 
 	go func() {
 		<-ctx.Done()
-		s.httpSrv.Close()
+		s.listening.Store(false)
+		_ = s.httpSrv.Close()
 	}()
 
 	go func() {
+		defer s.listening.Store(false)
 		if err := s.httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			slog.Error("webhook: serve error", "error", err)
 		}
@@ -176,10 +183,14 @@ func (s *Server) Start(ctx context.Context) error {
 
 func (s *Server) Addr() string { return s.bindAddr }
 
+// Healthy reports whether the listener is up.
+func (s *Server) Healthy() bool { return s.listening.Load() }
+
 func (s *Server) Stop(ctx context.Context) error {
 	if s.httpSrv == nil {
 		return nil
 	}
+	s.listening.Store(false)
 	return s.httpSrv.Shutdown(ctx)
 }
 

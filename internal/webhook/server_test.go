@@ -420,6 +420,25 @@ func TestStartServesImmediately(t *testing.T) {
 	}
 }
 
+func TestUnexpectedServeFailureClearsHealth(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+	if err := srv.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = srv.Stop(context.Background()) }()
+
+	if err := srv.listener.Close(); err != nil {
+		t.Fatalf("close listener: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for srv.Healthy() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if srv.Healthy() {
+		t.Fatal("Healthy() = true after Serve returned from an unexpected listener failure")
+	}
+}
+
 func TestServerTimeoutsSet(t *testing.T) {
 	srv, _ := newTestServer(t, nil)
 	if err := srv.Start(context.Background()); err != nil {

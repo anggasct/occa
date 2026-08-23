@@ -75,7 +75,7 @@ func TestSchemaVersionAndReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	assertVersion(t, s, schemaVersion)
+	assertVersion(t, s, SchemaVersion)
 	_ = s.Close()
 
 	s2, err := OpenWithDefaultWorkdir(path, "")
@@ -83,7 +83,7 @@ func TestSchemaVersionAndReopen(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer func() { _ = s2.Close() }()
-	assertVersion(t, s2, schemaVersion)
+	assertVersion(t, s2, SchemaVersion)
 }
 
 func TestAdoptsUnversionedDatabase(t *testing.T) {
@@ -148,7 +148,7 @@ VALUES ('chat-legacy', 'telegram', 'agent-sess-1', 1, 1, 1);
 		t.Fatalf("adopt open: %v", err)
 	}
 	defer func() { _ = s.Close() }()
-	assertVersion(t, s, schemaVersion)
+	assertVersion(t, s, SchemaVersion)
 
 	id, _, err := s.SessionRepo().Active(context.Background(), "telegram", "chat-legacy", "", "")
 	if err != nil {
