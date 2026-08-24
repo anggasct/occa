@@ -6,9 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/render"
@@ -56,8 +56,19 @@ type Streamer struct {
 
 type toolBubble struct {
 	ref     channel.MessageRef
+	name    string
 	count   int
 	context string
+}
+
+// toolPhaseState tracks one contiguous phase of tool activity: the run still
+// accepting same-type continuations, how many bubbles it has spent, and its
+// live Working notice. Every agent text segment starts a fresh phase.
+type toolPhaseState struct {
+	run     *toolBubble
+	bubbles int
+	calls   int
+	working workingState
 }
 
 type workingState struct {
@@ -162,10 +173,9 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 	var buf strings.Builder
 	var refs []channel.MessageRef
 	var lastChunks []string
-	toolBubbles := make(map[string]*toolBubble)
-	cappedTools := make(map[string]bool)
-	var working workingState
-	totalToolCalls := 0
+	var phase toolPhaseState
+	respTotal := 0
+	respTypes := make(map[string]int)
 
 	typingTicker := time.NewTicker(s.typingInterval)
 	defer typingTicker.Stop()
@@ -193,7 +203,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 	for {
 		select {
 		case <-ctx.Done():
-			s.flushWorking(&working)
+			s.flushWorking(&phase.working)
 			return ctx.Err()
 
 		case <-typingTicker.C:
@@ -202,7 +212,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 			}
 
 		case <-timeoutTimer.C:
-			s.flushWorking(&working)
+			s.flushWorking(&phase.working)
 			msg := taskTimeoutMessage
 			if s.permissionPendingFunc != nil && s.permissionPendingFunc() {
 				msg = taskTimeoutPermissionMessage
@@ -213,7 +223,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 
 		case ev, ok := <-events:
 			if !ok {
-				s.flushWorking(&working)
+				s.flushWorking(&phase.working)
 				syncErr := s.finalSync(&refs, &lastChunks, buf.String())
 				s.notice(incompleteStreamMessage)
 				s.setReaction(channel.ReactionError)
@@ -230,7 +240,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				buf.WriteString(ev.Delta)
 				dirty = true
 			case EventDone:
-				s.flushWorking(&working)
+				s.resolveWorking(&phase.working, true, respTotal, respTypes)
 				if buf.Len() == 0 {
 					s.completedNotice(&refs)
 					s.setReaction(channel.ReactionSuccess)
@@ -244,14 +254,12 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				s.setReaction(channel.ReactionSuccess)
 				return nil
 			case EventError:
-				s.flushWorking(&working)
+				s.resolveWorking(&phase.working, false, respTotal, respTypes)
 				s.notice("⚠️ Agent error: " + ev.Delta)
 				s.setReaction(channel.ReactionError)
 				return fmt.Errorf("%w: %s", ErrStreamFailed, ev.Delta)
 			case EventSegment:
-				if utf8.RuneCountInString(buf.String()) >= maxToolBubbleResetRunes {
-					s.resetToolPhase(&toolBubbles, &cappedTools, &totalToolCalls, &working)
-				}
+				s.resetToolPhase(&phase)
 				if buf.Len() > 0 {
 					slog.Debug("streaming: segment break", "finalized_len", buf.Len())
 					s.finalizeSegment(&refs, &lastChunks, buf.String())
@@ -276,47 +284,46 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				}
 				ctxStr := normalizeToolContext(ev.ToolContext)
 				if ev.ToolSamePart {
-					if bubble, ok := toolBubbles[name]; ok {
-						if ctxStr != "" && ctxStr != bubble.context {
-							bubble.context = ctxStr
-							if err := s.reply.Edit(bubble.ref, formatToolLabel(name, bubble.context, bubble.count)); err != nil {
-								slog.Warn("streaming: tool notice context edit failed", "tool", name, "error", err)
-							}
+					switch {
+					case phase.run != nil && phase.run.name == name && ctxStr != "" && ctxStr != phase.run.context:
+						phase.run.context = ctxStr
+						if err := s.reply.Edit(phase.run.ref, formatToolLabel(name, phase.run.context, phase.run.count)); err != nil {
+							slog.Warn("streaming: tool notice context edit failed", "tool", name, "error", err)
 						}
-					} else if cappedTools[name] && ctxStr != "" {
-						working.latestName = name
-						working.latestContext = ctxStr
-						s.queueWorking(&working)
+					case phase.working.ref != nil && phase.working.latestName == name && ctxStr != "" && ctxStr != phase.working.latestContext:
+						phase.working.latestContext = ctxStr
+						s.queueWorking(&phase.working)
 					}
 					break
 				}
-				totalToolCalls++
-				if bubble, ok := toolBubbles[name]; ok {
-					bubble.count++
+				respTotal++
+				respTypes[name]++
+				phase.calls++
+				if phase.run != nil && phase.run.name == name {
+					phase.run.count++
 					if ctxStr != "" {
-						bubble.context = ctxStr
+						phase.run.context = ctxStr
 					}
-					if err := s.reply.Edit(bubble.ref, formatToolLabel(name, bubble.context, bubble.count)); err != nil {
+					if err := s.reply.Edit(phase.run.ref, formatToolLabel(name, phase.run.context, phase.run.count)); err != nil {
 						slog.Warn("streaming: tool notice edit failed", "tool", name, "error", err)
 					}
 					break
 				}
-				if len(toolBubbles) < maxToolBubbles {
+				if phase.bubbles < maxToolBubbles {
 					ref, err := s.reply.Send(formatToolLabel(name, ctxStr, 1))
 					if err != nil {
 						slog.Warn("streaming: tool notice send failed", "tool", name, "error", err)
 						break
 					}
-					bubble := &toolBubble{ref: ref, count: 1, context: ctxStr}
-					toolBubbles[name] = bubble
+					phase.run = &toolBubble{ref: ref, name: name, count: 1, context: ctxStr}
+					phase.bubbles++
 					s.trackFirstRef(ref)
 					break
 				}
-				cappedTools[name] = true
-				working.total = totalToolCalls
-				working.latestName = name
-				working.latestContext = ctxStr
-				s.queueWorking(&working)
+				phase.working.total = phase.calls
+				phase.working.latestName = name
+				phase.working.latestContext = ctxStr
+				s.queueWorking(&phase.working)
 			case "permission_asked":
 				if ev.Permission != nil {
 					if s.permissionHandler != nil {
@@ -353,15 +360,9 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 	}
 }
 
-// maxToolBubbles bounds the distinct tool-type bubbles in one phase before
-// the Working indicator takes over.
+// maxToolBubbles bounds the tool-run bubbles in one phase before the Working
+// indicator takes over.
 const maxToolBubbles = 5
-
-// maxToolBubbleResetRunes is the minimum text (runes) accumulated since the
-// last phase break before an EventSegment resets the tool-bubble budget.
-// Reasoning models interleave empty/short text parts between tool calls;
-// resetting on those would give every tool a fresh phase and defeat the cap.
-const maxToolBubbleResetRunes = 60
 
 const workingIndicator = "🔄 Working…"
 
@@ -446,19 +447,70 @@ func (s *Streamer) flushWorking(working *workingState) {
 	working.hasLastEditAt = true
 }
 
-func (s *Streamer) resetToolPhase(bubbles *map[string]*toolBubble, capped *map[string]bool, total *int, working *workingState) {
-	s.flushWorking(working)
-	if working.ref != nil {
+func (s *Streamer) resetToolPhase(phase *toolPhaseState) {
+	s.flushWorking(&phase.working)
+	if phase.working.ref != nil {
 		if remover, ok := s.reply.(channel.MessageRemover); ok {
-			if err := remover.Delete(working.ref); err != nil {
+			if err := remover.Delete(phase.working.ref); err != nil {
 				slog.Warn("streaming: working notice removal failed", "error", err)
 			}
 		}
 	}
-	*bubbles = make(map[string]*toolBubble)
-	*capped = make(map[string]bool)
-	*total = 0
-	*working = workingState{}
+	*phase = toolPhaseState{}
+}
+
+// resolveWorking replaces a visible Working notice with a final response-wide
+// rollup on done/error. With no Working bubble on screen it does nothing: all
+// tool activity is already visible as persisted bubbles. The edit bypasses
+// the live throttle because it is the bubble's terminal state.
+func (s *Streamer) resolveWorking(working *workingState, success bool, total int, types map[string]int) {
+	if working.ref == nil {
+		return
+	}
+	icon := "⚠️"
+	if success {
+		icon = "✅"
+	}
+	text := s.renderedSingle(rollupText(icon, total, types))
+	if text == "" || text == working.rendered {
+		return
+	}
+	if err := s.reply.Edit(working.ref, text); err != nil {
+		slog.Warn("streaming: working rollup failed", "error", err)
+		return
+	}
+	working.rendered = text
+	working.pending = ""
+}
+
+// maxRollupTypes bounds how many per-type entries the final rollup lists;
+// the remainder collapses into a "+N more" suffix.
+const maxRollupTypes = 8
+
+func rollupText(icon string, total int, types map[string]int) string {
+	names := make([]string, 0, len(types))
+	for name := range types {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		if types[names[i]] != types[names[j]] {
+			return types[names[i]] > types[names[j]]
+		}
+		return names[i] < names[j]
+	})
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s %d tool calls", icon, total)
+	listed := len(names)
+	if listed > maxRollupTypes {
+		listed = maxRollupTypes
+	}
+	for _, name := range names[:listed] {
+		fmt.Fprintf(&b, " · %s ×%d", name, types[name])
+	}
+	if rest := len(names) - listed; rest > 0 {
+		fmt.Fprintf(&b, " · +%d more", rest)
+	}
+	return b.String()
 }
 
 func (s *Streamer) sendSingle(raw string) (channel.MessageRef, string, error) {
@@ -497,8 +549,8 @@ func normalizeToolContext(raw string) string {
 	return s
 }
 
-// formatToolLabel renders one tool bubble, with its context and repeat count when
-// it ran more than once in the current phase.
+// formatToolLabel renders one tool bubble, with its context and repeat count
+// when the contiguous run made more than one call.
 func formatToolLabel(name, context string, count int) string {
 	ctx := normalizeToolContext(context)
 	if ctx != "" {
