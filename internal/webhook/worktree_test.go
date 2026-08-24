@@ -67,26 +67,31 @@ func TestWorktreeResolverReusesExistingCleanWorktree(t *testing.T) {
 	}
 	initTestGitRepo(t, repoDir)
 
-	// Create a branch and a worktree manually
-	cmd := exec.Command("git", "worktree", "add", "-b", "feat/cool-feature", filepath.Join(repoDir, ".worktree", "cool-feature"))
-	cmd.Dir = repoDir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("worktree add: %v\n%s", err, out)
-	}
-
 	resolver := NewGitWorktreeResolver(tmpDir)
 	key := WebhookExecutionKey{
 		Repository: "myrepo",
 		Branch:     "feat/cool-feature",
 	}
 
-	resolved, err := resolver.ResolveWorktree(context.Background(), key)
-	if err != nil {
-		t.Fatalf("ResolveWorktree failed: %v", err)
+	// Create local branch first so resolver can create worktree
+	cmd := exec.Command("git", "branch", "feat/cool-feature")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git branch: %v\n%s", err, out)
 	}
-	expectedPath := filepath.Join(repoDir, ".worktree", "cool-feature")
-	if resolved != expectedPath {
-		t.Fatalf("ResolveWorktree = %q, want %q", resolved, expectedPath)
+
+	resolved1, err := resolver.ResolveWorktree(context.Background(), key)
+	if err != nil {
+		t.Fatalf("ResolveWorktree 1 failed: %v", err)
+	}
+
+	// Second resolve should reuse the exact same attached clean worktree
+	resolved2, err := resolver.ResolveWorktree(context.Background(), key)
+	if err != nil {
+		t.Fatalf("ResolveWorktree 2 failed: %v", err)
+	}
+	if resolved1 != resolved2 {
+		t.Fatalf("expected reused worktree path %q, got %q", resolved1, resolved2)
 	}
 }
 
@@ -98,16 +103,10 @@ func TestWorktreeResolverDirtyConflict(t *testing.T) {
 	}
 	initTestGitRepo(t, repoDir)
 
-	wtPath := filepath.Join(repoDir, ".worktree", "cool-feature")
-	cmd := exec.Command("git", "worktree", "add", "-b", "feat/cool-feature", wtPath)
+	cmd := exec.Command("git", "branch", "feat/cool-feature")
 	cmd.Dir = repoDir
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("worktree add: %v\n%s", err, out)
-	}
-
-	// Make the worktree dirty
-	if err := os.WriteFile(filepath.Join(wtPath, "dirty.txt"), []byte("uncommitted"), 0644); err != nil {
-		t.Fatal(err)
+		t.Fatalf("branch create: %v\n%s", err, out)
 	}
 
 	resolver := NewGitWorktreeResolver(tmpDir)
@@ -116,7 +115,17 @@ func TestWorktreeResolverDirtyConflict(t *testing.T) {
 		Branch:     "feat/cool-feature",
 	}
 
-	_, err := resolver.ResolveWorktree(context.Background(), key)
+	wtPath, err := resolver.ResolveWorktree(context.Background(), key)
+	if err != nil {
+		t.Fatalf("initial resolve failed: %v", err)
+	}
+
+	// Make the worktree dirty
+	if err := os.WriteFile(filepath.Join(wtPath, "dirty.txt"), []byte("uncommitted"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = resolver.ResolveWorktree(context.Background(), key)
 	if err == nil {
 		t.Fatal("expected ErrWorktreeConflict for dirty worktree, got nil")
 	}
@@ -128,9 +137,42 @@ func TestWorktreeResolverDirtyConflict(t *testing.T) {
 	}
 }
 
-func TestWorktreeResolverCreatesMissingWorktree(t *testing.T) {
+func TestWorktreeResolverRejectsPathTraversalAndAbsolutePaths(t *testing.T) {
 	tmpDir := t.TempDir()
-	repoDir := filepath.Join(tmpDir, "occa")
+	resolver := NewGitWorktreeResolver(tmpDir)
+
+	badRepos := []string{
+		"/etc/passwd",
+		"../../etc/shadow",
+		"/tmp/repo",
+		"org/repo/sub/invalid",
+		"repo with space",
+		"repo;evil",
+		"repo$cmd",
+		"..",
+		".",
+	}
+
+	for _, repo := range badRepos {
+		t.Run(repo, func(t *testing.T) {
+			key := WebhookExecutionKey{
+				Repository: repo,
+				Branch:     "main",
+			}
+			_, err := resolver.ResolveWorktree(context.Background(), key)
+			if err == nil {
+				t.Fatalf("expected validation error for invalid repo %q, got nil", repo)
+			}
+			if !errors.Is(err, ErrInvalidRepo) && !errors.Is(err, ErrRepoNotFound) {
+				t.Fatalf("expected ErrInvalidRepo or ErrRepoNotFound, got %v", err)
+			}
+		})
+	}
+}
+
+func TestWorktreeResolverMissingBranchFailsClosedNoFabrication(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "myrepo")
 	if err := os.MkdirAll(repoDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -138,20 +180,111 @@ func TestWorktreeResolverCreatesMissingWorktree(t *testing.T) {
 
 	resolver := NewGitWorktreeResolver(tmpDir)
 	key := WebhookExecutionKey{
-		Repository:     "anggasct/occa",
-		HeadRepository: "contributor/occa",
-		Branch:         "feat/new-thing",
+		Repository: "myrepo",
+		Branch:     "non-existent-pr-branch",
 	}
 
-	resolved, err := resolver.ResolveWorktree(context.Background(), key)
+	_, err := resolver.ResolveWorktree(context.Background(), key)
+	if err == nil {
+		t.Fatal("expected error for missing local/remote branch, got nil")
+	}
+	if !strings.Contains(err.Error(), "not found in local or remote refs") {
+		t.Fatalf("expected 'not found in local or remote refs' error, got %q", err.Error())
+	}
+
+	// Verify no branch was created in the git repository
+	cmd := exec.Command("git", "branch", "--list", "non-existent-pr-branch")
+	cmd.Dir = repoDir
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("ResolveWorktree failed: %v", err)
+		t.Fatalf("git branch --list: %v", err)
 	}
-	if !strings.Contains(resolved, ".worktree") {
-		t.Fatalf("expected resolved path inside .worktree, got %q", resolved)
+	if strings.TrimSpace(string(out)) != "" {
+		t.Fatalf("branch was erroneously fabricated from HEAD: %q", string(out))
 	}
-	if _, err := os.Stat(resolved); err != nil {
-		t.Fatalf("created worktree path does not exist on disk: %v", err)
+}
+
+func TestWorktreeResolverInjectiveUniquePathAndDirectoryConflict(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "occa")
+	if err := os.MkdirAll(repoDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	initTestGitRepo(t, repoDir)
+
+	// Create branches
+	for _, b := range []string{
+		"feat/long-branch-name-that-exceeds-thirty-characters-1",
+		"feat/long-branch-name-that-exceeds-thirty-characters-2",
+		"feat/same-branch",
+	} {
+		cmd := exec.Command("git", "branch", b)
+		cmd.Dir = repoDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("create branch %s: %v\n%s", b, err, out)
+		}
+	}
+
+	resolver := NewGitWorktreeResolver(tmpDir)
+
+	// 1. Long branches differing past 30 chars produce separate worktrees
+	key1 := WebhookExecutionKey{
+		Repository: "anggasct/occa",
+		Branch:     "feat/long-branch-name-that-exceeds-thirty-characters-1",
+	}
+	key2 := WebhookExecutionKey{
+		Repository: "anggasct/occa",
+		Branch:     "feat/long-branch-name-that-exceeds-thirty-characters-2",
+	}
+
+	path1, err := resolver.ResolveWorktree(context.Background(), key1)
+	if err != nil {
+		t.Fatalf("resolve key1: %v", err)
+	}
+	path2, err := resolver.ResolveWorktree(context.Background(), key2)
+	if err != nil {
+		t.Fatalf("resolve key2: %v", err)
+	}
+	if path1 == path2 {
+		t.Fatalf("colliding worktree paths for distinct branches: %q vs %q", path1, path2)
+	}
+
+	// 2. Different head repositories for same branch produce separate worktrees
+	keyFork := WebhookExecutionKey{
+		Repository:     "anggasct/occa",
+		HeadRepository: "contributor/occa",
+		Branch:         "feat/same-branch",
+	}
+	keyUpstream := WebhookExecutionKey{
+		Repository:     "anggasct/occa",
+		HeadRepository: "anggasct/occa",
+		Branch:         "feat/same-branch",
+	}
+	pathFork := resolver.generateWorktreePath(repoDir, keyFork)
+	pathUpstream := resolver.generateWorktreePath(repoDir, keyUpstream)
+	if pathFork == pathUpstream {
+		t.Fatalf("colliding worktree paths for fork vs upstream: %q vs %q", pathFork, pathUpstream)
+	}
+
+	// 3. Pre-existing unregistered directory fails closed with ErrWorktreeConflict
+	unregisteredDir := resolver.generateWorktreePath(repoDir, keyFork)
+	if err := os.MkdirAll(unregisteredDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(unregisteredDir, "somefile.txt"), []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = resolver.ResolveWorktree(context.Background(), keyFork)
+	if err == nil {
+		t.Fatal("expected ErrWorktreeConflict for unattached pre-existing directory, got nil")
+	}
+	if !errors.Is(err, ErrWorktreeConflict) {
+		t.Fatalf("expected ErrWorktreeConflict, got %v", err)
+	}
+	// Verify file was NOT deleted or mutated
+	if _, err := os.Stat(filepath.Join(unregisteredDir, "somefile.txt")); err != nil {
+		t.Fatal("pre-existing file was destructively deleted or altered")
 	}
 }
 
@@ -163,13 +296,19 @@ func TestWorktreeResolverConcurrentCreationSerialized(t *testing.T) {
 	}
 	initTestGitRepo(t, repoDir)
 
+	cmd := exec.Command("git", "branch", "feat/same-branch")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("create branch: %v\n%s", err, out)
+	}
+
 	resolver := NewGitWorktreeResolver(tmpDir)
 	var wg sync.WaitGroup
 	errs := make(chan error, 5)
 
 	for i := 0; i < 5; i++ {
 		wg.Add(1)
-		go func(idx int) {
+		go func() {
 			defer wg.Done()
 			key := WebhookExecutionKey{
 				Repository: "anggasct/occa",
@@ -179,7 +318,7 @@ func TestWorktreeResolverConcurrentCreationSerialized(t *testing.T) {
 			if err != nil {
 				errs <- err
 			}
-		}(i)
+		}()
 	}
 
 	wg.Wait()

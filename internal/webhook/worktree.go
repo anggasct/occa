@@ -3,6 +3,8 @@ package webhook
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -17,6 +19,7 @@ import (
 var (
 	ErrWorktreeConflict = errors.New("worktree conflict")
 	ErrRepoNotFound     = errors.New("repository not found")
+	ErrInvalidRepo      = errors.New("invalid repository identifier")
 )
 
 type WorktreeResolver interface {
@@ -61,19 +64,58 @@ func (d *defaultGitRunner) Run(ctx context.Context, dir string, args ...string) 
 	return stdout.String(), nil
 }
 
+func validateRepoIdentifier(repo string) error {
+	if repo == "" {
+		return fmt.Errorf("%w: empty repository name", ErrInvalidRepo)
+	}
+	if filepath.IsAbs(repo) || strings.HasPrefix(repo, "/") || strings.HasPrefix(repo, "\\") {
+		return fmt.Errorf("%w: absolute repository paths are forbidden: %q", ErrInvalidRepo, repo)
+	}
+	cleaned := filepath.Clean(repo)
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) || strings.HasPrefix(cleaned, "../") {
+		return fmt.Errorf("%w: repository path traversal is forbidden: %q", ErrInvalidRepo, repo)
+	}
+	parts := strings.Split(cleaned, string(filepath.Separator))
+	if len(parts) > 2 {
+		return fmt.Errorf("%w: repository path depth exceeded: %q", ErrInvalidRepo, repo)
+	}
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return fmt.Errorf("%w: invalid repository path component: %q", ErrInvalidRepo, repo)
+		}
+		for _, r := range part {
+			if !isAllowedRepoChar(r) {
+				return fmt.Errorf("%w: invalid character %q in repository identifier: %q", ErrInvalidRepo, r, repo)
+			}
+		}
+	}
+	return nil
+}
+
+func isAllowedRepoChar(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.'
+}
+
 func (r *GitWorktreeResolver) findRepoDir(repo string) (string, error) {
+	if err := validateRepoIdentifier(repo); err != nil {
+		return "", err
+	}
+
+	cleanProjectsDir := filepath.Clean(r.ProjectsDir)
 	baseName := path.Base(repo)
 	candidates := []string{
-		filepath.Join(r.ProjectsDir, baseName),
-		filepath.Join(r.ProjectsDir, repo),
-	}
-	if filepath.IsAbs(repo) {
-		candidates = append([]string{repo}, candidates...)
+		filepath.Join(cleanProjectsDir, baseName),
+		filepath.Join(cleanProjectsDir, repo),
 	}
 
 	for _, cand := range candidates {
-		if stat, err := os.Stat(cand); err == nil && stat.IsDir() {
-			return cand, nil
+		cleanCand := filepath.Clean(cand)
+		rel, err := filepath.Rel(cleanProjectsDir, cleanCand)
+		if err != nil || strings.HasPrefix(rel, "..") || rel == "." {
+			continue
+		}
+		if stat, err := os.Stat(cleanCand); err == nil && stat.IsDir() {
+			return cleanCand, nil
 		}
 	}
 	return "", fmt.Errorf("%w: %q under %s", ErrRepoNotFound, repo, r.ProjectsDir)
@@ -153,11 +195,33 @@ func sanitizeBranchSlug(branch string) string {
 	if s == "" {
 		s = "branch"
 	}
-	if len(s) > 40 {
-		s = s[:40]
-		s = strings.Trim(s, "-")
-	}
 	return strings.ToLower(s)
+}
+
+func (r *GitWorktreeResolver) generateWorktreePath(repoDir string, key WebhookExecutionKey) string {
+	headRepo := key.HeadRepository
+	if headRepo == "" {
+		headRepo = key.Repository
+	}
+	h := sha256.Sum256([]byte(key.Repository + "\x00" + headRepo + "\x00" + key.Branch))
+	hashSuffix := hex.EncodeToString(h[:4])
+
+	slug := sanitizeBranchSlug(key.Branch)
+	if len(slug) > 30 {
+		slug = slug[:30]
+		slug = strings.Trim(slug, "-")
+	}
+
+	if headRepo != key.Repository {
+		owner := sanitizeBranchSlug(strings.Split(headRepo, "/")[0])
+		if len(owner) > 15 {
+			owner = owner[:15]
+		}
+		slug = owner + "-" + slug
+	}
+
+	folderName := fmt.Sprintf("%s-%s", slug, hashSuffix)
+	return filepath.Join(repoDir, ".worktree", folderName)
 }
 
 func (r *GitWorktreeResolver) ResolveWorktree(ctx context.Context, key WebhookExecutionKey) (string, error) {
@@ -194,21 +258,27 @@ func (r *GitWorktreeResolver) ResolveWorktree(ctx context.Context, key WebhookEx
 		}
 	}
 
-	slug := sanitizeBranchSlug(key.Branch)
-	if key.HeadRepository != "" && key.HeadRepository != key.Repository {
-		owner := path.Base(path.Dir(key.HeadRepository))
-		if owner != "." && owner != "" && owner != "/" {
-			slug = sanitizeBranchSlug(owner) + "-" + slug
-		}
-	}
-	targetPath := filepath.Join(repoDir, ".worktree", slug)
+	targetPath := r.generateWorktreePath(repoDir, key)
 
 	if fi, err := os.Stat(targetPath); err == nil && fi.IsDir() {
-		dirty, dErr := r.isWorktreeDirty(ctx, targetPath)
-		if dErr == nil && dirty {
-			return "", fmt.Errorf("%w: path %s exists with uncommitted changes", ErrWorktreeConflict, targetPath)
+		var isAttachedThisKey bool
+		for _, wt := range worktrees {
+			if filepath.Clean(wt.Path) == filepath.Clean(targetPath) && (wt.Branch == branchRef || wt.Branch == key.Branch) {
+				isAttachedThisKey = true
+				break
+			}
 		}
-		_, _ = r.runner.Run(ctx, repoDir, "worktree", "prune")
+		if !isAttachedThisKey {
+			return "", fmt.Errorf("%w: path %s already exists and is not an attached worktree for branch %s", ErrWorktreeConflict, targetPath, key.Branch)
+		}
+		dirty, dErr := r.isWorktreeDirty(ctx, targetPath)
+		if dErr != nil {
+			return "", fmt.Errorf("check worktree status: %w", dErr)
+		}
+		if dirty {
+			return "", fmt.Errorf("%w: worktree at %s has uncommitted changes", ErrWorktreeConflict, targetPath)
+		}
+		return targetPath, nil
 	}
 
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
@@ -227,9 +297,7 @@ func (r *GitWorktreeResolver) ResolveWorktree(ctx context.Context, key WebhookEx
 				return "", fmt.Errorf("add worktree for remote branch origin/%s: %w", key.Branch, err)
 			}
 		} else {
-			if _, err := r.runner.Run(ctx, repoDir, "worktree", "add", targetPath, "-b", key.Branch); err != nil {
-				return "", fmt.Errorf("add worktree creating branch %s: %w", key.Branch, err)
-			}
+			return "", fmt.Errorf("branch %q not found in local or remote refs", key.Branch)
 		}
 	}
 

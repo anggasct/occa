@@ -397,7 +397,31 @@ func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, d
 		workCtx.SessionKey = key.String()
 	}
 
-	if !key.IsZero() && s.worktreeResolver != nil {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("webhook: panic recovered in delivery processing",
+				"endpoint", ep.Name,
+				"delivery_id", deliveryID,
+				"event_type", eventType,
+				"execution_key", workCtx.Key.String(),
+				"worktree", workCtx.Worktree,
+				"panic", fmt.Sprint(r),
+			)
+			s.failDelivery(ep, id, deliveryID, eventType, redactSummary(fmt.Sprintf("panic: %v", r), maxErrorSummaryRunes, ep.Secret), workCtx)
+		}
+	}()
+
+	if !key.IsZero() {
+		if s.worktreeResolver == nil {
+			slog.Warn("webhook: worktree resolver missing for project key",
+				"endpoint", ep.Name,
+				"delivery_id", deliveryID,
+				"execution_key", key.String(),
+			)
+			s.failDelivery(ep, id, deliveryID, eventType, "worktree resolver required for project execution key", workCtx)
+			return
+		}
+
 		worktree, err := s.worktreeResolver.ResolveWorktree(context.Background(), key)
 		if err != nil {
 			slog.Warn("webhook: worktree resolution failed", "endpoint", ep.Name, "delivery_id", deliveryID, "execution_key", key.String(), "error", err)

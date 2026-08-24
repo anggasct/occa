@@ -1377,6 +1377,7 @@ func TestWebhookProjectAwareSerializationSameKey(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	srv := New(cfg, exec, st.WebhookDeliveryRepo())
+	srv.SetWorktreeResolver(&fakeWorktreeResolver{worktree: "/projects/occa/.worktree/feat-branch-1"})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleRequest)
 	ts := httptest.NewServer(mux)
@@ -1449,6 +1450,7 @@ func TestWebhookProjectAwareParallelismDifferentBranches(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	srv := New(cfg, exec, st.WebhookDeliveryRepo())
+	srv.SetWorktreeResolver(&fakeWorktreeResolver{worktree: "/projects/occa/.worktree/branch"})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleRequest)
 	ts := httptest.NewServer(mux)
@@ -1523,6 +1525,7 @@ func TestWebhookProjectAwareParallelismDifferentRepos(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	srv := New(cfg, exec, st.WebhookDeliveryRepo())
+	srv.SetWorktreeResolver(&fakeWorktreeResolver{worktree: "/projects/repo/.worktree/main"})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleRequest)
 	ts := httptest.NewServer(mux)
@@ -1643,4 +1646,97 @@ func TestWebhookWorktreeConflictFailsDelivery(t *testing.T) {
 	if !strings.Contains(receipt.ErrorSummary, "worktree conflict") {
 		t.Fatalf("expected error summary to contain 'worktree conflict', got %q", receipt.ErrorSummary)
 	}
+}
+
+func TestWebhookNonZeroKeyWithoutResolverFailsDelivery(t *testing.T) {
+	exec := &fakeExecutor{}
+	cfg := config.WebhookConfig{
+		Bind: "127.0.0.1:0",
+		Endpoints: []config.EndpointConfig{
+			{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+		},
+	}
+	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	srv := New(cfg, exec.exec, st.WebhookDeliveryRepo())
+	// Explicitly ensure worktreeResolver is nil
+	srv.worktreeResolver = nil
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	payload := `{"repository":{"full_name":"anggasct/occa"},"pull_request":{"base":{"repo":{"full_name":"anggasct/occa"}},"head":{"repo":{"full_name":"anggasct/occa"},"ref":"feat/no-resolver"}}}`
+	if resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-1", "pull_request", payload); resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	receipt := waitForReceipt(t, st, store.WebhookStatusFailed)
+	if receipt.Status != store.WebhookStatusFailed {
+		t.Fatalf("expected failed status, got %s", receipt.Status)
+	}
+	if !strings.Contains(receipt.ErrorSummary, "worktree resolver required") {
+		t.Fatalf("expected 'worktree resolver required', got %q", receipt.ErrorSummary)
+	}
+	if exec.callCount() != 0 {
+		t.Fatalf("executor should not have been called without resolver, called %d times", exec.callCount())
+	}
+}
+
+func TestWebhookExecutorPanicRecoversAndFailsDelivery(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+		mu.Lock()
+		calls++
+		c := calls
+		mu.Unlock()
+		if c == 1 {
+			panic("simulated fatal executor crash")
+		}
+		return nil
+	}
+
+	cfg := config.WebhookConfig{
+		Bind: "127.0.0.1:0",
+		Endpoints: []config.EndpointConfig{
+			{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+		},
+	}
+	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	srv := New(cfg, exec, st.WebhookDeliveryRepo())
+	srv.SetWorktreeResolver(&fakeWorktreeResolver{worktree: "/projects/occa/.worktree/fix"})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	payload := `{"repository":{"full_name":"anggasct/occa"},"pull_request":{"base":{"repo":{"full_name":"anggasct/occa"}},"head":{"repo":{"full_name":"anggasct/occa"},"ref":"fix"}}}`
+
+	// Delivery 1 panics
+	if resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-panic", "pull_request", payload); resp.StatusCode != http.StatusOK {
+		t.Fatalf("delivery-panic expected 200, got %d", resp.StatusCode)
+	}
+
+	receipt1 := waitForReceipt(t, st, store.WebhookStatusFailed)
+	if receipt1.Status != store.WebhookStatusFailed {
+		t.Fatalf("expected failed status on panic, got %s", receipt1.Status)
+	}
+	if !strings.Contains(receipt1.ErrorSummary, "panic: simulated fatal executor crash") {
+		t.Fatalf("expected panic in summary, got %q", receipt1.ErrorSummary)
+	}
+
+	// Delivery 2 for same key executes successfully, proving lock was released and server is alive
+	if resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-recovery", "pull_request", payload); resp.StatusCode != http.StatusOK {
+		t.Fatalf("delivery-recovery expected 200, got %d", resp.StatusCode)
+	}
+
+	waitForCompletedCount(t, st, 2)
 }
