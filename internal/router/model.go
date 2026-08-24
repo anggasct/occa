@@ -39,6 +39,18 @@ func (r *Router) handleModel(ctx context.Context, msg channel.IncomingMessage, a
 		return r.viewModel(ctx, msg)
 	}
 
+	if providerID, query, search, usage := parseModelSearch(parts); search {
+		if err := r.openModelSearch(ctx, msg, providerID, query); err != nil {
+			if errors.Is(err, errReplied) {
+				return "", errReplied
+			}
+			return "", err
+		}
+		return "", errReplied
+	} else if usage {
+		return "Usage: /model <provider> <query> | /model search <provider> <query>", nil
+	}
+
 	if parts[0] == "default" {
 		if len(parts) != 1 {
 			return "Usage: /model [provider/model-id[@variant]] | default", nil
@@ -82,6 +94,22 @@ func (r *Router) handleModel(ctx context.Context, msg channel.IncomingMessage, a
 		return "", fmt.Errorf("model: set personal: %w", err)
 	}
 	return fmt.Sprintf("✅ Personal model set: %s\nScope: personal override", formatModelRef(ref)), nil
+}
+
+func parseModelSearch(parts []string) (providerID, query string, search, usage bool) {
+	if len(parts) == 0 {
+		return "", "", false, false
+	}
+	if parts[0] == "search" {
+		if len(parts) < 3 {
+			return "", "", false, true
+		}
+		return parts[1], strings.Join(parts[2:], " "), true, false
+	}
+	if len(parts) < 2 || strings.Contains(parts[0], "/") || parts[0] == "default" || parts[0] == "channel" || parts[0] == "session" {
+		return "", "", false, false
+	}
+	return parts[0], strings.Join(parts[1:], " "), true, false
 }
 
 func (r *Router) clearModel(ctx context.Context, msg channel.IncomingMessage) (string, error) {

@@ -54,7 +54,7 @@ func (r *Router) MenuCommands() []channel.MenuCommand {
 		{Alias: "deny", Description: "Revoke a user's access to this bot", HasArgs: true},
 		{Alias: "admin", Description: "Grant a user admin access", HasArgs: true},
 		{Alias: "channel", Description: "View or set listen mode (mention, all, thread)", HasArgs: true},
-		{Alias: "model", Description: "View or set the active model", HasArgs: true},
+		{Alias: "model", Description: "View, set, or search the active model", HasArgs: true},
 		{Alias: "variants", Description: "List and set model reasoning variants", HasArgs: true},
 		{Alias: "permissions", Description: "List / delete saved always-allow rules", HasArgs: true},
 		{Alias: "schedules", Description: "View or delete scheduled tasks", HasArgs: true},
@@ -660,7 +660,7 @@ func (r *Router) helpText() string {
 		"• /redo — restore a reverted turn\n" +
 		"• /dir [path] — view or set working directory (per location)\n" +
 		"• /channel [mention|all|thread] — view or set listen mode (per location)\n" +
-		"• /model [provider/model-id[@variant]] — view or set model (per location)\n" +
+		"• /model [provider/model-id[@variant]] | <provider> <query> | search <provider> <query> — view, set, or search model (per location)\n" +
 		"• /variants [provider/model-id] — list and set model reasoning variants\n" +
 		"• /permissions [delete <id>|clear] — list or delete saved always-allow rules\n" +
 		"• /schedules [delete <id>] — view or delete scheduled tasks\n" +
