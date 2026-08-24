@@ -160,6 +160,8 @@ type WebhookDeliveryRepo interface {
 	// Transition moves a receipt between statuses only when it currently holds
 	// one of the from statuses (compare-and-swap) and returns whether it moved.
 	Transition(ctx context.Context, id int64, from []WebhookStatus, to WebhookStatus, summary string) (bool, error)
+	// ClaimStale atomically claims an old in-flight receipt for recovery.
+	ClaimStale(ctx context.Context, id, cutoff int64) (bool, error)
 	// List returns the most recent deliveries, newest first, capped at limit.
 	List(ctx context.Context, limit int) ([]WebhookDelivery, error)
 	// Prune deletes rows older than cutoff and caps newer rows at keep entries.

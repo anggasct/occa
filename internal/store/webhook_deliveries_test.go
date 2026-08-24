@@ -89,6 +89,67 @@ func TestWebhookDeliveryDuplicateBumpsAttempt(t *testing.T) {
 	}
 }
 
+func TestWebhookDeliveryDuplicateDoesNotRefreshProcessingFreshness(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+
+	if _, err := s.WebhookDeliveryRepo().Create(ctx, webhookDelivery(nil)); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	d, err := s.WebhookDeliveryRepo().Get(ctx, "github-review", "abc-123")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if ok, err := s.WebhookDeliveryRepo().Transition(ctx, d.ID, []WebhookStatus{WebhookStatusReceived}, WebhookStatusProcessing, ""); err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	if _, err := s.db.Exec(`UPDATE webhook_delivery SET updated_at = 123 WHERE id = ?`, d.ID); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+
+	if created, err := s.WebhookDeliveryRepo().Create(ctx, webhookDelivery(nil)); err != nil || created {
+		t.Fatalf("duplicate Create: created=%v err=%v", created, err)
+	}
+	updated, err := s.WebhookDeliveryRepo().Get(ctx, "github-review", "abc-123")
+	if err != nil {
+		t.Fatalf("Get after duplicate: %v", err)
+	}
+	if updated.Attempt != 2 {
+		t.Fatalf("attempt = %d, want 2", updated.Attempt)
+	}
+	if updated.UpdatedAt != 123 {
+		t.Fatalf("duplicate refreshed processing freshness: updated_at=%d, want 123", updated.UpdatedAt)
+	}
+}
+
+func TestWebhookDeliveryClaimStaleCAS(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+
+	if _, err := s.WebhookDeliveryRepo().Create(ctx, webhookDelivery(nil)); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	d, err := s.WebhookDeliveryRepo().Get(ctx, "github-review", "abc-123")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if ok, err := s.WebhookDeliveryRepo().Transition(ctx, d.ID, []WebhookStatus{WebhookStatusReceived}, WebhookStatusProcessing, ""); err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	if _, err := s.db.Exec(`UPDATE webhook_delivery SET updated_at = 1 WHERE id = ?`, d.ID); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+
+	claimed, err := s.WebhookDeliveryRepo().ClaimStale(ctx, d.ID, 500)
+	if err != nil || !claimed {
+		t.Fatalf("first stale claim: claimed=%v err=%v", claimed, err)
+	}
+	claimed, err = s.WebhookDeliveryRepo().ClaimStale(ctx, d.ID, 500)
+	if err != nil || claimed {
+		t.Fatalf("second stale claim: claimed=%v err=%v, want no-op", claimed, err)
+	}
+}
+
 func TestWebhookDeliveryTransitionCAS(t *testing.T) {
 	s := tempStore(t)
 	ctx := context.Background()
