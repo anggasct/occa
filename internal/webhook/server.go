@@ -50,6 +50,7 @@ type DeliveryStore interface {
 	Create(ctx context.Context, d store.WebhookDelivery) (bool, error)
 	Get(ctx context.Context, endpoint, deliveryID string) (*store.WebhookDelivery, error)
 	Transition(ctx context.Context, id int64, from []store.WebhookStatus, to store.WebhookStatus, summary string) (bool, error)
+	ClaimStale(ctx context.Context, id, cutoff int64) (bool, error)
 	Prune(ctx context.Context, cutoff int64, keep int) (int, error)
 	FailStale(ctx context.Context, cutoff int64, summary string) (int, error)
 }
@@ -262,6 +263,9 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	if s.shouldSkip(ep, eventType) {
 		if ok, tErr := s.deliveries.Transition(r.Context(), receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived, store.WebhookStatusAccepted, store.WebhookStatusProcessing}, store.WebhookStatusSkipped, ""); tErr != nil {
 			slog.Error("webhook: skip transition failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", tErr)
+			s.releaseEvent()
+			http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+			return
 		} else if !ok {
 			slog.Warn("webhook: skip transition lost race", "endpoint", ep.Name, "delivery_id", deliveryID, "observed_status", receipt.Status)
 		} else {
@@ -272,7 +276,12 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claimed := s.claimProcessing(r.Context(), receipt, deliveryID)
+	claimed, claimErr := s.claimProcessing(r.Context(), receipt, deliveryID)
+	if claimErr != nil {
+		s.releaseEvent()
+		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	if !claimed {
 		s.releaseEvent()
 		w.WriteHeader(http.StatusOK)
@@ -292,9 +301,11 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 // claimReceipt inserts a durable receipt for a validated delivery. A brand-new
 // delivery reports shouldProcess=true. A duplicate of a terminal delivery, or
 // one still being processed within the claim grace window, observes the
-// existing status and does not start a second session. A duplicate whose
-// in-flight attempt went stale (the earlier process died mid-request) is
-// re-claimed atomically so the event cannot be silently lost.
+// existing status and does not start a second session. A receipt still in
+// received has not completed its first state transition, so it remains
+// retryable; the next handler step performs the transition with CAS. A
+// duplicate whose in-flight attempt went stale (the earlier process died
+// mid-request) is re-claimed atomically so the event cannot be silently lost.
 func (s *Server) claimReceipt(ctx context.Context, ep config.EndpointConfig, deliveryID, eventType, payloadHash string) (*store.WebhookDelivery, bool, error) {
 	created, err := s.deliveries.Create(ctx, store.WebhookDelivery{
 		Endpoint:    ep.Name,
@@ -321,11 +332,14 @@ func (s *Server) claimReceipt(ctx context.Context, ep config.EndpointConfig, del
 	if isTerminal(receipt.Status) {
 		return receipt, false, nil
 	}
+	if receipt.Status == store.WebhookStatusReceived {
+		return receipt, true, nil
+	}
 	if time.Now().Unix()-receipt.UpdatedAt < int64(claimGrace.Seconds()) {
 		return receipt, false, nil
 	}
 
-	ok, tErr := s.deliveries.Transition(ctx, receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived, store.WebhookStatusAccepted, store.WebhookStatusProcessing}, store.WebhookStatusProcessing, "")
+	ok, tErr := s.deliveries.ClaimStale(ctx, receipt.ID, time.Now().Add(-claimGrace).Unix())
 	if tErr != nil {
 		return nil, false, tErr
 	}
@@ -336,27 +350,21 @@ func (s *Server) claimReceipt(ctx context.Context, ep config.EndpointConfig, del
 	return receipt, true, nil
 }
 
-// claimProcessing walks a fresh receipt through accepted -> processing under
-// compare-and-swap so a concurrent request can never observe a half-claimed
-// state or start a second session.
-func (s *Server) claimProcessing(ctx context.Context, receipt *store.WebhookDelivery, deliveryID string) bool {
+// claimProcessing moves a fresh receipt directly to processing under
+// compare-and-swap so a failed claim leaves the delivery retryable.
+func (s *Server) claimProcessing(ctx context.Context, receipt *store.WebhookDelivery, deliveryID string) (bool, error) {
 	if receipt.Status == store.WebhookStatusProcessing {
-		return true
+		return true, nil
 	}
-	ok, err := s.deliveries.Transition(ctx, receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived}, store.WebhookStatusAccepted, "")
-	if err != nil {
-		slog.Error("webhook: accept transition failed", "endpoint", receipt.Endpoint, "delivery_id", deliveryID, "error", err)
-		return false
-	}
-	if !ok {
-		return false
-	}
-	ok, err = s.deliveries.Transition(ctx, receipt.ID, []store.WebhookStatus{store.WebhookStatusAccepted}, store.WebhookStatusProcessing, "")
+	ok, err := s.deliveries.Transition(ctx, receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived}, store.WebhookStatusProcessing, "")
 	if err != nil {
 		slog.Error("webhook: processing claim failed", "endpoint", receipt.Endpoint, "delivery_id", deliveryID, "error", err)
-		return false
+		return false, err
 	}
-	return ok
+	if !ok {
+		return false, nil
+	}
+	return ok, nil
 }
 
 func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, deliveryID, eventType string) {

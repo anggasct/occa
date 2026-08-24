@@ -26,9 +26,8 @@ func scanWebhookDelivery(row interface{ Scan(...any) error }) (*WebhookDelivery,
 }
 
 func (r *sqliteWebhookDeliveryRepo) Create(ctx context.Context, d WebhookDelivery) (bool, error) {
-	now := time.Now().Unix()
 	if d.CreatedAt == 0 {
-		d.CreatedAt = now
+		d.CreatedAt = time.Now().Unix()
 	}
 	if d.UpdatedAt == 0 {
 		d.UpdatedAt = d.CreatedAt
@@ -53,8 +52,8 @@ func (r *sqliteWebhookDeliveryRepo) Create(ctx context.Context, d WebhookDeliver
 	}
 	if inserted == 0 {
 		if _, err := r.db.ExecContext(ctx,
-			`UPDATE webhook_delivery SET attempt = attempt + 1, updated_at = ? WHERE endpoint = ? AND delivery_id = ?`,
-			now, d.Endpoint, d.DeliveryID,
+			`UPDATE webhook_delivery SET attempt = attempt + 1 WHERE endpoint = ? AND delivery_id = ?`,
+			d.Endpoint, d.DeliveryID,
 		); err != nil {
 			return false, fmt.Errorf("store: webhook delivery bump attempt: %w", err)
 		}
@@ -105,6 +104,25 @@ func (r *sqliteWebhookDeliveryRepo) Transition(ctx context.Context, id int64, fr
 	n, err := res.RowsAffected()
 	if err != nil {
 		return false, fmt.Errorf("store: webhook delivery transition rows: %w", err)
+	}
+	return n > 0, nil
+}
+
+func (r *sqliteWebhookDeliveryRepo) ClaimStale(ctx context.Context, id, cutoff int64) (bool, error) {
+	now := time.Now().Unix()
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE webhook_delivery
+		 SET status = ?, started_at = ?, updated_at = ?
+		 WHERE id = ? AND status IN (?, ?, ?) AND updated_at <= ?`,
+		string(WebhookStatusProcessing), now, now, id,
+		string(WebhookStatusReceived), string(WebhookStatusAccepted), string(WebhookStatusProcessing), cutoff,
+	)
+	if err != nil {
+		return false, fmt.Errorf("store: webhook delivery stale claim: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: webhook delivery stale claim rows: %w", err)
 	}
 	return n > 0, nil
 }
