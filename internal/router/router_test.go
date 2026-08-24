@@ -231,8 +231,11 @@ func (f *fakeRelayClient) Events(_ context.Context, _ string) (<-chan relay.Even
 
 func waitForDispatch(t *testing.T, client *fakeRelayClient) {
 	t.Helper()
+	client.mu.Lock()
+	dispatchDone := client.dispatchDone
+	client.mu.Unlock()
 	select {
-	case <-client.dispatchDone:
+	case <-dispatchDone:
 	case <-time.After(time.Second):
 		t.Fatal("dispatch did not complete")
 	}
