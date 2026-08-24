@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"text/template"
 	"time"
@@ -35,7 +36,7 @@ const (
 	retentionKeep     = 500
 	retentionAge      = 30 * 24 * time.Hour
 	pruneInterval     = 10 * time.Minute
-	processingTimeout = 10 * time.Minute
+	processingTimeout = 30 * time.Minute
 	claimGrace        = processingTimeout + 2*time.Minute
 
 	readHeaderTimeout = 10 * time.Second
@@ -66,6 +67,8 @@ type Server struct {
 	httpSrv           *http.Server
 	listener          net.Listener
 	eventSlots        chan struct{}
+	sessionMu         sync.Map
+	processingTimeout time.Duration
 	lastPrune         time.Time
 	pruneInterval     time.Duration
 	readHeaderTimeout time.Duration
@@ -86,6 +89,7 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 		executor:          executor,
 		deliveries:        deliveries,
 		eventSlots:        make(chan struct{}, maxConcurrentWebhookEvents),
+		processingTimeout: processingTimeout,
 		pruneInterval:     pruneInterval,
 		readHeaderTimeout: readHeaderTimeout,
 		readTimeout:       readTimeout,
@@ -365,6 +369,15 @@ func (s *Server) claimProcessing(ctx context.Context, receipt *store.WebhookDeli
 	return ok, nil
 }
 
+// sessionLock returns the mutex for the session identity used by the webhook
+// executor. Webhook calls resolve (platform, channelID, "", ""), so the lock
+// must cover the executor call: each call opens a stream for one agent turn.
+func (s *Server) sessionLock(ep config.EndpointConfig) *sync.Mutex {
+	key := ep.Platform + "|" + ep.ChannelID
+	mu, _ := s.sessionMu.LoadOrStore(key, &sync.Mutex{})
+	return mu.(*sync.Mutex)
+}
+
 func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, deliveryID, eventType string) {
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -385,7 +398,11 @@ func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, d
 	rendered = strings.ReplaceAll(rendered, "</untrusted_payload>", "&lt;/untrusted_payload&gt;")
 	wrapped := fmt.Sprintf("<untrusted_payload>\n%s\n</untrusted_payload>", rendered)
 
-	ctx, cancel := context.WithTimeout(context.Background(), processingTimeout)
+	mu := s.sessionLock(ep)
+	mu.Lock()
+	defer mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), s.processingTimeout)
 	defer cancel()
 	err = s.executor(ctx, ep.Platform, ep.ChannelID, wrapped)
 
@@ -396,7 +413,7 @@ func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, d
 		}
 		slog.Info("webhook: delivery completed", "endpoint", ep.Name, "delivery_id", deliveryID, "event_type", eventType)
 	case errors.Is(err, context.DeadlineExceeded), ctx.Err() == context.DeadlineExceeded:
-		s.failDelivery(ep, id, deliveryID, eventType, "timed out after "+processingTimeout.String())
+		s.failDelivery(ep, id, deliveryID, eventType, "timed out after "+s.processingTimeout.String())
 	default:
 		s.failDelivery(ep, id, deliveryID, eventType, redactSummary(err.Error(), maxErrorSummaryRunes, ep.Secret))
 	}
