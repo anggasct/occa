@@ -716,6 +716,139 @@ func TestWebhookReplayAfterGraceRecoversStaleProcessing(t *testing.T) {
 	}
 }
 
+func TestWebhookSerializesSameSessionDeliveries(t *testing.T) {
+	var mu sync.Mutex
+	starts := 0
+	firstStarted := make(chan struct{})
+	firstReleased := make(chan struct{})
+	secondStarted := make(chan struct{})
+
+	exec := func(ctx context.Context, platform, channelID, prompt string) error {
+		mu.Lock()
+		starts++
+		call := starts
+		mu.Unlock()
+
+		switch call {
+		case 1:
+			close(firstStarted)
+			select {
+			case <-firstReleased:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		case 2:
+			close(secondStarted)
+		}
+		return nil
+	}
+
+	cfg := config.WebhookConfig{
+		Bind: "127.0.0.1:0",
+		Endpoints: []config.EndpointConfig{
+			{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+		},
+	}
+	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	srv := New(cfg, exec, st.WebhookDeliveryRepo())
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	if resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-1", "pull_request", `{}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("delivery-1 expected 200, got %d", resp.StatusCode)
+	}
+	select {
+	case <-firstStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("delivery-1 executor never started")
+	}
+
+	if resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-2", "pull_request", `{}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("delivery-2 expected 200, got %d", resp.StatusCode)
+	}
+	select {
+	case <-secondStarted:
+		t.Fatal("delivery-2 started before delivery-1 returned")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(firstReleased)
+	select {
+	case <-secondStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("delivery-2 executor never started after delivery-1 returned")
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		deliveries := mustList(t, st)
+		completed := 0
+		for _, delivery := range deliveries {
+			if delivery.Status == store.WebhookStatusCompleted {
+				completed++
+			}
+		}
+		if completed == 2 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("serialized deliveries did not both complete: %+v", mustList(t, st))
+}
+
+func TestWebhookProcessingTimeoutStartsAfterSessionLock(t *testing.T) {
+	started := make(chan time.Duration, 1)
+	exec := func(ctx context.Context, platform, channelID, prompt string) error {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Error("executor context has no deadline")
+		} else {
+			started <- time.Until(deadline)
+		}
+		return nil
+	}
+
+	ep := config.EndpointConfig{Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"}
+	srv, _ := newTestServer(t, []config.EndpointConfig{ep})
+	srv.executor = exec
+	srv.processingTimeout = 100 * time.Millisecond
+	lock := srv.sessionLock(ep)
+	lock.Lock()
+	done := make(chan struct{})
+	go func() {
+		srv.processAsync(ep, []byte(`{}`), 0, "delivery-1", "pull_request")
+		close(done)
+	}()
+
+	time.Sleep(150 * time.Millisecond)
+	select {
+	case <-started:
+		t.Fatal("executor started before the session lock was released")
+	default:
+	}
+	lock.Unlock()
+
+	select {
+	case remaining := <-started:
+		if remaining < 75*time.Millisecond {
+			t.Fatalf("processing timeout started before session lock acquisition: %s remaining", remaining)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("executor never started after the session lock was released")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("delivery did not finish")
+	}
+}
+
 func TestWebhookConcurrentDuplicateSuppression(t *testing.T) {
 	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{
 		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
