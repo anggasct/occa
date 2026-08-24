@@ -206,7 +206,7 @@ func TestPermissionAlwaysTapPersistsRule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListByOwner: %v", err)
 	}
-	if len(got) != 1 || got[0].Tool != "bash" {
+	if len(got) != 1 || got[0].Tool != "external_directory" {
 		t.Fatalf("persisted rules = %+v", got)
 	}
 	if view := reply.lastEdit(); view.text != "✅ Always allowed" || len(view.buttons) != 0 {
@@ -233,6 +233,89 @@ func TestPermissionAlwaysTapPersistFailureStillAllows(t *testing.T) {
 	}
 	if view := reply.lastEdit(); view.text != permissionNotSavedLabel {
 		t.Fatalf("terminal view = %+v, want not-saved variant", view)
+	}
+}
+
+func TestPermissionAlwaysTapMissingIdentityFailsClosed(t *testing.T) {
+	client := &permissionClient{}
+	rules := newFakePermissionRuleRepo()
+	broker := newPermissionBroker(rules)
+	owner := &permissionOwner{}
+	reply := &permissionReply{}
+	handler := &permissionPromptHandler{
+		broker:    broker,
+		owner:     owner,
+		client:    client,
+		platform:  "telegram",
+		channelID: "chat1",
+		sessionID: "session-1",
+		reply:     reply,
+	}
+	if err := handler.Prompt(context.Background(), relay.PermissionRequest{
+		ID:        "request-1",
+		SessionID: "session-1",
+		Tool:      "call_123",
+		Patterns:  []string{"/tmp/*"},
+	}); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	waitForSends(reply)
+	if len(reply.sends) != 1 || len(reply.sends[0].buttons) != 3 {
+		t.Fatalf("prompt view = %+v", reply.sends)
+	}
+	token, _, ok := parsePermissionCallback(reply.sends[0].buttons[1].Value)
+	if !ok {
+		t.Fatalf("invalid callback value: %q", reply.sends[0].buttons[1].Value)
+	}
+	callback := permissionCallback(token, reply.sends[0].ref, reply)
+	callback.CallbackData = "permission:" + token + ":always"
+	if err := broker.handle(context.Background(), callback); err != nil {
+		t.Fatalf("Always allow callback: %v", err)
+	}
+
+	if calls := client.callSnapshot(); len(calls) != 1 || calls[0].decision != relay.PermissionAlways {
+		t.Fatalf("backend calls = %+v, want one always reply", calls)
+	}
+	if view := reply.lastEdit(); view.text != permissionNotSavedLabel || len(view.buttons) != 0 {
+		t.Fatalf("terminal view = %+v, want rule-not-saved without buttons", view)
+	}
+	if saved, err := rules.ListByOwner(context.Background(), permissionsOwner()); err != nil {
+		t.Fatalf("ListByOwner: %v", err)
+	} else if len(saved) != 0 {
+		t.Fatalf("persisted rules = %+v, want none", saved)
+	}
+}
+
+func TestPermissionAutoApplyDifferentCallIDsShareStableIdentity(t *testing.T) {
+	client := &permissionClient{}
+	rules := newFakePermissionRuleRepo()
+	ctx := context.Background()
+	owner := permissionsOwner()
+	if _, err := rules.Add(ctx, owner, "external_directory", []string{"/tmp/*"}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	_, handler, reply := newPermissionPromptWithRules(t, client, rules)
+	for _, callID := range []string{"call_1", "call_2"} {
+		if err := handler.Prompt(ctx, relay.PermissionRequest{
+			ID:         "request-" + callID,
+			Permission: "external_directory",
+			Tool:       callID,
+			Patterns:   []string{"/tmp/*"},
+		}); err != nil {
+			t.Fatalf("Prompt %s: %v", callID, err)
+		}
+	}
+
+	if calls := client.callSnapshot(); len(calls) != 2 {
+		t.Fatalf("backend calls = %+v, want two auto-applied replies", calls)
+	}
+	if len(reply.sends) != 2 {
+		t.Fatalf("notice count = %d, want two", len(reply.sends))
+	}
+	for _, send := range reply.sends {
+		if len(send.buttons) != 0 || strings.Contains(send.text, "call_") {
+			t.Fatalf("auto-allowed view = %+v", send)
+		}
 	}
 }
 
