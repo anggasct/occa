@@ -45,9 +45,10 @@ type execCall struct {
 	platform  string
 	channelID string
 	prompt    string
+	workCtx   WebhookWorkContext
 }
 
-func (f *fakeExecutor) exec(ctx context.Context, platform, channelID, prompt string) error {
+func (f *fakeExecutor) exec(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
 	if f.block != nil {
 		select {
 		case <-f.block:
@@ -59,7 +60,7 @@ func (f *fakeExecutor) exec(ctx context.Context, platform, channelID, prompt str
 		return f.err
 	}
 	f.mu.Lock()
-	f.calls = append(f.calls, execCall{platform, channelID, prompt})
+	f.calls = append(f.calls, execCall{platform, channelID, prompt, workCtx})
 	f.mu.Unlock()
 	return nil
 }
@@ -590,6 +591,28 @@ func mustList(t *testing.T, st *store.SQLiteStore) []store.WebhookDelivery {
 	return deliveries
 }
 
+func waitForCompletedCount(t *testing.T, st *store.SQLiteStore, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		deliveries, err := st.WebhookDeliveryRepo().List(context.Background(), 50)
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		completed := 0
+		for _, d := range deliveries {
+			if isTerminal(d.Status) {
+				completed++
+			}
+		}
+		if completed >= want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("did not reach %d completed deliveries: %+v", want, mustList(t, st))
+}
+
 func TestWebhookReceiptLifecycleAndReplay(t *testing.T) {
 	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{
 		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
@@ -723,7 +746,7 @@ func TestWebhookSerializesSameSessionDeliveries(t *testing.T) {
 	firstReleased := make(chan struct{})
 	secondStarted := make(chan struct{})
 
-	exec := func(ctx context.Context, platform, channelID, prompt string) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
 		mu.Lock()
 		starts++
 		call := starts
@@ -804,7 +827,7 @@ func TestWebhookSerializesSameSessionDeliveries(t *testing.T) {
 
 func TestWebhookProcessingTimeoutStartsAfterSessionLock(t *testing.T) {
 	started := make(chan time.Duration, 1)
-	exec := func(ctx context.Context, platform, channelID, prompt string) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
 		deadline, ok := ctx.Deadline()
 		if !ok {
 			t.Error("executor context has no deadline")
@@ -818,7 +841,7 @@ func TestWebhookProcessingTimeoutStartsAfterSessionLock(t *testing.T) {
 	srv, _ := newTestServer(t, []config.EndpointConfig{ep})
 	srv.executor = exec
 	srv.processingTimeout = 100 * time.Millisecond
-	lock := srv.sessionLock(ep)
+	lock := srv.sessionLock(ep, WebhookExecutionKey{})
 	lock.Lock()
 	done := make(chan struct{})
 	go func() {
@@ -1312,5 +1335,312 @@ func TestWebhookStartPrunesOldDeliveries(t *testing.T) {
 	}
 	if len(deliveries) != 0 {
 		t.Fatalf("retention after prune = %d rows, want 0 rows older than retention age", len(deliveries))
+	}
+}
+
+func TestWebhookProjectAwareSerializationSameKey(t *testing.T) {
+	var mu sync.Mutex
+	starts := 0
+	firstStarted := make(chan struct{})
+	firstReleased := make(chan struct{})
+	secondStarted := make(chan struct{})
+
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+		mu.Lock()
+		starts++
+		call := starts
+		mu.Unlock()
+
+		switch call {
+		case 1:
+			close(firstStarted)
+			select {
+			case <-firstReleased:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		case 2:
+			close(secondStarted)
+		}
+		return nil
+	}
+
+	cfg := config.WebhookConfig{
+		Bind: "127.0.0.1:0",
+		Endpoints: []config.EndpointConfig{
+			{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+		},
+	}
+	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	srv := New(cfg, exec, st.WebhookDeliveryRepo())
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	payloadSameKey := `{"repository":{"full_name":"anggasct/occa"},"pull_request":{"base":{"repo":{"full_name":"anggasct/occa"}},"head":{"repo":{"full_name":"anggasct/occa"},"ref":"feat/branch-1"}}}`
+
+	if resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-1", "pull_request", payloadSameKey); resp.StatusCode != http.StatusOK {
+		t.Fatalf("delivery-1 expected 200, got %d", resp.StatusCode)
+	}
+	select {
+	case <-firstStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("delivery-1 never started")
+	}
+
+	if resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-2", "pull_request", payloadSameKey); resp.StatusCode != http.StatusOK {
+		t.Fatalf("delivery-2 expected 200, got %d", resp.StatusCode)
+	}
+	select {
+	case <-secondStarted:
+		t.Fatal("delivery-2 started before delivery-1 released lock")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(firstReleased)
+	select {
+	case <-secondStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("delivery-2 never started after delivery-1 completed")
+	}
+
+	waitForCompletedCount(t, st, 2)
+}
+
+func TestWebhookProjectAwareParallelismDifferentBranches(t *testing.T) {
+	firstStarted := make(chan struct{})
+	secondStarted := make(chan struct{})
+	bothRunning := make(chan struct{})
+	release := make(chan struct{})
+
+	var sessionKeys sync.Map
+
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+		sessionKeys.Store(workCtx.Key.Branch, workCtx.SessionKey)
+		switch workCtx.Key.Branch {
+		case "feat/branch-1":
+			close(firstStarted)
+		case "feat/branch-2":
+			close(secondStarted)
+		}
+
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		return nil
+	}
+
+	cfg := config.WebhookConfig{
+		Bind: "127.0.0.1:0",
+		Endpoints: []config.EndpointConfig{
+			{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+		},
+	}
+	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	srv := New(cfg, exec, st.WebhookDeliveryRepo())
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	payload1 := `{"repository":{"full_name":"anggasct/occa"},"pull_request":{"base":{"repo":{"full_name":"anggasct/occa"}},"head":{"repo":{"full_name":"anggasct/occa"},"ref":"feat/branch-1"}}}`
+	payload2 := `{"repository":{"full_name":"anggasct/occa"},"pull_request":{"base":{"repo":{"full_name":"anggasct/occa"}},"head":{"repo":{"full_name":"anggasct/occa"},"ref":"feat/branch-2"}}}`
+
+	if resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-1", "pull_request", payload1); resp.StatusCode != http.StatusOK {
+		t.Fatalf("delivery-1 expected 200, got %d", resp.StatusCode)
+	}
+	if resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-2", "pull_request", payload2); resp.StatusCode != http.StatusOK {
+		t.Fatalf("delivery-2 expected 200, got %d", resp.StatusCode)
+	}
+
+	go func() {
+		<-firstStarted
+		<-secondStarted
+		close(bothRunning)
+	}()
+
+	select {
+	case <-bothRunning:
+	case <-time.After(5 * time.Second):
+		t.Fatal("both branches did not execute concurrently in parallel")
+	}
+
+	close(release)
+	waitForCompletedCount(t, st, 2)
+
+	sk1, _ := sessionKeys.Load("feat/branch-1")
+	sk2, _ := sessionKeys.Load("feat/branch-2")
+	if sk1 == "" || sk2 == "" || sk1 == sk2 {
+		t.Fatalf("expected different session keys for different branches: %v vs %v", sk1, sk2)
+	}
+}
+
+func TestWebhookProjectAwareParallelismDifferentRepos(t *testing.T) {
+	firstStarted := make(chan struct{})
+	secondStarted := make(chan struct{})
+	bothRunning := make(chan struct{})
+	release := make(chan struct{})
+
+	var sessionKeys sync.Map
+
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+		sessionKeys.Store(workCtx.Key.Repository, workCtx.SessionKey)
+		switch workCtx.Key.Repository {
+		case "anggasct/occa":
+			close(firstStarted)
+		case "anggasct/dispatch":
+			close(secondStarted)
+		}
+
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		return nil
+	}
+
+	cfg := config.WebhookConfig{
+		Bind: "127.0.0.1:0",
+		Endpoints: []config.EndpointConfig{
+			{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+		},
+	}
+	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	srv := New(cfg, exec, st.WebhookDeliveryRepo())
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	payload1 := `{"repository":{"full_name":"anggasct/occa"},"pull_request":{"base":{"repo":{"full_name":"anggasct/occa"}},"head":{"repo":{"full_name":"anggasct/occa"},"ref":"main"}}}`
+	payload2 := `{"repository":{"full_name":"anggasct/dispatch"},"pull_request":{"base":{"repo":{"full_name":"anggasct/dispatch"}},"head":{"repo":{"full_name":"anggasct/dispatch"},"ref":"main"}}}`
+
+	if resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-1", "pull_request", payload1); resp.StatusCode != http.StatusOK {
+		t.Fatalf("delivery-1 expected 200, got %d", resp.StatusCode)
+	}
+	if resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-2", "pull_request", payload2); resp.StatusCode != http.StatusOK {
+		t.Fatalf("delivery-2 expected 200, got %d", resp.StatusCode)
+	}
+
+	go func() {
+		<-firstStarted
+		<-secondStarted
+		close(bothRunning)
+	}()
+
+	select {
+	case <-bothRunning:
+	case <-time.After(5 * time.Second):
+		t.Fatal("both repositories did not execute concurrently in parallel")
+	}
+
+	close(release)
+	waitForCompletedCount(t, st, 2)
+
+	sk1, _ := sessionKeys.Load("anggasct/occa")
+	sk2, _ := sessionKeys.Load("anggasct/dispatch")
+	if sk1 == "" || sk2 == "" || sk1 == sk2 {
+		t.Fatalf("expected different session keys for different repos: %v vs %v", sk1, sk2)
+	}
+}
+
+type fakeWorktreeResolver struct {
+	worktree string
+	err      error
+}
+
+func (f *fakeWorktreeResolver) ResolveWorktree(ctx context.Context, key WebhookExecutionKey) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.worktree, nil
+}
+
+func TestWebhookWorktreeResolutionIntegration(t *testing.T) {
+	var observedWorktree string
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+		observedWorktree = workCtx.Worktree
+		return nil
+	}
+
+	cfg := config.WebhookConfig{
+		Bind: "127.0.0.1:0",
+		Endpoints: []config.EndpointConfig{
+			{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+		},
+	}
+	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	srv := New(cfg, exec, st.WebhookDeliveryRepo())
+	srv.SetWorktreeResolver(&fakeWorktreeResolver{worktree: "/projects/occa/.worktree/my-fix"})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	payload := `{"repository":{"full_name":"anggasct/occa"},"pull_request":{"base":{"repo":{"full_name":"anggasct/occa"}},"head":{"repo":{"full_name":"anggasct/occa"},"ref":"my-fix"}}}`
+	if resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-1", "pull_request", payload); resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	waitForReceipt(t, st, store.WebhookStatusCompleted)
+	if observedWorktree != "/projects/occa/.worktree/my-fix" {
+		t.Fatalf("observed worktree = %q, want /projects/occa/.worktree/my-fix", observedWorktree)
+	}
+}
+
+func TestWebhookWorktreeConflictFailsDelivery(t *testing.T) {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+		return nil
+	}
+
+	cfg := config.WebhookConfig{
+		Bind: "127.0.0.1:0",
+		Endpoints: []config.EndpointConfig{
+			{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+		},
+	}
+	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	srv := New(cfg, exec, st.WebhookDeliveryRepo())
+	srv.SetWorktreeResolver(&fakeWorktreeResolver{err: ErrWorktreeConflict})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	payload := `{"repository":{"full_name":"anggasct/occa"},"pull_request":{"base":{"repo":{"full_name":"anggasct/occa"}},"head":{"repo":{"full_name":"anggasct/occa"},"ref":"my-fix"}}}`
+	if resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-1", "pull_request", payload); resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	receipt := waitForReceipt(t, st, store.WebhookStatusFailed)
+	if receipt.Status != store.WebhookStatusFailed {
+		t.Fatalf("expected failed status, got %s", receipt.Status)
+	}
+	if !strings.Contains(receipt.ErrorSummary, "worktree conflict") {
+		t.Fatalf("expected error summary to contain 'worktree conflict', got %q", receipt.ErrorSummary)
 	}
 }
