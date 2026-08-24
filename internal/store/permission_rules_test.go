@@ -256,3 +256,55 @@ func TestPermissionRuleMigrationFromV7PreservesRows(t *testing.T) {
 		t.Fatal("added rule after migration did not match")
 	}
 }
+
+func TestPermissionRuleMigrationRemovesOnlyLegacyCallIDsAndIsIdempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	ctx := context.Background()
+
+	s1, err := OpenWithDefaultWorkdir(path, "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	owner := permissionOwnerFixture()
+	if _, err := s1.PermissionRuleRepo().Add(ctx, owner, "external_directory", []string{"/tmp/*"}); err != nil {
+		t.Fatalf("Add stable: %v", err)
+	}
+	if _, err := s1.db.ExecContext(ctx, `INSERT INTO permission_rule (platform, channel_id, thread_id, user_id, tool, patterns, created_at) VALUES (?, ?, ?, ?, ?, ?, 1), (?, ?, ?, ?, ?, ?, 1), (?, ?, ?, ?, ?, ?, 1)`,
+		owner.Platform, owner.ChannelID, owner.ThreadID, owner.UserID, "call_123", "/tmp/call", owner.Platform, owner.ChannelID, owner.ThreadID, owner.UserID, "call_456", "/tmp/call2", owner.Platform, owner.ChannelID, owner.ThreadID, owner.UserID, "callable", "/tmp/stable",
+	); err != nil {
+		t.Fatalf("Add legacy rows: %v", err)
+	}
+	if _, err := s1.db.Exec("PRAGMA user_version=10"); err != nil {
+		t.Fatalf("stamp version 10: %v", err)
+	}
+	if err := s1.Close(); err != nil {
+		t.Fatalf("close first store: %v", err)
+	}
+
+	openAndCheck := func() *SQLiteStore {
+		s, err := OpenWithDefaultWorkdir(path, "")
+		if err != nil {
+			t.Fatalf("reopen: %v", err)
+		}
+		rules, err := s.PermissionRuleRepo().ListByOwner(ctx, owner)
+		if err != nil {
+			t.Fatalf("ListByOwner: %v", err)
+		}
+		if len(rules) != 2 {
+			t.Fatalf("rules after cleanup = %+v, want stable rows only", rules)
+		}
+		for _, rule := range rules {
+			if rule.Tool == "call_123" || rule.Tool == "call_456" {
+				t.Fatalf("legacy call ID survived cleanup: %+v", rule)
+			}
+		}
+		return s
+	}
+
+	s2 := openAndCheck()
+	if err := s2.Close(); err != nil {
+		t.Fatalf("close second store: %v", err)
+	}
+	s3 := openAndCheck()
+	defer func() { _ = s3.Close() }()
+}
