@@ -236,6 +236,11 @@ func TestDecoderPartTransitions(t *testing.T) {
 			want:     []Event{{Type: EventTool}, {Type: EventTool}},
 		},
 		{
+			name:     "reasoning between tools breaks no run",
+			sequence: []string{updated("p1", "tool"), updated("p2", "reasoning"), updated("p3", "tool")},
+			want:     []Event{{Type: EventTool}, {Type: EventTool}},
+		},
+		{
 			name:     "same kind emits nothing",
 			sequence: []string{updated("p1", "text"), updated("p2", "text")},
 			want:     nil,

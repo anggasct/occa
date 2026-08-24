@@ -52,13 +52,13 @@ func TestToolBubbleEditsInPlace(t *testing.T) {
 	}
 }
 
-// TestToolBubblePhaseReset: text ends the phase — the same tool after a
+// TestToolBubblePhaseReset: any text ends the phase — the same tool after a
 // message starts a fresh bubble instead of incrementing the old one.
 func TestToolBubblePhaseReset(t *testing.T) {
 	got := runToolEvents(t,
 		Event{Type: EventTool, Delta: "glob"},
 		Event{Type: EventTool, Delta: "glob"},
-		Event{Type: EventDelta, Delta: strings.Repeat("x", maxToolBubbleResetRunes)},
+		Event{Type: EventDelta, Delta: "done, next step"},
 		Event{Type: EventSegment},
 		Event{Type: EventTool, Delta: "glob"},
 	)
@@ -80,10 +80,9 @@ func TestToolBubbleDistinctTools(t *testing.T) {
 	}
 }
 
-// TestToolBubbleCapShowsWorkingIndicator: after 5 distinct bubbles in a phase,
-// further new tools stop creating bubbles and a single working indicator appears.
-// A substantial text block (EventSegment carrying >= maxToolBubbleResetRunes)
-// resets the bubble count so subsequent tools start fresh bubbles again.
+// TestToolBubbleCapShowsWorkingIndicator: after 5 bubbles in a phase, further
+// new runs stop creating bubbles and a single working indicator appears.
+// A text segment resets the budget so subsequent tools start fresh bubbles.
 func TestToolBubbleCapShowsWorkingIndicator(t *testing.T) {
 	got := runToolEvents(t,
 		Event{Type: EventTool, Delta: "a"},
@@ -118,10 +117,10 @@ func TestToolBubbleCapShowsWorkingIndicator(t *testing.T) {
 	}
 }
 
-// TestToolBubbleCapNotResetByEmptySegment: an EventSegment carrying no text
-// never resets the budget, so a burst of 10 distinct tools still caps at 5
-// bubbles plus a single working indicator.
-func TestToolBubbleCapNotResetByEmptySegment(t *testing.T) {
+// TestToolBubbleEmptySegmentResetsBudget: every text segment resets the
+// budget unconditionally, so ten segment-separated runs render ten bubbles
+// and never reach the working indicator.
+func TestToolBubbleEmptySegmentResetsBudget(t *testing.T) {
 	got := runToolEvents(t,
 		Event{Type: EventTool, Delta: "a"},
 		Event{Type: EventSegment},
@@ -150,9 +149,12 @@ func TestToolBubbleCapNotResetByEmptySegment(t *testing.T) {
 		"⚙️ c",
 		"⚙️ d",
 		"⚙️ e",
-		"🔄 Working… · 10 tool calls · latest: j",
+		"⚙️ f",
+		"⚙️ g",
+		"⚙️ h",
+		"⚙️ i",
+		"⚙️ j",
 	}
-
 	if len(got) != len(want) {
 		t.Fatalf("notices len = %d, want %d: %v", len(got), len(want), got)
 	}
@@ -163,10 +165,9 @@ func TestToolBubbleCapNotResetByEmptySegment(t *testing.T) {
 	}
 }
 
-// TestToolBubbleCapNotResetByShortText: an EventSegment carrying fewer runes
-// than the threshold does not reset the budget, so later tools still collapse
-// to the working indicator.
-func TestToolBubbleCapNotResetByShortText(t *testing.T) {
+// TestToolBubbleShortTextResetsBudget: even a short text block ends the
+// phase — later runs get fresh bubbles instead of collapsing into Working.
+func TestToolBubbleShortTextResetsBudget(t *testing.T) {
 	got := runToolEvents(t,
 		Event{Type: EventTool, Delta: "a"},
 		Event{Type: EventTool, Delta: "b"},
@@ -184,7 +185,7 @@ func TestToolBubbleCapNotResetByShortText(t *testing.T) {
 		"⚙️ c",
 		"⚙️ d",
 		"⚙️ e",
-		"🔄 Working… · 6 tool calls · latest: f",
+		"⚙️ f",
 	}
 
 	if len(got) != len(want) {
@@ -195,101 +196,6 @@ func TestToolBubbleCapNotResetByShortText(t *testing.T) {
 			t.Fatalf("notices[%d] = %q, want %q (got: %v)", i, got[i], want[i], got)
 		}
 	}
-}
-
-// TestToolBubbleCapResetBySubstantialText: an EventSegment carrying text at or
-// above the threshold resets the budget, so later tools render fresh bubbles.
-func TestToolBubbleCapResetBySubstantialText(t *testing.T) {
-	got := runToolEvents(t,
-		Event{Type: EventTool, Delta: "a"},
-		Event{Type: EventTool, Delta: "b"},
-		Event{Type: EventTool, Delta: "c"},
-		Event{Type: EventTool, Delta: "d"},
-		Event{Type: EventTool, Delta: "e"},
-		Event{Type: EventTool, Delta: "f"},
-		Event{Type: EventDelta, Delta: strings.Repeat("x", 60)},
-		Event{Type: EventSegment},
-		Event{Type: EventTool, Delta: "g"},
-		Event{Type: EventTool, Delta: "h"},
-	)
-
-	want := []string{
-		"⚙️ a",
-		"⚙️ b",
-		"⚙️ c",
-		"⚙️ d",
-		"⚙️ e",
-		"⚙️ g",
-		"⚙️ h",
-	}
-
-	if len(got) != len(want) {
-		t.Fatalf("notices len = %d, want %d: %v", len(got), len(want), got)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("notices[%d] = %q, want %q (got: %v)", i, got[i], want[i], got)
-		}
-	}
-}
-
-// TestToolBubbleCapThresholdBoundary: text of exactly maxToolBubbleResetRunes
-// resets the budget; one rune fewer does not.
-func TestToolBubbleCapThresholdBoundary(t *testing.T) {
-	run := func(t *testing.T, textLen int) []string {
-		t.Helper()
-		return runToolEvents(t,
-			Event{Type: EventTool, Delta: "a"},
-			Event{Type: EventTool, Delta: "b"},
-			Event{Type: EventTool, Delta: "c"},
-			Event{Type: EventTool, Delta: "d"},
-			Event{Type: EventTool, Delta: "e"},
-			Event{Type: EventTool, Delta: "f"},
-			Event{Type: EventDelta, Delta: strings.Repeat("x", textLen)},
-			Event{Type: EventSegment},
-			Event{Type: EventTool, Delta: "g"},
-		)
-	}
-
-	t.Run("at threshold resets", func(t *testing.T) {
-		got := run(t, maxToolBubbleResetRunes)
-		want := []string{
-			"⚙️ a",
-			"⚙️ b",
-			"⚙️ c",
-			"⚙️ d",
-			"⚙️ e",
-			"⚙️ g",
-		}
-		if len(got) != len(want) {
-			t.Fatalf("notices len = %d, want %d: %v", len(got), len(want), got)
-		}
-		for i := range want {
-			if got[i] != want[i] {
-				t.Fatalf("notices[%d] = %q, want %q (got: %v)", i, got[i], want[i], got)
-			}
-		}
-	})
-
-	t.Run("below threshold does not reset", func(t *testing.T) {
-		got := run(t, maxToolBubbleResetRunes-1)
-		want := []string{
-			"⚙️ a",
-			"⚙️ b",
-			"⚙️ c",
-			"⚙️ d",
-			"⚙️ e",
-			"🔄 Working… · 7 tool calls · latest: g",
-		}
-		if len(got) != len(want) {
-			t.Fatalf("notices len = %d, want %d: %v", len(got), len(want), got)
-		}
-		for i := range want {
-			if got[i] != want[i] {
-				t.Fatalf("notices[%d] = %q, want %q (got: %v)", i, got[i], want[i], got)
-			}
-		}
-	})
 }
 
 // TestToolBubbleEmptyNameFallback: tool parts without a name fall back to a
@@ -401,16 +307,16 @@ func TestToolBubbleWithContext(t *testing.T) {
 	})
 }
 
-// TestToolBubbleNonConsecutiveGrouping: the same tool separated by other
-// tools still updates its original bubble.
-func TestToolBubbleNonConsecutiveGrouping(t *testing.T) {
+// TestToolBubbleContiguousRunGrouping: the same tool separated by other tools
+// starts a fresh bubble — grouping follows adjacency, not tool type.
+func TestToolBubbleContiguousRunGrouping(t *testing.T) {
 	got := runToolEvents(t,
 		Event{Type: EventTool, Delta: "bash"},
 		Event{Type: EventTool, Delta: "grep"},
 		Event{Type: EventTool, Delta: "read"},
 		Event{Type: EventTool, Delta: "bash"},
 	)
-	want := []string{"⚙️ bash ×2", "⚙️ grep", "⚙️ read"}
+	want := []string{"⚙️ bash", "⚙️ grep", "⚙️ read", "⚙️ bash"}
 	if len(got) != len(want) {
 		t.Fatalf("notices = %v, want %v", got, want)
 	}
@@ -418,6 +324,135 @@ func TestToolBubbleNonConsecutiveGrouping(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("notices = %v, want %v", got, want)
 		}
+	}
+}
+
+// TestTerminalRollupResolvesWorkingBubble: on done the Working bubble becomes
+// a response-wide success summary instead of staying stale.
+func TestTerminalRollupResolvesWorkingBubble(t *testing.T) {
+	reply := newFakeReplyContext()
+	s := NewStreamer(reply, render.New(), render.Telegram)
+
+	events := make(chan Event, 10)
+	for _, name := range []string{"a", "b", "c", "d", "e", "f"} {
+		events <- Event{Type: EventTool, Delta: name}
+	}
+	events <- Event{Type: EventDone}
+	close(events)
+
+	if err := s.Run(context.Background(), events); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	edits := reply.edits["msg-6"]
+	if len(edits) == 0 || edits[len(edits)-1] != "✅ 6 tool calls · a ×1 · b ×1 · c ×1 · d ×1 · e ×1 · f ×1" {
+		t.Fatalf("terminal rollup = %v", edits)
+	}
+	for _, m := range reply.finalMessages() {
+		if strings.HasPrefix(m, "🔄 ") {
+			t.Fatalf("stale Working bubble survived done: %q", m)
+		}
+	}
+}
+
+// TestTerminalRollupErrorPrefixAndCountOrdering: error streams roll up under
+// ⚠️ with per-type totals sorted by count desc then name.
+func TestTerminalRollupErrorPrefixAndCountOrdering(t *testing.T) {
+	reply := newFakeReplyContext()
+	s := NewStreamer(reply, render.New(), render.Telegram)
+
+	events := make(chan Event, 12)
+	for _, name := range []string{"bash", "bash", "read", "grep", "edit", "write", "deploy"} {
+		events <- Event{Type: EventTool, Delta: name}
+	}
+	events <- Event{Type: EventError, Delta: "boom"}
+	close(events)
+
+	if err := s.Run(context.Background(), events); !errors.Is(err, ErrStreamFailed) {
+		t.Fatalf("Run error = %v", err)
+	}
+
+	edits := reply.edits["msg-6"]
+	want := "⚠️ 7 tool calls · bash ×2 · deploy ×1 · edit ×1 · grep ×1 · read ×1 · write ×1"
+	if len(edits) == 0 || edits[len(edits)-1] != want {
+		t.Fatalf("error rollup = %v, want last %q", edits, want)
+	}
+}
+
+// TestTerminalRollupOverflowListsEightTypes: more than eight distinct types
+// collapse into a "+N more" suffix.
+func TestTerminalRollupOverflowListsEightTypes(t *testing.T) {
+	reply := newFakeReplyContext()
+	s := NewStreamer(reply, render.New(), render.Telegram)
+
+	events := make(chan Event, 12)
+	for _, name := range []string{"a", "b", "c", "d", "e", "f", "g", "h", "i"} {
+		events <- Event{Type: EventTool, Delta: name}
+	}
+	events <- Event{Type: EventDone}
+	close(events)
+
+	if err := s.Run(context.Background(), events); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	edits := reply.edits["msg-6"]
+	want := "✅ 9 tool calls · a ×1 · b ×1 · c ×1 · d ×1 · e ×1 · f ×1 · g ×1 · h ×1 · +1 more"
+	if len(edits) == 0 || edits[len(edits)-1] != want {
+		t.Fatalf("overflow rollup = %v, want last %q", edits, want)
+	}
+}
+
+// TestTerminalRollupCountsAcrossPhases: phase resets never erase the
+// response-wide totals behind the final rollup.
+func TestTerminalRollupCountsAcrossPhases(t *testing.T) {
+	reply := newFakeReplyContext()
+	s := NewStreamer(reply, render.New(), render.Telegram)
+
+	events := make(chan Event, 20)
+	events <- Event{Type: EventTool, Delta: "bash"}
+	events <- Event{Type: EventDelta, Delta: "some narration"}
+	events <- Event{Type: EventSegment}
+	for _, name := range []string{"a", "b", "c", "d", "e", "f"} {
+		events <- Event{Type: EventTool, Delta: name}
+	}
+	events <- Event{Type: EventDone}
+	close(events)
+
+	if err := s.Run(context.Background(), events); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	edits := reply.edits["msg-8"]
+	wantRollup := "✅ 7 tool calls · a ×1 · b ×1 · bash ×1 · c ×1 · d ×1 · e ×1 · f ×1"
+	if len(edits) == 0 || edits[len(edits)-1] != wantRollup {
+		t.Fatalf("cross-phase rollup = %v, want last %q", edits, wantRollup)
+	}
+}
+
+// TestNoRollupWithoutWorkingBubble: when every run got its own bubble, done
+// must not send or edit anything extra.
+func TestNoRollupWithoutWorkingBubble(t *testing.T) {
+	reply := newFakeReplyContext()
+	s := NewStreamer(reply, render.New(), render.Telegram)
+
+	events := make(chan Event, 10)
+	events <- Event{Type: EventTool, Delta: "glob"}
+	events <- Event{Type: EventTool, Delta: "grep"}
+	events <- Event{Type: EventDone}
+	close(events)
+
+	if err := s.Run(context.Background(), events); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(reply.sends) != 3 {
+		t.Fatalf("sends = %v, want bubbles plus completion notice only", reply.sends)
+	}
+	if last := reply.sends[len(reply.sends)-1]; last != "✅ Task completed" {
+		t.Fatalf("last send = %q, want completion notice (no rollup message)", last)
+	}
+	if n := len(reply.edits["msg-1"]) + len(reply.edits["msg-2"]); n != 0 {
+		t.Fatalf("unexpected edits: %v", reply.edits)
 	}
 }
 
@@ -454,10 +489,11 @@ func TestWorkingBubbleSingleMessageAndPendingFlush(t *testing.T) {
 		t.Fatalf("Working send = %q", reply.sends[5])
 	}
 	if len(reply.edits["msg-6"]) != 1 {
-		t.Fatalf("Working edits = %v, want one terminal flush", reply.edits["msg-6"])
+		t.Fatalf("Working edits = %v, want one terminal rollup", reply.edits["msg-6"])
 	}
-	if got := reply.edits["msg-6"][0]; got != "🔄 Working… · 8 tool calls · latest: h" {
-		t.Fatalf("Working flush = %q", got)
+	wantRollup := "✅ 8 tool calls · a ×1 · b ×1 · c ×1 · d ×1 · e ×1 · f ×1 · g ×1 · h ×1"
+	if got := reply.edits["msg-6"][0]; got != wantRollup {
+		t.Fatalf("Working rollup = %q", got)
 	}
 }
 
@@ -494,7 +530,7 @@ func TestWorkingRemovalStartsFreshPhase(t *testing.T) {
 	for _, name := range []string{"a", "b", "c", "d", "e", "f"} {
 		events <- Event{Type: EventTool, Delta: name}
 	}
-	events <- Event{Type: EventDelta, Delta: strings.Repeat("x", maxToolBubbleResetRunes)}
+	events <- Event{Type: EventDelta, Delta: strings.Repeat("x", 60)}
 	events <- Event{Type: EventSegment}
 	for _, name := range []string{"g", "h", "i", "j", "k", "l"} {
 		events <- Event{Type: EventTool, Delta: name}
@@ -516,7 +552,6 @@ func TestWorkingRemovalStartsFreshPhase(t *testing.T) {
 	want := []string{
 		"⚙️ a", "⚙️ b", "⚙️ c", "⚙️ d", "⚙️ e",
 		"⚙️ g", "⚙️ h", "⚙️ i", "⚙️ j", "⚙️ k",
-		"🔄 Working… · 6 tool calls · latest: l",
 	}
 	got := toolNoticesOf(reply.finalMessages())
 	if len(got) != len(want) {
@@ -527,20 +562,37 @@ func TestWorkingRemovalStartsFreshPhase(t *testing.T) {
 			t.Fatalf("notices[%d] = %q, want %q", i, got[i], want[i])
 		}
 	}
+
+	edits := reply.edits["msg-13"]
+	wantRollup := "✅ 12 tool calls · a ×1 · b ×1 · c ×1 · d ×1 · e ×1 · f ×1 · g ×1 · h ×1 · +4 more"
+	if len(edits) == 0 || edits[len(edits)-1] != wantRollup {
+		t.Fatalf("second phase Working rollup = %v, want last %q", edits, wantRollup)
+	}
 }
 
 func TestWorkingFlushesOnTerminalEvents(t *testing.T) {
+	rollup := func(icon string) string {
+		return icon + " 7 tool calls · a ×1 · b ×1 · c ×1 · d ×1 · e ×1 · f ×1 · g ×1"
+	}
 	tests := []struct {
-		name      string
-		terminal  Event
-		wantErr   error
-		configure func(*Streamer)
-		cancelRun bool
+		name         string
+		terminal     Event
+		wantErr      error
+		wantLastEdit string
+		configure    func(*Streamer)
+		cancelRun    bool
 	}{
-		{name: "done", terminal: Event{Type: EventDone}},
-		{name: "error", terminal: Event{Type: EventError, Delta: "failed"}, wantErr: ErrStreamFailed},
-		{name: "timeout", wantErr: ErrTimeout, configure: func(s *Streamer) { s.noEventTimeout = 10 * time.Millisecond }},
-		{name: "cancellation", wantErr: context.Canceled, cancelRun: true},
+		{name: "done", terminal: Event{Type: EventDone}, wantLastEdit: rollup("✅")},
+		{name: "error", terminal: Event{Type: EventError, Delta: "failed"}, wantErr: ErrStreamFailed, wantLastEdit: rollup("⚠️")},
+		{
+			name: "timeout", wantErr: ErrTimeout,
+			wantLastEdit: "🔄 Working… · 7 tool calls · latest: g",
+			configure:    func(s *Streamer) { s.noEventTimeout = 10 * time.Millisecond },
+		},
+		{
+			name: "cancellation", wantErr: context.Canceled, cancelRun: true,
+			wantLastEdit: "🔄 Working… · 7 tool calls · latest: g",
+		},
 	}
 
 	for _, tc := range tests {
@@ -580,8 +632,8 @@ func TestWorkingFlushesOnTerminalEvents(t *testing.T) {
 			} else if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("Run error = %v, want %v", err, tc.wantErr)
 			}
-			if got := reply.edits["msg-6"]; len(got) == 0 || got[len(got)-1] != "🔄 Working… · 7 tool calls · latest: g" {
-				t.Fatalf("Working terminal flush = %v", got)
+			if got := reply.edits["msg-6"]; len(got) == 0 || got[len(got)-1] != tc.wantLastEdit {
+				t.Fatalf("Working terminal edit = %v, want last %q", got, tc.wantLastEdit)
 			}
 		})
 	}
