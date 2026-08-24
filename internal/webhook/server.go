@@ -245,7 +245,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	eventType := providerEventType(r, body)
 	deliveryID := providerDeliveryID(r, payloadHash)
 
-	receipt, shouldProcess, err := s.claimReceipt(r.Context(), ep, deliveryID, eventType, payloadHash)
+	receipt, shouldProcess, alreadyClaimed, err := s.claimReceipt(r.Context(), ep, deliveryID, eventType, payloadHash)
 	if err != nil {
 		s.releaseEvent()
 		slog.Error("webhook: receipt claim failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
@@ -276,16 +276,18 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claimed, claimErr := s.claimProcessing(r.Context(), receipt, deliveryID)
-	if claimErr != nil {
-		s.releaseEvent()
-		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	if !claimed {
-		s.releaseEvent()
-		w.WriteHeader(http.StatusOK)
-		return
+	if !alreadyClaimed {
+		claimed, claimErr := s.claimProcessing(r.Context(), receipt, deliveryID)
+		if claimErr != nil {
+			s.releaseEvent()
+			http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if !claimed {
+			s.releaseEvent()
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 	}
 
 	slog.Info("webhook: delivery accepted", "endpoint", ep.Name, "delivery_id", deliveryID, "event_type", eventType, "status", store.WebhookStatusProcessing)
@@ -305,8 +307,9 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 // received has not completed its first state transition, so it remains
 // retryable; the next handler step performs the transition with CAS. A
 // duplicate whose in-flight attempt went stale (the earlier process died
-// mid-request) is re-claimed atomically so the event cannot be silently lost.
-func (s *Server) claimReceipt(ctx context.Context, ep config.EndpointConfig, deliveryID, eventType, payloadHash string) (*store.WebhookDelivery, bool, error) {
+// mid-request) is re-claimed atomically via ClaimStale and reports
+// alreadyClaimed so the handler skips the redundant CAS.
+func (s *Server) claimReceipt(ctx context.Context, ep config.EndpointConfig, deliveryID, eventType, payloadHash string) (*store.WebhookDelivery, bool, bool, error) {
 	created, err := s.deliveries.Create(ctx, store.WebhookDelivery{
 		Endpoint:    ep.Name,
 		DeliveryID:  deliveryID,
@@ -315,54 +318,49 @@ func (s *Server) claimReceipt(ctx context.Context, ep config.EndpointConfig, del
 		Attempt:     1,
 	})
 	if err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
 
 	receipt, err := s.deliveries.Get(ctx, ep.Name, deliveryID)
 	if err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
 	if receipt == nil {
-		return nil, false, errors.New("receipt missing after claim")
+		return nil, false, false, errors.New("receipt missing after claim")
 	}
 	if created {
-		return receipt, true, nil
+		return receipt, true, false, nil
 	}
 
 	if isTerminal(receipt.Status) {
-		return receipt, false, nil
+		return receipt, false, false, nil
 	}
 	if receipt.Status == store.WebhookStatusReceived {
-		return receipt, true, nil
+		return receipt, true, false, nil
 	}
 	if time.Now().Unix()-receipt.UpdatedAt < int64(claimGrace.Seconds()) {
-		return receipt, false, nil
+		return receipt, false, false, nil
 	}
 
 	ok, tErr := s.deliveries.ClaimStale(ctx, receipt.ID, time.Now().Add(-claimGrace).Unix())
 	if tErr != nil {
-		return nil, false, tErr
+		return nil, false, false, tErr
 	}
 	if !ok {
-		return receipt, false, nil
+		return receipt, false, false, nil
 	}
 	receipt.Status = store.WebhookStatusProcessing
-	return receipt, true, nil
+	return receipt, true, true, nil
 }
 
-// claimProcessing moves a fresh receipt directly to processing under
-// compare-and-swap so a failed claim leaves the delivery retryable.
+// claimProcessing moves a fresh receipt to processing under compare-and-swap
+// so a lost race leaves the delivery retryable instead of double-starting a
+// session. Receipts already claimed through ClaimStale skip this call.
 func (s *Server) claimProcessing(ctx context.Context, receipt *store.WebhookDelivery, deliveryID string) (bool, error) {
-	if receipt.Status == store.WebhookStatusProcessing {
-		return true, nil
-	}
 	ok, err := s.deliveries.Transition(ctx, receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived}, store.WebhookStatusProcessing, "")
 	if err != nil {
 		slog.Error("webhook: processing claim failed", "endpoint", receipt.Endpoint, "delivery_id", deliveryID, "error", err)
 		return false, err
-	}
-	if !ok {
-		return false, nil
 	}
 	return ok, nil
 }

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -38,19 +39,14 @@ func (r *sqliteWebhookDeliveryRepo) Create(ctx context.Context, d WebhookDeliver
 	if d.Attempt < 1 {
 		d.Attempt = 1
 	}
-	res, err := r.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO webhook_delivery (endpoint, delivery_id, event_type, payload_hash, status, attempt, error_summary, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	err := r.db.QueryRowContext(ctx,
+		`INSERT INTO webhook_delivery (endpoint, delivery_id, event_type, payload_hash, status, attempt, error_summary, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(endpoint, delivery_id) DO NOTHING
+		 RETURNING id`,
 		d.Endpoint, d.DeliveryID, d.EventType, d.PayloadHash, string(d.Status), d.Attempt, d.ErrorSummary, d.CreatedAt, d.UpdatedAt,
-	)
-	if err != nil {
-		return false, fmt.Errorf("store: webhook delivery create: %w", err)
-	}
-	inserted, err := res.RowsAffected()
-	if err != nil {
-		return false, fmt.Errorf("store: webhook delivery create rows: %w", err)
-	}
-	if inserted == 0 {
+	).Scan(&d.ID)
+	if errors.Is(err, sql.ErrNoRows) {
 		if _, err := r.db.ExecContext(ctx,
 			`UPDATE webhook_delivery SET attempt = attempt + 1 WHERE endpoint = ? AND delivery_id = ?`,
 			d.Endpoint, d.DeliveryID,
@@ -58,6 +54,9 @@ func (r *sqliteWebhookDeliveryRepo) Create(ctx context.Context, d WebhookDeliver
 			return false, fmt.Errorf("store: webhook delivery bump attempt: %w", err)
 		}
 		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: webhook delivery create: %w", err)
 	}
 	return true, nil
 }
