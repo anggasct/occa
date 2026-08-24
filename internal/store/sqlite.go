@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	schemaVersion    = 10
+	schemaVersion    = 11
 	SchemaVersion    = schemaVersion
 	busyTimeoutMilli = 5000
 )
@@ -27,6 +27,14 @@ var migrations = []func(s *SQLiteStore, tx *sql.Tx) error{
 	addPermissionRules,
 	ensureUsageAndWebhookTables,
 	ensureUsageAndWebhookTables,
+	cleanupLegacyPermissionRules,
+}
+
+func cleanupLegacyPermissionRules(_ *SQLiteStore, tx *sql.Tx) error {
+	if _, err := tx.Exec(`DELETE FROM permission_rule WHERE tool GLOB 'call_*'`); err != nil {
+		return fmt.Errorf("store: clean up legacy permission rules: %w", err)
+	}
+	return nil
 }
 
 func ensureUsageAndWebhookTables(s *SQLiteStore, tx *sql.Tx) error {

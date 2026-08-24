@@ -102,8 +102,32 @@ func TestParsePermissionAskedToolObject(t *testing.T) {
 	if ev.Permission.Tool != "call_456" {
 		t.Fatalf("Tool = %q, want call_456", ev.Permission.Tool)
 	}
+	if got := PermissionRuleIdentity(*ev.Permission); got != "external_directory" {
+		t.Fatalf("rule identity = %q, want external_directory", got)
+	}
 	if len(ev.Permission.Patterns) != 1 || ev.Permission.Patterns[0] != "/path/*" {
 		t.Fatalf("Patterns = %v, want [/path/*]", ev.Permission.Patterns)
+	}
+}
+
+func TestPermissionRuleIdentityFallbacksAndFailClosed(t *testing.T) {
+	tests := []struct {
+		name    string
+		request PermissionRequest
+		want    string
+	}{
+		{name: "permission kind wins over call id", request: PermissionRequest{Permission: "bash", Tool: "call_123"}, want: "bash"},
+		{name: "stable tool fallback", request: PermissionRequest{Tool: "bash"}, want: "bash"},
+		{name: "missing permission and call id", request: PermissionRequest{Tool: "call_123"}},
+		{name: "missing permission and empty tool", request: PermissionRequest{}},
+		{name: "transient permission is rejected", request: PermissionRequest{Permission: "call_123", Tool: "bash"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := PermissionRuleIdentity(tt.request); got != tt.want {
+				t.Fatalf("PermissionRuleIdentity(%+v) = %q, want %q", tt.request, got, tt.want)
+			}
+		})
 	}
 }
 

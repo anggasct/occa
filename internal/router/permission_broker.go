@@ -130,10 +130,11 @@ func (h *permissionPromptHandler) Prompt(ctx context.Context, request relay.Perm
 // normal prompt; only an exact rule match bypasses it.
 func (h *permissionPromptHandler) autoApply(ctx context.Context, request relay.PermissionRequest) bool {
 	rules := h.broker.rules
-	if rules == nil {
+	identity := relay.PermissionRuleIdentity(request)
+	if rules == nil || identity == "" {
 		return false
 	}
-	rule, err := rules.Match(ctx, h.ownerKey(), request.Tool, request.Patterns)
+	rule, err := rules.Match(ctx, h.ownerKey(), identity, request.Patterns)
 	if err != nil {
 		slog.Warn("permission: rule match failed; prompting instead", "platform", h.platform, "channel_id", h.channelID, "error", err)
 		return false
@@ -145,7 +146,7 @@ func (h *permissionPromptHandler) autoApply(ctx context.Context, request relay.P
 		slog.Warn("permission: auto-allow reply failed; prompting instead", "rule_id", rule.ID, "error", err)
 		return false
 	}
-	slog.Info("permission auto-allowed", "rule_id", rule.ID, "platform", h.platform, "channel_id", h.channelID, "tool", request.Tool)
+	slog.Info("permission auto-allowed", "rule_id", rule.ID, "platform", h.platform, "channel_id", h.channelID, "tool", identity)
 	if h.reply != nil {
 		if _, err := h.reply.Send(autoAllowedNotice(request)); err != nil {
 			slog.Warn("permission: auto-allowed notice send failed", "error", err)
@@ -163,7 +164,7 @@ func (r *permissionRecord) ownerKey() store.PermissionOwner {
 }
 
 func autoAllowedNotice(req relay.PermissionRequest) string {
-	return fmt.Sprintf("⚡ Auto-allowed (rule: %s — %s).", displayTool(req.Tool), describePatterns(req.Patterns))
+	return fmt.Sprintf("⚡ Auto-allowed (rule: %s — %s).", displayTool(relay.PermissionRuleIdentity(req)), describePatterns(req.Patterns))
 }
 
 var permissionToolLabels = map[string]string{
@@ -219,8 +220,18 @@ func describePatterns(patterns []string) string {
 
 func persistRules(ctx context.Context, rules store.PermissionRuleRepo, record *permissionRecord) error {
 	owner := record.ownerKey()
-	for _, req := range record.requests {
-		if _, err := rules.Add(ctx, owner, req.Tool, req.Patterns); err != nil {
+	identities := make([]string, len(record.requests))
+	for i, req := range record.requests {
+		identities[i] = relay.PermissionRuleIdentity(req)
+		if identities[i] == "" {
+			return errors.New("permission rule identity unavailable")
+		}
+	}
+	if rules == nil {
+		return nil
+	}
+	for i, req := range record.requests {
+		if _, err := rules.Add(ctx, owner, identities[i], req.Patterns); err != nil {
 			return err
 		}
 	}
@@ -387,7 +398,7 @@ func (b *permissionBroker) handle(ctx context.Context, msg channel.IncomingMessa
 	}
 
 	terminal := permissionTerminalLabel(decision)
-	if decision == relay.PermissionAlways && b.rules != nil {
+	if decision == relay.PermissionAlways {
 		if err := persistRules(ctx, b.rules, record); err != nil {
 			terminal = permissionNotSavedLabel
 			slog.Warn("permission: rule persist failed", "platform", record.platform, "channel_id", record.channelID, "error", err)
