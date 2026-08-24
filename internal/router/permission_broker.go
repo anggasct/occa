@@ -58,18 +58,31 @@ type permissionRecord struct {
 	attempt    uint64
 }
 
+type PermissionBatchKey struct {
+	Identity string
+	Patterns string
+}
+
+type pendingBatchKey struct {
+	owner *permissionOwner
+	batch PermissionBatchKey
+	nonce uint64
+}
+
 type pendingBatch struct {
 	owner    *permissionOwner
 	handler  *permissionPromptHandler
 	requests []relay.PermissionRequest
 	timer    *time.Timer
+	key      pendingBatchKey
 }
 
 type permissionBroker struct {
-	mu      sync.Mutex
-	records map[string]*permissionRecord
-	batches map[*permissionOwner]*pendingBatch
-	rules   store.PermissionRuleRepo
+	mu          sync.Mutex
+	records     map[string]*permissionRecord
+	batches     map[pendingBatchKey]*pendingBatch
+	nextBatchID uint64
+	rules       store.PermissionRuleRepo
 }
 
 type permissionPromptHandler struct {
@@ -88,7 +101,7 @@ type permissionPromptHandler struct {
 func newPermissionBroker(rules store.PermissionRuleRepo) *permissionBroker {
 	return &permissionBroker{
 		records: make(map[string]*permissionRecord),
-		batches: make(map[*permissionOwner]*pendingBatch),
+		batches: make(map[pendingBatchKey]*pendingBatch),
 		rules:   rules,
 	}
 }
@@ -102,8 +115,18 @@ func (h *permissionPromptHandler) Prompt(ctx context.Context, request relay.Perm
 		return nil
 	}
 
+	batchKey := PermissionBatchKey{
+		Identity: relay.PermissionRuleIdentity(request),
+		Patterns: store.CanonicalizePatterns(request.Patterns),
+	}
+
 	h.broker.mu.Lock()
-	batch, exists := h.broker.batches[h.owner]
+	key := pendingBatchKey{owner: h.owner, batch: batchKey}
+	if batchKey.Identity == "" {
+		h.broker.nextBatchID++
+		key.nonce = h.broker.nextBatchID
+	}
+	batch, exists := h.broker.batches[key]
 	if exists {
 		batch.requests = append(batch.requests, request)
 		h.broker.mu.Unlock()
@@ -114,11 +137,12 @@ func (h *permissionPromptHandler) Prompt(ctx context.Context, request relay.Perm
 		owner:    h.owner,
 		handler:  h,
 		requests: []relay.PermissionRequest{request},
+		key:      key,
 	}
 	batch.timer = time.AfterFunc(permissionBatchWindow, func() {
 		h.broker.flushBatch(batch)
 	})
-	h.broker.batches[h.owner] = batch
+	h.broker.batches[key] = batch
 	h.broker.mu.Unlock()
 
 	return nil
@@ -240,12 +264,12 @@ func persistRules(ctx context.Context, rules store.PermissionRuleRepo, record *p
 
 func (b *permissionBroker) flushBatch(batch *pendingBatch) {
 	b.mu.Lock()
-	current, exists := b.batches[batch.owner]
+	current, exists := b.batches[batch.key]
 	if !exists || current != batch {
 		b.mu.Unlock()
 		return
 	}
-	delete(b.batches, batch.owner)
+	delete(b.batches, batch.key)
 	b.mu.Unlock()
 
 	h := batch.handler
@@ -420,8 +444,11 @@ func (b *permissionBroker) expireOwner(owner *permissionOwner) {
 	b.mu.Lock()
 	b.cleanupLocked(now)
 
-	if batch, ok := b.batches[owner]; ok {
-		delete(b.batches, owner)
+	for key, batch := range b.batches {
+		if key.owner != owner {
+			continue
+		}
+		delete(b.batches, key)
 		if batch.timer != nil {
 			batch.timer.Stop()
 		}

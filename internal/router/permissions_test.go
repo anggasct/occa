@@ -214,6 +214,49 @@ func TestPermissionAlwaysTapPersistsRule(t *testing.T) {
 	}
 }
 
+func TestPermissionAlwaysCompatibleBatchPersistsExactPatterns(t *testing.T) {
+	client := &permissionClient{}
+	rules := newFakePermissionRuleRepo()
+	broker, handler, reply := newPermissionPromptWithRules(t, client, rules)
+	requests := []relay.PermissionRequest{
+		{ID: "request-1", SessionID: "session-1", Permission: "bash", Tool: "bash", Patterns: []string{"/path/b/*", "/path/a/*"}},
+		{ID: "request-2", SessionID: "session-1", Permission: "bash", Tool: "bash", Patterns: []string{"/path/a/*", "/path/b/*", "/path/a/*"}},
+	}
+	for _, request := range requests {
+		if err := handler.Prompt(context.Background(), request); err != nil {
+			t.Fatalf("Prompt %s: %v", request.ID, err)
+		}
+	}
+	waitForSendCount(reply, 1)
+	reply.mu.Lock()
+	view := reply.sends[0]
+	sendCount := len(reply.sends)
+	reply.mu.Unlock()
+	if sendCount != 1 {
+		t.Fatalf("send count = %d, want one compatible prompt", sendCount)
+	}
+	token, _, ok := parsePermissionCallback(view.buttons[1].Value)
+	if !ok {
+		t.Fatalf("invalid always callback: %q", view.buttons[1].Value)
+	}
+	callback := permissionCallback(token, view.ref, reply)
+	callback.CallbackData = "permission:" + token + ":always"
+	if err := broker.handle(context.Background(), callback); err != nil {
+		t.Fatalf("Always allow callback: %v", err)
+	}
+
+	saved, err := rules.ListByOwner(context.Background(), permissionsOwner())
+	if err != nil {
+		t.Fatalf("ListByOwner: %v", err)
+	}
+	if len(saved) != 1 {
+		t.Fatalf("persisted rules = %+v, want one exact rule", saved)
+	}
+	if saved[0].Tool != "bash" || saved[0].Patterns != "/path/a/*|/path/b/*" {
+		t.Fatalf("persisted rule = %+v, want canonical exact patterns", saved[0])
+	}
+}
+
 func TestPermissionAlwaysTapPersistFailureStillAllows(t *testing.T) {
 	client := &permissionClient{}
 	rules := newFakePermissionRuleRepo()
