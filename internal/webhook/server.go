@@ -301,9 +301,11 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 // claimReceipt inserts a durable receipt for a validated delivery. A brand-new
 // delivery reports shouldProcess=true. A duplicate of a terminal delivery, or
 // one still being processed within the claim grace window, observes the
-// existing status and does not start a second session. A duplicate whose
-// in-flight attempt went stale (the earlier process died mid-request) is
-// re-claimed atomically so the event cannot be silently lost.
+// existing status and does not start a second session. A receipt still in
+// received has not completed its first state transition, so it remains
+// retryable; the next handler step performs the transition with CAS. A
+// duplicate whose in-flight attempt went stale (the earlier process died
+// mid-request) is re-claimed atomically so the event cannot be silently lost.
 func (s *Server) claimReceipt(ctx context.Context, ep config.EndpointConfig, deliveryID, eventType, payloadHash string) (*store.WebhookDelivery, bool, error) {
 	created, err := s.deliveries.Create(ctx, store.WebhookDelivery{
 		Endpoint:    ep.Name,
@@ -329,6 +331,9 @@ func (s *Server) claimReceipt(ctx context.Context, ep config.EndpointConfig, del
 
 	if isTerminal(receipt.Status) {
 		return receipt, false, nil
+	}
+	if receipt.Status == store.WebhookStatusReceived {
+		return receipt, true, nil
 	}
 	if time.Now().Unix()-receipt.UpdatedAt < int64(claimGrace.Seconds()) {
 		return receipt, false, nil

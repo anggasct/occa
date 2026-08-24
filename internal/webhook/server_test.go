@@ -102,6 +102,27 @@ func (s *failingTransitionStore) Transition(ctx context.Context, id int64, from 
 	return s.DeliveryStore.Transition(ctx, id, from, to, summary)
 }
 
+type failOnceTransitionStore struct {
+	DeliveryStore
+	to     store.WebhookStatus
+	err    error
+	mu     sync.Mutex
+	failed bool
+}
+
+func (s *failOnceTransitionStore) Transition(ctx context.Context, id int64, from []store.WebhookStatus, to store.WebhookStatus, summary string) (bool, error) {
+	s.mu.Lock()
+	shouldFail := to == s.to && !s.failed
+	if shouldFail {
+		s.failed = true
+	}
+	s.mu.Unlock()
+	if shouldFail {
+		return false, s.err
+	}
+	return s.DeliveryStore.Transition(ctx, id, from, to, summary)
+}
+
 func TestWebhookValidSecret(t *testing.T) {
 	srv, _ := newTestServer(t, []config.EndpointConfig{
 		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze this"},
@@ -931,6 +952,80 @@ func TestWebhookProcessingClaimFailureDoesNotAck(t *testing.T) {
 	}
 	if receipt.Status != store.WebhookStatusReceived {
 		t.Fatalf("failed processing claim changed receipt unexpectedly: %+v", receipt)
+	}
+}
+
+func TestWebhookSkipTransitionFailureIsRetryable(t *testing.T) {
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze", SkipEvents: []string{"ping"}},
+	})
+	base := srv.deliveries
+	srv.deliveries = &failOnceTransitionStore{DeliveryStore: base, to: store.WebhookStatusSkipped, err: errors.New("skip transition unavailable")}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-ping", "ping", `{}`)
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("initial skip transition failure returned %d, want 503", resp.StatusCode)
+	}
+	receipt, err := base.Get(context.Background(), "github", "delivery-ping")
+	if err != nil {
+		t.Fatalf("Get after failed skip transition: %v", err)
+	}
+	if receipt.Status != store.WebhookStatusReceived {
+		t.Fatalf("failed skip transition changed receipt: %+v", receipt)
+	}
+
+	srv.deliveries = base
+	resp = post(t, ts.URL+"/github?secret=s3cret", "delivery-ping", "ping", `{}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("retry after skip transition failure returned %d, want 200", resp.StatusCode)
+	}
+	receipt = waitForReceipt(t, st, store.WebhookStatusSkipped)
+	if receipt.Attempt != 2 || receipt.Status != store.WebhookStatusSkipped {
+		t.Fatalf("retry did not complete skip: %+v", receipt)
+	}
+	if exec.callCount() != 0 {
+		t.Fatalf("skipped retry started %d sessions", exec.callCount())
+	}
+}
+
+func TestWebhookProcessingClaimFailureIsRetryable(t *testing.T) {
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+	})
+	base := srv.deliveries
+	srv.deliveries = &failOnceTransitionStore{DeliveryStore: base, to: store.WebhookStatusProcessing, err: errors.New("processing claim unavailable")}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-1", "pull_request", `{}`)
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("initial processing claim failure returned %d, want 503", resp.StatusCode)
+	}
+	receipt, err := base.Get(context.Background(), "github", "delivery-1")
+	if err != nil {
+		t.Fatalf("Get after failed processing claim: %v", err)
+	}
+	if receipt.Status != store.WebhookStatusReceived {
+		t.Fatalf("failed processing claim changed receipt: %+v", receipt)
+	}
+
+	srv.deliveries = base
+	resp = post(t, ts.URL+"/github?secret=s3cret", "delivery-1", "pull_request", `{}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("retry after processing claim failure returned %d, want 200", resp.StatusCode)
+	}
+	receipt = waitForReceipt(t, st, store.WebhookStatusCompleted)
+	if receipt.Attempt != 2 || receipt.Status != store.WebhookStatusCompleted {
+		t.Fatalf("retry did not complete processing: %+v", receipt)
+	}
+	if exec.callCount() != 1 {
+		t.Fatalf("processing retry started %d sessions, want 1", exec.callCount())
 	}
 }
 
