@@ -22,6 +22,64 @@ func webhookDelivery(overrides func(*WebhookDelivery)) WebhookDelivery {
 	return d
 }
 
+// TestWebhookDeliveryConcurrentCreateSingleWinner: N goroutines creating the
+// same delivery must yield exactly one created=true, one row, and attempt=N.
+func TestWebhookDeliveryConcurrentCreateSingleWinner(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+	repo := s.WebhookDeliveryRepo()
+
+	const workers = 8
+	var mu sync.Mutex
+	wins := 0
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			created, err := repo.Create(ctx, webhookDelivery(nil))
+			if err != nil {
+				t.Errorf("Create: %v", err)
+				return
+			}
+			if created {
+				mu.Lock()
+				wins++
+				mu.Unlock()
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if wins != 1 {
+		t.Fatalf("created=true reported %d times, want exactly 1", wins)
+	}
+	got, err := repo.Get(ctx, "github-review", "abc-123")
+	if err != nil || got == nil {
+		t.Fatalf("Get: %v (receipt=%v)", err, got)
+	}
+	if got.Attempt != workers {
+		t.Fatalf("attempt = %d, want %d", got.Attempt, workers)
+	}
+
+	all, err := repo.List(ctx, 100)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	rows := 0
+	for _, d := range all {
+		if d.Endpoint == "github-review" && d.DeliveryID == "abc-123" {
+			rows++
+		}
+	}
+	if rows != 1 {
+		t.Fatalf("receipt rows = %d, want 1", rows)
+	}
+}
+
 func TestWebhookDeliveryCreateAndGet(t *testing.T) {
 	s := tempStore(t)
 	ctx := context.Background()
