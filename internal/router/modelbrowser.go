@@ -200,7 +200,13 @@ func (r *Router) modelBrowserRenderModels(ctx context.Context, msg channel.Incom
 	if err != nil {
 		return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "⚠️ Agent unreachable", nil)
 	}
-	text, buttons, err := r.modelModelsViewWithQuery(msg.Platform, providers, providerID, page, false, "", query)
+	var text string
+	var buttons []channel.Button
+	if query == "" {
+		text, buttons, err = r.modelModelsView(msg.Platform, providers, providerID, page, false, "")
+	} else {
+		text, buttons, err = r.modelModelsViewWithQuery(msg.Platform, providers, providerID, page, false, "", query)
+	}
 	if err != nil {
 		return err
 	}
@@ -303,7 +309,13 @@ func (r *Router) modelBrowserClose(ctx context.Context, msg channel.IncomingMess
 			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, text, nil)
 		}
 	case "models":
-		text, _, vErr := r.modelModelsViewWithQuery(msg.Platform, providers, action.providerID, action.page, true, "", action.query)
+		var text string
+		var vErr error
+		if action.query == "" {
+			text, _, vErr = r.modelModelsView(msg.Platform, providers, action.providerID, action.page, true, "")
+		} else {
+			text, _, vErr = r.modelModelsViewWithQuery(msg.Platform, providers, action.providerID, action.page, true, "", action.query)
+		}
 		if vErr == nil {
 			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, text, nil)
 		}
