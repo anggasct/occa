@@ -16,7 +16,9 @@ import (
 type fakeReplyContext struct {
 	mu       sync.Mutex
 	sends    []string
+	sent     map[string]string
 	edits    map[string][]string
+	deleted  map[string]bool
 	refCount int
 	typings  int
 }
@@ -26,7 +28,11 @@ type fakeRef struct{ id string }
 func (f fakeRef) ID() string { return f.id }
 
 func newFakeReplyContext() *fakeReplyContext {
-	return &fakeReplyContext{edits: make(map[string][]string)}
+	return &fakeReplyContext{
+		sent:    make(map[string]string),
+		edits:   make(map[string][]string),
+		deleted: make(map[string]bool),
+	}
 }
 
 func (f *fakeReplyContext) SendTyping() error {
@@ -41,7 +47,9 @@ func (f *fakeReplyContext) Send(text string) (channel.MessageRef, error) {
 	defer f.mu.Unlock()
 	f.sends = append(f.sends, text)
 	f.refCount++
-	return fakeRef{id: fmt.Sprintf("msg-%d", f.refCount)}, nil
+	ref := fakeRef{id: fmt.Sprintf("msg-%d", f.refCount)}
+	f.sent[ref.id] = text
+	return ref, nil
 }
 
 func (f *fakeReplyContext) Edit(ref channel.MessageRef, text string) error {
@@ -60,7 +68,16 @@ func (f *fakeReplyContext) SendWithButtons(text string, buttons []channel.Button
 	defer f.mu.Unlock()
 	f.sends = append(f.sends, text)
 	f.refCount++
-	return fakeRef{id: fmt.Sprintf("msg-%d", f.refCount)}, nil
+	ref := fakeRef{id: fmt.Sprintf("msg-%d", f.refCount)}
+	f.sent[ref.id] = text
+	return ref, nil
+}
+
+func (f *fakeReplyContext) Delete(ref channel.MessageRef) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deleted[ref.ID()] = true
+	return nil
 }
 
 func (f *fakeReplyContext) lastOutput() string {
@@ -68,12 +85,15 @@ func (f *fakeReplyContext) lastOutput() string {
 	defer f.mu.Unlock()
 	for id := f.refCount; id >= 1; id-- {
 		key := fmt.Sprintf("msg-%d", id)
+		if f.deleted[key] {
+			continue
+		}
 		if e := f.edits[key]; len(e) > 0 {
 			return e[len(e)-1]
 		}
-	}
-	if len(f.sends) > 0 {
-		return f.sends[len(f.sends)-1]
+		if sent, ok := f.sent[key]; ok {
+			return sent
+		}
 	}
 	return ""
 }
@@ -84,10 +104,13 @@ func (f *fakeReplyContext) finalMessages() []string {
 	var result []string
 	for i := 1; i <= f.refCount; i++ {
 		key := fmt.Sprintf("msg-%d", i)
+		if f.deleted[key] {
+			continue
+		}
 		if e := f.edits[key]; len(e) > 0 {
 			result = append(result, e[len(e)-1])
-		} else if i <= len(f.sends) {
-			result = append(result, f.sends[i-1])
+		} else if sent, ok := f.sent[key]; ok {
+			result = append(result, sent)
 		}
 	}
 	return result
