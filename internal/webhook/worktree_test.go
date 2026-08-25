@@ -647,3 +647,49 @@ func TestWorktreeResolverUnreadableOrNonRegularSidecarConflict(t *testing.T) {
 		t.Fatalf("expected ErrWorktreeConflict, got %v", err)
 	}
 }
+
+func TestWorktreeResolverDirtyAttachedWorktreeWithoutSidecarDoesNotWriteSidecar(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "occa")
+	if err := os.MkdirAll(repoDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	initTestGitRepo(t, repoDir)
+
+	customWtPath := filepath.Join(repoDir, ".worktree", "dirty-no-sidecar-wt")
+	cmd := exec.Command("git", "worktree", "add", "-b", "feat/dirty-branch", customWtPath)
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, out)
+	}
+
+	// Make the worktree dirty with an uncommitted file
+	if err := os.WriteFile(filepath.Join(customWtPath, "dirty.txt"), []byte("dirty content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	sidecarPath := customWtPath + ".key"
+	// Ensure sidecar does not exist prior to resolution
+	if _, err := os.Lstat(sidecarPath); !os.IsNotExist(err) {
+		t.Fatal("sidecar should not exist before resolution")
+	}
+
+	resolver := NewGitWorktreeResolver(tmpDir)
+	key := WebhookExecutionKey{
+		Repository: "anggasct/occa",
+		Branch:     "feat/dirty-branch",
+	}
+
+	_, err := resolver.ResolveWorktree(context.Background(), key)
+	if err == nil {
+		t.Fatal("expected ErrWorktreeConflict for dirty worktree, got nil")
+	}
+	if !errors.Is(err, ErrWorktreeConflict) {
+		t.Fatalf("expected ErrWorktreeConflict, got %v", err)
+	}
+
+	// Verify that sidecar was NEVER written/created on the dirty failure path!
+	if _, err := os.Lstat(sidecarPath); !os.IsNotExist(err) {
+		t.Fatalf("sidecar file %s was erroneously created on dirty conflict path", sidecarPath)
+	}
+}

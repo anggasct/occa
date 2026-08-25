@@ -120,6 +120,25 @@ func ExtractExecutionKey(body []byte) WebhookExecutionKey {
 	}
 }
 
+func isValidRepoFullName(s string) bool {
+	parts := strings.Split(s, "/")
+	if len(parts) != 2 {
+		return false
+	}
+	owner, repo := parts[0], parts[1]
+	if owner == "" || repo == "" || owner == "." || owner == ".." || repo == "." || repo == ".." {
+		return false
+	}
+	for _, part := range parts {
+		for _, r := range part {
+			if !isAllowedRepoChar(r) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func extractRepoFullName(v any) string {
 	if v == nil {
 		return ""
@@ -133,7 +152,7 @@ func extractRepoFullName(v any) string {
 			raw = strings.TrimSpace(fn)
 		}
 	}
-	if !strings.Contains(raw, "/") {
+	if !isValidRepoFullName(raw) {
 		return ""
 	}
 	return raw

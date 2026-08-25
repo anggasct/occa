@@ -70,6 +70,7 @@ type Server struct {
 	eventSlots        chan struct{}
 	sessionMu         sync.Map
 	processingTimeout time.Duration
+	pruneMu           sync.Mutex
 	lastPrune         time.Time
 	pruneInterval     time.Duration
 	readHeaderTimeout time.Duration
@@ -131,14 +132,20 @@ func (s *Server) recoverStale(ctx context.Context) {
 	} else if pruned > 0 {
 		slog.Info("webhook: pruned old deliveries", "pruned", pruned)
 	}
+	s.pruneMu.Lock()
 	s.lastPrune = now
+	s.pruneMu.Unlock()
 }
 
 func (s *Server) pruneIfDue() {
+	s.pruneMu.Lock()
 	if time.Since(s.lastPrune) < s.pruneInterval {
+		s.pruneMu.Unlock()
 		return
 	}
 	s.lastPrune = time.Now()
+	s.pruneMu.Unlock()
+
 	pruned, err := s.deliveries.Prune(context.Background(), time.Now().Add(-retentionAge).Unix(), retentionKeep)
 	if err != nil {
 		if errors.Is(err, sql.ErrConnDone) {

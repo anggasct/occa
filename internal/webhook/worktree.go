@@ -356,12 +356,11 @@ func (r *GitWorktreeResolver) ResolveWorktree(ctx context.Context, key WebhookEx
 	for _, wt := range worktrees {
 		if wt.Branch == branchRef || wt.Branch == key.Branch {
 			sidecarPath := wt.Path + ".key"
+			var needWriteSidecar bool
 			storedKey, sErr := readKeySidecar(sidecarPath)
 			if sErr != nil {
 				if os.IsNotExist(sErr) {
-					if err := writeKeySidecar(sidecarPath, key.String()); err != nil {
-						return "", fmt.Errorf("write sidecar metadata for attached worktree %s: %w", wt.Path, err)
-					}
+					needWriteSidecar = true
 				} else {
 					if errors.Is(sErr, ErrWorktreeConflict) {
 						return "", sErr
@@ -380,6 +379,12 @@ func (r *GitWorktreeResolver) ResolveWorktree(ctx context.Context, key WebhookEx
 			}
 			if dirty {
 				return "", fmt.Errorf("%w: worktree at %s has uncommitted changes", ErrWorktreeConflict, wt.Path)
+			}
+
+			if needWriteSidecar {
+				if err := writeKeySidecar(sidecarPath, key.String()); err != nil {
+					return "", fmt.Errorf("write sidecar metadata for attached worktree %s: %w", wt.Path, err)
+				}
 			}
 
 			return wt.Path, nil
