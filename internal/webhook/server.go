@@ -66,27 +66,28 @@ type Executor func(ctx context.Context, platform, channelID, prompt string, work
 type Notifier func(ctx context.Context, platform, channelID, text string) error
 
 type Server struct {
-	bind              string
-	bindAddr          string
-	endpoints         map[string]config.EndpointConfig
-	executor          Executor
-	notifier          Notifier
-	deliveries        DeliveryStore
-	channels          ChannelStore
-	worktreeResolver  WorktreeResolver
-	httpSrv           *http.Server
-	listener          net.Listener
-	eventSlots        chan struct{}
-	sessionMu         sync.Map
-	processingTimeout time.Duration
-	pruneMu           sync.Mutex
-	lastPrune         time.Time
-	pruneInterval     time.Duration
-	readHeaderTimeout time.Duration
-	readTimeout       time.Duration
-	writeTimeout      time.Duration
-	idleTimeout       time.Duration
-	listening         atomic.Bool
+	bind                string
+	bindAddr            string
+	endpoints           map[string]config.EndpointConfig
+	executor            Executor
+	notifier            Notifier
+	deliveries          DeliveryStore
+	channels            ChannelStore
+	worktreeResolver    WorktreeResolver
+	pullRequestResolver PullRequestResolver
+	httpSrv             *http.Server
+	listener            net.Listener
+	eventSlots          chan struct{}
+	sessionMu           sync.Map
+	processingTimeout   time.Duration
+	pruneMu             sync.Mutex
+	lastPrune           time.Time
+	pruneInterval       time.Duration
+	readHeaderTimeout   time.Duration
+	readTimeout         time.Duration
+	writeTimeout        time.Duration
+	idleTimeout         time.Duration
+	listening           atomic.Bool
 }
 
 func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) *Server {
@@ -113,6 +114,10 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 
 func (s *Server) SetWorktreeResolver(r WorktreeResolver) {
 	s.worktreeResolver = r
+}
+
+func (s *Server) SetPullRequestResolver(r PullRequestResolver) {
+	s.pullRequestResolver = r
 }
 
 func (s *Server) SetNotifier(n Notifier) {
@@ -425,10 +430,6 @@ func (s *Server) sessionLock(ep config.EndpointConfig, key WebhookExecutionKey) 
 
 func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, deliveryID, eventType string) {
 	key := ExtractExecutionKey(body)
-	mu := s.sessionLock(ep, key)
-	mu.Lock()
-	defer mu.Unlock()
-
 	var workCtx WebhookWorkContext
 	workCtx.Key = key
 	if !key.IsZero() {
@@ -454,6 +455,33 @@ func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, d
 		s.markSkipped(id, ep, envelope, reason)
 		return
 	}
+
+	if key.IsZero() && eventType == "issue_comment" && isWebhookWorkflow(ep.Workflow) {
+		ref, err := extractIssueCommentPullRequestRef(body)
+		if err != nil {
+			s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary("pull request reference invalid: "+err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
+			return
+		}
+		if s.pullRequestResolver == nil {
+			s.failDelivery(ep, id, deliveryID, eventType, envelope, "pull request resolver required for issue comments", workCtx)
+			return
+		}
+		key, err = s.pullRequestResolver.ResolvePullRequest(context.Background(), ref)
+		if err != nil {
+			s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary("pull request inspection failed: "+err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
+			return
+		}
+		if !strings.EqualFold(key.Repository, ref.Repository) || !isValidRepoFullName(key.HeadRepository) || !isSafeBranch(key.Branch) {
+			s.failDelivery(ep, id, deliveryID, eventType, envelope, "pull request inspection returned an invalid execution key", workCtx)
+			return
+		}
+		workCtx.Key = key
+		workCtx.SessionKey = key.String()
+	}
+
+	mu := s.sessionLock(ep, key)
+	mu.Lock()
+	defer mu.Unlock()
 
 	if !key.IsZero() {
 		if s.worktreeResolver == nil {
