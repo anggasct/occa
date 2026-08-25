@@ -45,6 +45,7 @@ type WebhookConfig struct {
 type EndpointConfig struct {
 	Name       string   `yaml:"name"`
 	Path       string   `yaml:"path"`
+	Auth       string   `yaml:"auth,omitempty"`
 	Secret     string   `yaml:"secret"`
 	Platform   string   `yaml:"platform"`
 	ChannelID  string   `yaml:"channel_id"`
@@ -234,6 +235,13 @@ func build(fc fileConfig, adminID string) (Config, error) {
 		}
 		paths := make(map[string]struct{}, len(fc.Webhooks.Endpoints))
 		for i, endpoint := range fc.Webhooks.Endpoints {
+			authMode := strings.TrimSpace(endpoint.Auth)
+			switch authMode {
+			case "", "legacy_bearer", "github_hmac_sha256":
+			default:
+				return Config{}, fmt.Errorf("config: webhooks.endpoints[%d].auth is unsupported: %q (supported: \"github_hmac_sha256\", \"legacy_bearer\")", i, endpoint.Auth)
+			}
+
 			if strings.TrimSpace(endpoint.Secret) == "" {
 				return Config{}, fmt.Errorf("config: webhooks.endpoints[%d].secret must not be empty", i)
 			}

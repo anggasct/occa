@@ -1,6 +1,7 @@
 package webhook
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1739,4 +1740,210 @@ func TestWebhookExecutorPanicRecoversAndFailsDelivery(t *testing.T) {
 	}
 
 	waitForCompletedCount(t, st, 2)
+}
+
+func TestWebhookGitHubHMACSuccess(t *testing.T) {
+	executed := make(chan struct{})
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+		close(executed)
+		return nil
+	}
+
+	secret := "github-hmac-secret-123"
+	cfg := config.WebhookConfig{
+		Bind: "127.0.0.1:0",
+		Endpoints: []config.EndpointConfig{
+			{
+				Name:      "github-review",
+				Path:      "/webhooks/github-review",
+				Auth:      "github_hmac_sha256",
+				Secret:    secret,
+				Platform:  "telegram",
+				ChannelID: "chat1",
+				Prompt:    "Analyze review",
+			},
+		},
+	}
+
+	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	srv := New(cfg, exec, st.WebhookDeliveryRepo())
+	srv.SetWorktreeResolver(&fakeWorktreeResolver{worktree: "/projects/occa/.worktree/hmac"})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	payload := []byte(`{"action":"submitted","repository":{"full_name":"anggasct/occa"},"pull_request":{"base":{"repo":{"full_name":"anggasct/occa"}},"head":{"repo":{"full_name":"anggasct/occa"},"ref":"main"}}}`)
+	sig := computeTestSignature(payload, secret)
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/webhooks/github-review", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GitHub-Delivery", "delivery-hmac-1")
+	req.Header.Set("X-GitHub-Event", "pull_request_review")
+	req.Header.Set("X-Hub-Signature-256", sig)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+
+	select {
+	case <-executed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("executor was not called for valid HMAC delivery")
+	}
+
+	receipt, err := st.WebhookDeliveryRepo().Get(context.Background(), "github-review", "delivery-hmac-1")
+	if err != nil {
+		t.Fatalf("get receipt: %v", err)
+	}
+	if receipt == nil {
+		t.Fatal("expected delivery receipt in store, got nil")
+	}
+}
+
+func TestWebhookGitHubHMACUnauthorizedNegativeCases(t *testing.T) {
+	var execCalled bool
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+		execCalled = true
+		return nil
+	}
+
+	secret := "github-hmac-secret-123"
+	cfg := config.WebhookConfig{
+		Bind: "127.0.0.1:0",
+		Endpoints: []config.EndpointConfig{
+			{
+				Name:      "github-review",
+				Path:      "/webhooks/github-review",
+				Auth:      "github_hmac_sha256",
+				Secret:    secret,
+				Platform:  "telegram",
+				ChannelID: "chat1",
+				Prompt:    "Analyze review",
+			},
+		},
+	}
+
+	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	srv := New(cfg, exec, st.WebhookDeliveryRepo())
+	srv.SetWorktreeResolver(&fakeWorktreeResolver{worktree: "/projects/occa/.worktree/hmac"})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	payload := []byte(`{"action":"submitted","repository":{"full_name":"anggasct/occa"}}`)
+	validSig := computeTestSignature(payload, secret)
+
+	tests := []struct {
+		name      string
+		urlSuffix string
+		headers   map[string]string
+		body      []byte
+	}{
+		{
+			name:      "missing signature header",
+			urlSuffix: "/webhooks/github-review",
+			headers:   map[string]string{"X-GitHub-Delivery": "d-missing-sig"},
+			body:      payload,
+		},
+		{
+			name:      "wrong secret signature",
+			urlSuffix: "/webhooks/github-review",
+			headers: map[string]string{
+				"X-GitHub-Delivery":   "d-wrong-sig",
+				"X-Hub-Signature-256": computeTestSignature(payload, "incorrect-secret"),
+			},
+			body: payload,
+		},
+		{
+			name:      "malformed prefix",
+			urlSuffix: "/webhooks/github-review",
+			headers: map[string]string{
+				"X-GitHub-Delivery":   "d-malformed-prefix",
+				"X-Hub-Signature-256": "sha1=47eef3f9704f2c07c5fed441603d472cb05b741d",
+			},
+			body: payload,
+		},
+		{
+			name:      "query param cannot authenticate HMAC endpoint",
+			urlSuffix: "/webhooks/github-review?secret=" + secret,
+			headers: map[string]string{
+				"X-GitHub-Delivery": "d-query-only",
+			},
+			body: payload,
+		},
+		{
+			name:      "legacy header cannot authenticate HMAC endpoint",
+			urlSuffix: "/webhooks/github-review",
+			headers: map[string]string{
+				"X-GitHub-Delivery": "d-legacy-header-only",
+				"X-Webhook-Secret":  secret,
+			},
+			body: payload,
+		},
+		{
+			name:      "tampered body with valid signature for different body",
+			urlSuffix: "/webhooks/github-review",
+			headers: map[string]string{
+				"X-GitHub-Delivery":   "d-tampered",
+				"X-Hub-Signature-256": validSig,
+			},
+			body: []byte(`{"action":"submitted","repository":{"full_name":"anggasct/occa"}, "extra": 1}`),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			execCalled = false
+			req, err := http.NewRequest(http.MethodPost, ts.URL+tt.urlSuffix, bytes.NewReader(tt.body))
+			if err != nil {
+				t.Fatalf("new request: %v", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			for k, v := range tt.headers {
+				req.Header.Set(k, v)
+			}
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("do request: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("expected status 401 Unauthorized, got %d", resp.StatusCode)
+			}
+
+			if execCalled {
+				t.Fatal("executor was erroneously called on unauthorized delivery")
+			}
+
+			if delID := tt.headers["X-GitHub-Delivery"]; delID != "" {
+				r, _ := st.WebhookDeliveryRepo().Get(context.Background(), "github-review", delID)
+				if r != nil {
+					t.Fatalf("receipt was erroneously created on 401 for %s", delID)
+				}
+			}
+		})
+	}
 }

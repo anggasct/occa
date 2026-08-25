@@ -338,3 +338,91 @@ func TestWebhookDuplicatePathValidation(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestWebhookAuthModeValidation(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
+
+	tests := []struct {
+		name      string
+		yaml      string
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			name: "explicit github_hmac_sha256 passes",
+			yaml: `webhooks:
+  endpoints:
+    - name: gh
+      path: /gh
+      auth: github_hmac_sha256
+      secret: supersecret
+      platform: discord
+      channel_id: c1
+      prompt: p`,
+			wantErr: false,
+		},
+		{
+			name: "explicit legacy_bearer passes",
+			yaml: `webhooks:
+  endpoints:
+    - name: legacy
+      path: /legacy
+      auth: legacy_bearer
+      secret: supersecret
+      platform: discord
+      channel_id: c1
+      prompt: p`,
+			wantErr: false,
+		},
+		{
+			name: "unsupported auth mode fails",
+			yaml: `webhooks:
+  endpoints:
+    - name: invalid
+      path: /invalid
+      auth: oauth2_token
+      secret: supersecret
+      platform: discord
+      channel_id: c1
+      prompt: p`,
+			wantErr:   true,
+			errSubstr: "webhooks.endpoints[0].auth is unsupported",
+		},
+		{
+			name: "github_hmac_sha256 with empty secret fails",
+			yaml: `webhooks:
+  endpoints:
+    - name: gh
+      path: /gh
+      auth: github_hmac_sha256
+      secret: "   "
+      platform: discord
+      channel_id: c1
+      prompt: p`,
+			wantErr:   true,
+			errSubstr: "webhooks.endpoints[0].secret must not be empty",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeConfig(t, t.TempDir(), tt.yaml)
+			cfg, err := Load(path)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.errSubstr)
+				}
+				if !strings.Contains(err.Error(), tt.errSubstr) {
+					t.Fatalf("error %q does not contain %q", err.Error(), tt.errSubstr)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if len(cfg.Webhooks.Endpoints) != 1 {
+					t.Fatalf("expected 1 endpoint, got %d", len(cfg.Webhooks.Endpoints))
+				}
+			}
+		})
+	}
+}

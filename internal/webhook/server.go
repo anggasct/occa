@@ -227,33 +227,40 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	secret := r.Header.Get("X-Webhook-Secret")
-	if secret == "" {
-		secret = r.URL.Query().Get("secret")
-	}
-	if subtle.ConstantTimeCompare([]byte(secret), []byte(ep.Secret)) != 1 {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
-
 	if r.ContentLength > maxWebhookBodySize {
 		http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
-		return
-	}
-	if !s.tryAcquireEvent() {
-		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
 		return
 	}
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBodySize))
 	if err != nil {
-		s.releaseEvent()
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
 			http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
 		} else {
 			http.Error(w, "Bad Request", http.StatusBadRequest)
 		}
+		return
+	}
+
+	if ep.Auth == "github_hmac_sha256" {
+		if !VerifyGitHubSignature(body, r.Header.Get("X-Hub-Signature-256"), ep.Secret) {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+	} else {
+		secret := r.Header.Get("X-Webhook-Secret")
+		if secret == "" {
+			secret = r.URL.Query().Get("secret")
+		}
+		if subtle.ConstantTimeCompare([]byte(secret), []byte(ep.Secret)) != 1 {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+
+	if !s.tryAcquireEvent() {
+		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
 		return
 	}
 
