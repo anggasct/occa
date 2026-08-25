@@ -141,7 +141,7 @@ func (r *Router) runResponse(
 	}
 	questionHandler := &questionPromptHandler{
 		broker:    r.questions,
-		encode:    func(text string) string { return r.inline(msg.Platform, text) },
+		split:     func(text string) []string { return r.outbound(msg.Platform, text) },
 		client:    inst.Client(),
 		platform:  key.platform,
 		channelID: key.channelID,

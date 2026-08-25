@@ -75,17 +75,22 @@ func (c *questionClient) RejectQuestion(_ context.Context, requestID string) err
 }
 
 type questionReply struct {
-	mu       sync.Mutex
-	nextID   int
-	sends    []permissionView
-	edits    []permissionView
-	editFail error
+	mu                  sync.Mutex
+	nextID              int
+	sends               []permissionView
+	edits               []permissionView
+	editFail            error
+	sendFail            error
+	sendWithButtonsFail error
 }
 
 func (r *questionReply) SendTyping() error { return nil }
 func (r *questionReply) Send(text string) (channel.MessageRef, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.sendFail != nil {
+		return nil, r.sendFail
+	}
 	r.nextID++
 	ref := permissionRef("q-msg-" + string(rune('0'+r.nextID)))
 	r.sends = append(r.sends, permissionView{ref: ref, text: text})
@@ -94,6 +99,9 @@ func (r *questionReply) Send(text string) (channel.MessageRef, error) {
 func (r *questionReply) SendWithButtons(text string, buttons []channel.Button) (channel.MessageRef, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.sendWithButtonsFail != nil {
+		return nil, r.sendWithButtonsFail
+	}
 	r.nextID++
 	ref := permissionRef("q-msg-" + string(rune('0'+r.nextID)))
 	r.sends = append(r.sends, permissionView{ref: ref, text: text, buttons: append([]channel.Button(nil), buttons...)})
@@ -158,8 +166,128 @@ func TestQuestionPromptSendsOptions(t *testing.T) {
 	if len(sent.buttons) != 3 {
 		t.Fatalf("expected 2 option buttons + skip, got %d", len(sent.buttons))
 	}
-	if sent.buttons[0].Label != "A" || sent.buttons[1].Label != "B" {
+	if sent.buttons[0].Label != "Q1 · 1" || sent.buttons[1].Label != "Q1 · 2" {
 		t.Fatalf("unexpected option labels: %+v", sent.buttons)
+	}
+}
+
+func TestQuestionPromptPreservesLongOptionDetails(t *testing.T) {
+	client := &questionClient{}
+	reply := &questionReply{}
+	h := newQuestionTestHandler(client, reply)
+	longLabel := strings.Repeat("label ", 20)
+	longDescription := strings.Repeat("description ", 20)
+	req := questionRequest()
+	req.Questions[0].Options = []relay.QuestionOption{{Label: longLabel, Description: longDescription}}
+
+	if err := h.Prompt(context.Background(), req); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	sent := reply.sends[0]
+	if !strings.Contains(sent.text, longLabel) || !strings.Contains(sent.text, longDescription) {
+		t.Fatalf("full option details missing from prompt: %q", sent.text)
+	}
+	if sent.buttons[0].Label != "Q1 · 1" {
+		t.Fatalf("button label = %q, want compact question index", sent.buttons[0].Label)
+	}
+	token := strings.Split(sent.buttons[0].Value, ":")[1]
+	msg := channel.IncomingMessage{
+		Platform:     "telegram",
+		ChannelID:    "chat-1",
+		IsCallback:   true,
+		CallbackData: "question:" + token + ":0:0",
+		CallbackRef:  sent.ref,
+		ReplyCtx:     reply,
+	}
+	if err := h.broker.HandleQuestionCallback(context.Background(), msg); err != nil {
+		t.Fatalf("handle long-label callback: %v", err)
+	}
+	client.mu.Lock()
+	answered := append([]string(nil), client.answered...)
+	client.mu.Unlock()
+	if len(answered) != 1 || answered[0] != "que-1|"+longLabel {
+		t.Fatalf("callback answer = %v, want original long label", answered)
+	}
+}
+
+func TestQuestionButtonsUseUnambiguousIndexesAcrossQuestions(t *testing.T) {
+	questions := questionRequest().Questions
+	questions = append(questions, relay.QuestionInfo{
+		Question: "Pilih database?",
+		Options:  []relay.QuestionOption{{Label: "X"}},
+	})
+	buttons := questionButtons("token", questions)
+	want := []string{"Q1 · 1", "Q1 · 2", "Q2 · 1", "❌ Skip"}
+	if len(buttons) != len(want) {
+		t.Fatalf("button count = %d, want %d", len(buttons), len(want))
+	}
+	for i, label := range want {
+		if buttons[i].Label != label {
+			t.Fatalf("button %d label = %q, want %q", i, buttons[i].Label, label)
+		}
+	}
+}
+
+func TestQuestionPromptSplitsDetailsBeforeActionMessage(t *testing.T) {
+	client := &questionClient{}
+	reply := &questionReply{}
+	h := newQuestionTestHandler(client, reply)
+	h.split = func(text string) []string {
+		if strings.Contains(text, "Agent has a question") {
+			return []string{"detail part 1", "detail part 2"}
+		}
+		return []string{text}
+	}
+
+	if err := h.Prompt(context.Background(), questionRequest()); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	if len(reply.sends) != 3 {
+		t.Fatalf("send count = %d, want 2 detail messages plus action message", len(reply.sends))
+	}
+	if reply.sends[0].buttons != nil || reply.sends[1].buttons != nil {
+		t.Fatalf("detail messages must be text-only: %+v", reply.sends)
+	}
+	if reply.sends[2].text != "❓ Choose an option:" || len(reply.sends[2].buttons) != 3 {
+		t.Fatalf("action message = %+v", reply.sends[2])
+	}
+
+	token := strings.Split(reply.sends[2].buttons[0].Value, ":")[1]
+	msg := channel.IncomingMessage{
+		Platform:     "telegram",
+		ChannelID:    "chat-1",
+		IsCallback:   true,
+		CallbackData: "question:" + token + ":0:1",
+		CallbackRef:  reply.sends[2].ref,
+		ReplyCtx:     reply,
+	}
+	if err := h.broker.HandleQuestionCallback(context.Background(), msg); err != nil {
+		t.Fatalf("handle action callback: %v", err)
+	}
+	client.mu.Lock()
+	answered := append([]string(nil), client.answered...)
+	client.mu.Unlock()
+	if len(answered) != 1 || answered[0] != "que-1|B" {
+		t.Fatalf("callback mapping = %v, want original option label", answered)
+	}
+}
+
+func TestQuestionPromptFailureRejectsPendingRequest(t *testing.T) {
+	client := &questionClient{}
+	reply := &questionReply{sendWithButtonsFail: errors.New("platform unavailable")}
+	h := newQuestionTestHandler(client, reply)
+
+	if err := h.Prompt(context.Background(), questionRequest()); err == nil {
+		t.Fatal("Prompt should fail when action message cannot be sent")
+	}
+	if len(client.rejected) != 1 || client.rejected[0] != "que-1" {
+		t.Fatalf("rejected requests = %v, want que-1", client.rejected)
+	}
+	if len(reply.sends) != 1 || reply.sends[0].text != "⚠️ Could not show the question. The request was stopped." {
+		t.Fatalf("failure notice = %+v", reply.sends)
+	}
+	if len(h.broker.records) != 0 {
+		t.Fatal("failed prompt must not remain pending")
 	}
 }
 
