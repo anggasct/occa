@@ -73,6 +73,34 @@ func TestBuildPermissionPolicyExactPathIsolation(t *testing.T) {
 	}
 }
 
+func TestBuildPermissionPolicyPostMergeEditsOnlyCanonicalDocsRoot(t *testing.T) {
+	const docsRoot = "/srv/vault/1-projects/occa"
+	policy, err := BuildPermissionPolicy(PermissionPolicyInput{
+		Workflow:        "github_merged",
+		Repository:      "anggasct/occa",
+		PRNumber:        "42",
+		Branch:          "fix/webhook-permissions",
+		Worktree:        "/srv/projects/occa/.worktree/pr-42",
+		ProjectDocsRoot: docsRoot,
+	})
+	if err != nil {
+		t.Fatalf("BuildPermissionPolicy: %v", err)
+	}
+
+	if got := permissionAction(policy, "edit", docsRoot+"/development-plan.md"); got != "allow" {
+		t.Fatalf("canonical docs edit = %q, want allow", got)
+	}
+	for _, path := range []string{
+		"/srv/projects/occa/.worktree/pr-42/project-docs/development-plan.md",
+		"/srv/projects/occa/project-docs/development-plan.md",
+		"/srv/projects/other/development-plan.md",
+	} {
+		if got := permissionAction(policy, "edit", path); got != "deny" {
+			t.Fatalf("post-merge edit %q = %q, want deny", path, got)
+		}
+	}
+}
+
 func TestBuildPermissionPolicyCommandMatrix(t *testing.T) {
 	base := PermissionPolicyInput{
 		Repository:      "anggasct/occa",

@@ -59,7 +59,6 @@ func BuildPermissionPolicy(input PermissionPolicyInput) (relay.PermissionRuleset
 		)
 		for _, permission := range []string{"read", "glob", "grep"} {
 			allowPath(permission, docs)
-			policy = append(policy, relay.PermissionRule{Permission: permission, Pattern: "project-docs/**", Action: "allow"})
 		}
 	}
 	allowExternalWorktree := func() {
@@ -156,7 +155,6 @@ func BuildPermissionPolicy(input PermissionPolicyInput) (relay.PermissionRuleset
 		allowPath("glob", docs)
 		allowPath("grep", docs)
 		allowPath("edit", docs)
-		policy = append(policy, relay.PermissionRule{Permission: "edit", Pattern: "project-docs/**", Action: "allow"})
 		allowExternalDocs()
 		for _, command := range []string{
 			"gh pr view " + input.PRNumber + " --repo " + repository,
