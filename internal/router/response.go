@@ -15,7 +15,7 @@ import (
 	"github.com/anggasct/occa/internal/store"
 )
 
-const busyResponseMessage = "⚠️ A response is already running in this conversation. Wait for it to finish or check /occa:status."
+const busyResponseMessage = "⚠️ A response is already running in this conversation. Wait for it to finish or check /status."
 
 const maxQueuedMessages = 5
 
@@ -103,7 +103,7 @@ func (c *responseCoordinator) release(key responseKey) {
 }
 
 // cancelResponse cancels the in-flight response for a conversation key,
-// used by /occa:reset and /occa:session new to stop a running response.
+// used by /reset and /session new to stop a running response.
 func (c *responseCoordinator) cancelResponse(key responseKey) {
 	c.mu.Lock()
 	cancel := c.active[key]

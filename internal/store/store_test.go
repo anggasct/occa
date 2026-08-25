@@ -129,7 +129,7 @@ func TestSessionKeyIsolation(t *testing.T) {
 
 // TestSessionSetActiveReKeysAdoptedRow: activating a session created under a
 // different key (e.g. before key granularity) re-keys it to the current
-// conversation so /occa:session switch keeps old sessions reachable.
+// conversation so /session switch keeps old sessions reachable.
 func TestSessionSetActiveReKeysAdoptedRow(t *testing.T) {
 	s := tempStore(t)
 	ctx := context.Background()

@@ -11,7 +11,7 @@ import (
 
 // The router's own fakes never exercise the SQL driver, so authorization is
 // also asserted against a real store: a role written without a model is the
-// shape every /occa:allow and admin bootstrap produces.
+// shape every /allow and admin bootstrap produces.
 func newSQLiteBackedRouter(t *testing.T, adminID string) (*Router, *fakeRelayClient, *fakeReplyCtx, store.Store) {
 	t.Helper()
 	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "router.db"), "")

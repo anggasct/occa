@@ -186,7 +186,7 @@ func TestDifferentThreadsRunConcurrently(t *testing.T) {
 	waitForResponse(t, r)
 }
 
-// TestSessionNewResetsOnlyCurrentConversation: /occa:new activates a new
+// TestSessionNewResetsOnlyCurrentConversation: /new activates a new
 // session only for the conversation the command ran in — one topic's reset
 // must not touch another topic or another user.s session.
 func TestSessionNewResetsOnlyCurrentConversation(t *testing.T) {
@@ -212,8 +212,8 @@ func TestSessionNewResetsOnlyCurrentConversation(t *testing.T) {
 	before := st.sessionRepo.activeBy[topic1Key]
 
 	replyB := &fakeReplyCtx{}
-	if err := r.Route(context.Background(), threadMsg("chat1", "topic-2", "alice", "/occa:session new", replyB)); err != nil {
-		t.Fatalf("Route /occa:new in topic-2: %v", err)
+	if err := r.Route(context.Background(), threadMsg("chat1", "topic-2", "alice", "/session new", replyB)); err != nil {
+		t.Fatalf("Route /new in topic-2: %v", err)
 	}
 	if st.sessionRepo.activeBy[topic1Key] != before {
 		t.Fatalf("topic-1 session must survive topic-2's reset, got %q", st.sessionRepo.activeBy[topic1Key])

@@ -105,7 +105,7 @@ func TestModelBrowserOpenShowsProviders(t *testing.T) {
 	client.providers = browseProviders()
 	reply := newBrowseReplyCtx()
 
-	m := msg("/occa:model", reply.fakeReplyCtx)
+	m := msg("/model", reply.fakeReplyCtx)
 	m.ReplyCtx = reply
 	if err := r.Route(context.Background(), m); err != nil {
 		t.Fatalf("Route: %v", err)
@@ -132,7 +132,7 @@ func TestModelBrowserProviderToModels(t *testing.T) {
 	client.providers = browseProviders()
 	reply := newBrowseReplyCtx()
 
-	m := msg("/occa:model", reply.fakeReplyCtx)
+	m := msg("/model", reply.fakeReplyCtx)
 	m.ReplyCtx = reply
 	if err := r.Route(context.Background(), m); err != nil {
 		t.Fatalf("Route: %v", err)
@@ -170,7 +170,7 @@ func TestModelBrowserSetPersonalForCaller(t *testing.T) {
 	client.providers = browseProviders()
 	reply := newBrowseReplyCtx()
 
-	m := msg("/occa:model", reply.fakeReplyCtx)
+	m := msg("/model", reply.fakeReplyCtx)
 	m.ReplyCtx = reply
 	if err := r.Route(context.Background(), m); err != nil {
 		t.Fatalf("Route: %v", err)
@@ -286,7 +286,7 @@ func TestModelBrowserPagination(t *testing.T) {
 	client.providers = providers
 	reply := newBrowseReplyCtx()
 
-	m := msg("/occa:model", reply.fakeReplyCtx)
+	m := msg("/model", reply.fakeReplyCtx)
 	m.ReplyCtx = reply
 	if err := r.Route(context.Background(), m); err != nil {
 		t.Fatalf("Route: %v", err)
@@ -320,7 +320,7 @@ func TestModelBrowserCloseAndStale(t *testing.T) {
 	client.providers = browseProviders()
 	reply := newBrowseReplyCtx()
 
-	m := msg("/occa:model", reply.fakeReplyCtx)
+	m := msg("/model", reply.fakeReplyCtx)
 	m.ReplyCtx = reply
 	if err := r.Route(context.Background(), m); err != nil {
 		t.Fatalf("Route: %v", err)
@@ -356,7 +356,7 @@ func TestModelBrowserBackToProviders(t *testing.T) {
 	client.providers = browseProviders()
 	reply := newBrowseReplyCtx()
 
-	m := msg("/occa:model", reply.fakeReplyCtx)
+	m := msg("/model", reply.fakeReplyCtx)
 	m.ReplyCtx = reply
 	if err := r.Route(context.Background(), m); err != nil {
 		t.Fatalf("Route: %v", err)
@@ -391,7 +391,7 @@ func TestModelBrowserShowsOnlyConnectedProviders(t *testing.T) {
 	client.providers = providers
 	reply := newBrowseReplyCtx()
 
-	m := msg("/occa:model", reply.fakeReplyCtx)
+	m := msg("/model", reply.fakeReplyCtx)
 	m.ReplyCtx = reply
 	if err := r.Route(context.Background(), m); err != nil {
 		t.Fatalf("Route: %v", err)
@@ -417,7 +417,7 @@ func TestModelBrowserRowLayout(t *testing.T) {
 	client.providers = providers
 	reply := newBrowseReplyCtx()
 
-	m := msg("/occa:model", reply.fakeReplyCtx)
+	m := msg("/model", reply.fakeReplyCtx)
 	m.ReplyCtx = reply
 	if err := r.Route(context.Background(), m); err != nil {
 		t.Fatalf("Route: %v", err)
@@ -456,7 +456,7 @@ func TestModelBrowserRowLayoutDiscord(t *testing.T) {
 		Platform:  "discord",
 		ChannelID: "chat1",
 		UserID:    "user1",
-		Text:      "/occa:model",
+		Text:      "/model",
 		IsMention: true,
 		ReplyCtx:  reply,
 	}
