@@ -121,6 +121,31 @@ func TestWebhookWorkflowGateMatrix(t *testing.T) {
 	}
 }
 
+func TestWebhookAuditNotificationsHaveSeparator(t *testing.T) {
+	for _, status := range []string{"COMPLETED", "SKIP", "FAILED"} {
+		t.Run(status, func(t *testing.T) {
+			var got string
+			srv := &Server{}
+			srv.SetNotifier(func(_ context.Context, _, _, text string) error {
+				got = text
+				return nil
+			})
+
+			srv.emitAudit(context.Background(), config.EndpointConfig{Platform: "telegram", ChannelID: "chat"}, WebhookEnvelope{
+				"event_type": "pull_request",
+				"action":     "opened",
+			}, status, "")
+
+			if !strings.HasSuffix(got, "\n"+webhookMessageSeparator) && got != webhookMessageSeparator {
+				t.Fatalf("audit notification = %q, want one trailing separator", got)
+			}
+			if !strings.Contains(got, "Status: "+status) {
+				t.Fatalf("audit notification = %q, missing status %q", got, status)
+			}
+		})
+	}
+}
+
 func TestWebhookMergeSkipsFormalFindingsSelfReview(t *testing.T) {
 	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{{
 		Name:      "github",
