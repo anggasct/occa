@@ -126,6 +126,8 @@ func TestExtractExecutionKeyMissingOrAmbiguousFallback(t *testing.T) {
 		{"missing branch", `{"repository":{"full_name":"org/repo"}}`},
 		{"missing repo", `{"branch":"fix/test"}`},
 		{"empty repo string", `{"repository":"","branch":"main"}`},
+		{"name-only repository object without owner", `{"repository":{"name":"occa"},"ref":"refs/heads/main"}`},
+		{"name-only repository string without owner", `{"repository":"occa","branch":"main"}`},
 	}
 
 	for _, tt := range tests {

@@ -112,16 +112,17 @@ func extractRepoFullName(v any) string {
 	if v == nil {
 		return ""
 	}
+	var raw string
 	switch val := v.(type) {
 	case string:
-		return strings.TrimSpace(val)
+		raw = strings.TrimSpace(val)
 	case map[string]any:
 		if fn, ok := val["full_name"].(string); ok && strings.TrimSpace(fn) != "" {
-			return strings.TrimSpace(fn)
-		}
-		if n, ok := val["name"].(string); ok && strings.TrimSpace(n) != "" {
-			return strings.TrimSpace(n)
+			raw = strings.TrimSpace(fn)
 		}
 	}
-	return ""
+	if !strings.Contains(raw, "/") {
+		return ""
+	}
+	return raw
 }

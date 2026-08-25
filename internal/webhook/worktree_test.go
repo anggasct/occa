@@ -296,7 +296,7 @@ func TestWorktreeResolverInjectiveUniquePathAndDirectoryConflict(t *testing.T) {
 	}
 
 	// 3. Pre-existing unregistered directory fails closed with ErrWorktreeConflict
-	unregisteredDir := resolver.generateWorktreePath(repoDir, keyFork)
+	unregisteredDir := resolver.generateWorktreePath(repoDir, keyUpstream)
 	if err := os.MkdirAll(unregisteredDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -304,7 +304,7 @@ func TestWorktreeResolverInjectiveUniquePathAndDirectoryConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = resolver.ResolveWorktree(context.Background(), keyFork)
+	_, err = resolver.ResolveWorktree(context.Background(), keyUpstream)
 	if err == nil {
 		t.Fatal("expected ErrWorktreeConflict for unattached pre-existing directory, got nil")
 	}
@@ -367,6 +367,119 @@ func TestWorktreeResolverForkVersusUpstreamSameBranch(t *testing.T) {
 	}
 	if !strings.HasPrefix(forkPath, forkDir) {
 		t.Fatalf("fork path %q not in %q", forkPath, forkDir)
+	}
+}
+
+func TestWorktreeResolverMissingForkFailsClosedNoUpstreamFallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	upstreamDir := filepath.Join(tmpDir, "occa")
+	if err := os.MkdirAll(upstreamDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	initTestGitRepo(t, upstreamDir)
+
+	cmd := exec.Command("git", "branch", "fix/shared-name")
+	cmd.Dir = upstreamDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("create branch: %v\n%s", err, out)
+	}
+
+	resolver := NewGitWorktreeResolver(tmpDir)
+	forkKey := WebhookExecutionKey{
+		Repository:     "anggasct/occa",
+		HeadRepository: "contributor/occa",
+		Branch:         "fix/shared-name",
+	}
+
+	_, err := resolver.ResolveWorktree(context.Background(), forkKey)
+	if err == nil {
+		t.Fatal("expected ErrRepoNotFound for missing fork repository, got nil")
+	}
+	if !errors.Is(err, ErrRepoNotFound) {
+		t.Fatalf("expected ErrRepoNotFound, got %v", err)
+	}
+}
+
+func TestWorktreeResolverReusesExistingBranchAtCustomPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "myrepo")
+	if err := os.MkdirAll(repoDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	initTestGitRepo(t, repoDir)
+
+	customWtPath := filepath.Join(repoDir, ".worktree", "my-manual-checkout")
+	cmd := exec.Command("git", "worktree", "add", "-b", "feat/custom-branch", customWtPath)
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, out)
+	}
+
+	resolver := NewGitWorktreeResolver(tmpDir)
+	key := WebhookExecutionKey{
+		Repository: "myrepo",
+		Branch:     "feat/custom-branch",
+	}
+
+	resolved, err := resolver.ResolveWorktree(context.Background(), key)
+	if err != nil {
+		t.Fatalf("ResolveWorktree failed to reuse existing attached branch: %v", err)
+	}
+	if resolved != customWtPath {
+		t.Fatalf("expected reused custom path %q, got %q", customWtPath, resolved)
+	}
+}
+
+func TestWorktreeResolverSidecarSymlinkRejected(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "occa")
+	victimFile := filepath.Join(tmpDir, "victim.txt")
+	if err := os.MkdirAll(repoDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	initTestGitRepo(t, repoDir)
+	if err := os.WriteFile(victimFile, []byte("protected data\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("git", "branch", "feat/symlink-test")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("create branch: %v\n%s", err, out)
+	}
+
+	resolver := NewGitWorktreeResolver(tmpDir)
+	key := WebhookExecutionKey{
+		Repository: "anggasct/occa",
+		Branch:     "feat/symlink-test",
+	}
+
+	targetPath := resolver.generateWorktreePath(repoDir, key)
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create symlink targetPath.key -> victimFile
+	sidecarPath := targetPath + ".key"
+	if err := os.Symlink(victimFile, sidecarPath); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := resolver.ResolveWorktree(context.Background(), key)
+	if err == nil {
+		t.Fatal("expected ErrWorktreeConflict on sidecar symlink, got nil")
+	}
+	if !errors.Is(err, ErrWorktreeConflict) {
+		t.Fatalf("expected ErrWorktreeConflict, got %v", err)
+	}
+
+	// Verify victim file was NOT modified
+	data, err := os.ReadFile(victimFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "protected data\n" {
+		t.Fatalf("victim file was overwritten: %q", string(data))
 	}
 }
 

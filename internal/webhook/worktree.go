@@ -96,6 +96,40 @@ func isAllowedRepoChar(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.'
 }
 
+func (r *GitWorktreeResolver) findExactRepoDir(repo string) (string, error) {
+	if err := validateRepoIdentifier(repo); err != nil {
+		return "", err
+	}
+
+	cleanProjectsDir := filepath.Clean(r.ProjectsDir)
+	realProjectsDir, err := filepath.EvalSymlinks(cleanProjectsDir)
+	if err != nil {
+		realProjectsDir = cleanProjectsDir
+	}
+
+	cand := filepath.Join(cleanProjectsDir, repo)
+	cleanCand := filepath.Clean(cand)
+
+	relLex, err := filepath.Rel(cleanProjectsDir, cleanCand)
+	if err != nil || strings.HasPrefix(relLex, "..") || relLex == "." {
+		return "", fmt.Errorf("%w: %q under %s", ErrRepoNotFound, repo, r.ProjectsDir)
+	}
+
+	realCand, err := filepath.EvalSymlinks(cleanCand)
+	if err != nil {
+		return "", fmt.Errorf("%w: %q under %s", ErrRepoNotFound, repo, r.ProjectsDir)
+	}
+	relReal, err := filepath.Rel(realProjectsDir, realCand)
+	if err != nil || strings.HasPrefix(relReal, "..") || relReal == "." {
+		return "", fmt.Errorf("%w: %q escapes root %s", ErrRepoNotFound, repo, r.ProjectsDir)
+	}
+
+	if stat, err := os.Stat(realCand); err == nil && stat.IsDir() {
+		return realCand, nil
+	}
+	return "", fmt.Errorf("%w: %q under %s", ErrRepoNotFound, repo, r.ProjectsDir)
+}
+
 func (r *GitWorktreeResolver) findRepoDir(repo string) (string, error) {
 	if err := validateRepoIdentifier(repo); err != nil {
 		return "", err
@@ -110,7 +144,9 @@ func (r *GitWorktreeResolver) findRepoDir(repo string) (string, error) {
 	baseName := path.Base(repo)
 	candidates := []string{
 		filepath.Join(cleanProjectsDir, repo),
-		filepath.Join(cleanProjectsDir, baseName),
+	}
+	if strings.Contains(repo, "/") {
+		candidates = append(candidates, filepath.Join(cleanProjectsDir, baseName))
 	}
 
 	for _, cand := range candidates {
@@ -239,6 +275,46 @@ func (r *GitWorktreeResolver) generateWorktreePath(repoDir string, key WebhookEx
 	return filepath.Join(repoDir, ".worktree", folderName)
 }
 
+func writeKeySidecar(keyPath, keyStr string) error {
+	if fi, err := os.Lstat(keyPath); err == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%w: sidecar file %s is a symlink", ErrWorktreeConflict, keyPath)
+		}
+		_ = os.Remove(keyPath)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("lstat sidecar: %w", err)
+	}
+
+	f, err := os.OpenFile(keyPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	if err != nil {
+		return fmt.Errorf("create sidecar file: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	if _, err := f.WriteString(keyStr + "\n"); err != nil {
+		return fmt.Errorf("write sidecar file: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("sync sidecar file: %w", err)
+	}
+	return f.Close()
+}
+
+func readKeySidecar(keyPath string) (string, error) {
+	fi, err := os.Lstat(keyPath)
+	if err != nil {
+		return "", err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("%w: sidecar file %s is a symlink", ErrWorktreeConflict, keyPath)
+	}
+	data, err := os.ReadFile(keyPath)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
 func (r *GitWorktreeResolver) ResolveWorktree(ctx context.Context, key WebhookExecutionKey) (string, error) {
 	if key.Repository == "" || key.Branch == "" {
 		return "", errors.New("missing repository or branch in execution key")
@@ -248,13 +324,9 @@ func (r *GitWorktreeResolver) ResolveWorktree(ctx context.Context, key WebhookEx
 	var err error
 
 	if key.HeadRepository != "" && key.HeadRepository != key.Repository {
-		repoDir, err = r.findRepoDir(key.HeadRepository)
+		repoDir, err = r.findExactRepoDir(key.HeadRepository)
 		if err != nil {
-			baseDir, bErr := r.findRepoDir(key.Repository)
-			if bErr != nil {
-				return "", fmt.Errorf("%w: neither head repo %q nor base repo %q found: %w", ErrRepoNotFound, key.HeadRepository, key.Repository, err)
-			}
-			repoDir = baseDir
+			return "", fmt.Errorf("%w: fork head repository %q not found under %s", ErrRepoNotFound, key.HeadRepository, r.ProjectsDir)
 		}
 	} else {
 		repoDir, err = r.findRepoDir(key.Repository)
@@ -268,9 +340,6 @@ func (r *GitWorktreeResolver) ResolveWorktree(ctx context.Context, key WebhookEx
 	lock.Lock()
 	defer lock.Unlock()
 
-	targetPath := r.generateWorktreePath(repoDir, key)
-	keyFile := targetPath + ".key"
-
 	worktrees, err := r.listWorktrees(ctx, repoDir)
 	if err != nil {
 		return "", fmt.Errorf("list worktrees: %w", err)
@@ -278,12 +347,16 @@ func (r *GitWorktreeResolver) ResolveWorktree(ctx context.Context, key WebhookEx
 
 	branchRef := "refs/heads/" + key.Branch
 	for _, wt := range worktrees {
-		if filepath.Clean(wt.Path) == filepath.Clean(targetPath) && (wt.Branch == branchRef || wt.Branch == key.Branch) {
-			if data, err := os.ReadFile(keyFile); err == nil {
-				if strings.TrimSpace(string(data)) != key.String() {
-					return "", fmt.Errorf("%w: worktree at %s belongs to a different execution key %q", ErrWorktreeConflict, targetPath, string(data))
+		if wt.Branch == branchRef || wt.Branch == key.Branch {
+			sidecarPath := wt.Path + ".key"
+			if storedKey, sErr := readKeySidecar(sidecarPath); sErr == nil && storedKey != "" {
+				if storedKey != key.String() {
+					return "", fmt.Errorf("%w: branch %s attached at %s belongs to a different execution key %q", ErrWorktreeConflict, key.Branch, wt.Path, storedKey)
 				}
+			} else if errors.Is(sErr, ErrWorktreeConflict) {
+				return "", sErr
 			}
+
 			dirty, dErr := r.isWorktreeDirty(ctx, wt.Path)
 			if dErr != nil {
 				return "", fmt.Errorf("check worktree status: %w", dErr)
@@ -291,35 +364,48 @@ func (r *GitWorktreeResolver) ResolveWorktree(ctx context.Context, key WebhookEx
 			if dirty {
 				return "", fmt.Errorf("%w: worktree at %s has uncommitted changes", ErrWorktreeConflict, wt.Path)
 			}
+
+			// Ensure sidecar metadata is written if missing
+			if _, sErr := os.Lstat(sidecarPath); os.IsNotExist(sErr) {
+				if err := writeKeySidecar(sidecarPath, key.String()); err != nil {
+					return "", err
+				}
+			}
 			return wt.Path, nil
 		}
 	}
 
+	targetPath := r.generateWorktreePath(repoDir, key)
 	if fi, err := os.Stat(targetPath); err == nil && fi.IsDir() {
 		return "", fmt.Errorf("%w: path %s already exists and is not an attached worktree for %s", ErrWorktreeConflict, targetPath, key.String())
+	}
+
+	hasLocal, _ := r.hasLocalBranch(ctx, repoDir, key.Branch)
+	if !hasLocal {
+		hasRemote, _ := r.hasRemoteBranch(ctx, repoDir, key.Branch)
+		if !hasRemote {
+			return "", fmt.Errorf("branch %q not found in local or remote refs for repo %s", key.Branch, repoDir)
+		}
 	}
 
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
 		return "", fmt.Errorf("mkdir .worktree: %w", err)
 	}
 
-	hasLocal, _ := r.hasLocalBranch(ctx, repoDir, key.Branch)
 	if hasLocal {
 		if _, err := r.runner.Run(ctx, repoDir, "worktree", "add", targetPath, key.Branch); err != nil {
 			return "", fmt.Errorf("add worktree for branch %s: %w", key.Branch, err)
 		}
 	} else {
-		hasRemote, _ := r.hasRemoteBranch(ctx, repoDir, key.Branch)
-		if hasRemote {
-			if _, err := r.runner.Run(ctx, repoDir, "worktree", "add", targetPath, "-b", key.Branch, "origin/"+key.Branch); err != nil {
-				return "", fmt.Errorf("add worktree for remote branch origin/%s: %w", key.Branch, err)
-			}
-		} else {
-			return "", fmt.Errorf("branch %q not found in local or remote refs for repo %s", key.Branch, repoDir)
+		if _, err := r.runner.Run(ctx, repoDir, "worktree", "add", targetPath, "-b", key.Branch, "origin/"+key.Branch); err != nil {
+			return "", fmt.Errorf("add worktree for remote branch origin/%s: %w", key.Branch, err)
 		}
 	}
 
-	_ = os.WriteFile(keyFile, []byte(key.String()+"\n"), 0644)
+	sidecarPath := targetPath + ".key"
+	if err := writeKeySidecar(sidecarPath, key.String()); err != nil {
+		return "", err
+	}
 
 	return targetPath, nil
 }
