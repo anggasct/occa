@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/anggasct/occa/internal/config"
 	"github.com/anggasct/occa/internal/store"
@@ -116,6 +117,95 @@ func TestWebhookWorkflowGateMatrix(t *testing.T) {
 				t.Fatalf("workflowAllows = %v, want %v", allowed, tt.allowed)
 			}
 		})
+	}
+}
+
+func TestWebhookMergeSkipsFormalFindingsSelfReview(t *testing.T) {
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{{
+		Name:      "github",
+		Path:      "/github",
+		Secret:    "secret",
+		Workflow:  "github_merge",
+		Platform:  "telegram",
+		ChannelID: "chat",
+		Prompt:    "must not run",
+	}})
+	audit := make(chan string, 1)
+	srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
+		audit <- text
+		return nil
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	body := `{"action":"submitted","repository":{"full_name":"anggasct/occa"},"pull_request":{"number":123,"html_url":"https://github.com/anggasct/occa/pull/123","title":"Webhook UX","user":{"login":"kumasct"}},"review":{"state":"commented","body":"**Verdict:** APPROVED\n\n### Findings\n\n- **Severity:** critical\n- **Type:** security\n- **Problem:** The merge gate must not accept this review.","user":{"login":"kumasct"}}}`
+	if response := post(t, ts.URL+"/github?secret=secret", "formal-findings", "pull_request_review", body); response.StatusCode != http.StatusOK {
+		t.Fatalf("POST status = %d, want 200", response.StatusCode)
+	}
+	waitForReceipt(t, st, store.WebhookStatusSkipped)
+	if exec.callCount() != 0 {
+		t.Fatalf("self-review with formal findings invoked executor %d times", exec.callCount())
+	}
+	select {
+	case summary := <-audit:
+		if !strings.Contains(summary, "Status: SKIP") || strings.Contains(summary, "Status: COMPLETED") {
+			t.Fatalf("unexpected audit summary: %q", summary)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("formal findings self-review did not emit an audit summary")
+	}
+}
+
+func TestWebhookAcceptedDeliveryAuditsOnceAndReplayIsSilent(t *testing.T) {
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{{
+		Name:      "github",
+		Path:      "/github",
+		Secret:    "secret",
+		Platform:  "telegram",
+		ChannelID: "chat",
+		Prompt:    "analyze",
+	}})
+	audit := make(chan string, 2)
+	srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
+		audit <- text
+		return nil
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	body := `{"action":"opened","repository":{"full_name":"anggasct/occa"},"pull_request":{"number":123,"title":"Webhook UX"}}`
+	if response := post(t, ts.URL+"/github?secret=secret", "accepted-once", "pull_request", body); response.StatusCode != http.StatusOK {
+		t.Fatalf("POST status = %d, want 200", response.StatusCode)
+	}
+	waitForReceipt(t, st, store.WebhookStatusCompleted)
+	select {
+	case summary := <-audit:
+		for _, want := range []string{"Repo: anggasct/occa", "PR: #123 — Webhook UX", "Status: COMPLETED", "Delivery: accepted-once"} {
+			if !strings.Contains(summary, want) {
+				t.Fatalf("audit summary missing %q: %q", want, summary)
+			}
+		}
+		if strings.Contains(summary, "secret") || strings.Contains(summary, "<no value>") {
+			t.Fatalf("audit summary leaked sensitive or unresolved content: %q", summary)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("accepted delivery did not emit an audit summary")
+	}
+	if exec.callCount() != 1 {
+		t.Fatalf("executor calls = %d, want 1", exec.callCount())
+	}
+
+	if response := post(t, ts.URL+"/github?secret=secret", "accepted-once", "pull_request", body); response.StatusCode != http.StatusOK {
+		t.Fatalf("replay status = %d, want 200", response.StatusCode)
+	}
+	select {
+	case duplicate := <-audit:
+		t.Fatalf("duplicate delivery emitted audit summary: %q", duplicate)
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 

@@ -63,7 +63,13 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
-func formatAuditSummary(envelope WebhookEnvelope, workflow, reason string) string {
+func formatAuditSummary(envelope WebhookEnvelope, workflow string, statusAndReason ...string) string {
+	status, reason := "SKIP", ""
+	if len(statusAndReason) == 1 {
+		reason = statusAndReason[0]
+	} else if len(statusAndReason) >= 2 {
+		status, reason = statusAndReason[0], statusAndReason[1]
+	}
 	if workflow == "" {
 		workflow = "webhook"
 	}
@@ -95,7 +101,7 @@ func formatAuditSummary(envelope WebhookEnvelope, workflow, reason string) strin
 	if head, base := auditField(stringValue(envelope["head_branch"])), auditField(stringValue(envelope["base_branch"])); head != "" || base != "" {
 		lines = append(lines, "Branch: "+head+" → "+base)
 	}
-	lines = append(lines, "Status: SKIP")
+	lines = append(lines, "Status: "+status)
 	if reason != "" {
 		lines = append(lines, "Reason: "+clipRunes(auditField(reason), maxErrorSummaryRunes))
 	}
@@ -119,27 +125,29 @@ func redactAuditSummary(summary, secret string) string {
 	return strings.ReplaceAll(summary, secret, "[redacted]")
 }
 
-func (s *Server) markSkipped(id int64, ep config.EndpointConfig, deliveryID, summary string) {
+func (s *Server) markSkipped(id int64, ep config.EndpointConfig, envelope WebhookEnvelope, reason string) {
+	summary := redactAuditSummary(formatAuditSummary(envelope, ep.Workflow, "SKIP", reason), ep.Secret)
 	if id != 0 {
 		ok, err := s.deliveries.Transition(context.Background(), id, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusSkipped, summary)
 		if err != nil {
-			slog.Error("webhook: skip transition failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
+			slog.Error("webhook: skip transition failed", "endpoint", ep.Name, "delivery_id", stringValue(envelope["delivery_id"]), "error", err)
 			return
 		}
 		if !ok {
-			slog.Warn("webhook: skip transition lost race", "endpoint", ep.Name, "delivery_id", deliveryID)
+			slog.Warn("webhook: skip transition lost race", "endpoint", ep.Name, "delivery_id", stringValue(envelope["delivery_id"]))
 			return
 		}
 	}
-	s.emitSkip(context.Background(), ep, summary)
+	s.emitAudit(context.Background(), ep, envelope, "SKIP", reason)
 }
 
-func (s *Server) emitSkip(ctx context.Context, ep config.EndpointConfig, summary string) {
+func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelope WebhookEnvelope, status, reason string) {
+	summary := redactAuditSummary(formatAuditSummary(envelope, ep.Workflow, status, reason), ep.Secret)
 	if s.notifier == nil {
-		slog.Info("webhook: delivery skipped", "endpoint", ep.Name)
+		slog.Info("webhook: audit notification skipped", "endpoint", ep.Name, "status", status)
 		return
 	}
 	if err := s.notifier(ctx, ep.Platform, ep.ChannelID, summary); err != nil {
-		slog.Warn("webhook: skip notification failed", "endpoint", ep.Name, "error", err)
+		slog.Warn("webhook: audit notification failed", "endpoint", ep.Name, "status", status, "error", err)
 	}
 }

@@ -183,14 +183,52 @@ func reviewVerdict(body string) string {
 
 func hasActionableFindings(body string) bool {
 	lower := strings.ToLower(body)
-	if strings.Contains(lower, "no actionable finding") ||
-		strings.Contains(lower, "actionable findings: 0") ||
-		strings.Contains(lower, "actionable findings: none") ||
-		strings.Contains(lower, "findings: none") ||
-		strings.Contains(lower, "findings: 0") ||
-		strings.Contains(lower, "no findings") ||
-		strings.Contains(lower, "findings\nnone") {
+	if declaresNoFindings(lower) {
 		return false
 	}
-	return strings.Contains(lower, "actionable finding") || strings.Contains(lower, "finding #")
+
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		heading := strings.TrimSpace(line)
+		if !strings.HasPrefix(heading, "#") {
+			continue
+		}
+		heading = strings.TrimSpace(strings.TrimLeft(heading, "#"))
+		heading = strings.Trim(heading, " *_`")
+		if !strings.EqualFold(heading, "findings") {
+			continue
+		}
+
+		sectionEnd := len(lines)
+		for j := i + 1; j < len(lines); j++ {
+			next := strings.TrimSpace(lines[j])
+			if strings.HasPrefix(next, "#") {
+				sectionEnd = j
+				break
+			}
+		}
+		section := strings.TrimSpace(strings.Join(lines[i+1:sectionEnd], "\n"))
+		return section != "" && !declaresNoFindings(section)
+	}
+
+	if strings.Contains(lower, "severity:") &&
+		strings.Contains(lower, "type:") &&
+		strings.Contains(lower, "problem:") {
+		return true
+	}
+	if strings.Contains(lower, "actionable finding") || strings.Contains(lower, "finding #") {
+		return true
+	}
+
+	return true
+}
+
+func declaresNoFindings(value string) bool {
+	return strings.Contains(value, "no actionable finding") ||
+		strings.Contains(value, "actionable findings: 0") ||
+		strings.Contains(value, "actionable findings: none") ||
+		strings.Contains(value, "findings: none") ||
+		strings.Contains(value, "findings: 0") ||
+		strings.Contains(value, "no findings") ||
+		strings.Contains(value, "findings\nnone")
 }

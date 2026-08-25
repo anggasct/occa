@@ -294,8 +294,9 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.shouldSkip(ep, eventType) {
-		envelope := normalizeWebhook(body, eventType, deliveryID, true, "configured event skip")
-		summary := redactAuditSummary(formatAuditSummary(envelope, ep.Workflow, "configured event skip"), ep.Secret)
+		reason := "configured event skip"
+		envelope := normalizeWebhook(body, eventType, deliveryID, true, reason)
+		summary := redactAuditSummary(formatAuditSummary(envelope, ep.Workflow, "SKIP", reason), ep.Secret)
 		if ok, tErr := s.deliveries.Transition(r.Context(), receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived, store.WebhookStatusAccepted, store.WebhookStatusProcessing}, store.WebhookStatusSkipped, summary); tErr != nil {
 			slog.Error("webhook: skip transition failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", tErr)
 			s.releaseEvent()
@@ -305,7 +306,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("webhook: skip transition lost race", "endpoint", ep.Name, "delivery_id", deliveryID, "observed_status", receipt.Status)
 		} else {
 			slog.Info("webhook: delivery skipped", "endpoint", ep.Name, "delivery_id", deliveryID, "event_type", eventType)
-			s.emitSkip(r.Context(), ep, summary)
+			s.emitAudit(r.Context(), ep, envelope, "SKIP", reason)
 		}
 		s.releaseEvent()
 		w.WriteHeader(http.StatusOK)
@@ -423,6 +424,7 @@ func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, d
 	if !key.IsZero() {
 		workCtx.SessionKey = key.String()
 	}
+	envelope := normalizeWebhook(body, eventType, deliveryID, false, "")
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -434,14 +436,12 @@ func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, d
 				"worktree", workCtx.Worktree,
 				"panic", fmt.Sprint(r),
 			)
-			s.failDelivery(ep, id, deliveryID, eventType, redactSummary(fmt.Sprintf("panic: %v", r), maxErrorSummaryRunes, ep.Secret), workCtx)
+			s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary(fmt.Sprintf("panic: %v", r), maxErrorSummaryRunes, ep.Secret), workCtx)
 		}
 	}()
 
-	envelope := normalizeWebhook(body, eventType, deliveryID, false, "")
 	if allowed, reason := workflowAllows(ep.Workflow, envelope); !allowed {
-		summary := redactAuditSummary(formatAuditSummary(envelope, ep.Workflow, reason), ep.Secret)
-		s.markSkipped(id, ep, deliveryID, summary)
+		s.markSkipped(id, ep, envelope, reason)
 		return
 	}
 
@@ -452,7 +452,7 @@ func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, d
 				"delivery_id", deliveryID,
 				"execution_key", key.String(),
 			)
-			s.failDelivery(ep, id, deliveryID, eventType, "worktree resolver required for project execution key", workCtx)
+			s.failDelivery(ep, id, deliveryID, eventType, envelope, "worktree resolver required for project execution key", workCtx)
 			return
 		}
 
@@ -460,9 +460,9 @@ func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, d
 		if err != nil {
 			slog.Warn("webhook: worktree resolution failed", "endpoint", ep.Name, "delivery_id", deliveryID, "execution_key", key.String(), "error", err)
 			if errors.Is(err, ErrWorktreeConflict) {
-				s.failDelivery(ep, id, deliveryID, eventType, redactSummary("worktree conflict: "+err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
+				s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary("worktree conflict: "+err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
 			} else {
-				s.failDelivery(ep, id, deliveryID, eventType, redactSummary("worktree resolution failed: "+err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
+				s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary("worktree resolution failed: "+err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
 			}
 			return
 		}
@@ -485,7 +485,7 @@ func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, d
 	rendered, err := renderTemplate(ep.Prompt, tmplData)
 	if err != nil {
 		slog.Error("webhook: template render failed", "endpoint", ep.Name, "delivery_id", deliveryID, "payload_bytes", len(body), "error", err)
-		s.failDelivery(ep, id, deliveryID, eventType, redactSummary("template render failed: "+err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
+		s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary("template render failed: "+err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
 		return
 	}
 
@@ -498,8 +498,11 @@ func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, d
 
 	switch {
 	case err == nil:
-		if _, tErr := s.deliveries.Transition(context.Background(), id, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusCompleted, ""); tErr != nil {
+		ok, tErr := s.deliveries.Transition(context.Background(), id, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusCompleted, "")
+		if tErr != nil {
 			slog.Error("webhook: completed transition failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", tErr)
+		} else if ok {
+			s.emitAudit(context.Background(), ep, envelope, "COMPLETED", "")
 		}
 		slog.Info("webhook: delivery completed",
 			"endpoint", ep.Name,
@@ -509,15 +512,18 @@ func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, d
 			"worktree", workCtx.Worktree,
 		)
 	case errors.Is(err, context.DeadlineExceeded), ctx.Err() == context.DeadlineExceeded:
-		s.failDelivery(ep, id, deliveryID, eventType, "timed out after "+s.processingTimeout.String(), workCtx)
+		s.failDelivery(ep, id, deliveryID, eventType, envelope, "timed out after "+s.processingTimeout.String(), workCtx)
 	default:
-		s.failDelivery(ep, id, deliveryID, eventType, redactSummary(err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
+		s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary(err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
 	}
 }
 
-func (s *Server) failDelivery(ep config.EndpointConfig, id int64, deliveryID, eventType, summary string, workCtx WebhookWorkContext) {
-	if _, err := s.deliveries.Transition(context.Background(), id, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusFailed, summary); err != nil {
+func (s *Server) failDelivery(ep config.EndpointConfig, id int64, deliveryID, eventType string, envelope WebhookEnvelope, summary string, workCtx WebhookWorkContext) {
+	ok, err := s.deliveries.Transition(context.Background(), id, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusFailed, summary)
+	if err != nil {
 		slog.Error("webhook: failed transition", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
+	} else if ok {
+		s.emitAudit(context.Background(), ep, envelope, "FAILED", summary)
 	}
 	slog.Warn("webhook: delivery failed",
 		"endpoint", ep.Name,
