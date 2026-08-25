@@ -56,6 +56,7 @@ type questionBroker struct {
 type questionPromptHandler struct {
 	broker    *questionBroker
 	encode    func(string) string
+	split     func(string) []string
 	client    relay.Client
 	platform  string
 	channelID string
@@ -98,19 +99,25 @@ func (h *questionPromptHandler) Prompt(ctx context.Context, request relay.Questi
 	h.broker.records[token] = record
 	h.broker.mu.Unlock()
 
-	text := questionPromptText(request.Questions)
-	if h.encode != nil {
-		text = h.encode(text)
+	textChunks := h.renderText(questionPromptText(request.Questions))
+	buttons := questionButtons(token, request.Questions)
+	var ref channel.MessageRef
+	if len(textChunks) == 1 {
+		ref, err = h.reply.SendWithButtons(textChunks[0], buttons)
+	} else {
+		for _, chunk := range textChunks {
+			if _, err = h.reply.Send(chunk); err != nil {
+				return h.failPrompt(ctx, record, err)
+			}
+		}
+		actionChunks := h.renderText("❓ Choose an option:")
+		ref, err = h.reply.SendWithButtons(actionChunks[0], buttons)
 	}
-
-	ref, err := h.reply.SendWithButtons(text, questionButtons(token, request.Questions))
 	if err != nil {
-		h.broker.removePending(record)
-		return fmt.Errorf("question: send prompt: %w", err)
+		return h.failPrompt(ctx, record, err)
 	}
 	if ref == nil || ref.ID() == "" {
-		h.broker.removePending(record)
-		return fmt.Errorf("question: prompt has no origin reference")
+		return h.failPrompt(ctx, record, errors.New("prompt has no origin reference"))
 	}
 
 	h.broker.mu.Lock()
@@ -119,6 +126,39 @@ func (h *questionPromptHandler) Prompt(ctx context.Context, request relay.Questi
 
 	slog.Info("question prompt registered", "platform", record.platform, "channel_id", record.channelID)
 	return nil
+}
+
+func (h *questionPromptHandler) renderText(text string) []string {
+	if h.split != nil {
+		chunks := h.split(text)
+		if len(chunks) > 0 {
+			return chunks
+		}
+	}
+	if h.encode != nil {
+		return []string{h.encode(text)}
+	}
+	return []string{text}
+}
+
+func (h *questionPromptHandler) failPrompt(ctx context.Context, record *questionRecord, sendErr error) error {
+	h.broker.removePending(record)
+	rejectErr := record.client.RejectQuestion(ctx, record.requestID)
+	if rejectErr != nil {
+		slog.Warn("question: reject after prompt failure failed", "platform", record.platform, "channel_id", record.channelID, "error", rejectErr)
+	}
+	if record.reply != nil {
+		failureText := "⚠️ Could not show the question."
+		if rejectErr == nil {
+			failureText += " The request was stopped."
+		} else {
+			failureText += " Please check the agent status and try again."
+		}
+		if _, notifyErr := record.reply.Send(failureText); notifyErr != nil {
+			slog.Warn("question: prompt failure notice failed", "platform", record.platform, "channel_id", record.channelID, "error", notifyErr)
+		}
+	}
+	return fmt.Errorf("question: send prompt: %w", sendErr)
 }
 
 // HandleQuestionCallback is exported through the Router wrapper to prevent
@@ -347,13 +387,15 @@ func questionPromptText(questions []relay.QuestionInfo) string {
 
 func questionButtons(token string, questions []relay.QuestionInfo) []channel.Button {
 	var buttons []channel.Button
+	buttonIndex := 0
 	for qIdx, q := range questions {
-		for optIdx, o := range q.Options {
+		for optIdx := range q.Options {
 			value := "question:" + token + ":" + strconv.Itoa(qIdx) + ":" + strconv.Itoa(optIdx)
-			buttons = append(buttons, channel.Button{Label: o.Label, Value: value, Row: qIdx + 1})
+			buttons = append(buttons, channel.Button{Label: fmt.Sprintf("Q%d · %d", qIdx+1, optIdx+1), Value: value, Row: buttonIndex/5 + 1})
+			buttonIndex++
 		}
 	}
-	buttons = append(buttons, channel.Button{Label: "❌ Skip", Value: "question:" + token + ":skip", Row: len(questions) + 1})
+	buttons = append(buttons, channel.Button{Label: "❌ Skip", Value: "question:" + token + ":skip", Row: buttonIndex/5 + 1})
 	return buttons
 }
 

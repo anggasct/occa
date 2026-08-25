@@ -17,7 +17,12 @@ import (
 	"github.com/anggasct/occa/internal/render"
 )
 
-const maxDownloadSize = 10 * 1024 * 1024
+const (
+	maxDownloadSize        = 10 * 1024 * 1024
+	maxButtonLabelRunes    = 80
+	maxDiscordActionRows   = 5
+	maxButtonsPerActionRow = 5
+)
 
 type ThreadPolicy func(channelID string) (bool, error)
 
@@ -676,7 +681,7 @@ func componentRows(buttons []channel.Button) []discordgo.MessageComponent {
 	var order []int
 	for _, b := range buttons {
 		btn := discordgo.Button{
-			Label:    b.Label,
+			Label:    safeButtonLabel(b.Label),
 			Style:    discordgo.SecondaryButton,
 			CustomID: b.Value,
 		}
@@ -690,21 +695,36 @@ func componentRows(buttons []channel.Button) []discordgo.MessageComponent {
 		grouped[b.Row] = append(grouped[b.Row], btn)
 	}
 	for _, r := range order {
-		row := grouped[r]
-		for len(row) > 5 {
-			components = append(components, discordgo.ActionsRow{Components: row[:5]})
-			row = row[5:]
+		if len(components) >= maxDiscordActionRows {
+			break
 		}
-		components = append(components, discordgo.ActionsRow{Components: row})
+		row := grouped[r]
+		for len(row) > 0 && len(components) < maxDiscordActionRows {
+			count := maxButtonsPerActionRow
+			if len(row) < count {
+				count = len(row)
+			}
+			components = append(components, discordgo.ActionsRow{Components: row[:count]})
+			row = row[count:]
+		}
 	}
-	for len(legacy) > 5 {
-		components = append(components, discordgo.ActionsRow{Components: legacy[:5]})
-		legacy = legacy[5:]
-	}
-	if len(legacy) > 0 {
-		components = append(components, discordgo.ActionsRow{Components: legacy})
+	for len(legacy) > 0 && len(components) < maxDiscordActionRows {
+		count := maxButtonsPerActionRow
+		if len(legacy) < count {
+			count = len(legacy)
+		}
+		components = append(components, discordgo.ActionsRow{Components: legacy[:count]})
+		legacy = legacy[count:]
 	}
 	return components
+}
+
+func safeButtonLabel(label string) string {
+	runes := []rune(label)
+	if len(runes) <= maxButtonLabelRunes {
+		return label
+	}
+	return string(runes[:maxButtonLabelRunes-1]) + "…"
 }
 
 type messageRef struct {

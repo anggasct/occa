@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/anggasct/occa/internal/render"
 
@@ -481,6 +482,42 @@ func TestComponentRowsChunksOversizedRows(t *testing.T) {
 	row2, ok2 := components[1].(discordgo.ActionsRow)
 	if !ok1 || !ok2 || len(row1.Components) != 5 || len(row2.Components) != 1 {
 		t.Fatalf("row sizes = %d/%d, want 5/1", len(row1.Components), len(row2.Components))
+	}
+}
+
+func TestComponentRowsClampsButtonLabels(t *testing.T) {
+	long := strings.Repeat("界", 81)
+	components := componentRows([]channel.Button{{Label: long, Value: "v"}})
+	row, ok := components[0].(discordgo.ActionsRow)
+	if !ok || len(row.Components) != 1 {
+		t.Fatalf("components = %+v", components)
+	}
+	button, ok := row.Components[0].(discordgo.Button)
+	if !ok {
+		t.Fatalf("component = %T, want button", row.Components[0])
+	}
+	if got := utf8.RuneCountInString(button.Label); got != maxButtonLabelRunes {
+		t.Fatalf("button label length = %d, want %d", got, maxButtonLabelRunes)
+	}
+	if !strings.HasSuffix(button.Label, "…") {
+		t.Fatalf("clamped label = %q, want ellipsis", button.Label)
+	}
+}
+
+func TestComponentRowsCapsActionRows(t *testing.T) {
+	buttons := make([]channel.Button, 6)
+	for i := range buttons {
+		buttons[i] = channel.Button{Label: string(rune('a' + i)), Value: "v", Row: i + 1}
+	}
+	components := componentRows(buttons)
+	if len(components) != maxDiscordActionRows {
+		t.Fatalf("action rows = %d, want %d", len(components), maxDiscordActionRows)
+	}
+	for _, component := range components {
+		row, ok := component.(discordgo.ActionsRow)
+		if !ok || len(row.Components) > maxButtonsPerActionRow {
+			t.Fatalf("invalid action row: %+v", component)
+		}
 	}
 }
 
