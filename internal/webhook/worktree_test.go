@@ -693,3 +693,59 @@ func TestWorktreeResolverDirtyAttachedWorktreeWithoutSidecarDoesNotWriteSidecar(
 		t.Fatalf("sidecar file %s was erroneously created on dirty conflict path", sidecarPath)
 	}
 }
+
+func TestWorktreeResolverNeverReturnsPrimaryCheckoutEvenIfCleanAndOnBranch(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "occa")
+	if err := os.MkdirAll(repoDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	initTestGitRepo(t, repoDir) // primary checkout is on 'main' and clean
+
+	resolver := NewGitWorktreeResolver(tmpDir)
+	key := WebhookExecutionKey{
+		Repository:     "anggasct/occa",
+		HeadRepository: "anggasct/occa",
+		Branch:         "main",
+	}
+
+	resolvedPath, err := resolver.ResolveWorktree(context.Background(), key)
+	if err != nil {
+		t.Fatalf("ResolveWorktree failed: %v", err)
+	}
+
+	// 1. Primary checkout must never be returned
+	if filepath.Clean(resolvedPath) == filepath.Clean(repoDir) {
+		t.Fatalf("ResolveWorktree erroneously returned primary repository checkout %q", resolvedPath)
+	}
+
+	// 2. Must be located under .worktree
+	if !strings.HasPrefix(filepath.Clean(resolvedPath), filepath.Join(filepath.Clean(repoDir), ".worktree")) {
+		t.Fatalf("resolvedPath %q is not inside repo .worktree folder", resolvedPath)
+	}
+
+	// 3. Primary checkout sidecar must NOT exist
+	repoSidecar := repoDir + ".key"
+	if _, err := os.Lstat(repoSidecar); !os.IsNotExist(err) {
+		t.Fatalf("sidecar was erroneously created for primary checkout: %s", repoSidecar)
+	}
+
+	// 4. Worktree sidecar must exist and contain the key
+	wtSidecar := resolvedPath + ".key"
+	data, err := os.ReadFile(wtSidecar)
+	if err != nil {
+		t.Fatalf("failed to read worktree sidecar %s: %v", wtSidecar, err)
+	}
+	if strings.TrimSpace(string(data)) != key.String() {
+		t.Fatalf("sidecar content %q, want %q", string(data), key.String())
+	}
+
+	// 5. Subsequent call cleanly reuses the same isolated worktree
+	reusedPath, err := resolver.ResolveWorktree(context.Background(), key)
+	if err != nil {
+		t.Fatalf("subsequent ResolveWorktree failed: %v", err)
+	}
+	if reusedPath != resolvedPath {
+		t.Fatalf("expected reused path %q, got %q", resolvedPath, reusedPath)
+	}
+}

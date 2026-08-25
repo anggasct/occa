@@ -148,7 +148,7 @@ func (s *Server) pruneIfDue() {
 
 	pruned, err := s.deliveries.Prune(context.Background(), time.Now().Add(-retentionAge).Unix(), retentionKeep)
 	if err != nil {
-		if errors.Is(err, sql.ErrConnDone) {
+		if errors.Is(err, sql.ErrConnDone) || strings.Contains(err.Error(), "database is closed") {
 			return
 		}
 		slog.Error("webhook: prune failed", "error", err)

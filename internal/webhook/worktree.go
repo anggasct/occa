@@ -352,9 +352,22 @@ func (r *GitWorktreeResolver) ResolveWorktree(ctx context.Context, key WebhookEx
 		return "", fmt.Errorf("list worktrees: %w", err)
 	}
 
+	cleanRepoDir := filepath.Clean(repoDir)
+	targetPath := r.generateWorktreePath(repoDir, key)
+	cleanTargetPath := filepath.Clean(targetPath)
+
 	branchRef := "refs/heads/" + key.Branch
 	for _, wt := range worktrees {
-		if wt.Branch == branchRef || wt.Branch == key.Branch {
+		cleanWtPath := filepath.Clean(wt.Path)
+		// Never return or mutate the primary repository checkout for project execution!
+		if cleanWtPath == cleanRepoDir {
+			continue
+		}
+
+		isMatchingBranch := wt.Branch == branchRef || wt.Branch == key.Branch
+		isMatchingTarget := cleanWtPath == cleanTargetPath
+
+		if isMatchingBranch || isMatchingTarget {
 			sidecarPath := wt.Path + ".key"
 			var needWriteSidecar bool
 			storedKey, sErr := readKeySidecar(sidecarPath)
@@ -391,7 +404,6 @@ func (r *GitWorktreeResolver) ResolveWorktree(ctx context.Context, key WebhookEx
 		}
 	}
 
-	targetPath := r.generateWorktreePath(repoDir, key)
 	if fi, err := os.Stat(targetPath); err == nil && fi.IsDir() {
 		return "", fmt.Errorf("%w: path %s already exists and is not an attached worktree for %s", ErrWorktreeConflict, targetPath, key.String())
 	}
@@ -410,11 +422,23 @@ func (r *GitWorktreeResolver) ResolveWorktree(ctx context.Context, key WebhookEx
 
 	if hasLocal {
 		if _, err := r.runner.Run(ctx, repoDir, "worktree", "add", targetPath, key.Branch); err != nil {
-			return "", fmt.Errorf("add worktree for branch %s: %w", key.Branch, err)
+			if strings.Contains(err.Error(), "already used by worktree") || strings.Contains(err.Error(), "already checked out") {
+				if _, err := r.runner.Run(ctx, repoDir, "worktree", "add", "--detach", targetPath, key.Branch); err != nil {
+					return "", fmt.Errorf("add detached worktree for branch %s: %w", key.Branch, err)
+				}
+			} else {
+				return "", fmt.Errorf("add worktree for branch %s: %w", key.Branch, err)
+			}
 		}
 	} else {
 		if _, err := r.runner.Run(ctx, repoDir, "worktree", "add", targetPath, "-b", key.Branch, "origin/"+key.Branch); err != nil {
-			return "", fmt.Errorf("add worktree for remote branch origin/%s: %w", key.Branch, err)
+			if strings.Contains(err.Error(), "already used by worktree") || strings.Contains(err.Error(), "already checked out") {
+				if _, err := r.runner.Run(ctx, repoDir, "worktree", "add", "--detach", targetPath, "origin/"+key.Branch); err != nil {
+					return "", fmt.Errorf("add detached worktree for remote branch origin/%s: %w", key.Branch, err)
+				}
+			} else {
+				return "", fmt.Errorf("add worktree for remote branch origin/%s: %w", key.Branch, err)
+			}
 		}
 	}
 
