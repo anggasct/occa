@@ -290,6 +290,15 @@ func main() {
 		}
 
 		webhookSrv = webhook.New(cfg.Webhooks, webhookExecutor, db.WebhookDeliveryRepo())
+		webhookSrv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
+			for _, ch := range channels {
+				if ch.Name() == platform {
+					notify(ch, channelID, text)
+					return nil
+				}
+			}
+			return errors.New("webhook channel adapter unavailable")
+		})
 		webhookSrv.SetWorktreeResolver(webhook.NewGitWorktreeResolver(""))
 		if err := webhookSrv.Start(ctx); err != nil {
 			slog.Error("failed to start webhook server", "error", err)

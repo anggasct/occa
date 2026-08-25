@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -47,9 +48,11 @@ type EndpointConfig struct {
 	Path       string   `yaml:"path"`
 	Auth       string   `yaml:"auth,omitempty"`
 	Secret     string   `yaml:"secret"`
+	Workflow   string   `yaml:"workflow,omitempty"`
 	Platform   string   `yaml:"platform"`
 	ChannelID  string   `yaml:"channel_id"`
 	Prompt     string   `yaml:"prompt"`
+	PromptFile string   `yaml:"prompt_file,omitempty"`
 	SkipEvents []string `yaml:"skip_events,omitempty"`
 }
 
@@ -101,7 +104,13 @@ func Load(configPath string) (Config, error) {
 	if adminID == "" {
 		return Config{}, fmt.Errorf("config: OCCA_ADMIN_ID must be set")
 	}
-	return build(fc, adminID)
+	if configPath == "" {
+		configPath, err = DefaultConfigPath()
+		if err != nil {
+			return Config{}, err
+		}
+	}
+	return build(fc, adminID, filepath.Dir(configPath))
 }
 
 // DBPath resolves the configured database path without requiring the bot or
@@ -205,7 +214,7 @@ func applyEnv(fc *fileConfig) error {
 	return nil
 }
 
-func build(fc fileConfig, adminID string) (Config, error) {
+func build(fc fileConfig, adminID, configDir string) (Config, error) {
 	idle, err := time.ParseDuration(fc.Agent.IdleTimeout)
 	if err != nil {
 		return Config{}, fmt.Errorf("config: agent.idle_timeout: %w", err)
@@ -237,6 +246,14 @@ func build(fc fileConfig, adminID string) (Config, error) {
 		for i := range fc.Webhooks.Endpoints {
 			endpoint := &fc.Webhooks.Endpoints[i]
 			endpoint.Auth = strings.TrimSpace(strings.ToLower(endpoint.Auth))
+			endpoint.Workflow = strings.TrimSpace(strings.ToLower(endpoint.Workflow))
+			if endpoint.Workflow != "" {
+				switch endpoint.Workflow {
+				case "github_reviewer", "github_fix", "github_merge", "github_merged":
+				default:
+					return Config{}, fmt.Errorf("config: webhooks.endpoints[%d].workflow is unsupported: %q", i, endpoint.Workflow)
+				}
+			}
 			switch endpoint.Auth {
 			case "", "legacy_bearer", "github_hmac_sha256":
 			default:
@@ -245,6 +262,16 @@ func build(fc fileConfig, adminID string) (Config, error) {
 
 			if strings.TrimSpace(endpoint.Secret) == "" {
 				return Config{}, fmt.Errorf("config: webhooks.endpoints[%d].secret must not be empty", i)
+			}
+			if strings.TrimSpace(endpoint.Prompt) != "" && strings.TrimSpace(endpoint.PromptFile) != "" {
+				return Config{}, fmt.Errorf("config: webhooks.endpoints[%d] must not define both prompt and prompt_file", i)
+			}
+			if strings.TrimSpace(endpoint.PromptFile) != "" {
+				prompt, err := loadPromptFile(configDir, endpoint.PromptFile)
+				if err != nil {
+					return Config{}, fmt.Errorf("config: webhooks.endpoints[%d].prompt_file: %w", i, err)
+				}
+				endpoint.Prompt = prompt
 			}
 			if _, exists := paths[endpoint.Path]; exists {
 				return Config{}, fmt.Errorf("config: webhooks.endpoints[%d].path duplicates %q", i, endpoint.Path)
@@ -267,6 +294,57 @@ func build(fc fileConfig, adminID string) (Config, error) {
 		Logging:  LoggingConfig{Format: fc.Logging.Format},
 		Webhooks: fc.Webhooks,
 	}, nil
+}
+
+func loadPromptFile(configDir, promptFile string) (string, error) {
+	if filepath.IsAbs(promptFile) {
+		return "", fmt.Errorf("absolute paths are forbidden: %q", promptFile)
+	}
+	cleanRelative := filepath.Clean(promptFile)
+	if cleanRelative == "." || cleanRelative == ".." || strings.HasPrefix(cleanRelative, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path escapes config directory: %q", promptFile)
+	}
+
+	baseDir, err := filepath.Abs(configDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve config directory: %w", err)
+	}
+	baseDir, err = filepath.EvalSymlinks(baseDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve config directory: %w", err)
+	}
+	candidate := filepath.Join(baseDir, cleanRelative)
+	resolved, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return "", fmt.Errorf("read prompt file: %w", err)
+	}
+	relative, err := filepath.Rel(baseDir, resolved)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path escapes config directory: %q", promptFile)
+	}
+
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("stat prompt file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("prompt file is not a regular file")
+	}
+	if info.Mode().Perm()&0444 == 0 {
+		return "", fmt.Errorf("prompt file is unreadable")
+	}
+
+	data, err := os.ReadFile(resolved)
+	if err != nil {
+		return "", err
+	}
+	if len(data) == 0 || strings.TrimSpace(string(data)) == "" {
+		return "", fmt.Errorf("file is empty")
+	}
+	if !utf8.Valid(data) {
+		return "", fmt.Errorf("file is not valid UTF-8")
+	}
+	return string(data), nil
 }
 
 func isLoopbackBind(addr string) bool {

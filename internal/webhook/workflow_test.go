@@ -1,0 +1,163 @@
+package webhook
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/anggasct/occa/internal/config"
+	"github.com/anggasct/occa/internal/store"
+)
+
+func TestNormalizeWebhookGitHubEvents(t *testing.T) {
+	tests := []struct {
+		name   string
+		event  string
+		body   string
+		assert func(t *testing.T, got WebhookEnvelope)
+	}{
+		{
+			name:  "pull request",
+			event: "pull_request",
+			body:  `{"action":"opened","repository":{"full_name":"acme/widgets"},"pull_request":{"number":42,"html_url":"https://github.com/acme/widgets/pull/42","title":"Improve widgets","head":{"ref":"fix/widgets","repo":{"full_name":"acme/widgets"}},"base":{"ref":"main","repo":{"full_name":"acme/widgets"}},"merged":false,"merge_commit_sha":""}}`,
+			assert: func(t *testing.T, got WebhookEnvelope) {
+				if got["repository"] != "acme/widgets" || got["pr_number"] != "42" || got["head_branch"] != "fix/widgets" || got["base_branch"] != "main" {
+					t.Fatalf("unexpected pull request envelope: %#v", got)
+				}
+			},
+		},
+		{
+			name:  "pull request review",
+			event: "pull_request_review",
+			body:  `{"action":"submitted","repository":{"full_name":"acme/widgets"},"pull_request":{"number":43,"html_url":"https://github.com/acme/widgets/pull/43","title":"Review widgets","user":{"login":"author"},"head":{"ref":"fix/review","repo":{"full_name":"acme/widgets"}},"base":{"ref":"main","repo":{"full_name":"acme/widgets"}}},"review":{"state":"changes_requested","body":"Please fix the test.","user":{"login":"reviewer"}}}`,
+			assert: func(t *testing.T, got WebhookEnvelope) {
+				if got["pr_number"] != "43" || got["pr_author"] != "author" || got["review_state"] != "changes_requested" || got["review_user"] != "reviewer" || got["comment_body"] != "Please fix the test." {
+					t.Fatalf("unexpected review envelope: %#v", got)
+				}
+			},
+		},
+		{
+			name:  "issue comment re-review",
+			event: "issue_comment",
+			body:  `{"action":"created","repository":{"full_name":"acme/widgets"},"issue":{"number":44,"html_url":"https://github.com/acme/widgets/issues/44","title":"Improve widgets","pull_request":{"html_url":"https://github.com/acme/widgets/pull/44"}},"comment":{"body":"Please re-review this PR","user":{"login":"maintainer"}}}`,
+			assert: func(t *testing.T, got WebhookEnvelope) {
+				if got["pr_number"] != "44" || got["pr_url"] != "https://github.com/acme/widgets/pull/44" || got["comment_trigger"] != "please re-review" || got["review_user"] != "maintainer" {
+					t.Fatalf("unexpected issue comment envelope: %#v", got)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeWebhook([]byte(tt.body), tt.event, "delivery-1", false, "")
+			tt.assert(t, got)
+			for key, value := range got {
+				if value == nil {
+					t.Fatalf("envelope field %q is nil", key)
+				}
+			}
+		})
+	}
+}
+
+func TestNormalizeWebhookMissingFieldsNeverRendersNoValue(t *testing.T) {
+	envelope := normalizeWebhook([]byte(`{"action":"opened","repository":{"full_name":"acme/widgets"}}`), "pull_request", "delivery-1", false, "")
+	prompt, err := renderTemplate(`{{.webhook.repository}}|{{.webhook.pr_number}}|{{.webhook.title}}|{{.webhook.comment_trigger}}`, map[string]any{"webhook": envelope})
+	if err != nil {
+		t.Fatalf("render normalized envelope: %v", err)
+	}
+	if strings.Contains(prompt, "<no value>") {
+		t.Fatalf("normalized prompt contains unresolved value: %q", prompt)
+	}
+}
+
+func TestNormalizeWebhookNonPullRequestIssueCommentKeepsPRFieldsEmpty(t *testing.T) {
+	envelope := normalizeWebhook([]byte(`{"action":"created","repository":{"full_name":"acme/widgets"},"issue":{"number":44,"title":"Question"},"comment":{"body":"please re-review"}}`), "issue_comment", "delivery-1", false, "")
+	if envelope["pr_number"] != "" || envelope["pr_url"] != "" || envelope["comment_trigger"] != "" {
+		t.Fatalf("non-PR issue comment envelope = %#v, want empty PR and trigger fields", envelope)
+	}
+}
+
+func TestRenderTemplateRejectsStaticNoValue(t *testing.T) {
+	if _, err := renderTemplate("literal <no value>", nil); err == nil {
+		t.Fatal("renderTemplate accepted a static unresolved-value placeholder")
+	}
+}
+
+func TestWebhookWorkflowGateMatrix(t *testing.T) {
+	tests := []struct {
+		workflow string
+		event    string
+		body     string
+		allowed  bool
+	}{
+		{"github_reviewer", "pull_request", `{"action":"opened","pull_request":{"number":1}}`, true},
+		{"github_reviewer", "issue_comment", `{"action":"created","issue":{"number":2,"pull_request":{"html_url":"https://example/pull/2"}},"comment":{"body":"please re-review"}}`, true},
+		{"github_reviewer", "pull_request_review", `{"action":"submitted","review":{"state":"approved"}}`, false},
+		{"github_fix", "pull_request_review", `{"action":"submitted","review":{"state":"changes_requested"}}`, true},
+		{"github_fix", "pull_request", `{"action":"closed","pull_request":{"merged":true}}`, false},
+		{"github_merge", "pull_request_review", `{"action":"submitted","review":{"state":"approved"}}`, true},
+		{"github_fix", "pull_request_review", `{"action":"submitted","pull_request":{"user":{"login":"kumasct"}},"review":{"state":"commented","body":"**Verdict:** REQUEST_CHANGES\n\nActionable findings: 1","user":{"login":"kumasct"}}}`, true},
+		{"github_merge", "pull_request_review", `{"action":"submitted","pull_request":{"user":{"login":"kumasct"}},"review":{"state":"commented","body":"**Verdict:** APPROVED\n\nNo actionable findings.","user":{"login":"kumasct"}}}`, true},
+		{"github_merge", "pull_request_review", `{"action":"submitted","pull_request":{"user":{"login":"kumasct"}},"review":{"state":"commented","body":"**Verdict:** APPROVED\n\nActionable findings: 1","user":{"login":"kumasct"}}}`, false},
+		{"github_merge", "pull_request_review", `{"action":"submitted","pull_request":{"user":{"login":"other"}},"review":{"state":"commented","body":"**Verdict:** APPROVED\n\nNo actionable findings.","user":{"login":"kumasct"}}}`, false},
+		{"github_merge", "issue_comment", `{"action":"created","issue":{"number":2},"comment":{"body":"please re-review"}}`, false},
+		{"github_merged", "pull_request", `{"action":"closed","pull_request":{"merged":true}}`, true},
+		{"github_merged", "pull_request_review", `{"action":"submitted","review":{"state":"approved"}}`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.workflow+"/"+tt.event, func(t *testing.T) {
+			allowed, _ := workflowAllows(tt.workflow, normalizeWebhook([]byte(tt.body), tt.event, "d", false, ""))
+			if allowed != tt.allowed {
+				t.Fatalf("workflowAllows = %v, want %v", allowed, tt.allowed)
+			}
+		})
+	}
+}
+
+func TestWebhookWorkflowMismatchSkipsAndNotifiesWithoutExecutor(t *testing.T) {
+	tests := []struct {
+		workflow string
+		event    string
+		body     string
+	}{
+		{"github_reviewer", "pull_request_review", `{"action":"submitted","review":{"state":"approved"}}`},
+		{"github_fix", "pull_request", `{"action":"closed","pull_request":{"merged":true}}`},
+		{"github_merge", "issue_comment", `{"action":"created","issue":{"number":7,"pull_request":{"html_url":"https://example/pull/7"}},"comment":{"body":"please re-review"}}`},
+		{"github_merged", "pull_request_review", `{"action":"submitted","review":{"state":"approved"}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.workflow, func(t *testing.T) {
+			srv, exec, st := newTestServerFull(t, []config.EndpointConfig{{Name: "github", Path: "/github", Secret: "secret", Workflow: tt.workflow, Platform: "telegram", ChannelID: "chat", Prompt: "must not run"}})
+			var mu sync.Mutex
+			var notifications []string
+			srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
+				mu.Lock()
+				notifications = append(notifications, text)
+				mu.Unlock()
+				return nil
+			})
+			mux := http.NewServeMux()
+			mux.HandleFunc("/", srv.handleRequest)
+			ts := httptest.NewServer(mux)
+			defer ts.Close()
+
+			if response := post(t, ts.URL+"/github?secret=secret", "delivery-"+tt.workflow, tt.event, tt.body); response.StatusCode != 200 {
+				t.Fatalf("POST status = %d, want 200", response.StatusCode)
+			}
+			waitForReceipt(t, st, store.WebhookStatusSkipped)
+			if exec.callCount() != 0 {
+				t.Fatalf("mismatched workflow invoked executor %d times", exec.callCount())
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(notifications) != 1 || strings.Contains(notifications[0], "secret") || strings.Contains(notifications[0], "Raw") {
+				t.Fatalf("unexpected skip notifications: %#v", notifications)
+			}
+		})
+	}
+}
