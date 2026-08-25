@@ -1947,3 +1947,83 @@ func TestWebhookGitHubHMACUnauthorizedNegativeCases(t *testing.T) {
 		})
 	}
 }
+
+func TestWebhookWhitespacePaddedHMACModeRequiresSignatureAndRejectsLegacy(t *testing.T) {
+	executed := make(chan struct{})
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+		close(executed)
+		return nil
+	}
+
+	secret := "github-padded-secret"
+	cfg := config.WebhookConfig{
+		Bind: "127.0.0.1:0",
+		Endpoints: []config.EndpointConfig{
+			{
+				Name:      "github-review",
+				Path:      "/webhooks/github-review",
+				Auth:      "  github_hmac_sha256  ",
+				Secret:    secret,
+				Platform:  "telegram",
+				ChannelID: "chat1",
+				Prompt:    "Analyze review",
+			},
+		},
+	}
+
+	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	srv := New(cfg, exec, st.WebhookDeliveryRepo())
+	srv.SetWorktreeResolver(&fakeWorktreeResolver{worktree: "/projects/occa/.worktree/hmac"})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	payload := []byte(`{"action":"submitted","repository":{"full_name":"anggasct/occa"},"pull_request":{"base":{"repo":{"full_name":"anggasct/occa"}},"head":{"repo":{"full_name":"anggasct/occa"},"ref":"main"}}}`)
+
+	// 1. Legacy query parameter fails on whitespace-padded HMAC endpoint
+	reqLegacy, err := http.NewRequest(http.MethodPost, ts.URL+"/webhooks/github-review?secret="+secret, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("new legacy request: %v", err)
+	}
+	reqLegacy.Header.Set("Content-Type", "application/json")
+	respLegacy, err := http.DefaultClient.Do(reqLegacy)
+	if err != nil {
+		t.Fatalf("do legacy request: %v", err)
+	}
+	defer func() { _ = respLegacy.Body.Close() }()
+	if respLegacy.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized for legacy query on whitespace-padded HMAC endpoint, got %d", respLegacy.StatusCode)
+	}
+
+	// 2. Valid GitHub signature passes and executes
+	sig := computeTestSignature(payload, secret)
+	reqHMAC, err := http.NewRequest(http.MethodPost, ts.URL+"/webhooks/github-review", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("new HMAC request: %v", err)
+	}
+	reqHMAC.Header.Set("Content-Type", "application/json")
+	reqHMAC.Header.Set("X-GitHub-Delivery", "delivery-padded-1")
+	reqHMAC.Header.Set("X-GitHub-Event", "pull_request_review")
+	reqHMAC.Header.Set("X-Hub-Signature-256", sig)
+
+	respHMAC, err := http.DefaultClient.Do(reqHMAC)
+	if err != nil {
+		t.Fatalf("do HMAC request: %v", err)
+	}
+	defer func() { _ = respHMAC.Body.Close() }()
+	if respHMAC.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK for valid HMAC signature, got %d", respHMAC.StatusCode)
+	}
+
+	select {
+	case <-executed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("executor was not called for valid HMAC on normalized endpoint")
+	}
+}

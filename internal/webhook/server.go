@@ -83,6 +83,7 @@ type Server struct {
 func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) *Server {
 	endpoints := make(map[string]config.EndpointConfig)
 	for _, ep := range cfg.Endpoints {
+		ep.Auth = strings.TrimSpace(strings.ToLower(ep.Auth))
 		endpoints[ep.Path] = ep
 	}
 	return &Server{
@@ -243,7 +244,8 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if ep.Auth == "github_hmac_sha256" {
+	authMode := strings.TrimSpace(strings.ToLower(ep.Auth))
+	if authMode == "github_hmac_sha256" {
 		if !VerifyGitHubSignature(body, r.Header.Get("X-Hub-Signature-256"), ep.Secret) {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return

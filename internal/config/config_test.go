@@ -362,6 +362,19 @@ func TestWebhookAuthModeValidation(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "whitespace padded github_hmac_sha256 normalized",
+			yaml: `webhooks:
+  endpoints:
+    - name: gh-padded
+      path: /gh-padded
+      auth: "  github_hmac_sha256  "
+      secret: supersecret
+      platform: discord
+      channel_id: c1
+      prompt: p`,
+			wantErr: false,
+		},
+		{
 			name: "explicit legacy_bearer passes",
 			yaml: `webhooks:
   endpoints:
@@ -421,6 +434,11 @@ func TestWebhookAuthModeValidation(t *testing.T) {
 				}
 				if len(cfg.Webhooks.Endpoints) != 1 {
 					t.Fatalf("expected 1 endpoint, got %d", len(cfg.Webhooks.Endpoints))
+				}
+				if tt.name == "whitespace padded github_hmac_sha256 normalized" {
+					if cfg.Webhooks.Endpoints[0].Auth != "github_hmac_sha256" {
+						t.Fatalf("expected normalized auth 'github_hmac_sha256', got %q", cfg.Webhooks.Endpoints[0].Auth)
+					}
 				}
 			}
 		})
