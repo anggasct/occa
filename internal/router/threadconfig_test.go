@@ -182,10 +182,6 @@ func TestEffectiveListenModeIsolation(t *testing.T) {
 	}
 }
 
-// TestThreadConfigReadErrorFailsClosed proves the snapshot boundary holds when
-// the isolation store read fails: workdir / listen / model resolution must
-// propagate the error instead of falling back to the parent channel, and
-// listenModeAllows must fail closed (not process the message).
 func TestThreadConfigReadErrorFailsClosed(t *testing.T) {
 	r, _ := newThreadTestRouter()
 	ctx := context.Background()
@@ -549,9 +545,6 @@ func telegramTopicMsg(chatID, threadID, text string, reply *fakeReplyCtx) channe
 	}
 }
 
-// TestSameThreadIDDifferentChatsIsolated proves Telegram forum topic ids are
-// scoped to their parent chat: two chats that happen to use the same bare
-// topic id (555) must not share a workdir/model/listen snapshot.
 func TestSameThreadIDDifferentChatsIsolated(t *testing.T) {
 	r, client := newThreadTestRouter()
 	client.providers = modelTestProviders()
@@ -596,8 +589,6 @@ func TestSameThreadIDDifferentChatsIsolated(t *testing.T) {
 		t.Fatalf("chat-b effective model = %+v, want zai-coding-plan/glm-5.2", modelB)
 	}
 
-	// Workdir and listen-mode writes must stay scoped too: setting them in
-	// chat-a's topic must not overwrite chat-b's row with the same topic id.
 	wd := t.TempDir()
 	if err := r.Route(ctx, telegramTopicMsg("chat-a", "555", "/channel all", &fakeReplyCtx{})); err != nil {
 		t.Fatalf("Route chat-a /channel: %v", err)
@@ -615,9 +606,6 @@ func TestSameThreadIDDifferentChatsIsolated(t *testing.T) {
 	}
 }
 
-// TestNonThreadResolutionSkipsThreadConfig proves the no-thread-config-read
-// boundary: plain (non-thread) workdir/listen/model resolution and set
-// commands must never touch the thread-config repository.
 func TestNonThreadResolutionSkipsThreadConfig(t *testing.T) {
 	r, client, _ := newTestRouter()
 	client.providers = modelTestProviders()
@@ -681,8 +669,6 @@ func TestNonThreadResolutionSkipsThreadConfig(t *testing.T) {
 		t.Fatalf("non-thread set commands made %d thread-config writes, want 0", tc.writeCalls)
 	}
 
-	// Plain Discord (non-thread) messages must hit the same boundary: zero
-	// thread-config reads/writes through view, set, and resolution paths.
 	st.overrideRepo.overrides["discord:text-channel:user1"] = &store.UserOverride{
 		ChannelID: "text-channel", Platform: "discord", UserID: "user1", Role: "admin",
 	}

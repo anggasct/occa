@@ -20,15 +20,12 @@ const (
 
 const defaultProbeTimeout = 1500 * time.Millisecond
 
-// Probe is the outcome of one bounded, independent subsystem check.
 type Probe struct {
 	Name   string
 	Status Status
 	Detail string
 }
 
-// Report is a full diagnostics snapshot. It is the single structured value
-// consumed by both the chat renderer and structured logging.
 type Report struct {
 	Status    Status
 	Probes    []Probe
@@ -37,7 +34,6 @@ type Report struct {
 	LastError string
 }
 
-// Store is the database probe surface. SQLiteStore implements it.
 type Store interface {
 	Ping(ctx context.Context) error
 	SchemaVersion(ctx context.Context) (int, error)
@@ -49,19 +45,16 @@ type Agent interface {
 	Running(ctx context.Context) (pid int, ok bool, err error)
 }
 
-// Channel is the connection-state probe surface implemented by adapters.
 type Channel interface {
 	Name() string
 	Connected() (bool, string)
 }
 
-// Webhook is the listener probe surface implemented by the webhook server.
 type Webhook interface {
 	Addr() string
 	Healthy() bool
 }
 
-// Reporter runs the bounded diagnostic probes and renders a chat report.
 type Reporter struct {
 	store          Store
 	agent          Agent
@@ -120,7 +113,6 @@ func New(opts ...Option) *Reporter {
 	return r
 }
 
-// RecordError stores a short, sanitized failure message for the next report.
 func (r *Reporter) RecordError(msg string) {
 	if r.lastErr != nil {
 		r.lastErr.Set(msg)
@@ -321,7 +313,6 @@ func (r Report) Render() string {
 	return b.String()
 }
 
-// LogFields exposes the same snapshot as structured attributes for logs.
 func (r Report) LogFields() []slog.Attr {
 	attrs := []slog.Attr{
 		slog.String("status", string(r.Status)),

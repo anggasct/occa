@@ -350,10 +350,6 @@ func TestStreamerOnlyLastChunkEdited(t *testing.T) {
 	}
 }
 
-// TestStreamerSegmentsAroundTool: a delta → tool → delta stream finalizes
-// the preview at the tool boundary, emits exactly one tool notice, and
-// delivers the next text block as a fresh message, with the final
-// concatenation equal to the full response.
 func TestStreamerSegmentsAroundTool(t *testing.T) {
 	reply := newFakeReplyContext()
 	renderer := render.New()
@@ -392,8 +388,6 @@ func TestStreamerSegmentsAroundTool(t *testing.T) {
 	}
 }
 
-// TestStreamerToolOnlyReplySendsNoEmptyMessage: a tool-only stream (no text)
-// leaves only the tool notice, never an empty bubble.
 func TestStreamerToolOnlyReplySendsNoEmptyMessage(t *testing.T) {
 	reply := newFakeReplyContext()
 	renderer := render.New()
@@ -415,8 +409,6 @@ func TestStreamerToolOnlyReplySendsNoEmptyMessage(t *testing.T) {
 	}
 }
 
-// TestStreamerEmptySegmentIsNoOp: a segment event with an empty buffer must
-// not produce an extra message.
 func TestStreamerEmptySegmentIsNoOp(t *testing.T) {
 	reply := newFakeReplyContext()
 	renderer := render.New()
@@ -470,8 +462,6 @@ func TestStreamerFinalEditReconciles(t *testing.T) {
 	}
 }
 
-// TestStreamerEmptyStreamShowsCompletionNotice: a stream that delivers
-// nothing (no text, no tool bubbles) still confirms completion.
 func TestStreamerEmptyStreamShowsCompletionNotice(t *testing.T) {
 	reply := newFakeReplyContext()
 	renderer := render.New()

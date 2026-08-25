@@ -246,8 +246,6 @@ func TestEvents(t *testing.T) {
 	}
 }
 
-// TestWrapTransportErrPreservesCancel: a canceled request keeps the
-// context.Canceled sentinel instead of being mislabeled unreachable.
 func TestWrapTransportErrPreservesCancel(t *testing.T) {
 	c := NewHTTPClient("http://127.0.0.1:1")
 	err := c.wrapTransportErr(context.Canceled)
@@ -259,7 +257,6 @@ func TestWrapTransportErrPreservesCancel(t *testing.T) {
 	}
 }
 
-// TestAnswerQuestionPostsPayload verifies the reply endpoint and payload.
 func TestAnswerQuestionPostsPayload(t *testing.T) {
 	var gotBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -418,7 +415,6 @@ func TestBuildMessagePayloadModelVariant(t *testing.T) {
 		if decoded.Variant != "max" {
 			t.Fatalf("top-level variant = %q, want max", decoded.Variant)
 		}
-		// variant must NOT be inside model
 		var rawMap map[string]any
 		if err := json.Unmarshal(data, &rawMap); err != nil {
 			t.Fatalf("Unmarshal: %v", err)

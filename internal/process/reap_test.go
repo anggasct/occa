@@ -117,11 +117,6 @@ func TestReapOrphansSkipsForeignProcess(t *testing.T) {
 	}
 }
 
-// TestReapOrphansSkipsForeignOpenCodeSubstring is the regression case for the
-// strict executable-identity rule: a listener whose executable basename merely
-// CONTAINS the "opencode" substring (not-opencode) and whose argv otherwise
-// satisfies the serve + port checks must NOT be matched or killed. The sweep
-// leaves it running and continues.
 func TestReapOrphansSkipsForeignOpenCodeSubstring(t *testing.T) {
 	port := freePort(t)
 	cmd := spawnArgvLike(t, "not-opencode", port)

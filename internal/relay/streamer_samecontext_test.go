@@ -7,10 +7,6 @@ import (
 	"github.com/anggasct/occa/internal/render"
 )
 
-// TestStreamerToolSamePartSkipsIdenticalEdit: a ToolSamePart follow-up that
-// renders the same label (same tool, same context) must NOT call Edit again —
-// Telegram rejects no-op edits with "message is not modified" (observed live:
-// "streaming: tool notice context edit failed" WARN spam).
 func TestStreamerToolSamePartSkipsIdenticalEdit(t *testing.T) {
 	reply := newFakeReplyContext()
 	renderer := render.New()
@@ -28,7 +24,6 @@ func TestStreamerToolSamePartSkipsIdenticalEdit(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	// One bubble was sent; only the context changes should have edited it.
 	edits := reply.edits["msg-1"]
 	if len(edits) != 2 {
 		t.Fatalf("edits on msg-1 = %d (%v), want 2 (context foo.txt, then bar.txt)", len(edits), edits)

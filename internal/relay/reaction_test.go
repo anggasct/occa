@@ -52,7 +52,6 @@ func waitReactions(t *testing.T, r *fakeReactionSetter, want int) {
 	t.Fatalf("reactions did not reach %d transitions, have %v", want, r.record())
 }
 
-// TestStreamerReactionDone: the reply gains 👀 on first send and ✅ on done.
 func TestStreamerReactionDone(t *testing.T) {
 	reply := newFakeReplyContext()
 	s := NewStreamer(reply, render.New(), render.Telegram)
@@ -73,8 +72,6 @@ func TestStreamerReactionDone(t *testing.T) {
 	}
 }
 
-// TestStreamerReactionErrorState: an error event after a reply replaces 👀
-// with ❌.
 func TestStreamerReactionErrorState(t *testing.T) {
 	reply := newFakeReplyContext()
 	s := NewStreamer(reply, render.New(), render.Telegram)
@@ -99,7 +96,6 @@ func TestStreamerReactionErrorState(t *testing.T) {
 	}
 }
 
-// TestStreamerReactionIncompleteState: an incomplete stream replaces 👀 with ❌.
 func TestStreamerReactionIncompleteState(t *testing.T) {
 	reply := newFakeReplyContext()
 	s := NewStreamer(reply, render.New(), render.Telegram)
@@ -119,8 +115,6 @@ func TestStreamerReactionIncompleteState(t *testing.T) {
 	}
 }
 
-// TestStreamerReactionTimeoutNoMessage: a timeout before any reply message
-// exists sends no reactions.
 func TestStreamerReactionTimeoutNoMessage(t *testing.T) {
 	reply := newFakeReplyContext()
 	s := NewStreamer(reply, render.New(), render.Telegram)
@@ -140,8 +134,6 @@ func TestStreamerReactionTimeoutNoMessage(t *testing.T) {
 	}
 }
 
-// TestStreamerReactionCancelLeavesProcessing: cancellation does not change
-// the reaction (the task may still be running in the backend).
 func TestStreamerReactionCancelLeavesProcessing(t *testing.T) {
 	reply := newFakeReplyContext()
 	s := NewStreamer(reply, render.New(), render.Telegram)
@@ -167,8 +159,6 @@ func TestStreamerReactionCancelLeavesProcessing(t *testing.T) {
 	}
 }
 
-// TestStreamerReactionNoSetterIsNoOp: without a setter the stream behaves
-// exactly as before.
 func TestStreamerReactionNoSetterIsNoOp(t *testing.T) {
 	reply := newFakeReplyContext()
 	s := NewStreamer(reply, render.New(), render.Telegram)
@@ -187,9 +177,6 @@ func TestStreamerReactionNoSetterIsNoOp(t *testing.T) {
 	}
 }
 
-// TestStreamerReactionTargetsSourceMessage: with a source target set via
-// SetReactionTarget, the 👀→✅ lifecycle lands on the source message (a
-// read-receipt) and never on the reply.
 func TestStreamerReactionTargetsSourceMessage(t *testing.T) {
 	reply := newFakeReplyContext()
 	s := NewStreamer(reply, render.New(), render.Discord)
@@ -217,8 +204,6 @@ func TestStreamerReactionTargetsSourceMessage(t *testing.T) {
 	}
 }
 
-// TestStreamerReactionFallsBackToReplyRef: without a source target the
-// 👀→✅ lifecycle falls back onto the first reply message.
 func TestStreamerReactionFallsBackToReplyRef(t *testing.T) {
 	reply := newFakeReplyContext()
 	s := NewStreamer(reply, render.New(), render.Discord)

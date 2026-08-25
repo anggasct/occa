@@ -163,9 +163,6 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-// TestAutoThreadCreatesThreadAndRescopesMessage covers the auto-thread flow: an @mention in
-// an auto-thread channel creates a thread from the message, keeps access
-// scope on the parent channel, and routes replies into the thread.
 func TestAutoThreadCreatesThreadAndRescopesMessage(t *testing.T) {
 	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
 		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/threads") {
@@ -202,9 +199,6 @@ func TestAutoThreadCreatesThreadAndRescopesMessage(t *testing.T) {
 	}
 }
 
-// TestAutoThreadFollowUpNeedsNoMention covers follow-ups: messages in a
-// thread OCCA created are treated as bot-directed and scoped to the parent
-// channel for authorization.
 func TestAutoThreadFollowUpNeedsNoMention(t *testing.T) {
 	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
 		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/channels/thread-9") {
@@ -240,8 +234,6 @@ func TestAutoThreadFollowUpNeedsNoMention(t *testing.T) {
 	}
 }
 
-// TestAutoThreadDisabledRepliesInline covers auto_thread=0: the
-// @mention replies inline in the channel, no thread is created.
 func TestAutoThreadDisabledRepliesInline(t *testing.T) {
 	var threadCalls int
 	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
@@ -275,8 +267,6 @@ func TestAutoThreadDisabledRepliesInline(t *testing.T) {
 	}
 }
 
-// TestAutoThreadFailureFallsBackInline: a failed thread creation keeps the
-// message inline in the parent channel.
 func TestAutoThreadFailureFallsBackInline(t *testing.T) {
 	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
 		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/threads") {
@@ -324,10 +314,6 @@ func TestThreadNameSanitization(t *testing.T) {
 	}
 }
 
-// TestAutoThreadFollowUpSurvivesRestart: after a restart the in-memory
-// participation map is empty, but the persisted ownership check still
-// recognizes an OCCA-created thread (its session key lives in the parent
-// channel), so follow-ups keep working without a mention.
 func TestAutoThreadFollowUpSurvivesRestart(t *testing.T) {
 	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
 		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/channels/thread-9") {
@@ -365,8 +351,6 @@ func TestAutoThreadFollowUpSurvivesRestart(t *testing.T) {
 	}
 }
 
-// TestUserThreadNotTreatedAsOwned: a thread whose session keys to itself
-// (user-created thread the bot only participated in) is not re-scoped.
 func TestUserThreadNotTreatedAsOwned(t *testing.T) {
 	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
 		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/channels/user-thread") {
@@ -394,9 +378,6 @@ func TestUserThreadNotTreatedAsOwned(t *testing.T) {
 	}
 }
 
-// TestOutboundMessagesSuppressMentions covers the allowed-mentions hardening:
-// every outbound call site sends allowed_mentions with the zero-value shape
-// (parse:null, replied_user:false) so Discord pings nothing.
 func TestOutboundMessagesSuppressMentions(t *testing.T) {
 	var bodies []string
 	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
@@ -444,8 +425,6 @@ func TestOutboundMessagesSuppressMentions(t *testing.T) {
 	}
 }
 
-// TestComponentRowsGroupsByRow: buttons sharing a Row hint land in one
-// action row; Row 0 keeps the legacy all-in-one-row layout.
 func TestComponentRowsGroupsByRow(t *testing.T) {
 	components := componentRows([]channel.Button{
 		{Label: "a", Value: "1", Row: 1},
@@ -467,8 +446,6 @@ func TestComponentRowsGroupsByRow(t *testing.T) {
 	}
 }
 
-// TestComponentRowsChunksOversizedRows: a same-Row group larger than
-// Discord's 5-button row cap is chunked into multiple action rows.
 func TestComponentRowsChunksOversizedRows(t *testing.T) {
 	buttons := make([]channel.Button, 6)
 	for i := range buttons {
@@ -521,8 +498,6 @@ func TestComponentRowsCapsActionRows(t *testing.T) {
 	}
 }
 
-// TestComponentRowsBrowserPageWithinCap: a full 10-item browser page (5+5
-// items plus one nav row) stays within Discord's 5-action-row message cap.
 func TestComponentRowsBrowserPageWithinCap(t *testing.T) {
 	buttons := make([]channel.Button, 0, 14)
 	for i := 0; i < 10; i++ {
@@ -543,10 +518,6 @@ func TestComponentRowsBrowserPageWithinCap(t *testing.T) {
 	}
 }
 
-// TestSendWithButtonsResolvesInteraction covers the deferred-interaction
-// fix: when the reply context holds a pending interaction, SendWithButtons
-// edits the deferred response (content + buttons) instead of sending a new
-// channel message, consumes the interaction, and returns the edited ref.
 func TestSendWithButtonsResolvesInteraction(t *testing.T) {
 	var paths []string
 	var bodies []string
@@ -580,10 +551,6 @@ func TestSendWithButtonsResolvesInteraction(t *testing.T) {
 	}
 }
 
-// TestSendWithButtonsClampsInteractionContent covers review finding 1: the
-// deferred-interaction path must clamp the content to Discord's limit just
-// like the channel-message path, so a long permission/question prompt cannot
-// exceed 2000 units and fail with BASE_TYPE_MAX_LENGTH.
 func TestSendWithButtonsClampsInteractionContent(t *testing.T) {
 	var body string
 	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
@@ -616,9 +583,6 @@ func TestSendWithButtonsClampsInteractionContent(t *testing.T) {
 	}
 }
 
-// TestSendWithButtonsFallbackAfterInteraction covers the fallback: once the
-// pending interaction is consumed by the first call, a second
-// SendWithButtons sends a regular channel message.
 func TestSendWithButtonsFallbackAfterInteraction(t *testing.T) {
 	var paths []string
 	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
@@ -646,9 +610,6 @@ func TestSendWithButtonsFallbackAfterInteraction(t *testing.T) {
 	}
 }
 
-// TestSendWithButtonsNoInteraction covers the unchanged path: without a
-// pending interaction SendWithButtons sends a new channel message and
-// returns its ref.
 func TestSendWithButtonsNoInteraction(t *testing.T) {
 	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
 		return []byte(`{"id":"plain-1"}`), http.StatusOK
@@ -664,8 +625,6 @@ func TestSendWithButtonsNoInteraction(t *testing.T) {
 	}
 }
 
-// TestNormalizeMessageSetsSourceRef: an ordinary user message carries a
-// SourceRef pointing at the triggering message for read-receipt reactions.
 func TestNormalizeMessageSetsSourceRef(t *testing.T) {
 	a := &Adapter{
 		channelLookup: func(channelID string) (*discordgo.Channel, error) {
@@ -688,9 +647,6 @@ func TestNormalizeMessageSetsSourceRef(t *testing.T) {
 	}
 }
 
-// TestAutoThreadReactionTargetsSourceChannel: in the auto-thread case the
-// reaction channel stays on the parent channel that hosts the user's message,
-// and SourceRef points at the triggering message.
 func TestAutoThreadReactionTargetsSourceChannel(t *testing.T) {
 	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
 		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/threads") {
@@ -716,7 +672,6 @@ func TestAutoThreadReactionTargetsSourceChannel(t *testing.T) {
 	if !ok {
 		t.Fatalf("reply context type: %T", got.ReplyCtx)
 	}
-	// Reply lands in the thread, but reactions must target the parent channel.
 	if rc.channelID != "thread-9" {
 		t.Fatalf("reply channelID = %q, want thread-9", rc.channelID)
 	}
@@ -728,8 +683,6 @@ func TestAutoThreadReactionTargetsSourceChannel(t *testing.T) {
 	}
 }
 
-// TestInteractionMessagesHaveNoSourceRef: interaction-driven messages (slash
-// commands) carry no SourceRef — there is no ordinary user message to react on.
 func TestInteractionMessagesHaveNoSourceRef(t *testing.T) {
 	s := newUnconnectedSession(t)
 	s.Client = &http.Client{Transport: fakeRoundTripper{do: func(*http.Request) (*http.Response, error) {

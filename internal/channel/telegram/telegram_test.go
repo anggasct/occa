@@ -116,11 +116,6 @@ func TestSanitizeDescription(t *testing.T) {
 	}
 }
 
-// TestSetChatCommandsTruncatesLongDescription reproduces the production
-// failure where an agent command (e.g. OpenCode's "customize-opencode"
-// skill) has a description over Telegram's 256-character limit: Telegram
-// rejects the whole setMyCommands batch, silently dropping every command in
-// the menu, not just the offending one.
 func TestSetChatCommandsTruncatesLongDescription(t *testing.T) {
 	var gotBody []byte
 	bot := fakeTelegramServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -263,8 +258,6 @@ func TestFetchFileSucceeds(t *testing.T) {
 	}
 }
 
-// TestNormalizeCarriesTopicThreadID: a message with message_thread_id maps
-// to ThreadID and a thread-scoped reply context.
 func TestNormalizeCarriesTopicThreadID(t *testing.T) {
 	bot := fakeTelegramServer(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"ok":true,"result":{}}`))
@@ -296,8 +289,6 @@ func TestNormalizeCarriesTopicThreadID(t *testing.T) {
 	}
 }
 
-// TestReplyContextSendsIntoTopic: Send and SendTyping include
-// message_thread_id so replies land inside the topic.
 func TestReplyContextSendsIntoTopic(t *testing.T) {
 	var sentBodies []string
 	bot := fakeTelegramServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -334,8 +325,6 @@ func TestReplyContextSendsIntoTopic(t *testing.T) {
 	}
 }
 
-// TestReplyContextOutsideTopicOmitsThreadID: without a topic the outbound
-// params must not carry message_thread_id.
 func TestReplyContextOutsideTopicOmitsThreadID(t *testing.T) {
 	var sentBodies []string
 	bot := fakeTelegramServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -355,8 +344,6 @@ func TestReplyContextOutsideTopicOmitsThreadID(t *testing.T) {
 	}
 }
 
-// TestInlineKeyboardGroupsByRow: buttons sharing a Row hint land in one
-// platform row; Row 0 keeps the legacy one-button-per-row layout.
 func TestInlineKeyboardGroupsByRow(t *testing.T) {
 	markup := inlineKeyboard([]channel.Button{
 		{Label: "a", Value: "1", Row: 1},
@@ -377,8 +364,6 @@ func TestInlineKeyboardGroupsByRow(t *testing.T) {
 	}
 }
 
-// TestInlineKeyboardChunksOversizedRows: a same-Row group larger than
-// Telegram's 8-button row cap is chunked into multiple rows.
 func TestInlineKeyboardChunksOversizedRows(t *testing.T) {
 	buttons := make([]channel.Button, 10)
 	for i := range buttons {

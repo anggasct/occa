@@ -1193,11 +1193,6 @@ func (r *blockingPermissionReply) SendWithButtons(text string, buttons []channel
 	return r.permissionReply.SendWithButtons(text, buttons)
 }
 
-// TestPermissionBrokerFreshSendNeverExpires is the regression test for the
-// fresh-send never-expires behavior: a fresh prompt must never be edited to
-// "⌛ Permission request expired." with
-// nil buttons in the send path, even when the record leaves the pending state
-// while the send is still in flight. Origin is still recorded.
 func TestPermissionBrokerFreshSendNeverExpires(t *testing.T) {
 	client := &permissionClient{}
 	broker := newPermissionBroker(nil)

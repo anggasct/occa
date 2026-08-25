@@ -19,12 +19,6 @@ import (
 	"time"
 )
 
-// TestAgentHelperProcess is re-executed as a stand-in agent binary when
-// GO_WANT_HELPER_PROCESS=1. Modes:
-//   - parent-with-child: serves /global/health, spawns a self child that
-//     ignores SIGTERM, records the child PID, then ignores SIGTERM itself.
-//   - child-ignore-term: ignores SIGTERM and hangs.
-//   - exit-on-term: writes a marker file on SIGTERM, then exits.
 func TestAgentHelperProcess(t *testing.T) {
 	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
 		return

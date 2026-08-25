@@ -321,7 +321,6 @@ func TestAgentCallback_TokenRevocationOnReplacement(t *testing.T) {
 
 	msg := channel.IncomingMessage{Platform: "telegram", ChannelID: "chat1", UserID: "user1", ReplyCtx: reply}
 
-	// 1. Build initial picker (picker 1)
 	_, buttons1, err := r.buildAgentPickerPage(context.Background(), msg, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -331,7 +330,6 @@ func TestAgentCallback_TokenRevocationOnReplacement(t *testing.T) {
 	}
 	oldSwitchBtn := buttons1[0].Value
 
-	// 2. Render replacement picker (picker 2)
 	_, buttons2, err := r.buildAgentPickerPage(context.Background(), msg, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -340,7 +338,6 @@ func TestAgentCallback_TokenRevocationOnReplacement(t *testing.T) {
 		t.Fatal("expected buttons in picker 2")
 	}
 
-	// 3. Invoking old callback from picker 1 must return expired notice
 	ref := fakeRef{id: "msg-old"}
 	oldMsg := channel.IncomingMessage{
 		Platform:     "telegram",
@@ -440,12 +437,10 @@ func TestAgentDelete_SecuritySymlinksAndModeFilter(t *testing.T) {
 			t.Fatalf("expected invalid agent file path for symlink delete, got: %s", out)
 		}
 
-		// Ensure external file was not removed
 		if _, err := os.Stat(extFile); err != nil {
 			t.Fatalf("external file should be intact, stat err: %v", err)
 		}
 
-		// Also test symlinked agent directory
 		symWorkdir := t.TempDir()
 		if err := os.MkdirAll(filepath.Join(symWorkdir, ".opencode"), 0755); err != nil {
 			t.Fatal(err)
@@ -531,7 +526,6 @@ func TestAgentDelete_SecuritySymlinksAndModeFilter(t *testing.T) {
 	})
 
 	t.Run("valid custom agent deletion succeeds and refreshes picker", func(t *testing.T) {
-		// Set active session for picker rendering
 		if err := r.store.SessionRepo().SetActive(context.Background(), "telegram", "chat1", "", "admin1", "sess-1", 100); err != nil {
 			t.Fatal(err)
 		}
@@ -653,7 +647,6 @@ func TestNewAgentDetectionOnTurnEnd(t *testing.T) {
 
 	t.Run("delayed live registry registration announces agent after retry", func(t *testing.T) {
 		reply.sends = nil
-		// Write file on disk
 		if err := os.WriteFile(filepath.Join(agentDir, "delayed_reg.md"), []byte("# delayed"), 0644); err != nil {
 			t.Fatal(err)
 		}
@@ -721,7 +714,6 @@ func TestAgentPicker_CLIBackendUnsupported(t *testing.T) {
 		t.Fatalf("expected unsupported backend message, got: %v", reply.sends)
 	}
 
-	// Also test /agent switch on unsupported backend
 	msgSwitch := msgFrom("user1", "/agent switch reviewer", reply)
 	out, err := r.handleAgent(context.Background(), msgSwitch, "switch reviewer")
 	if err != nil {

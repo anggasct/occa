@@ -949,10 +949,6 @@ func TestRoutePassthrough(t *testing.T) {
 	}
 }
 
-// TestRouteDropsMessageWhenContextCanceled guards against the shutdown race
-// where a message is routed with a root context that was already canceled
-// (process shutting down): the message must be dropped quietly instead of
-// running store/agent work that fails with "context canceled" WARNs.
 func TestRouteDropsMessageWhenContextCanceled(t *testing.T) {
 	r, client, reply := newTestRouter()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -969,9 +965,6 @@ func TestRouteDropsMessageWhenContextCanceled(t *testing.T) {
 	}
 }
 
-// TestRouteDropsOwnedThreadMessageWhenContextCanceled ensures the
-// session-activation thread-config materialization is skipped entirely when
-// the context is canceled (the exact log line seen during shutdown).
 func TestRouteDropsOwnedThreadMessageWhenContextCanceled(t *testing.T) {
 	r, client := newThreadTestRouter()
 	reply := &fakeReplyCtx{}
@@ -993,8 +986,6 @@ func TestRouteDropsOwnedThreadMessageWhenContextCanceled(t *testing.T) {
 	}
 }
 
-// TestPassthroughQueuedDropsCanceledContext ensures a queued message whose
-// context was canceled (shutdown mid-drain) is not dispatched.
 func TestPassthroughQueuedDropsCanceledContext(t *testing.T) {
 	r, client, _ := newTestRouter()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1008,10 +999,6 @@ func TestPassthroughQueuedDropsCanceledContext(t *testing.T) {
 	}
 }
 
-// TestExecutePassthroughDropsCanceledContext covers the defense-in-depth
-// guard: if the task context is canceled between acquire and execution, the
-// slot must be released, the message dropped, and the canceled drop reported
-// via errPassthroughCanceled (so callers do not mistake it for a dispatch).
 func TestExecutePassthroughDropsCanceledContext(t *testing.T) {
 	r, client, reply := newTestRouter()
 	key := responseKey{platform: "telegram", channelID: "chat1", threadID: "", userID: "user1"}
@@ -1035,11 +1022,6 @@ func TestExecutePassthroughDropsCanceledContext(t *testing.T) {
 	}
 }
 
-// TestExecutePassthroughCanceledAfterAcquireRedispatchesQueued covers the
-// shutdown race where another request enqueues after acquire but before the
-// cancellation guard observes the canceled context. The guard must perform
-// the same queue cleanup as normal response finalization: the queued message
-// (whose context is still valid) is redispatched, not left stranded.
 func TestExecutePassthroughCanceledAfterAcquireRedispatchesQueued(t *testing.T) {
 	r, client, reply := newTestRouter()
 	key := responseKey{platform: "telegram", channelID: "chat1", threadID: "", userID: "user1"}
@@ -1076,11 +1058,6 @@ func TestExecutePassthroughCanceledAfterAcquireRedispatchesQueued(t *testing.T) 
 	}
 }
 
-// TestExecutePassthroughCanceledAfterAcquireDiscardsCanceledQueue covers the
-// same race when the enqueued message's context is already canceled (process
-// shutdown in progress): the guard drains the queue and intentionally
-// discards the entry instead of leaving it stranded or dispatching work that
-// would only fail with "context canceled".
 func TestExecutePassthroughCanceledAfterAcquireDiscardsCanceledQueue(t *testing.T) {
 	r, client, reply := newTestRouter()
 	key := responseKey{platform: "telegram", channelID: "chat1", threadID: "", userID: "user1"}
@@ -1145,11 +1122,6 @@ var closedDone = func() <-chan struct{} {
 	return ch
 }()
 
-// TestPassthroughQueuedCanceledAfterAcquireNotReportedAsDispatched guards
-// against dispatchDrained misreading a canceled drop as a successful dispatch.
-// When the canceled-after-acquire guard fires through passthroughQueued, the
-// queued message must be reported as not dispatched so the remaining FIFO
-// entries are preserved (requeued) instead of dropped as a side effect.
 func TestPassthroughQueuedCanceledAfterAcquireNotReportedAsDispatched(t *testing.T) {
 	r, client, _ := newTestRouter()
 	qmsg := queuedMessage{ctx: &raceCancelCtx{Context: context.Background()}, msg: msg("hello queued", &fakeReplyCtx{})}
@@ -1166,11 +1138,6 @@ func TestPassthroughQueuedCanceledAfterAcquireNotReportedAsDispatched(t *testing
 	}
 }
 
-// TestDispatchDrainedContinuesAfterCanceledDrop locks in the FIFO-preserving
-// behavior the canceled-after-acquire guard needs: when the guard fires for
-// the first drained entry, dispatchDrained must continue to the next entry
-// (dispatched) instead of treating the canceled drop as a successful dispatch
-// and leaving the remaining FIFO suffix stranded.
 func TestDispatchDrainedContinuesAfterCanceledDrop(t *testing.T) {
 	r, client, _ := newTestRouter()
 	key := responseKey{platform: "telegram", channelID: "chat1", threadID: "", userID: "user1"}
@@ -1363,7 +1330,6 @@ func TestRouteSessionListRetired(t *testing.T) {
 func TestFirstMessageTitleCapture(t *testing.T) {
 	r, client, reply := newTestRouter()
 
-	// 1. First message stamps title
 	longMsg := "  Fix bug in   authentication logic\nand clean up session handling  "
 	err := r.Route(context.Background(), msg(longMsg, reply))
 	if err != nil {
@@ -1384,7 +1350,6 @@ func TestFirstMessageTitleCapture(t *testing.T) {
 		t.Fatalf("title = %q, want %q", sessions[0].Title, expectedTitle)
 	}
 
-	// 2. Second message does NOT overwrite title
 	err = r.Route(context.Background(), msg("second message should be ignored for title", reply))
 	if err != nil {
 		t.Fatalf("Route second: %v", err)
@@ -1400,7 +1365,6 @@ func TestFirstMessageTitleCapture(t *testing.T) {
 		t.Fatalf("title after second message = %q, want unchanged %q", sessions[0].Title, expectedTitle)
 	}
 
-	// 3. /session new does NOT stamp a title
 	err = r.Route(context.Background(), msg("/session new", reply))
 	if err != nil {
 		t.Fatalf("Route /session new: %v", err)
@@ -2972,7 +2936,6 @@ func TestCallbackSwitchSuccessAndDeadID(t *testing.T) {
 		scheduleRepo: &fakeScheduleRepo{},
 	}
 
-	// 1. Success callback
 	cbMsg := channel.IncomingMessage{
 		Platform:     "telegram",
 		ChannelID:    "chat1",
@@ -2994,7 +2957,6 @@ func TestCallbackSwitchSuccessAndDeadID(t *testing.T) {
 		t.Fatalf("expected edit with switched text, got %v", reply.edits)
 	}
 
-	// 2. Dead ID callback
 	deadCbMsg := channel.IncomingMessage{
 		Platform:     "telegram",
 		ChannelID:    "chat1",
@@ -3040,7 +3002,6 @@ func TestSessionPickerPagination(t *testing.T) {
 		fakeRepo.sessions = append(fakeRepo.sessions, sessions[i])
 	}
 
-	// 1. Page 1
 	reply.sends = nil
 	reply.buttons = nil
 	err := r.Route(ctx, msg("/session", reply))
@@ -3065,7 +3026,6 @@ func TestSessionPickerPagination(t *testing.T) {
 		t.Fatalf("unexpected nav button on page 1: %+v", navBtn1)
 	}
 
-	// 2. Page 2 (via /session 2)
 	reply.sends = nil
 	reply.buttons = nil
 	err = r.Route(ctx, msg("/session 2", reply))
@@ -3094,7 +3054,6 @@ func TestSessionPickerPagination(t *testing.T) {
 		t.Fatalf("unexpected next button on page 2: %+v", nextBtn2)
 	}
 
-	// 3. Page 3 (via /session 3)
 	reply.sends = nil
 	reply.buttons = nil
 	err = r.Route(ctx, msg("/session 3", reply))
@@ -3234,7 +3193,6 @@ func TestSessionPageCallback(t *testing.T) {
 		})
 	}
 
-	// 1. Valid spage:2 callback edits in place
 	cbMsg := channel.IncomingMessage{
 		Platform:     "telegram",
 		ChannelID:    "chat1",
@@ -3257,7 +3215,6 @@ func TestSessionPageCallback(t *testing.T) {
 		t.Fatalf("expected 7 edit buttons, got %v", reply.buttons)
 	}
 
-	// 2. Out of bounds callback (spage:99 -> clamps to 2)
 	cbMsg.CallbackData = "spage:99"
 	reply.edits = nil
 	err = r.Route(ctx, cbMsg)
@@ -3268,7 +3225,6 @@ func TestSessionPageCallback(t *testing.T) {
 		t.Fatalf("expected clamp to page 2, got %v", reply.edits)
 	}
 
-	// 3. Malformed callback (spage:abc -> defaults to 1)
 	cbMsg.CallbackData = "spage:abc"
 	reply.edits = nil
 	err = r.Route(ctx, cbMsg)
@@ -3331,7 +3287,6 @@ func TestSessionPickerConversationIsolation(t *testing.T) {
 
 	fakeRepo := r.store.SessionRepo().(*fakeSessionRepo)
 	now := time.Now()
-	// Sessions for user1
 	for i := 1; i <= 8; i++ {
 		fakeRepo.sessions = append(fakeRepo.sessions, store.Session{
 			ID:             int64(i),
@@ -3342,7 +3297,6 @@ func TestSessionPickerConversationIsolation(t *testing.T) {
 			CreatedAt:      now.Add(time.Duration(i) * time.Minute).Unix(),
 		})
 	}
-	// Sessions for user2
 	for i := 9; i <= 15; i++ {
 		fakeRepo.sessions = append(fakeRepo.sessions, store.Session{
 			ID:             int64(i),
@@ -3354,7 +3308,6 @@ func TestSessionPickerConversationIsolation(t *testing.T) {
 		})
 	}
 
-	// User1 views picker page 1
 	msgUser1 := channel.IncomingMessage{
 		Platform:  "telegram",
 		ChannelID: "chat1",
@@ -3375,7 +3328,6 @@ func TestSessionPickerConversationIsolation(t *testing.T) {
 		t.Fatalf("user1 picker contains user2 session: %q", out1)
 	}
 
-	// User2 views picker page 1
 	msgUser2 := channel.IncomingMessage{
 		Platform:  "telegram",
 		ChannelID: "chat1",

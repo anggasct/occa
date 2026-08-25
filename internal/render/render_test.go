@@ -652,10 +652,6 @@ func TestClamp(t *testing.T) {
 	}
 }
 
-// TestClampBalancedAtEveryLimit covers review finding 2: for every positive
-// limit Clamp must return rune-safe, tag-balanced output that stays within
-// the limit — including inputs whose opening tag alone cannot fit with its
-// close and the marker (which previously produced "<…" and "<b>…").
 func TestClampBalancedAtEveryLimit(t *testing.T) {
 	inputs := []struct {
 		name string

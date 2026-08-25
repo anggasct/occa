@@ -194,10 +194,6 @@ func TestSanitizeDescriptionDiscord(t *testing.T) {
 	}
 }
 
-// TestSetChatCommandsTruncatesLongDescription mirrors the Telegram
-// regression: Discord's ApplicationCommandBulkOverwrite also rejects the
-// whole batch if any single description exceeds its limit, so a long agent
-// command description must be truncated before it reaches the API.
 func TestSetChatCommandsTruncatesLongDescription(t *testing.T) {
 	var gotBody []byte
 	s := newUnconnectedSession(t)
@@ -279,10 +275,6 @@ func TestRegisterCommandsFailureDoesNotPanic(t *testing.T) {
 	a.registerCommands(&discordgo.Ready{Application: &discordgo.Application{ID: "app-1"}}) // must not panic
 }
 
-// TestApplicationCommandInteractionReconstructsAliasedText covers the
-// discord-side half of the round trip: a slash-command interaction using a
-// registered alias (e.g. "session") reconstructs to "/session
-// list" the same way the pre-existing message-content path would.
 func TestApplicationCommandInteractionReconstructsAliasedText(t *testing.T) {
 	s := newUnconnectedSession(t)
 	s.Client = &http.Client{Transport: fakeRoundTripper{do: func(req *http.Request) (*http.Response, error) {

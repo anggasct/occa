@@ -38,7 +38,6 @@ func TestStoreTTLExpiry(t *testing.T) {
 	fp := Fingerprint("0 9 * * 1-5", "run tests", "weekdays at 9am")
 	s.Put(fp, "telegram", "c1")
 
-	// Force expiry without waiting.
 	s.mu.Lock()
 	s.items[fp][0].expires = time.Now().Add(-time.Second)
 	s.mu.Unlock()

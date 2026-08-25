@@ -411,7 +411,6 @@ func TestQuestionRetryGuardNoDuplicateEdits(t *testing.T) {
 		ReplyCtx:     reply,
 	}
 
-	// 3 taps on the same failed state
 	for i := 0; i < 3; i++ {
 		if err := h.broker.HandleQuestionCallback(context.Background(), msg); err != nil {
 			t.Fatalf("handle tap %d: %v", i, err)
@@ -478,7 +477,6 @@ func TestQuestionAnswerMultipleQuestionsNoNilEntries(t *testing.T) {
 	if err := h.Prompt(context.Background(), req); err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
-	// Answer the first question (qIdx=0, optIdx=1 → label B).
 	token := strings.Split(reply.sends[0].buttons[0].Value, ":")[1]
 	msg := channel.IncomingMessage{
 		Platform:     "telegram",
@@ -627,7 +625,6 @@ func TestQuestionRetryGuardEditFailureRetries(t *testing.T) {
 		ReplyCtx:     reply,
 	}
 
-	// 1st tap: edit fails, guard should NOT be set
 	if err := h.broker.HandleQuestionCallback(context.Background(), msg); err != nil {
 		t.Fatalf("handle tap 1: %v", err)
 	}
@@ -637,12 +634,10 @@ func TestQuestionRetryGuardEditFailureRetries(t *testing.T) {
 	}
 	reply.mu.Unlock()
 
-	// Clear edit failure so next attempt succeeds
 	reply.mu.Lock()
 	reply.editFail = nil
 	reply.mu.Unlock()
 
-	// 2nd tap: edit succeeds, guard IS set
 	if err := h.broker.HandleQuestionCallback(context.Background(), msg); err != nil {
 		t.Fatalf("handle tap 2: %v", err)
 	}
@@ -652,7 +647,6 @@ func TestQuestionRetryGuardEditFailureRetries(t *testing.T) {
 	}
 	reply.mu.Unlock()
 
-	// 3rd tap: guard prevents duplicate edit
 	if err := h.broker.HandleQuestionCallback(context.Background(), msg); err != nil {
 		t.Fatalf("handle tap 3: %v", err)
 	}

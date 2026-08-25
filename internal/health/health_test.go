@@ -163,8 +163,6 @@ func TestRunWebhookNotConfigured(t *testing.T) {
 	}
 }
 
-// TestRunBoundedWhenProbeHangs: a probe that ignores its context must not
-// hold the report hostage — the whole run returns within the probe budget.
 func TestRunBoundedWhenProbeHangs(t *testing.T) {
 	rep := healthyReporter()
 	rep.probeTimeout = 100 * time.Millisecond

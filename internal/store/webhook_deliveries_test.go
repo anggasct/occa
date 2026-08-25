@@ -22,8 +22,6 @@ func webhookDelivery(overrides func(*WebhookDelivery)) WebhookDelivery {
 	return d
 }
 
-// TestWebhookDeliveryConcurrentCreateSingleWinner: N goroutines creating the
-// same delivery must yield exactly one created=true, one row, and attempt=N.
 func TestWebhookDeliveryConcurrentCreateSingleWinner(t *testing.T) {
 	s := tempStore(t)
 	ctx := context.Background()
@@ -228,7 +226,6 @@ func TestWebhookDeliveryTransitionCAS(t *testing.T) {
 		t.Fatalf("after claim: status=%q started_at=%d", d.Status, d.StartedAt)
 	}
 
-	// A duplicate claim from an unexpected state must not move the row.
 	if ok, err := s.WebhookDeliveryRepo().Transition(ctx, d.ID, []WebhookStatus{WebhookStatusReceived}, WebhookStatusProcessing, ""); err != nil || ok {
 		t.Fatalf("stale claim: ok=%v err=%v, want no-op", ok, err)
 	}
@@ -304,7 +301,6 @@ func TestWebhookDeliveryPruneBounded(t *testing.T) {
 	s := tempStore(t)
 	ctx := context.Background()
 
-	// Insert rows in order; sqlite autoincrement ids follow insertion order.
 	for i := 0; i < 10; i++ {
 		d := webhookDelivery(func(d *WebhookDelivery) {
 			d.DeliveryID = fmt.Sprintf("del-%d", i)

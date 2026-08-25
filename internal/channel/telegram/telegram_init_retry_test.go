@@ -44,7 +44,6 @@ func TestInitBotWithRetrySucceedsAfterTransientFailures(t *testing.T) {
 	if bot.Self.UserName != "testbot" {
 		t.Fatalf("bot.Self.UserName = %q, want testbot", bot.Self.UserName)
 	}
-	// the bounded init client must NOT leak into the long-poll bot.Client
 	if hc, ok := bot.Client.(*http.Client); !ok || hc.Timeout != 0 {
 		t.Fatalf("bot.Client = %T (timeout %v), want unbounded *http.Client (timeout 0) so getUpdates long-poll is not cut", bot.Client, hcTimeout(bot.Client))
 	}

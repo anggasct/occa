@@ -39,8 +39,6 @@ func runToolEvents(t *testing.T, events ...Event) []string {
 	return toolNoticesOf(reply.finalMessages())
 }
 
-// TestToolBubbleEditsInPlace: repeats of the same tool within one phase edit
-// the same bubble with a count.
 func TestToolBubbleEditsInPlace(t *testing.T) {
 	got := runToolEvents(t,
 		Event{Type: EventTool, Delta: "glob"},
@@ -52,8 +50,6 @@ func TestToolBubbleEditsInPlace(t *testing.T) {
 	}
 }
 
-// TestToolBubblePhaseReset: any text ends the phase — the same tool after a
-// message starts a fresh bubble instead of incrementing the old one.
 func TestToolBubblePhaseReset(t *testing.T) {
 	got := runToolEvents(t,
 		Event{Type: EventTool, Delta: "glob"},
@@ -68,7 +64,6 @@ func TestToolBubblePhaseReset(t *testing.T) {
 	}
 }
 
-// TestToolBubbleDistinctTools: different tools get separate bubbles.
 func TestToolBubbleDistinctTools(t *testing.T) {
 	got := runToolEvents(t,
 		Event{Type: EventTool, Delta: "glob"},
@@ -80,9 +75,6 @@ func TestToolBubbleDistinctTools(t *testing.T) {
 	}
 }
 
-// TestToolBubbleCapShowsWorkingIndicator: after 5 bubbles in a phase, further
-// new runs stop creating bubbles and a single working indicator appears.
-// A text segment resets the budget so subsequent tools start fresh bubbles.
 func TestToolBubbleCapShowsWorkingIndicator(t *testing.T) {
 	got := runToolEvents(t,
 		Event{Type: EventTool, Delta: "a"},
@@ -117,9 +109,6 @@ func TestToolBubbleCapShowsWorkingIndicator(t *testing.T) {
 	}
 }
 
-// TestToolBubbleEmptySegmentResetsBudget: every text segment resets the
-// budget unconditionally, so ten segment-separated runs render ten bubbles
-// and never reach the working indicator.
 func TestToolBubbleEmptySegmentResetsBudget(t *testing.T) {
 	got := runToolEvents(t,
 		Event{Type: EventTool, Delta: "a"},
@@ -165,8 +154,6 @@ func TestToolBubbleEmptySegmentResetsBudget(t *testing.T) {
 	}
 }
 
-// TestToolBubbleShortTextResetsBudget: even a short text block ends the
-// phase — later runs get fresh bubbles instead of collapsing into Working.
 func TestToolBubbleShortTextResetsBudget(t *testing.T) {
 	got := runToolEvents(t,
 		Event{Type: EventTool, Delta: "a"},
@@ -198,8 +185,6 @@ func TestToolBubbleShortTextResetsBudget(t *testing.T) {
 	}
 }
 
-// TestToolBubbleEmptyNameFallback: tool parts without a name fall back to a
-// generic label, still edited in place with counts.
 func TestToolBubbleEmptyNameFallback(t *testing.T) {
 	got := runToolEvents(t,
 		Event{Type: EventTool},
@@ -211,7 +196,6 @@ func TestToolBubbleEmptyNameFallback(t *testing.T) {
 	}
 }
 
-// TestToolBubblesPersistAfterDone: bubbles remain after the response ends.
 func TestToolBubblesPersistAfterDone(t *testing.T) {
 	got := runToolEvents(t, Event{Type: EventTool, Delta: "glob"})
 	want := []string{"⚙️ glob"}
@@ -220,7 +204,6 @@ func TestToolBubblesPersistAfterDone(t *testing.T) {
 	}
 }
 
-// TestFormatToolLabel: counts render only above one.
 func TestFormatToolLabel(t *testing.T) {
 	if got := formatToolLabel("glob", "", 1); got != "⚙️ glob" {
 		t.Fatalf("formatToolLabel(1) = %q", got)
@@ -307,8 +290,6 @@ func TestToolBubbleWithContext(t *testing.T) {
 	})
 }
 
-// TestToolBubbleContiguousRunGrouping: the same tool separated by other tools
-// starts a fresh bubble — grouping follows adjacency, not tool type.
 func TestToolBubbleContiguousRunGrouping(t *testing.T) {
 	got := runToolEvents(t,
 		Event{Type: EventTool, Delta: "bash"},
@@ -327,8 +308,6 @@ func TestToolBubbleContiguousRunGrouping(t *testing.T) {
 	}
 }
 
-// TestTerminalRollupResolvesWorkingBubble: on done the Working bubble becomes
-// a response-wide success summary instead of staying stale.
 func TestTerminalRollupResolvesWorkingBubble(t *testing.T) {
 	reply := newFakeReplyContext()
 	s := NewStreamer(reply, render.New(), render.Telegram)
@@ -355,8 +334,6 @@ func TestTerminalRollupResolvesWorkingBubble(t *testing.T) {
 	}
 }
 
-// TestTerminalRollupErrorPrefixAndCountOrdering: error streams roll up under
-// ⚠️ with per-type totals sorted by count desc then name.
 func TestTerminalRollupErrorPrefixAndCountOrdering(t *testing.T) {
 	reply := newFakeReplyContext()
 	s := NewStreamer(reply, render.New(), render.Telegram)
@@ -379,8 +356,6 @@ func TestTerminalRollupErrorPrefixAndCountOrdering(t *testing.T) {
 	}
 }
 
-// TestTerminalRollupOverflowListsEightTypes: more than eight distinct types
-// collapse into a "+N more" suffix.
 func TestTerminalRollupOverflowListsEightTypes(t *testing.T) {
 	reply := newFakeReplyContext()
 	s := NewStreamer(reply, render.New(), render.Telegram)
@@ -403,8 +378,6 @@ func TestTerminalRollupOverflowListsEightTypes(t *testing.T) {
 	}
 }
 
-// TestTerminalRollupCountsAcrossPhases: phase resets never erase the
-// response-wide totals behind the final rollup.
 func TestTerminalRollupCountsAcrossPhases(t *testing.T) {
 	reply := newFakeReplyContext()
 	s := NewStreamer(reply, render.New(), render.Telegram)
@@ -430,8 +403,6 @@ func TestTerminalRollupCountsAcrossPhases(t *testing.T) {
 	}
 }
 
-// TestNoRollupWithoutWorkingBubble: when every run got its own bubble, done
-// must not send or edit anything extra.
 func TestNoRollupWithoutWorkingBubble(t *testing.T) {
 	reply := newFakeReplyContext()
 	s := NewStreamer(reply, render.New(), render.Telegram)
@@ -639,8 +610,6 @@ func TestWorkingFlushesOnTerminalEvents(t *testing.T) {
 	}
 }
 
-// TestTypingHeartbeat: a short-typed stream emits the typing indicator at
-// least once, including during a silent gap before any output.
 func TestTypingHeartbeat(t *testing.T) {
 	reply := newFakeReplyContext()
 	s := NewStreamer(reply, render.New(), render.Telegram)

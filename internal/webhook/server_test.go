@@ -651,7 +651,6 @@ func TestWebhookReceiptLifecycleAndReplay(t *testing.T) {
 		t.Fatalf("executor calls = %d, want 1", exec.callCount())
 	}
 
-	// Replaying the same delivery id must ack idempotently without a second session.
 	resp = post(t, ts.URL+"/github?secret=s3cret", "delivery-1", "pull_request", `{"action":"opened","number":42}`)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("replay expected 200, got %d", resp.StatusCode)
@@ -1673,7 +1672,6 @@ func TestWebhookNonZeroKeyWithoutResolverFailsDelivery(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	srv := New(cfg, exec.exec, st.WebhookDeliveryRepo())
-	// Explicitly ensure worktreeResolver is nil
 	srv.worktreeResolver = nil
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleRequest)
@@ -1731,7 +1729,6 @@ func TestWebhookExecutorPanicRecoversAndFailsDelivery(t *testing.T) {
 
 	payload := `{"repository":{"full_name":"anggasct/occa"},"pull_request":{"base":{"repo":{"full_name":"anggasct/occa"}},"head":{"repo":{"full_name":"anggasct/occa"},"ref":"fix"}}}`
 
-	// Delivery 1 panics
 	if resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-panic", "pull_request", payload); resp.StatusCode != http.StatusOK {
 		t.Fatalf("delivery-panic expected 200, got %d", resp.StatusCode)
 	}
@@ -1744,7 +1741,6 @@ func TestWebhookExecutorPanicRecoversAndFailsDelivery(t *testing.T) {
 		t.Fatalf("expected panic in summary, got %q", receipt1.ErrorSummary)
 	}
 
-	// Delivery 2 for same key executes successfully, proving lock was released and server is alive
 	if resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-recovery", "pull_request", payload); resp.StatusCode != http.StatusOK {
 		t.Fatalf("delivery-recovery expected 200, got %d", resp.StatusCode)
 	}
@@ -1996,7 +1992,6 @@ func TestWebhookWhitespacePaddedHMACModeRequiresSignatureAndRejectsLegacy(t *tes
 
 	payload := []byte(`{"action":"submitted","repository":{"full_name":"anggasct/occa"},"pull_request":{"base":{"repo":{"full_name":"anggasct/occa"}},"head":{"repo":{"full_name":"anggasct/occa"},"ref":"main"}}}`)
 
-	// 1. Legacy query parameter fails on whitespace-padded HMAC endpoint
 	reqLegacy, err := http.NewRequest(http.MethodPost, ts.URL+"/webhooks/github-review?secret="+secret, bytes.NewReader(payload))
 	if err != nil {
 		t.Fatalf("new legacy request: %v", err)
@@ -2011,7 +2006,6 @@ func TestWebhookWhitespacePaddedHMACModeRequiresSignatureAndRejectsLegacy(t *tes
 		t.Fatalf("expected 401 Unauthorized for legacy query on whitespace-padded HMAC endpoint, got %d", respLegacy.StatusCode)
 	}
 
-	// 2. Valid GitHub signature passes and executes
 	sig := computeTestSignature(payload, secret)
 	reqHMAC, err := http.NewRequest(http.MethodPost, ts.URL+"/webhooks/github-review", bytes.NewReader(payload))
 	if err != nil {
@@ -2205,7 +2199,6 @@ func TestWebhookModelResolution_DynamicChannelModelChange(t *testing.T) {
 		Prompt:    "analyze",
 	}})
 
-	// 1. Initial channel model: openai/gpt-4o
 	if err := st.ChannelRepo().UpsertModel(context.Background(), "telegram", "chat-dynamic-model", "openai/gpt-4o"); err != nil {
 		t.Fatalf("upsert channel model: %v", err)
 	}
@@ -2230,12 +2223,10 @@ func TestWebhookModelResolution_DynamicChannelModelChange(t *testing.T) {
 		t.Fatalf("delivery 1 model = %+v, want %+v", *calls[0].workCtx.Model, wantModel1)
 	}
 
-	// 2. Change channel model dynamically to anthropic/claude-3-5-sonnet@max
 	if err := st.ChannelRepo().UpsertModel(context.Background(), "telegram", "chat-dynamic-model", "anthropic/claude-3-5-sonnet@max"); err != nil {
 		t.Fatalf("update channel model: %v", err)
 	}
 
-	// Next delivery immediately picks up the new channel model without restart
 	if response := post(t, ts.URL+"/github?secret=secret", "delivery-dyn-2", "pull_request", body); response.StatusCode != http.StatusOK {
 		t.Fatalf("POST status = %d, want 200", response.StatusCode)
 	}

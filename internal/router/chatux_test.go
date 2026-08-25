@@ -23,8 +23,6 @@ func threadMsg(channelID, threadID, userID, text string, reply *fakeReplyCtx) ch
 	}
 }
 
-// TestConversationKeyPolicy covers the session-key derivation: threads are
-// shared per thread, non-thread conversations isolate per sender.
 func TestConversationKeyPolicy(t *testing.T) {
 	msgChannel := func(userID string) channel.IncomingMessage {
 		return channel.IncomingMessage{Platform: "telegram", ChannelID: "chat1", UserID: userID}
@@ -50,8 +48,6 @@ func TestConversationKeyPolicy(t *testing.T) {
 	})
 }
 
-// TestTwoUsersSameChannelSeparateSessions: two users in the same channel get
-// separate session keys and separate in-flight slots.
 func TestTwoUsersSameChannelSeparateSessions(t *testing.T) {
 	r, client, _, overrideRepo := newTestRouterWithAccess()
 	overrideRepo.overrides["telegram:chat1:alice"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "alice", Role: "allow"}
@@ -94,8 +90,6 @@ func TestTwoUsersSameChannelSeparateSessions(t *testing.T) {
 	}
 }
 
-// TestSameConversationIsSingleFlight: a second message in the same
-// conversation while one task is in flight is queued, not rejected.
 func TestSameConversationIsSingleFlight(t *testing.T) {
 	r, client, _, overrideRepo := newTestRouterWithAccess()
 	overrideRepo.overrides["telegram:chat1:alice"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "alice", Role: "allow"}
@@ -157,8 +151,6 @@ func TestSameConversationIsSingleFlight(t *testing.T) {
 	}
 }
 
-// TestDifferentThreadsRunConcurrently: tasks in two different threads of the
-// same channel are both admitted (thread = the conversation boundary).
 func TestDifferentThreadsRunConcurrently(t *testing.T) {
 	r, client, _, overrideRepo := newTestRouterWithAccess()
 	for _, user := range []string{"alice", "bob"} {
@@ -186,9 +178,6 @@ func TestDifferentThreadsRunConcurrently(t *testing.T) {
 	waitForResponse(t, r)
 }
 
-// TestSessionNewResetsOnlyCurrentConversation: /new activates a new
-// session only for the conversation the command ran in — one topic's reset
-// must not touch another topic or another user.s session.
 func TestSessionNewResetsOnlyCurrentConversation(t *testing.T) {
 	r, client, _, overrideRepo := newTestRouterWithAccess()
 	for _, key := range []string{"discord:chat1:alice", "discord:chat1:bob"} {

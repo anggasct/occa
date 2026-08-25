@@ -368,12 +368,10 @@ func (s *SQLiteStore) Close() error {
 
 func (s *SQLiteStore) DB() *sql.DB { return s.db }
 
-// Ping verifies the database is reachable.
 func (s *SQLiteStore) Ping(ctx context.Context) error {
 	return s.db.PingContext(ctx)
 }
 
-// SchemaVersion reads the current PRAGMA user_version.
 func (s *SQLiteStore) SchemaVersion(ctx context.Context) (int, error) {
 	var version int
 	err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version)

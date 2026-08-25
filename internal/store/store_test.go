@@ -62,9 +62,6 @@ func TestSessionRoundTrip(t *testing.T) {
 	}
 }
 
-// TestSessionKeyIsolation covers the per-conversation key: two users in the
-// same channel hold separate active sessions, thread participants share one,
-// and switching one key never disturbs another.
 func TestSessionKeyIsolation(t *testing.T) {
 	s := tempStore(t)
 	ctx := context.Background()
@@ -127,9 +124,6 @@ func TestSessionKeyIsolation(t *testing.T) {
 	}
 }
 
-// TestSessionSetActiveReKeysAdoptedRow: activating a session created under a
-// different key (e.g. before key granularity) re-keys it to the current
-// conversation so /session switch keeps old sessions reachable.
 func TestSessionSetActiveReKeysAdoptedRow(t *testing.T) {
 	s := tempStore(t)
 	ctx := context.Background()
@@ -153,8 +147,6 @@ func TestSessionSetActiveReKeysAdoptedRow(t *testing.T) {
 	}
 }
 
-// TestUniqueActiveIndexEnforced: the partial unique index rejects a second
-// active row for the same conversation key.
 func TestUniqueActiveIndexEnforced(t *testing.T) {
 	s := tempStore(t)
 	ctx := context.Background()
@@ -457,9 +449,6 @@ func TestOverridePlatformScoping(t *testing.T) {
 	}
 }
 
-// TestSessionThreadChannel: ThreadChannel resolves the parent channel for an
-// OCCA-created thread (channel_id != thread_id) and the thread itself for a
-// self-scoped conversation.
 func TestSessionThreadChannel(t *testing.T) {
 	s := tempStore(t)
 	ctx := context.Background()
@@ -723,8 +712,6 @@ func TestSessionSetModelNoActiveRow(t *testing.T) {
 	}
 }
 
-// TestSessionSetModelActiveRowOnly: SetModel writes the active row only, so
-// switching sessions restores the target row's stored model.
 func TestSessionSetModelActiveRowOnly(t *testing.T) {
 	s := tempStore(t)
 	ctx := context.Background()
@@ -897,7 +884,6 @@ func TestThreadConfigMigrationBackfillsOwnedThreads(t *testing.T) {
 		t.Fatalf("self-scoped thread must not be backfilled, got %+v", self)
 	}
 
-	// Same bare topic id in two chats must produce two isolated rows.
 	tgA, err := repo.Get(ctx, "telegram", "chat-a", "555")
 	if err != nil {
 		t.Fatalf("Get chat-a topic: %v", err)
@@ -1028,8 +1014,6 @@ func TestThreadConfigSnapshotFromChannel(t *testing.T) {
 		t.Fatalf("missing-channel snapshot = %+v, want defaults", tc2)
 	}
 
-	// Snapshotting the same thread id under a different parent channel must
-	// not touch the original row.
 	if err := repo.SnapshotFromChannel(ctx, "discord", "parent-2", "thread-1", "/default"); err != nil {
 		t.Fatalf("SnapshotFromChannel parent-2: %v", err)
 	}

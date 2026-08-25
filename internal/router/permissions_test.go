@@ -684,7 +684,6 @@ func TestPermissionsDetailsView(t *testing.T) {
 		t.Fatalf("back returned to %q", last.text)
 	}
 
-	// Delete straight from the details view removes the rule.
 	delMsg := channel.IncomingMessage{
 		Platform:     "telegram",
 		ChannelID:    "chat1",
@@ -816,11 +815,6 @@ func TestPermissionsPagination(t *testing.T) {
 	}
 }
 
-// TestPermissionsBrowserScaleAndLimits runs the permission browser at 0, 1,
-// 6, and 30 rules on both platform seams, asserting pagination structure and
-// that every rendered button stays within the platform's label/callback
-// limits (Telegram callback_data <= 64 bytes, Discord custom_id <= 100 chars,
-// Discord <= 5 action rows with <= 5 buttons each, Telegram <= 8 per row).
 func TestPermissionsBrowserScaleAndLimits(t *testing.T) {
 	for _, platform := range []string{"telegram", "discord"} {
 		for _, count := range []int{0, 1, 6, 30} {

@@ -14,8 +14,6 @@ type capturedRequest struct {
 	path   string
 }
 
-// TestSetReactionEmojiSequence asserts the exact emoji sequence including
-// the removal of the previous state, using the real transition order.
 func TestSetReactionEmojiSequence(t *testing.T) {
 	var calls []capturedRequest
 	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
@@ -68,7 +66,6 @@ func reactionFromPath(path string) string {
 	return ""
 }
 
-// TestSetReactionSameStateNoOp: repeating the current state issues no request.
 func TestSetReactionSameStateNoOp(t *testing.T) {
 	var calls []capturedRequest
 	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
@@ -91,9 +88,6 @@ func TestSetReactionSameStateNoOp(t *testing.T) {
 	}
 }
 
-// TestSetReactionUsesReactionChannelID: when a reactionChannelID is set (the
-// source message's channel) both the add and remove calls target it rather
-// than the reply channel, so the auto-thread case reacts on the parent.
 func TestSetReactionUsesReactionChannelID(t *testing.T) {
 	var paths []string
 	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {

@@ -168,12 +168,6 @@ func TestParseJSONEvents(t *testing.T) {
 	}
 }
 
-// TestReasoningPartDeltaNeverSurfacesAsText reproduces a live-server bug:
-// a ReasoningPart's own content field is also named "text" (same as
-// TextPart), so its message.part.delta events carry field:"text" too.
-// Filtering on field name alone let reasoning content leak into the actual
-// chat reply. The decoder must track each part's announced type and only
-// forward deltas for parts explicitly typed "text".
 func TestReasoningPartDeltaNeverSurfacesAsText(t *testing.T) {
 	decoder := newEventDecoder()
 
@@ -195,8 +189,6 @@ func TestReasoningPartDeltaNeverSurfacesAsText(t *testing.T) {
 	}
 }
 
-// TestDecoderPartTransitions: part-type transitions emit segment/tool events
-// and non-text deltas never surface as reply text.
 func TestDecoderPartTransitions(t *testing.T) {
 	updated := func(id, kind string) string {
 		return `{"type":"message.part.updated","properties":{"part":{"id":"` + id + `","type":"` + kind + `"}}}`
@@ -355,8 +347,6 @@ func TestParseLegacyEventsStillWork(t *testing.T) {
 	}
 }
 
-// TestDecoderToolPartCarriesName: a tool part's name reaches the event so
-// the notice can show which tool ran.
 func TestDecoderToolPartCarriesName(t *testing.T) {
 	decoder := newEventDecoder()
 	updated := `{"type":"message.part.updated","properties":{"part":{"id":"prt-t","type":"tool","tool":"bash"}}}`
@@ -372,8 +362,6 @@ func TestDecoderToolPartCarriesName(t *testing.T) {
 	}
 }
 
-// TestDecodeEmptyTextDeltaDropped: empty text deltas produce no event so the
-// streamer never tries to send an empty message.
 func TestDecodeEmptyTextDeltaDropped(t *testing.T) {
 	d := newEventDecoder()
 	d.parseJSON(`{"type":"message.part.updated","properties":{"part":{"id":"p1","type":"text"}}}`)
@@ -383,7 +371,6 @@ func TestDecodeEmptyTextDeltaDropped(t *testing.T) {
 	}
 }
 
-// TestDecodeQuestionAsked parses a question.asked event with options.
 func TestDecodeQuestionAsked(t *testing.T) {
 	ev, ok := parseSSEEvent(newEventDecoder(), "question.asked", `{"id":"evt_1","type":"question.asked","properties":{"id":"que_1","sessionID":"ses_1","questions":[{"question":"Pilih?","header":"H","options":[{"label":"A","description":"opsi a"},{"label":"B"}]}],"tool":{"messageID":"msg_1","callID":"call_1"}}}`)
 	if !ok || ev.Type != "question_asked" || ev.Question == nil {
@@ -402,8 +389,6 @@ func TestDecodeQuestionAsked(t *testing.T) {
 	}
 }
 
-// TestDecodeQuestionAskedViaPayload parses a question.asked event that
-// arrives with the type inside the JSON payload (no SSE event: line).
 func TestDecodeQuestionAskedViaPayload(t *testing.T) {
 	ev, ok := parseSSEEvent(newEventDecoder(), "", `{"type":"question.asked","properties":{"id":"que_2","sessionID":"ses_1","questions":[{"question":"Berapa?","header":"H","options":[{"label":"A"}]}],"tool":{"messageID":"m","callID":"c"}}}`)
 	if !ok || ev.Type != "question_asked" || ev.Question == nil {

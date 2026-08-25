@@ -381,9 +381,6 @@ func TestModelBrowserBackToProviders(t *testing.T) {
 	}
 }
 
-// TestModelBrowserShowsOnlyConnectedProviders: when the agent reports a
-// connected list, the browser shows only those providers — the rest of the
-// catalog is unusable (no credentials).
 func TestModelBrowserShowsOnlyConnectedProviders(t *testing.T) {
 	providers := browseProviders()
 	providers.Connected = []string{"openai"}
@@ -409,8 +406,6 @@ func TestModelBrowserShowsOnlyConnectedProviders(t *testing.T) {
 	}
 }
 
-// TestModelBrowserRowLayout: item buttons pair up in two columns (Row i/2+1)
-// on Telegram; nav buttons share one row regardless of position.
 func TestModelBrowserRowLayout(t *testing.T) {
 	providers := browseProviders()
 	r, client, _ := newTestRouter()
@@ -439,9 +434,6 @@ func TestModelBrowserRowLayout(t *testing.T) {
 	}
 }
 
-// TestModelBrowserRowLayoutDiscord: on Discord a full page packs 5 items per
-// row, so a 10-item page stays at 2 item rows + 1 nav row = 3 action rows
-// (Discord caps messages at 5 action rows).
 func TestModelBrowserRowLayoutDiscord(t *testing.T) {
 	providers := browseProviders()
 	for i := 0; i < 10; i++ {
@@ -538,7 +530,6 @@ func TestModelBrowserVariantSelection(t *testing.T) {
 			t.Fatalf("variant buttons = %v, want %v", labels, want)
 		}
 
-		// Test back to models button
 		backToken := buttonValue(variantButtons, "⬅️ Models")
 		backReply := newBrowseReplyCtx()
 		if err := r.Route(context.Background(), callbackMsg("user1", backToken, backReply)); err != nil {
@@ -549,7 +540,6 @@ func TestModelBrowserVariantSelection(t *testing.T) {
 			t.Fatalf("back text = %q, want models view", backText)
 		}
 
-		// Now set variant
 		setHighToken := buttonValue(variantButtons, "Set @high")
 		setReply := newBrowseReplyCtx()
 		if err := r.Route(context.Background(), callbackMsg("user1", setHighToken, setReply)); err != nil {

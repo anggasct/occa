@@ -19,9 +19,6 @@ func (r *reactingReplyCtx) SetReaction(ref channel.MessageRef, state channel.Rea
 	return nil
 }
 
-// TestRouterWiresReactionSetter: a reply context that implements
-// channel.ReactionSetter receives the 👀→✅ lifecycle for a completed stream.
-// Without a source ref the reactions fall back onto the first reply message.
 func TestRouterWiresReactionSetter(t *testing.T) {
 	r, client, reply := newTestRouter()
 	client.deltaBeforeDone = "hello"
@@ -45,9 +42,6 @@ func TestRouterWiresReactionSetter(t *testing.T) {
 	}
 }
 
-// TestRouterWiresReactionTargetToSourceMessage: when the incoming message
-// carries a SourceRef, the 👀→✅ lifecycle targets that source message (a
-// read-receipt) instead of occa's own reply.
 func TestRouterWiresReactionTargetToSourceMessage(t *testing.T) {
 	r, client, reply := newTestRouter()
 	client.deltaBeforeDone = "hello"
@@ -72,8 +66,6 @@ func TestRouterWiresReactionTargetToSourceMessage(t *testing.T) {
 	}
 }
 
-// TestRouterSkipsReactionSetterWhenUnsupported: a plain reply context
-// without ReactionSetter is unaffected (silent no-op).
 func TestRouterSkipsReactionSetterWhenUnsupported(t *testing.T) {
 	r, client, reply := newTestRouter()
 	client.deltaBeforeDone = "hello"

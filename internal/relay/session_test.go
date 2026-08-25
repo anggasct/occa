@@ -151,10 +151,6 @@ func TestResolveCreatesNew(t *testing.T) {
 	}
 }
 
-// TestResolveKeysByConversation checks the session-key policy: two users in
-// the same channel resolve different sessions, the same user resolves the
-// same session, and thread participants share one session. Rows are owned by
-// the current process, so resolution uses the same-PID fast path.
 func TestResolveKeysByConversation(t *testing.T) {
 	keyed := map[[4]string]string{
 		{"telegram", "chat", "", "alice"}:   "sess-alice",
@@ -182,9 +178,6 @@ func TestResolveKeysByConversation(t *testing.T) {
 	}
 }
 
-// TestResolveStaleSessionRecreates checks how a session owned by a replaced
-// agent process (PID mismatch) is handled: reused if still present on the agent,
-// or replaced with a fresh session if gone.
 func TestResolveStaleSessionRecreates(t *testing.T) {
 	t.Run("stale session exists on new agent", func(t *testing.T) {
 		repo := &mockSessionRepo{activeID: "stale-session", ownerPID: 999}
@@ -229,10 +222,6 @@ func TestResolveStaleSessionRecreates(t *testing.T) {
 	})
 }
 
-// TestResolveLegacyRowValidates: legacy rows without a recorded owner PID
-// (ownerPID == 0) are validated against the agent exactly like rows owned by
-// a replaced process — adopted and stamped with the current PID when the
-// session still exists, or replaced with a fresh session when it is gone.
 func TestResolveLegacyRowValidates(t *testing.T) {
 	t.Run("legacy session exists", func(t *testing.T) {
 		repo := &mockSessionRepo{activeID: "legacy-session", ownerPID: 0}
