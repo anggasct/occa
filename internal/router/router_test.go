@@ -1207,63 +1207,20 @@ func TestRouteHelp(t *testing.T) {
 	}
 }
 
-func TestNormalizeCommandAlias(t *testing.T) {
-	cases := map[string]string{
-		"/occa_help":         "/help",
-		"/occa_session list": "/session list",
-		"/occa:help":         "/help",
-		"hello world":        "hello world",
-		"/occa_status extra": "/status extra",
-		"/occa:model x":      "/model x",
-	}
-	for in, want := range cases {
-		if got := normalizeCommandAlias(in); got != want {
-			t.Fatalf("normalizeCommandAlias(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
-func TestRouteAcceptsUnderscoreAlias(t *testing.T) {
-	r, _, reply := newTestRouter()
-	err := r.Route(context.Background(), msg("/occa_help", reply))
-	if err != nil {
-		t.Fatalf("Route: %v", err)
-	}
-	if len(reply.sends) == 0 {
-		t.Fatal("expected help response")
-	}
-	if !strings.Contains(reply.sends[0], "/help") {
-		t.Fatalf("unexpected help via alias: %q", reply.sends[0])
-	}
-}
-
-func TestRouteAcceptsUnderscoreAliasWithArgs(t *testing.T) {
-	r, _, reply := newTestRouter()
-	err := r.Route(context.Background(), msg("/occa_session switch foo", reply))
-	if err != nil {
-		t.Fatalf("Route: %v", err)
-	}
-	if len(reply.sends) == 0 {
-		t.Fatal("expected session response")
-	}
-	if strings.Contains(reply.sends[0], "Usage:") {
-		t.Fatalf("alias with args did not reach the session handler: %q", reply.sends[0])
-	}
-}
-
-func TestRouteLegacyColonAlias(t *testing.T) {
-	r, client, reply, overrides := newTestRouterWithAccess()
-	client.providers = modelTestProviders()
-	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
-	}
-
-	err := r.Route(context.Background(), msg("/occa:model openai/gpt-4o", reply))
-	if err != nil {
-		t.Fatalf("Route: %v", err)
-	}
-	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Channel model set: openai/gpt-4o") {
-		t.Fatalf("expected model set via legacy colon alias, got %v", reply.sends)
+func TestRouteLegacyPrefixPassthroughToAgent(t *testing.T) {
+	for _, input := range []string{"/occa:foo", "/occa_help", "/occa:model openai/gpt-4o"} {
+		t.Run(input, func(t *testing.T) {
+			r, client, reply := newTestRouter()
+			err := r.Route(context.Background(), msg(input, reply))
+			if err != nil {
+				t.Fatalf("Route: %v", err)
+			}
+			waitForDispatch(t, client)
+			waitForResponse(t, r)
+			if client.lastCmd != input {
+				t.Fatalf("expected legacy prefix %q to pass through to agent, got %q", input, client.lastCmd)
+			}
+		})
 	}
 }
 
@@ -1343,20 +1300,6 @@ func TestRouteUnknownCommandPassthrough(t *testing.T) {
 	waitForResponse(t, r)
 	if client.lastCmd != "/xyz arg1" {
 		t.Fatalf("expected unknown command passthrough to agent, got %q", client.lastCmd)
-	}
-}
-
-func TestRouteLegacyUnknownCommandShowsHelp(t *testing.T) {
-	r, _, reply := newTestRouter()
-	err := r.Route(context.Background(), msg("/occa:foo", reply))
-	if err != nil {
-		t.Fatalf("Route: %v", err)
-	}
-	if len(reply.sends) == 0 {
-		t.Fatal("expected help fallback")
-	}
-	if !strings.Contains(reply.sends[0], "/help") {
-		t.Fatalf("expected help text for unknown legacy command, got: %q", reply.sends[0])
 	}
 }
 
@@ -2452,12 +2395,8 @@ func TestShortFormCommandsAndLegacyAliases(t *testing.T) {
 		wantPassthru string
 	}{
 		{input: "/help", wantSend: "OCCA commands:"},
-		{input: "/occa:help", wantSend: "OCCA commands:"},
-		{input: "/occa_help", wantSend: "OCCA commands:"},
 		{input: "/status", wantSend: "Agent connected"},
 		{input: "/session", wantSend: "Page 1/1 · Sessions"},
-		{input: "/occa_session", wantSend: "Page 1/1 · Sessions"},
-		{input: "/occa:session", wantSend: "Page 1/1 · Sessions"},
 		{input: "/session list", wantSend: "Usage: /session"},
 		{input: "/reset", wantSend: "Session reset"},
 		{input: "/dir", wantSend: "Workdir:"},
@@ -2466,8 +2405,6 @@ func TestShortFormCommandsAndLegacyAliases(t *testing.T) {
 		{input: "/admin user2", wantSend: "Granted admin: user2"},
 		{input: "/channel all", wantSend: "Listen mode set: all"},
 		{input: "/model openai/gpt-4o", wantSend: "Channel model set: openai/gpt-4o"},
-		{input: "/occa:model openai/gpt-4o", wantSend: "Channel model set: openai/gpt-4o"},
-		{input: "/occa_model openai/gpt-4o", wantSend: "Channel model set: openai/gpt-4o"},
 		{input: "/schedules", wantSend: "Scheduler not available"},
 		{input: "/unknown_cmd arg", wantPassthru: "/unknown_cmd arg"},
 	}

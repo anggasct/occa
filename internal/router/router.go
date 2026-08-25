@@ -132,7 +132,6 @@ func (r *Router) Route(ctx context.Context, msg channel.IncomingMessage) error {
 		return nil
 	}
 	isOcca := r.isOccaCommand(msg.Text)
-	msg.Text = normalizeCommandAlias(msg.Text)
 	inputKind := r.routeInputKind(msg, isOcca)
 	if err := r.authorize(ctx, msg); err != nil {
 		if errors.Is(err, ErrDenied) {
@@ -173,20 +172,7 @@ func (r *Router) Route(ctx context.Context, msg channel.IncomingMessage) error {
 	return r.passthrough(ctx, msg)
 }
 
-func normalizeCommandAlias(text string) string {
-	if strings.HasPrefix(text, "/occa:") {
-		return "/" + strings.TrimPrefix(text, "/occa:")
-	}
-	if strings.HasPrefix(text, "/occa_") {
-		return "/" + strings.TrimPrefix(text, "/occa_")
-	}
-	return text
-}
-
 func (r *Router) isOccaCommand(text string) bool {
-	if strings.HasPrefix(text, "/occa:") || strings.HasPrefix(text, "/occa_") {
-		return true
-	}
 	if !strings.HasPrefix(text, "/") {
 		return false
 	}
@@ -665,7 +651,6 @@ func (r *Router) helpText() string {
 		"• /permissions [delete <id>|clear] — list or delete saved always-allow rules\n" +
 		"• /schedules [delete <id>] — view or delete scheduled tasks\n" +
 		"• /reset — clear current session and start fresh\n\n" +
-		"(Legacy /occa: command aliases are also supported.)\n\n" +
 		"All other messages and /commands are forwarded to the agent."
 }
 
