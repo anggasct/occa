@@ -354,7 +354,7 @@ func TestWebhookEscapesClosingPayloadWrapper(t *testing.T) {
 	}
 }
 
-func TestWebhookTemplateErrorPreservesPayload(t *testing.T) {
+func TestWebhookTemplateErrorFailsClosed(t *testing.T) {
 	srv, exec := newTestServer(t, []config.EndpointConfig{
 		{Name: "test", Path: "/test", Secret: "s", Platform: "telegram", ChannelID: "c1", Prompt: "broken {{"},
 	})
@@ -362,11 +362,8 @@ func TestWebhookTemplateErrorPreservesPayload(t *testing.T) {
 
 	srv.processAsync(config.EndpointConfig{Prompt: "broken {{"}, body, 0, "delivery-1", "")
 
-	if len(exec.calls) != 1 {
-		t.Fatalf("expected 1 call, got %d", len(exec.calls))
-	}
-	if !strings.Contains(exec.calls[0].prompt, "Raw webhook payload:\n"+string(body)) {
-		t.Fatalf("expected raw payload in fallback prompt, got: %s", exec.calls[0].prompt)
+	if len(exec.calls) != 0 {
+		t.Fatalf("template failure must not invoke executor, got %d calls", len(exec.calls))
 	}
 }
 

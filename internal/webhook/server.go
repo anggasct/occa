@@ -58,11 +58,14 @@ type DeliveryStore interface {
 
 type Executor func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error
 
+type Notifier func(ctx context.Context, platform, channelID, text string) error
+
 type Server struct {
 	bind              string
 	bindAddr          string
 	endpoints         map[string]config.EndpointConfig
 	executor          Executor
+	notifier          Notifier
 	deliveries        DeliveryStore
 	worktreeResolver  WorktreeResolver
 	httpSrv           *http.Server
@@ -84,6 +87,7 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 	endpoints := make(map[string]config.EndpointConfig)
 	for _, ep := range cfg.Endpoints {
 		ep.Auth = strings.TrimSpace(strings.ToLower(ep.Auth))
+		ep.Workflow = strings.TrimSpace(strings.ToLower(ep.Workflow))
 		endpoints[ep.Path] = ep
 	}
 	return &Server{
@@ -103,6 +107,10 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 
 func (s *Server) SetWorktreeResolver(r WorktreeResolver) {
 	s.worktreeResolver = r
+}
+
+func (s *Server) SetNotifier(n Notifier) {
+	s.notifier = n
 }
 
 func (s *Server) tryAcquireEvent() bool {
@@ -286,7 +294,10 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.shouldSkip(ep, eventType) {
-		if ok, tErr := s.deliveries.Transition(r.Context(), receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived, store.WebhookStatusAccepted, store.WebhookStatusProcessing}, store.WebhookStatusSkipped, ""); tErr != nil {
+		reason := "configured event skip"
+		envelope := normalizeWebhook(body, eventType, deliveryID, true, reason)
+		summary := redactAuditSummary(formatAuditSummary(envelope, ep.Workflow, "SKIP", reason), ep.Secret)
+		if ok, tErr := s.deliveries.Transition(r.Context(), receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived, store.WebhookStatusAccepted, store.WebhookStatusProcessing}, store.WebhookStatusSkipped, summary); tErr != nil {
 			slog.Error("webhook: skip transition failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", tErr)
 			s.releaseEvent()
 			http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
@@ -295,6 +306,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("webhook: skip transition lost race", "endpoint", ep.Name, "delivery_id", deliveryID, "observed_status", receipt.Status)
 		} else {
 			slog.Info("webhook: delivery skipped", "endpoint", ep.Name, "delivery_id", deliveryID, "event_type", eventType)
+			s.emitAudit(r.Context(), ep, envelope, "SKIP", reason)
 		}
 		s.releaseEvent()
 		w.WriteHeader(http.StatusOK)
@@ -412,6 +424,7 @@ func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, d
 	if !key.IsZero() {
 		workCtx.SessionKey = key.String()
 	}
+	envelope := normalizeWebhook(body, eventType, deliveryID, false, "")
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -423,9 +436,14 @@ func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, d
 				"worktree", workCtx.Worktree,
 				"panic", fmt.Sprint(r),
 			)
-			s.failDelivery(ep, id, deliveryID, eventType, redactSummary(fmt.Sprintf("panic: %v", r), maxErrorSummaryRunes, ep.Secret), workCtx)
+			s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary(fmt.Sprintf("panic: %v", r), maxErrorSummaryRunes, ep.Secret), workCtx)
 		}
 	}()
+
+	if allowed, reason := workflowAllows(ep.Workflow, envelope); !allowed {
+		s.markSkipped(id, ep, envelope, reason)
+		return
+	}
 
 	if !key.IsZero() {
 		if s.worktreeResolver == nil {
@@ -434,7 +452,7 @@ func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, d
 				"delivery_id", deliveryID,
 				"execution_key", key.String(),
 			)
-			s.failDelivery(ep, id, deliveryID, eventType, "worktree resolver required for project execution key", workCtx)
+			s.failDelivery(ep, id, deliveryID, eventType, envelope, "worktree resolver required for project execution key", workCtx)
 			return
 		}
 
@@ -442,9 +460,9 @@ func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, d
 		if err != nil {
 			slog.Warn("webhook: worktree resolution failed", "endpoint", ep.Name, "delivery_id", deliveryID, "execution_key", key.String(), "error", err)
 			if errors.Is(err, ErrWorktreeConflict) {
-				s.failDelivery(ep, id, deliveryID, eventType, redactSummary("worktree conflict: "+err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
+				s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary("worktree conflict: "+err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
 			} else {
-				s.failDelivery(ep, id, deliveryID, eventType, redactSummary("worktree resolution failed: "+err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
+				s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary("worktree resolution failed: "+err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
 			}
 			return
 		}
@@ -453,7 +471,7 @@ func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, d
 
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
-		payload = map[string]any{"raw": string(body)}
+		payload = map[string]any{}
 	}
 
 	tmplData := map[string]any{
@@ -461,12 +479,14 @@ func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, d
 		"json":          string(body),
 		"execution_key": key.String(),
 		"worktree":      workCtx.Worktree,
+		"webhook":       envelope,
 	}
 
 	rendered, err := renderTemplate(ep.Prompt, tmplData)
 	if err != nil {
 		slog.Error("webhook: template render failed", "endpoint", ep.Name, "delivery_id", deliveryID, "payload_bytes", len(body), "error", err)
-		rendered = ep.Prompt + "\n\nRaw webhook payload:\n" + string(body)
+		s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary("template render failed: "+err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
+		return
 	}
 
 	rendered = strings.ReplaceAll(rendered, "</untrusted_payload>", "&lt;/untrusted_payload&gt;")
@@ -478,8 +498,11 @@ func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, d
 
 	switch {
 	case err == nil:
-		if _, tErr := s.deliveries.Transition(context.Background(), id, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusCompleted, ""); tErr != nil {
+		ok, tErr := s.deliveries.Transition(context.Background(), id, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusCompleted, "")
+		if tErr != nil {
 			slog.Error("webhook: completed transition failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", tErr)
+		} else if ok {
+			s.emitAudit(context.Background(), ep, envelope, "COMPLETED", "")
 		}
 		slog.Info("webhook: delivery completed",
 			"endpoint", ep.Name,
@@ -489,15 +512,18 @@ func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, d
 			"worktree", workCtx.Worktree,
 		)
 	case errors.Is(err, context.DeadlineExceeded), ctx.Err() == context.DeadlineExceeded:
-		s.failDelivery(ep, id, deliveryID, eventType, "timed out after "+s.processingTimeout.String(), workCtx)
+		s.failDelivery(ep, id, deliveryID, eventType, envelope, "timed out after "+s.processingTimeout.String(), workCtx)
 	default:
-		s.failDelivery(ep, id, deliveryID, eventType, redactSummary(err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
+		s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary(err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
 	}
 }
 
-func (s *Server) failDelivery(ep config.EndpointConfig, id int64, deliveryID, eventType, summary string, workCtx WebhookWorkContext) {
-	if _, err := s.deliveries.Transition(context.Background(), id, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusFailed, summary); err != nil {
+func (s *Server) failDelivery(ep config.EndpointConfig, id int64, deliveryID, eventType string, envelope WebhookEnvelope, summary string, workCtx WebhookWorkContext) {
+	ok, err := s.deliveries.Transition(context.Background(), id, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusFailed, summary)
+	if err != nil {
 		slog.Error("webhook: failed transition", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
+	} else if ok {
+		s.emitAudit(context.Background(), ep, envelope, "FAILED", summary)
 	}
 	slog.Warn("webhook: delivery failed",
 		"endpoint", ep.Name,
@@ -585,18 +611,20 @@ func redactSummary(s string, max int, secrets ...string) string {
 }
 
 func renderTemplate(prompt string, data any) (string, error) {
-	if !strings.Contains(prompt, "{{") {
-		return prompt, nil
-	}
-
-	tmpl, err := template.New("webhook").Parse(prompt)
-	if err != nil {
-		return "", fmt.Errorf("webhook: parse template: %w", err)
-	}
-
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, data); err != nil {
-		return "", fmt.Errorf("webhook: execute template: %w", err)
+	if strings.Contains(prompt, "{{") {
+		tmpl, err := template.New("webhook").Option("missingkey=error").Parse(prompt)
+		if err != nil {
+			return "", fmt.Errorf("webhook: parse template: %w", err)
+		}
+		if err := tmpl.Execute(&buf, data); err != nil {
+			return "", fmt.Errorf("webhook: execute template: %w", err)
+		}
+	} else {
+		buf.WriteString(prompt)
+	}
+	if strings.Contains(buf.String(), "<no value>") {
+		return "", errors.New("webhook: template rendered an unresolved value")
 	}
 	return buf.String(), nil
 }
