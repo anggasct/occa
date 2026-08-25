@@ -583,3 +583,67 @@ func TestWorktreeResolverRepoNotFound(t *testing.T) {
 		t.Fatalf("expected ErrRepoNotFound, got %v", err)
 	}
 }
+
+func TestWorktreeResolverUnreadableOrNonRegularSidecarConflict(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "occa")
+	if err := os.MkdirAll(repoDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	initTestGitRepo(t, repoDir)
+
+	for _, branch := range []string{"feat/dir-sidecar", "feat/empty-sidecar"} {
+		cmd := exec.Command("git", "branch", branch)
+		cmd.Dir = repoDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("create branch %s: %v\n%s", branch, err, out)
+		}
+	}
+
+	resolver := NewGitWorktreeResolver(tmpDir)
+
+	// 1. Sidecar is a directory
+	keyDir := WebhookExecutionKey{
+		Repository: "anggasct/occa",
+		Branch:     "feat/dir-sidecar",
+	}
+	resolvedDir, err := resolver.ResolveWorktree(context.Background(), keyDir)
+	if err != nil {
+		t.Fatalf("initial resolve: %v", err)
+	}
+	sidecarDir := resolvedDir + ".key"
+	_ = os.Remove(sidecarDir)
+	if err := os.MkdirAll(sidecarDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = resolver.ResolveWorktree(context.Background(), keyDir)
+	if err == nil {
+		t.Fatal("expected ErrWorktreeConflict for directory sidecar, got nil")
+	}
+	if !errors.Is(err, ErrWorktreeConflict) {
+		t.Fatalf("expected ErrWorktreeConflict, got %v", err)
+	}
+
+	// 2. Sidecar is empty
+	keyEmpty := WebhookExecutionKey{
+		Repository: "anggasct/occa",
+		Branch:     "feat/empty-sidecar",
+	}
+	resolvedEmpty, err := resolver.ResolveWorktree(context.Background(), keyEmpty)
+	if err != nil {
+		t.Fatalf("initial resolve: %v", err)
+	}
+	sidecarEmpty := resolvedEmpty + ".key"
+	if err := os.WriteFile(sidecarEmpty, []byte("   \n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = resolver.ResolveWorktree(context.Background(), keyEmpty)
+	if err == nil {
+		t.Fatal("expected ErrWorktreeConflict for empty sidecar, got nil")
+	}
+	if !errors.Is(err, ErrWorktreeConflict) {
+		t.Fatalf("expected ErrWorktreeConflict, got %v", err)
+	}
+}

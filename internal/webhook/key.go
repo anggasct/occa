@@ -66,7 +66,19 @@ func ExtractExecutionKey(body []byte) WebhookExecutionKey {
 	if raw.PullRequest != nil {
 		baseRepo = extractRepoFullName(raw.PullRequest.Base.Repo)
 		headRepo = extractRepoFullName(raw.PullRequest.Head.Repo)
-		branch = raw.PullRequest.Head.Ref
+		branch = strings.TrimSpace(raw.PullRequest.Head.Ref)
+
+		// For PR events, baseRepo, headRepo, and branch are all strictly required.
+		// Never guess or infer headRepo from baseRepo for PR events.
+		if baseRepo == "" || headRepo == "" || branch == "" {
+			return WebhookExecutionKey{}
+		}
+
+		return WebhookExecutionKey{
+			Repository:     baseRepo,
+			HeadRepository: headRepo,
+			Branch:         branch,
+		}
 	}
 
 	if baseRepo == "" {
@@ -97,7 +109,7 @@ func ExtractExecutionKey(body []byte) WebhookExecutionKey {
 	headRepo = strings.TrimSpace(headRepo)
 	branch = strings.TrimSpace(branch)
 
-	if baseRepo == "" || branch == "" {
+	if baseRepo == "" || headRepo == "" || branch == "" {
 		return WebhookExecutionKey{}
 	}
 

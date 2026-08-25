@@ -128,6 +128,9 @@ func TestExtractExecutionKeyMissingOrAmbiguousFallback(t *testing.T) {
 		{"empty repo string", `{"repository":"","branch":"main"}`},
 		{"name-only repository object without owner", `{"repository":{"name":"occa"},"ref":"refs/heads/main"}`},
 		{"name-only repository string without owner", `{"repository":"occa","branch":"main"}`},
+		{"PR with head.ref but missing head.repo", `{"repository":{"full_name":"anggasct/occa"},"pull_request":{"base":{"repo":{"full_name":"anggasct/occa"}},"head":{"ref":"fix/branch"}}}`},
+		{"PR with head.ref and empty head.repo object", `{"pull_request":{"base":{"repo":{"full_name":"anggasct/occa"}},"head":{"repo":{},"ref":"fix/branch"}}}`},
+		{"PR with head.ref and name-only head.repo", `{"pull_request":{"base":{"repo":{"full_name":"anggasct/occa"}},"head":{"repo":{"name":"fork-repo"},"ref":"fix/branch"}}}`},
 	}
 
 	for _, tt := range tests {

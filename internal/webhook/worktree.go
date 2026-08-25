@@ -308,11 +308,18 @@ func readKeySidecar(keyPath string) (string, error) {
 	if fi.Mode()&os.ModeSymlink != 0 {
 		return "", fmt.Errorf("%w: sidecar file %s is a symlink", ErrWorktreeConflict, keyPath)
 	}
+	if !fi.Mode().IsRegular() {
+		return "", fmt.Errorf("%w: sidecar file %s is not a regular file", ErrWorktreeConflict, keyPath)
+	}
 	data, err := os.ReadFile(keyPath)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: read sidecar file %s: %v", ErrWorktreeConflict, keyPath, err)
 	}
-	return strings.TrimSpace(string(data)), nil
+	stored := strings.TrimSpace(string(data))
+	if stored == "" {
+		return "", fmt.Errorf("%w: sidecar file %s contains empty key metadata", ErrWorktreeConflict, keyPath)
+	}
+	return stored, nil
 }
 
 func (r *GitWorktreeResolver) ResolveWorktree(ctx context.Context, key WebhookExecutionKey) (string, error) {
@@ -349,12 +356,22 @@ func (r *GitWorktreeResolver) ResolveWorktree(ctx context.Context, key WebhookEx
 	for _, wt := range worktrees {
 		if wt.Branch == branchRef || wt.Branch == key.Branch {
 			sidecarPath := wt.Path + ".key"
-			if storedKey, sErr := readKeySidecar(sidecarPath); sErr == nil && storedKey != "" {
+			storedKey, sErr := readKeySidecar(sidecarPath)
+			if sErr != nil {
+				if os.IsNotExist(sErr) {
+					if err := writeKeySidecar(sidecarPath, key.String()); err != nil {
+						return "", fmt.Errorf("write sidecar metadata for attached worktree %s: %w", wt.Path, err)
+					}
+				} else {
+					if errors.Is(sErr, ErrWorktreeConflict) {
+						return "", sErr
+					}
+					return "", fmt.Errorf("%w: sidecar validation failed for attached worktree %s: %v", ErrWorktreeConflict, wt.Path, sErr)
+				}
+			} else {
 				if storedKey != key.String() {
 					return "", fmt.Errorf("%w: branch %s attached at %s belongs to a different execution key %q", ErrWorktreeConflict, key.Branch, wt.Path, storedKey)
 				}
-			} else if errors.Is(sErr, ErrWorktreeConflict) {
-				return "", sErr
 			}
 
 			dirty, dErr := r.isWorktreeDirty(ctx, wt.Path)
@@ -365,12 +382,6 @@ func (r *GitWorktreeResolver) ResolveWorktree(ctx context.Context, key WebhookEx
 				return "", fmt.Errorf("%w: worktree at %s has uncommitted changes", ErrWorktreeConflict, wt.Path)
 			}
 
-			// Ensure sidecar metadata is written if missing
-			if _, sErr := os.Lstat(sidecarPath); os.IsNotExist(sErr) {
-				if err := writeKeySidecar(sidecarPath, key.String()); err != nil {
-					return "", err
-				}
-			}
 			return wt.Path, nil
 		}
 	}
