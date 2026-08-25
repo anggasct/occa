@@ -118,6 +118,12 @@ func (c *permissionClient) UnrevertSession(_ context.Context, _ string) error   
 func (c *permissionClient) ListMessages(_ context.Context, _ string) ([]relay.MessageInfo, error) {
 	return nil, nil
 }
+func (c *permissionClient) ListAgents(_ context.Context) ([]relay.AgentInfo, error) {
+	return nil, nil
+}
+func (c *permissionClient) SwitchAgent(_ context.Context, _, _ string) error {
+	return nil
+}
 func (c *permissionClient) ReplyPermission(ctx context.Context, requestID string, decision relay.PermissionReply) error {
 	c.mu.Lock()
 	callIndex := len(c.calls)

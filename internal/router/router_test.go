@@ -77,14 +77,18 @@ type fakeRelayClient struct {
 	sessionInfo        *relay.SessionInfo
 	sessionInfoErr     error
 
-	summarizeCalls  []struct{ sessionID, providerID, modelID string }
-	summarizeErr    error
-	revertCalls     []struct{ sessionID, messageID string }
-	revertErr       error
-	unrevertCalls   []string
-	unrevertErr     error
-	messages        []relay.MessageInfo
-	listMessagesErr error
+	summarizeCalls   []struct{ sessionID, providerID, modelID string }
+	summarizeErr     error
+	revertCalls      []struct{ sessionID, messageID string }
+	revertErr        error
+	unrevertCalls    []string
+	unrevertErr      error
+	messages         []relay.MessageInfo
+	listMessagesErr  error
+	agents           []relay.AgentInfo
+	agentsErr        error
+	switchAgentCalls []struct{ sessionID, name string }
+	switchAgentErr   error
 
 	customEvents []relay.Event
 
@@ -214,6 +218,17 @@ func (f *fakeRelayClient) ListMessages(_ context.Context, _ string) ([]relay.Mes
 		return nil, f.listMessagesErr
 	}
 	return f.messages, nil
+}
+func (f *fakeRelayClient) ListAgents(_ context.Context) ([]relay.AgentInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.agents, f.agentsErr
+}
+func (f *fakeRelayClient) SwitchAgent(_ context.Context, sessionID, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.switchAgentCalls = append(f.switchAgentCalls, struct{ sessionID, name string }{sessionID, name})
+	return f.switchAgentErr
 }
 func (f *fakeRelayClient) RunCommand(_ context.Context, _, cmd string) error {
 	f.lastCmd = cmd

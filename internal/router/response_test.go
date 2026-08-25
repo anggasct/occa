@@ -175,6 +175,12 @@ func (c *responseClient) UnrevertSession(_ context.Context, _ string) error     
 func (c *responseClient) ListMessages(_ context.Context, _ string) ([]relay.MessageInfo, error) {
 	return nil, nil
 }
+func (c *responseClient) ListAgents(_ context.Context) ([]relay.AgentInfo, error) {
+	return nil, nil
+}
+func (c *responseClient) SwitchAgent(_ context.Context, _, _ string) error {
+	return nil
+}
 
 func (c *responseClient) Events(_ context.Context, _ string) (<-chan relay.Event, error) {
 	c.mu.Lock()

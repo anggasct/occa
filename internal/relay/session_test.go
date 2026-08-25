@@ -107,6 +107,8 @@ func (m *mockClient) UnrevertSession(_ context.Context, _ string) error  { retur
 func (m *mockClient) ListMessages(_ context.Context, _ string) ([]MessageInfo, error) {
 	return nil, nil
 }
+func (m *mockClient) ListAgents(_ context.Context) ([]AgentInfo, error) { return nil, nil }
+func (m *mockClient) SwitchAgent(_ context.Context, _, _ string) error  { return nil }
 
 func TestResolveExisting(t *testing.T) {
 	repo := &mockSessionRepo{activeID: "existing", ownerPID: 100}

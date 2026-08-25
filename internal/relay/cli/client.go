@@ -110,6 +110,14 @@ func (c *Client) ListCommands(ctx context.Context) ([]relay.CommandInfo, error) 
 	return nil, nil
 }
 
+func (c *Client) ListAgents(ctx context.Context) ([]relay.AgentInfo, error) {
+	return nil, relay.ErrUnsupported
+}
+
+func (c *Client) SwitchAgent(ctx context.Context, sessionID, name string) error {
+	return relay.ErrUnsupported
+}
+
 func (c *Client) Events(ctx context.Context, sessionID string) (<-chan relay.Event, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

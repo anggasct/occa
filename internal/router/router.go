@@ -57,6 +57,7 @@ func (r *Router) MenuCommands() []channel.MenuCommand {
 		{Alias: "model", Description: "View, set, or search the active model", HasArgs: true},
 		{Alias: "variants", Description: "List and set model reasoning variants", HasArgs: true},
 		{Alias: "permissions", Description: "List / delete saved always-allow rules", HasArgs: true},
+		{Alias: "agent", Description: "Browse, switch, or delete custom agents", HasArgs: true},
 		{Alias: "schedules", Description: "View or delete scheduled tasks", HasArgs: true},
 		{Alias: "webhooks", Description: "Recent webhook delivery diagnostics (admin)"},
 	}
@@ -88,6 +89,8 @@ type Router struct {
 	permissions            *permissionBroker
 	questions              *questionBroker
 	modelBrowser           *modelBrowserBroker
+	agentBrowser           *agentBrowserBroker
+	agentTracker           *agentTracker
 	renderer               render.Renderer
 	streamerNoEventTimeout time.Duration
 }
@@ -117,6 +120,8 @@ func New(instances InstanceProvider, st store.Store, defaultWorkdir string, admi
 		permissions:    newPermissionBroker(st.PermissionRuleRepo()),
 		questions:      newQuestionBroker(),
 		modelBrowser:   newModelBrowserBroker(),
+		agentBrowser:   newAgentBrowserBroker(),
+		agentTracker:   newAgentTracker(),
 		renderer:       render.New(),
 	}
 	r.registerDefaults()
@@ -595,6 +600,10 @@ func (r *Router) registerDefaults() {
 		Name:    "variants",
 		Handler: r.handleVariants,
 	}
+	r.commands["agent"] = Command{
+		Name:    "agent",
+		Handler: r.handleAgent,
+	}
 	r.registerPermissionCommand()
 	r.commands["schedules"] = Command{
 		Name:    "schedules",
@@ -675,10 +684,33 @@ func (r *Router) handleStatus(ctx context.Context, msg channel.IncomingMessage, 
 	}
 	latency := time.Since(start).Truncate(time.Millisecond)
 
-	var modelLine, infoLines string
+	var agentLine, modelLine, infoLines string
 	if sessInfo, err := inst.Client().GetSession(ctx, sessionID); err != nil {
 		slog.Warn("router: status get session failed", "session_id", sessionID, "error", err)
 	} else if sessInfo != nil {
+		agentName := sessInfo.Agent
+		if agentName == "" {
+			agentName = "build"
+		}
+		var agentModel *relay.ModelRef
+		if agents, aErr := inst.Client().ListAgents(ctx); aErr == nil {
+			for _, a := range agents {
+				if a.Name == agentName && a.Model != nil && a.Model.ID != "" {
+					agentModel = a.Model
+					break
+				}
+			}
+		}
+		if agentModel != nil {
+			if agentModel.ProviderID != "" {
+				agentLine = fmt.Sprintf("\nAgent: %s (%s/%s)", agentName, agentModel.ProviderID, agentModel.ID)
+			} else {
+				agentLine = fmt.Sprintf("\nAgent: %s (%s)", agentName, agentModel.ID)
+			}
+		} else {
+			agentLine = fmt.Sprintf("\nAgent: %s", agentName)
+		}
+
 		resolution, resolveErr := r.resolveModel(ctx, msg)
 		if resolveErr != nil {
 			slog.Warn("router: status model resolution failed", "error", resolveErr)
@@ -756,8 +788,8 @@ func (r *Router) handleStatus(ctx context.Context, msg channel.IncomingMessage, 
 		}
 	}
 
-	status := fmt.Sprintf("✅ Agent connected\nSession: %s%s%s\nUptime: %s\nWorkdir: %s\nLatency: %s\n%s",
-		sessionLine, modelLine, infoLines, uptime, workdir, latency, listenView)
+	status := fmt.Sprintf("✅ Agent connected\nSession: %s%s%s%s\nUptime: %s\nWorkdir: %s\nLatency: %s\n%s",
+		sessionLine, agentLine, modelLine, infoLines, uptime, workdir, latency, listenView)
 	key := responseKey{platform: msg.Platform, channelID: msg.ChannelID, threadID: threadID, userID: userID}
 	if qLen := r.responses.queueDepth(key); qLen > 0 {
 		status += fmt.Sprintf("\nQueue: %d message(s)", qLen)
