@@ -245,35 +245,18 @@ func (r *Router) validateModel(ctx context.Context, msg channel.IncomingMessage,
 }
 
 func parseModelRef(value string) (relay.ModelRef, error) {
-	parts := strings.SplitN(value, "/", 2)
-	if len(parts) != 2 {
-		return relay.ModelRef{}, safeReplyError(fmt.Sprintf("invalid model %q; use provider/model-id[@variant]", value), nil)
-	}
-	providerID, modelIDPart := parts[0], parts[1]
-	if providerID == "" || modelIDPart == "" {
-		return relay.ModelRef{}, safeReplyError(fmt.Sprintf("invalid model %q; use provider/model-id[@variant]", value), nil)
-	}
-
-	var variant string
-	if modelID, v, hasAt := strings.Cut(modelIDPart, "@"); hasAt {
-		if v == "" {
+	ref, err := relay.ParseModelRef(value)
+	if err != nil {
+		if errors.Is(err, relay.ErrInvalidVariant) {
 			return relay.ModelRef{}, safeReplyError("invalid variant", nil)
 		}
-		if modelID == "" {
-			return relay.ModelRef{}, safeReplyError(fmt.Sprintf("invalid model %q; use provider/model-id[@variant]", value), nil)
-		}
-		modelIDPart = modelID
-		variant = v
+		return relay.ModelRef{}, safeReplyError(fmt.Sprintf("invalid model %q; use provider/model-id[@variant]", value), nil)
 	}
-
-	return relay.ModelRef{ProviderID: providerID, ID: modelIDPart, Variant: variant}, nil
+	return ref, nil
 }
 
 func formatModelRef(ref relay.ModelRef) string {
-	if ref.Variant != "" {
-		return ref.ProviderID + "/" + ref.ID + "@" + ref.Variant
-	}
-	return ref.ProviderID + "/" + ref.ID
+	return relay.FormatModelRef(ref)
 }
 
 func (r *Router) handleVariants(ctx context.Context, msg channel.IncomingMessage, args string) (string, error) {

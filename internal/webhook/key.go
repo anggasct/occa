@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/anggasct/occa/internal/relay"
 )
 
 type WebhookExecutionKey struct {
@@ -28,9 +30,11 @@ func (k WebhookExecutionKey) IsZero() bool {
 }
 
 type WebhookWorkContext struct {
-	Key        WebhookExecutionKey
-	Worktree   string
-	SessionKey string
+	Key         WebhookExecutionKey
+	Worktree    string
+	SessionKey  string
+	Model       *relay.ModelRef
+	ModelSource string
 }
 
 func ExtractExecutionKey(body []byte) WebhookExecutionKey {

@@ -32,10 +32,48 @@ type Attachment struct {
 	Data     []byte
 }
 
+var ErrInvalidVariant = errors.New("invalid variant")
+
 type ModelRef struct {
 	ProviderID string `json:"providerID"`
 	ID         string `json:"modelID"`
 	Variant    string `json:"variant,omitempty"`
+}
+
+func ParseModelRef(value string) (ModelRef, error) {
+	parts := strings.SplitN(value, "/", 2)
+	if len(parts) != 2 {
+		return ModelRef{}, fmt.Errorf("invalid model %q; use provider/model-id[@variant]", value)
+	}
+	providerID, modelIDPart := parts[0], parts[1]
+	if providerID == "" || modelIDPart == "" {
+		return ModelRef{}, fmt.Errorf("invalid model %q; use provider/model-id[@variant]", value)
+	}
+
+	var variant string
+	if modelID, v, hasAt := strings.Cut(modelIDPart, "@"); hasAt {
+		if v == "" {
+			return ModelRef{}, ErrInvalidVariant
+		}
+		if modelID == "" {
+			return ModelRef{}, fmt.Errorf("invalid model %q; use provider/model-id[@variant]", value)
+		}
+		modelIDPart = modelID
+		variant = v
+	}
+
+	return ModelRef{ProviderID: providerID, ID: modelIDPart, Variant: variant}, nil
+}
+
+func FormatModelRef(ref ModelRef) string {
+	if ref.Variant != "" {
+		return ref.ProviderID + "/" + ref.ID + "@" + ref.Variant
+	}
+	return ref.ProviderID + "/" + ref.ID
+}
+
+func (m ModelRef) String() string {
+	return FormatModelRef(m)
 }
 
 type Provider struct {

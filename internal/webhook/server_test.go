@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/anggasct/occa/internal/config"
+	"github.com/anggasct/occa/internal/relay"
 	"github.com/anggasct/occa/internal/store"
 )
 
@@ -32,6 +34,7 @@ func newTestServer(t *testing.T, endpoints []config.EndpointConfig) (*Server, *f
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	srv := New(cfg, exec.exec, st.WebhookDeliveryRepo())
+	srv.SetChannelStore(st.ChannelRepo())
 	return srv, exec
 }
 
@@ -70,6 +73,14 @@ func (f *fakeExecutor) callCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.calls)
+}
+
+func (f *fakeExecutor) getCalls() []execCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	res := make([]execCall, len(f.calls))
+	copy(res, f.calls)
+	return res
 }
 
 type staleClaimBarrierStore struct {
@@ -538,7 +549,9 @@ func newTestServerFull(t *testing.T, endpoints []config.EndpointConfig) (*Server
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	return New(cfg, exec.exec, st.WebhookDeliveryRepo()), exec, st
+	srv := New(cfg, exec.exec, st.WebhookDeliveryRepo())
+	srv.SetChannelStore(st.ChannelRepo())
+	return srv, exec, st
 }
 
 func post(t *testing.T, url, deliveryID, eventType, body string) *http.Response {
@@ -2022,5 +2035,335 @@ func TestWebhookWhitespacePaddedHMACModeRequiresSignatureAndRejectsLegacy(t *tes
 	case <-executed:
 	case <-time.After(5 * time.Second):
 		t.Fatal("executor was not called for valid HMAC on normalized endpoint")
+	}
+}
+
+func TestWebhookModelResolution_ExplicitChannelModel(t *testing.T) {
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{{
+		Name:      "github",
+		Path:      "/github",
+		Secret:    "secret",
+		Platform:  "telegram",
+		ChannelID: "chat-model-1",
+		Prompt:    "analyze",
+	}})
+
+	if err := st.ChannelRepo().UpsertModel(context.Background(), "telegram", "chat-model-1", "alibaba-token-plan/deepseek-v4-flash-0731@max"); err != nil {
+		t.Fatalf("upsert channel model: %v", err)
+	}
+
+	audit := make(chan string, 2)
+	srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
+		audit <- text
+		return nil
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	body := `{"action":"opened","repository":{"full_name":"anggasct/occa"},"pull_request":{"number":121,"title":"Agent Workshop"}}`
+	if response := post(t, ts.URL+"/github?secret=secret", "delivery-model-1", "pull_request", body); response.StatusCode != http.StatusOK {
+		t.Fatalf("POST status = %d, want 200", response.StatusCode)
+	}
+
+	waitForReceipt(t, st, store.WebhookStatusCompleted)
+
+	calls := exec.getCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 executor call, got %d", len(calls))
+	}
+	if calls[0].workCtx.Model == nil {
+		t.Fatal("expected non-nil workCtx.Model")
+	}
+	wantModel := relay.ModelRef{ProviderID: "alibaba-token-plan", ID: "deepseek-v4-flash-0731", Variant: "max"}
+	if *calls[0].workCtx.Model != wantModel {
+		t.Fatalf("got model %+v, want %+v", *calls[0].workCtx.Model, wantModel)
+	}
+	if calls[0].workCtx.ModelSource != "channel" {
+		t.Fatalf("got ModelSource %q, want channel", calls[0].workCtx.ModelSource)
+	}
+
+	select {
+	case summary := <-audit:
+		if !strings.Contains(summary, "Model: alibaba-token-plan/deepseek-v4-flash-0731@max") {
+			t.Fatalf("audit summary missing Model line: %q", summary)
+		}
+		if !strings.Contains(summary, "Model source: channel") {
+			t.Fatalf("audit summary missing Model source line: %q", summary)
+		}
+		if !strings.Contains(summary, "Status: COMPLETED") {
+			t.Fatalf("audit summary missing Status COMPLETED: %q", summary)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected audit summary notification")
+	}
+}
+
+func TestWebhookModelResolution_SlashInModelID(t *testing.T) {
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{{
+		Name:      "github",
+		Path:      "/github",
+		Secret:    "secret",
+		Platform:  "telegram",
+		ChannelID: "chat-model-slash",
+		Prompt:    "analyze",
+	}})
+
+	if err := st.ChannelRepo().UpsertModel(context.Background(), "telegram", "chat-model-slash", "openrouter/anthropic/claude-3-5-sonnet@high"); err != nil {
+		t.Fatalf("upsert channel model: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	body := `{"action":"opened","repository":{"full_name":"anggasct/occa"},"pull_request":{"number":121,"title":"Agent Workshop"}}`
+	if response := post(t, ts.URL+"/github?secret=secret", "delivery-slash-1", "pull_request", body); response.StatusCode != http.StatusOK {
+		t.Fatalf("POST status = %d, want 200", response.StatusCode)
+	}
+
+	waitForReceipt(t, st, store.WebhookStatusCompleted)
+
+	calls := exec.getCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 executor call, got %d", len(calls))
+	}
+	if calls[0].workCtx.Model == nil {
+		t.Fatal("expected non-nil workCtx.Model")
+	}
+	wantModel := relay.ModelRef{ProviderID: "openrouter", ID: "anthropic/claude-3-5-sonnet", Variant: "high"}
+	if *calls[0].workCtx.Model != wantModel {
+		t.Fatalf("got model %+v, want %+v", *calls[0].workCtx.Model, wantModel)
+	}
+	if calls[0].workCtx.ModelSource != "channel" {
+		t.Fatalf("got ModelSource %q, want channel", calls[0].workCtx.ModelSource)
+	}
+}
+
+func TestWebhookModelResolution_FallbackWhenUnset(t *testing.T) {
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{{
+		Name:      "github",
+		Path:      "/github",
+		Secret:    "secret",
+		Platform:  "telegram",
+		ChannelID: "chat-model-unset",
+		Prompt:    "analyze",
+	}})
+
+	audit := make(chan string, 2)
+	srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
+		audit <- text
+		return nil
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	body := `{"action":"opened","repository":{"full_name":"anggasct/occa"},"pull_request":{"number":122,"title":"Retire Legacy Aliases"}}`
+	if response := post(t, ts.URL+"/github?secret=secret", "delivery-fallback-1", "pull_request", body); response.StatusCode != http.StatusOK {
+		t.Fatalf("POST status = %d, want 200", response.StatusCode)
+	}
+
+	waitForReceipt(t, st, store.WebhookStatusCompleted)
+
+	calls := exec.getCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 executor call, got %d", len(calls))
+	}
+	if calls[0].workCtx.Model != nil {
+		t.Fatalf("expected nil workCtx.Model for fallback, got %+v", calls[0].workCtx.Model)
+	}
+	if calls[0].workCtx.ModelSource != "fallback" {
+		t.Fatalf("got ModelSource %q, want fallback", calls[0].workCtx.ModelSource)
+	}
+
+	select {
+	case summary := <-audit:
+		if !strings.Contains(summary, "Model: agent/session default") {
+			t.Fatalf("audit summary missing fallback Model line: %q", summary)
+		}
+		if !strings.Contains(summary, "Model source: fallback") {
+			t.Fatalf("audit summary missing fallback Model source line: %q", summary)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected audit summary notification")
+	}
+}
+
+func TestWebhookModelResolution_DynamicChannelModelChange(t *testing.T) {
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{{
+		Name:      "github",
+		Path:      "/github",
+		Secret:    "secret",
+		Platform:  "telegram",
+		ChannelID: "chat-dynamic-model",
+		Prompt:    "analyze",
+	}})
+
+	// 1. Initial channel model: openai/gpt-4o
+	if err := st.ChannelRepo().UpsertModel(context.Background(), "telegram", "chat-dynamic-model", "openai/gpt-4o"); err != nil {
+		t.Fatalf("upsert channel model: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	body := `{"action":"opened","repository":{"full_name":"anggasct/occa"},"pull_request":{"number":100,"title":"Test PR"}}`
+	if response := post(t, ts.URL+"/github?secret=secret", "delivery-dyn-1", "pull_request", body); response.StatusCode != http.StatusOK {
+		t.Fatalf("POST status = %d, want 200", response.StatusCode)
+	}
+	waitForReceipt(t, st, store.WebhookStatusCompleted)
+
+	calls := exec.getCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 executor call, got %d", len(calls))
+	}
+	wantModel1 := relay.ModelRef{ProviderID: "openai", ID: "gpt-4o"}
+	if *calls[0].workCtx.Model != wantModel1 {
+		t.Fatalf("delivery 1 model = %+v, want %+v", *calls[0].workCtx.Model, wantModel1)
+	}
+
+	// 2. Change channel model dynamically to anthropic/claude-3-5-sonnet@max
+	if err := st.ChannelRepo().UpsertModel(context.Background(), "telegram", "chat-dynamic-model", "anthropic/claude-3-5-sonnet@max"); err != nil {
+		t.Fatalf("update channel model: %v", err)
+	}
+
+	// Next delivery immediately picks up the new channel model without restart
+	if response := post(t, ts.URL+"/github?secret=secret", "delivery-dyn-2", "pull_request", body); response.StatusCode != http.StatusOK {
+		t.Fatalf("POST status = %d, want 200", response.StatusCode)
+	}
+	waitForReceipt(t, st, store.WebhookStatusCompleted)
+
+	calls = exec.getCalls()
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 executor calls, got %d", len(calls))
+	}
+	wantModel2 := relay.ModelRef{ProviderID: "anthropic", ID: "claude-3-5-sonnet", Variant: "max"}
+	if *calls[1].workCtx.Model != wantModel2 {
+		t.Fatalf("delivery 2 model = %+v, want %+v", *calls[1].workCtx.Model, wantModel2)
+	}
+}
+
+type errorChannelStore struct {
+	err error
+}
+
+func (e *errorChannelStore) Get(ctx context.Context, platform, channelID string) (*store.Channel, error) {
+	return nil, e.err
+}
+
+func TestWebhookModelResolution_ChannelRepoErrorFailsClosed(t *testing.T) {
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{{
+		Name:      "github",
+		Path:      "/github",
+		Secret:    "secret",
+		Platform:  "telegram",
+		ChannelID: "chat-err",
+		Prompt:    "analyze",
+	}})
+
+	srv.SetChannelStore(&errorChannelStore{err: errors.New("database locked")})
+
+	audit := make(chan string, 2)
+	srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
+		audit <- text
+		return nil
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	body := `{"action":"opened","repository":{"full_name":"anggasct/occa"},"pull_request":{"number":101,"title":"Error PR"}}`
+	if response := post(t, ts.URL+"/github?secret=secret", "delivery-err-1", "pull_request", body); response.StatusCode != http.StatusOK {
+		t.Fatalf("POST status = %d, want 200", response.StatusCode)
+	}
+
+	waitForReceipt(t, st, store.WebhookStatusFailed)
+
+	if exec.callCount() != 0 {
+		t.Fatalf("executor was called %d times on channel repo error, expected 0", exec.callCount())
+	}
+
+	select {
+	case summary := <-audit:
+		if !strings.Contains(summary, "Status: FAILED") {
+			t.Fatalf("audit summary missing Status FAILED: %q", summary)
+		}
+		if !strings.Contains(summary, "channel configuration error") {
+			t.Fatalf("audit summary missing channel configuration error: %q", summary)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected audit summary notification")
+	}
+}
+
+func TestWebhookModelResolution_MalformedChannelModelFailsClosed(t *testing.T) {
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{{
+		Name:      "github",
+		Path:      "/github",
+		Secret:    "secret",
+		Platform:  "telegram",
+		ChannelID: "chat-malformed",
+		Prompt:    "analyze",
+	}})
+
+	malformedCredentialValue := "provider_with_api_key_sk_test_12345_no_slash"
+	if err := st.ChannelRepo().UpsertModel(context.Background(), "telegram", "chat-malformed", malformedCredentialValue); err != nil {
+		t.Fatalf("upsert channel model: %v", err)
+	}
+
+	audit := make(chan string, 2)
+	srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
+		audit <- text
+		return nil
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	body := `{"action":"opened","repository":{"full_name":"anggasct/occa"},"pull_request":{"number":102,"title":"Malformed Model PR"}}`
+	if response := post(t, ts.URL+"/github?secret=secret", "delivery-malformed-1", "pull_request", body); response.StatusCode != http.StatusOK {
+		t.Fatalf("POST status = %d, want 200", response.StatusCode)
+	}
+
+	waitForReceipt(t, st, store.WebhookStatusFailed)
+
+	if exec.callCount() != 0 {
+		t.Fatalf("executor was called %d times on malformed channel model, expected 0", exec.callCount())
+	}
+
+	select {
+	case summary := <-audit:
+		if !strings.Contains(summary, "Status: FAILED") {
+			t.Fatalf("audit summary missing Status FAILED: %q", summary)
+		}
+		if !strings.Contains(summary, "invalid channel model") {
+			t.Fatalf("audit summary missing 'invalid channel model': %q", summary)
+		}
+		if strings.Contains(summary, malformedCredentialValue) {
+			t.Fatalf("audit summary leaked raw malformed model string: %q", summary)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected audit summary notification")
+	}
+
+	if strings.Contains(logBuf.String(), malformedCredentialValue) {
+		t.Fatalf("captured logs leaked raw malformed model credential string: %q", logBuf.String())
 	}
 }
