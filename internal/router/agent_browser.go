@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/anggasct/occa/internal/channel"
@@ -220,63 +221,52 @@ func filterAgents(all []relay.AgentInfo) (switchable []relay.AgentInfo, subagent
 	return switchable, subagents
 }
 
-func validateProjectAgentFile(workdir, agentName string) (string, error) {
+func validateAndRemoveProjectAgentFile(workdir, agentName string, remove bool) error {
 	if !isValidAgentName(agentName) {
-		return "", errors.New("invalid agent name")
+		return errors.New("invalid agent name")
 	}
 
-	agentDir := filepath.Join(workdir, ".opencode", "agent")
-	agentFile := filepath.Join(agentDir, agentName+".md")
-
-	wInfo, err := os.Lstat(workdir)
+	workdirFd, err := syscall.Open(workdir, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
-		return "", err
+		return err
 	}
-	if wInfo.Mode()&os.ModeSymlink != 0 {
-		return "", errors.New("symlinked workdir not allowed")
+	defer func() { _ = syscall.Close(workdirFd) }()
+
+	opencodeFd, err := syscall.Openat(workdirFd, ".opencode", syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = syscall.Close(opencodeFd) }()
+
+	agentFd, err := syscall.Openat(opencodeFd, "agent", syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = syscall.Close(agentFd) }()
+
+	fileName := agentName + ".md"
+	fileFd, err := syscall.Openat(agentFd, fileName, syscall.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fileFd, &st); err != nil {
+		_ = syscall.Close(fileFd)
+		return err
+	}
+	_ = syscall.Close(fileFd)
+
+	if st.Mode&syscall.S_IFMT != syscall.S_IFREG {
+		return errors.New("not a regular file")
 	}
 
-	dInfo, err := os.Lstat(agentDir)
-	if err != nil {
-		return "", err
-	}
-	if dInfo.Mode()&os.ModeSymlink != 0 {
-		return "", errors.New("symlinked agent directory not allowed")
+	if remove {
+		if err := syscall.Unlinkat(agentFd, fileName); err != nil {
+			return err
+		}
 	}
 
-	fInfo, err := os.Lstat(agentFile)
-	if err != nil {
-		return "", err
-	}
-	if fInfo.Mode()&os.ModeSymlink != 0 {
-		return "", errors.New("symlinked agent file not allowed")
-	}
-	if !fInfo.Mode().IsRegular() {
-		return "", errors.New("not a regular file")
-	}
-
-	realWorkdir, err := filepath.EvalSymlinks(workdir)
-	if err != nil {
-		return "", err
-	}
-	realDir, err := filepath.EvalSymlinks(agentDir)
-	if err != nil {
-		return "", err
-	}
-	realFile, err := filepath.EvalSymlinks(agentFile)
-	if err != nil {
-		return "", err
-	}
-
-	expectedDir := filepath.Join(realWorkdir, ".opencode", "agent")
-	if realDir != expectedDir {
-		return "", errors.New("agent directory escaped workdir")
-	}
-	if filepath.Dir(realFile) != expectedDir || filepath.Base(realFile) != agentName+".md" {
-		return "", errors.New("agent file escaped agent directory")
-	}
-
-	return agentFile, nil
+	return nil
 }
 
 func (r *Router) handleAgent(ctx context.Context, msg channel.IncomingMessage, args string) (string, error) {
@@ -307,12 +297,12 @@ func (r *Router) handleAgent(ctx context.Context, msg channel.IncomingMessage, a
 	}
 }
 
-func (r *Router) renderAgentPicker(ctx context.Context, msg channel.IncomingMessage, headerOverride ...string) (string, error) {
-	return r.renderAgentPickerPage(ctx, msg, 1, headerOverride...)
+func (r *Router) renderAgentPicker(ctx context.Context, msg channel.IncomingMessage, headerPrefix ...string) (string, error) {
+	return r.renderAgentPickerPage(ctx, msg, 1, headerPrefix...)
 }
 
-func (r *Router) renderAgentPickerPage(ctx context.Context, msg channel.IncomingMessage, page int, headerOverride ...string) (string, error) {
-	text, buttons, err := r.buildAgentPickerPage(ctx, msg, page, headerOverride...)
+func (r *Router) renderAgentPickerPage(ctx context.Context, msg channel.IncomingMessage, page int, headerPrefix ...string) (string, error) {
+	text, buttons, err := r.buildAgentPickerPage(ctx, msg, page, headerPrefix...)
 	if err != nil {
 		return "", err
 	}
@@ -325,7 +315,7 @@ func (r *Router) renderAgentPickerPage(ctx context.Context, msg channel.Incoming
 	return text, nil
 }
 
-func (r *Router) buildAgentPickerPage(ctx context.Context, msg channel.IncomingMessage, page int, headerOverride ...string) (string, []channel.Button, error) {
+func (r *Router) buildAgentPickerPage(ctx context.Context, msg channel.IncomingMessage, page int, headerPrefix ...string) (string, []channel.Button, error) {
 	inst, err := r.clientFor(ctx, msg)
 	if err != nil {
 		return "⚠️ Agent unreachable", nil, nil
@@ -397,12 +387,11 @@ func (r *Router) buildAgentPickerPage(ctx context.Context, msg channel.IncomingM
 	}
 
 	var sb strings.Builder
-	if len(headerOverride) > 0 && headerOverride[0] != "" {
-		sb.WriteString(headerOverride[0])
-		sb.WriteString("\n")
-	} else {
-		fmt.Fprintf(&sb, "Page %d/%d · Agents\n", clampedPage, totalPages)
+	if len(headerPrefix) > 0 && headerPrefix[0] != "" {
+		sb.WriteString(headerPrefix[0])
+		sb.WriteString("\n\n")
 	}
+	fmt.Fprintf(&sb, "Page %d/%d · Agents\n", clampedPage, totalPages)
 
 	activeDisplay := activeAgentName
 	if activeAgentName == "build" {
@@ -676,8 +665,12 @@ func (r *Router) handleAgentCallback(ctx context.Context, msg channel.IncomingMe
 
 	case agentActionDeleteCancel:
 		r.agentBrowser.revokeOwner(action.ownerFP)
+		text, buttons, err := r.buildAgentPickerPage(ctx, msg, 1, "Deletion canceled.")
+		if err != nil {
+			return err
+		}
 		if msg.ReplyCtx != nil && msg.CallbackRef != nil {
-			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "Deletion canceled.", nil)
+			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, text, buttons)
 		}
 		return nil
 	}
@@ -750,8 +743,8 @@ func (r *Router) handleAgentDeleteCommand(ctx context.Context, msg channel.Incom
 		return "", fmt.Errorf("effective workdir: %w", err)
 	}
 
-	if _, err := validateProjectAgentFile(workdir, matched.Name); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+	if err := validateAndRemoveProjectAgentFile(workdir, matched.Name, false); err != nil {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOENT) {
 			return "⚠️ Global agents cannot be deleted from chat.", nil
 		}
 		return "⚠️ Invalid agent file path.", nil
@@ -866,9 +859,8 @@ func (r *Router) executeAgentDelete(ctx context.Context, msg channel.IncomingMes
 		return fmt.Errorf("effective workdir: %w", err)
 	}
 
-	agentFile, err := validateProjectAgentFile(workdir, matched.Name)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+	if err := validateAndRemoveProjectAgentFile(workdir, matched.Name, true); err != nil {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOENT) {
 			if msg.ReplyCtx != nil && msg.CallbackRef != nil {
 				return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "⚠️ Global agents cannot be deleted from chat.", nil)
 			}
@@ -882,17 +874,22 @@ func (r *Router) executeAgentDelete(ctx context.Context, msg channel.IncomingMes
 		return nil
 	}
 
-	if err := os.Remove(agentFile); err != nil {
-		return fmt.Errorf("delete agent file: %w", err)
-	}
-
 	slog.Info("agent deleted", "agent", matched.Name, "workdir", workdir, "user_id", msg.UserID, "platform", msg.Platform, "channel_id", msg.ChannelID)
 
-	replyText := fmt.Sprintf("🗑 Deleted custom agent %s.", matched.Name)
-	if msg.ReplyCtx != nil && msg.CallbackRef != nil {
-		return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, replyText, nil)
+	banner := fmt.Sprintf("🗑 Deleted custom agent %s.", matched.Name)
+	text, buttons, err := r.buildAgentPickerPage(ctx, msg, 1, banner)
+	if err != nil {
+		return err
 	}
-	r.reply(msg, replyText)
+
+	if msg.ReplyCtx != nil && msg.CallbackRef != nil {
+		return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, text, buttons)
+	}
+	if msg.ReplyCtx != nil {
+		_, err := msg.ReplyCtx.SendWithButtons(text, buttons)
+		return err
+	}
+	r.reply(msg, text)
 	return nil
 }
 

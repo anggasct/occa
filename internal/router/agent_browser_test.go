@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -386,7 +387,7 @@ func TestAgentDelete_SecuritySymlinksAndModeFilter(t *testing.T) {
 		}
 	})
 
-	t.Run("symlinked agent file refused and external target preserved", func(t *testing.T) {
+	t.Run("symlinked agent file or dir refused and external target preserved", func(t *testing.T) {
 		extDir := t.TempDir()
 		extFile := filepath.Join(extDir, "external_secret.md")
 		if err := os.WriteFile(extFile, []byte("secret content"), 0644); err != nil {
@@ -413,9 +414,67 @@ func TestAgentDelete_SecuritySymlinksAndModeFilter(t *testing.T) {
 		if _, err := os.Stat(extFile); err != nil {
 			t.Fatalf("external file should be intact, stat err: %v", err)
 		}
+
+		// Also test symlinked agent directory
+		symWorkdir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(symWorkdir, ".opencode"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(extDir, filepath.Join(symWorkdir, ".opencode", "agent")); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateAndRemoveProjectAgentFile(symWorkdir, "external_secret", true); err == nil {
+			t.Fatal("expected error for symlinked agent directory")
+		}
+		if _, err := os.Stat(extFile); err != nil {
+			t.Fatalf("external file should be intact after symlinked dir delete attempt, stat err: %v", err)
+		}
 	})
 
-	t.Run("valid custom agent deletion succeeds", func(t *testing.T) {
+	t.Run("race confirmed delete against symlink directory swap preserves external file", func(t *testing.T) {
+		extDir := t.TempDir()
+		extSecret := filepath.Join(extDir, "target_agent.md")
+		if err := os.WriteFile(extSecret, []byte("protected"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		raceWorkdir := t.TempDir()
+		opencodeDir := filepath.Join(raceWorkdir, ".opencode")
+		realAgentDir := filepath.Join(opencodeDir, "agent")
+		if err := os.MkdirAll(realAgentDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		raceFile := filepath.Join(realAgentDir, "target_agent.md")
+		if err := os.WriteFile(raceFile, []byte("victim"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		// Concurrently swap .opencode/agent with symlink to extDir while deleting
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_ = validateAndRemoveProjectAgentFile(raceWorkdir, "target_agent", true)
+		}()
+		go func() {
+			defer wg.Done()
+			_ = os.Rename(realAgentDir, filepath.Join(opencodeDir, "agent_old"))
+			_ = os.Symlink(extDir, realAgentDir)
+		}()
+		wg.Wait()
+
+		// Target file in external directory must NEVER be deleted
+		if _, err := os.Stat(extSecret); err != nil {
+			t.Fatalf("external secret file was deleted during race! err: %v", err)
+		}
+	})
+
+	t.Run("valid custom agent deletion succeeds and refreshes picker", func(t *testing.T) {
+		// Set active session for picker rendering
+		if err := r.store.SessionRepo().SetActive(context.Background(), "telegram", "chat1", "", "admin1", "sess-1", 100); err != nil {
+			t.Fatal(err)
+		}
+
 		msg := msgFrom("admin1", "/agent delete mycustom", reply)
 		_, err := r.handleAgent(context.Background(), msg, "delete mycustom")
 		if err != nil && err != errReplied {
@@ -425,6 +484,7 @@ func TestAgentDelete_SecuritySymlinksAndModeFilter(t *testing.T) {
 			t.Fatal("expected confirm button prompt in sends")
 		}
 		confirmBtn := reply.buttons[len(reply.buttons)-1][0]
+
 		cbMsg := channel.IncomingMessage{
 			Platform:     "telegram",
 			ChannelID:    "chat1",
@@ -442,7 +502,13 @@ func TestAgentDelete_SecuritySymlinksAndModeFilter(t *testing.T) {
 		}
 		edit := reply.edits[len(reply.edits)-1]
 		if !strings.Contains(edit, "Deleted custom agent mycustom") {
-			t.Fatalf("unexpected edit text: %s", edit)
+			t.Fatalf("expected delete confirmation banner, got: %s", edit)
+		}
+		if !strings.Contains(edit, "Page 1/1 · Agents") || !strings.Contains(edit, "Active: build (default)") {
+			t.Fatalf("expected refreshed picker content, got:\n%s", edit)
+		}
+		if strings.Contains(edit, "mycustom") && !strings.Contains(edit, "Deleted custom agent mycustom") {
+			t.Fatalf("refreshed picker must not contain deleted agent, got:\n%s", edit)
 		}
 	})
 }
