@@ -56,7 +56,7 @@ type DeliveryStore interface {
 	FailStale(ctx context.Context, cutoff int64, summary string) (int, error)
 }
 
-type Executor func(ctx context.Context, platform, channelID, prompt string) error
+type Executor func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error
 
 type Server struct {
 	bind              string
@@ -64,11 +64,13 @@ type Server struct {
 	endpoints         map[string]config.EndpointConfig
 	executor          Executor
 	deliveries        DeliveryStore
+	worktreeResolver  WorktreeResolver
 	httpSrv           *http.Server
 	listener          net.Listener
 	eventSlots        chan struct{}
 	sessionMu         sync.Map
 	processingTimeout time.Duration
+	pruneMu           sync.Mutex
 	lastPrune         time.Time
 	pruneInterval     time.Duration
 	readHeaderTimeout time.Duration
@@ -96,6 +98,10 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 		writeTimeout:      writeTimeout,
 		idleTimeout:       idleTimeout,
 	}
+}
+
+func (s *Server) SetWorktreeResolver(r WorktreeResolver) {
+	s.worktreeResolver = r
 }
 
 func (s *Server) tryAcquireEvent() bool {
@@ -126,17 +132,23 @@ func (s *Server) recoverStale(ctx context.Context) {
 	} else if pruned > 0 {
 		slog.Info("webhook: pruned old deliveries", "pruned", pruned)
 	}
+	s.pruneMu.Lock()
 	s.lastPrune = now
+	s.pruneMu.Unlock()
 }
 
 func (s *Server) pruneIfDue() {
+	s.pruneMu.Lock()
 	if time.Since(s.lastPrune) < s.pruneInterval {
+		s.pruneMu.Unlock()
 		return
 	}
 	s.lastPrune = time.Now()
+	s.pruneMu.Unlock()
+
 	pruned, err := s.deliveries.Prune(context.Background(), time.Now().Add(-retentionAge).Unix(), retentionKeep)
 	if err != nil {
-		if errors.Is(err, sql.ErrConnDone) {
+		if errors.Is(err, sql.ErrConnDone) || strings.Contains(err.Error(), "database is closed") {
 			return
 		}
 		slog.Error("webhook: prune failed", "error", err)
@@ -369,24 +381,77 @@ func (s *Server) claimProcessing(ctx context.Context, receipt *store.WebhookDeli
 	return ok, nil
 }
 
-// sessionLock returns the mutex for the session identity used by the webhook
-// executor. Webhook calls resolve (platform, channelID, "", ""), so the lock
-// must cover the executor call: each call opens a stream for one agent turn.
-func (s *Server) sessionLock(ep config.EndpointConfig) *sync.Mutex {
-	key := ep.Platform + "|" + ep.ChannelID
-	mu, _ := s.sessionMu.LoadOrStore(key, &sync.Mutex{})
+func (s *Server) sessionLock(ep config.EndpointConfig, key WebhookExecutionKey) *sync.Mutex {
+	var lockKey string
+	if key.IsZero() {
+		lockKey = "endpoint:" + ep.Platform + "|" + ep.ChannelID
+	} else {
+		lockKey = "key:" + key.String()
+	}
+	mu, _ := s.sessionMu.LoadOrStore(lockKey, &sync.Mutex{})
 	return mu.(*sync.Mutex)
 }
 
 func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, deliveryID, eventType string) {
+	key := ExtractExecutionKey(body)
+	mu := s.sessionLock(ep, key)
+	mu.Lock()
+	defer mu.Unlock()
+
+	var workCtx WebhookWorkContext
+	workCtx.Key = key
+	if !key.IsZero() {
+		workCtx.SessionKey = key.String()
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("webhook: panic recovered in delivery processing",
+				"endpoint", ep.Name,
+				"delivery_id", deliveryID,
+				"event_type", eventType,
+				"execution_key", workCtx.Key.String(),
+				"worktree", workCtx.Worktree,
+				"panic", fmt.Sprint(r),
+			)
+			s.failDelivery(ep, id, deliveryID, eventType, redactSummary(fmt.Sprintf("panic: %v", r), maxErrorSummaryRunes, ep.Secret), workCtx)
+		}
+	}()
+
+	if !key.IsZero() {
+		if s.worktreeResolver == nil {
+			slog.Warn("webhook: worktree resolver missing for project key",
+				"endpoint", ep.Name,
+				"delivery_id", deliveryID,
+				"execution_key", key.String(),
+			)
+			s.failDelivery(ep, id, deliveryID, eventType, "worktree resolver required for project execution key", workCtx)
+			return
+		}
+
+		worktree, err := s.worktreeResolver.ResolveWorktree(context.Background(), key)
+		if err != nil {
+			slog.Warn("webhook: worktree resolution failed", "endpoint", ep.Name, "delivery_id", deliveryID, "execution_key", key.String(), "error", err)
+			if errors.Is(err, ErrWorktreeConflict) {
+				s.failDelivery(ep, id, deliveryID, eventType, redactSummary("worktree conflict: "+err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
+			} else {
+				s.failDelivery(ep, id, deliveryID, eventType, redactSummary("worktree resolution failed: "+err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
+			}
+			return
+		}
+		workCtx.Worktree = worktree
+	}
+
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		payload = map[string]any{"raw": string(body)}
 	}
 
 	tmplData := map[string]any{
-		"payload": payload,
-		"json":    string(body),
+		"payload":       payload,
+		"json":          string(body),
+		"execution_key": key.String(),
+		"worktree":      workCtx.Worktree,
 	}
 
 	rendered, err := renderTemplate(ep.Prompt, tmplData)
@@ -398,32 +463,41 @@ func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, d
 	rendered = strings.ReplaceAll(rendered, "</untrusted_payload>", "&lt;/untrusted_payload&gt;")
 	wrapped := fmt.Sprintf("<untrusted_payload>\n%s\n</untrusted_payload>", rendered)
 
-	mu := s.sessionLock(ep)
-	mu.Lock()
-	defer mu.Unlock()
-
 	ctx, cancel := context.WithTimeout(context.Background(), s.processingTimeout)
 	defer cancel()
-	err = s.executor(ctx, ep.Platform, ep.ChannelID, wrapped)
+	err = s.executor(ctx, ep.Platform, ep.ChannelID, wrapped, workCtx)
 
 	switch {
 	case err == nil:
 		if _, tErr := s.deliveries.Transition(context.Background(), id, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusCompleted, ""); tErr != nil {
 			slog.Error("webhook: completed transition failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", tErr)
 		}
-		slog.Info("webhook: delivery completed", "endpoint", ep.Name, "delivery_id", deliveryID, "event_type", eventType)
+		slog.Info("webhook: delivery completed",
+			"endpoint", ep.Name,
+			"delivery_id", deliveryID,
+			"event_type", eventType,
+			"execution_key", workCtx.Key.String(),
+			"worktree", workCtx.Worktree,
+		)
 	case errors.Is(err, context.DeadlineExceeded), ctx.Err() == context.DeadlineExceeded:
-		s.failDelivery(ep, id, deliveryID, eventType, "timed out after "+s.processingTimeout.String())
+		s.failDelivery(ep, id, deliveryID, eventType, "timed out after "+s.processingTimeout.String(), workCtx)
 	default:
-		s.failDelivery(ep, id, deliveryID, eventType, redactSummary(err.Error(), maxErrorSummaryRunes, ep.Secret))
+		s.failDelivery(ep, id, deliveryID, eventType, redactSummary(err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
 	}
 }
 
-func (s *Server) failDelivery(ep config.EndpointConfig, id int64, deliveryID, eventType, summary string) {
+func (s *Server) failDelivery(ep config.EndpointConfig, id int64, deliveryID, eventType, summary string, workCtx WebhookWorkContext) {
 	if _, err := s.deliveries.Transition(context.Background(), id, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusFailed, summary); err != nil {
 		slog.Error("webhook: failed transition", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
 	}
-	slog.Warn("webhook: delivery failed", "endpoint", ep.Name, "delivery_id", deliveryID, "event_type", eventType, "error_summary", summary)
+	slog.Warn("webhook: delivery failed",
+		"endpoint", ep.Name,
+		"delivery_id", deliveryID,
+		"event_type", eventType,
+		"execution_key", workCtx.Key.String(),
+		"worktree", workCtx.Worktree,
+		"error_summary", summary,
+	)
 }
 
 func (s *Server) shouldSkip(ep config.EndpointConfig, eventType string) bool {

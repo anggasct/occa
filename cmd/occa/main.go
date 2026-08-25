@@ -228,13 +228,18 @@ func main() {
 
 	var webhookSrv *webhook.Server
 	if len(cfg.Webhooks.Endpoints) > 0 {
-		webhookExecutor := func(ctx context.Context, platform, channelID, prompt string) error {
+		webhookExecutor := func(ctx context.Context, platform, channelID, prompt string, workCtx webhook.WebhookWorkContext) error {
 			for _, ch := range channels {
 				if ch.Name() == platform {
 					send := func(text string) { notify(ch, channelID, text) }
 
 					send("📨 Webhook: analyzing...")
-					inst, err := manager.Instance(ctx, cfg.Agent.DefaultWorkdir)
+					workdir := cfg.Agent.DefaultWorkdir
+					if workCtx.Worktree != "" {
+						workdir = workCtx.Worktree
+					}
+
+					inst, err := manager.Instance(ctx, workdir)
 					if err != nil {
 						send("⚠️ Webhook analysis failed: agent unreachable")
 						return errors.New("webhook agent unavailable")
@@ -242,7 +247,7 @@ func main() {
 					defer inst.End()
 
 					resolver := relay.NewSessionResolver(db.SessionRepo(), inst.Client())
-					sessionID, err := resolver.Resolve(ctx, platform, channelID, "", "", inst.PID())
+					sessionID, err := resolver.Resolve(ctx, platform, channelID, workCtx.SessionKey, "", inst.PID())
 					if err != nil {
 						send("⚠️ Webhook analysis failed: session error")
 						return errors.New("webhook session unavailable")
@@ -285,6 +290,7 @@ func main() {
 		}
 
 		webhookSrv = webhook.New(cfg.Webhooks, webhookExecutor, db.WebhookDeliveryRepo())
+		webhookSrv.SetWorktreeResolver(webhook.NewGitWorktreeResolver(""))
 		if err := webhookSrv.Start(ctx); err != nil {
 			slog.Error("failed to start webhook server", "error", err)
 		}
