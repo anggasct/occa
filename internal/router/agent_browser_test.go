@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -158,28 +159,57 @@ func TestAgentPicker_UnknownModelWarning(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	client.agents = []relay.AgentInfo{
-		{Name: "build", Mode: "primary", Native: true},
-		{Name: "custom-agent", Description: "Unconnected model agent", Mode: "primary", Native: false, Model: &relay.ModelRef{ProviderID: "fakeprovider", ID: "fake-model"}},
-	}
-	client.providers = relay.Providers{
-		All: []relay.Provider{
-			{ID: "openai", Models: map[string]json.RawMessage{"gpt-4o": json.RawMessage(`{}`)}},
-		},
-	}
+	t.Run("unconnected provider model triggers warning", func(t *testing.T) {
+		client.agents = []relay.AgentInfo{
+			{Name: "build", Mode: "primary", Native: true},
+			{Name: "custom-agent", Description: "Unconnected model agent", Mode: "primary", Native: false, Model: &relay.ModelRef{ProviderID: "fakeprovider", ID: "fake-model"}},
+		}
+		client.providers = relay.Providers{
+			All: []relay.Provider{
+				{ID: "openai", Models: map[string]json.RawMessage{"gpt-4o": json.RawMessage(`{}`)}},
+			},
+		}
 
-	msg := msgFrom("user1", "/agent", reply)
-	text, _, err := r.buildAgentPickerPage(context.Background(), msg, 1)
-	if err != nil {
-		t.Fatalf("buildAgentPickerPage: %v", err)
-	}
+		msg := msgFrom("user1", "/agent", reply)
+		text, _, err := r.buildAgentPickerPage(context.Background(), msg, 1)
+		if err != nil {
+			t.Fatalf("buildAgentPickerPage: %v", err)
+		}
 
-	if !strings.Contains(text, "fake-model ⚠") {
-		t.Fatalf("expected warning marker on unknown model, got:\n%s", text)
-	}
-	if !strings.Contains(text, "⚠ Pinned model not found in connected providers") {
-		t.Fatalf("expected footnote warning, got:\n%s", text)
-	}
+		if !strings.Contains(text, "fake-model ⚠") {
+			t.Fatalf("expected warning marker on unknown model, got:\n%s", text)
+		}
+		if !strings.Contains(text, "⚠ Pinned model not found in connected providers") {
+			t.Fatalf("expected footnote warning, got:\n%s", text)
+		}
+	})
+
+	t.Run("model in catalog but provider not in connected triggers warning", func(t *testing.T) {
+		client.agents = []relay.AgentInfo{
+			{Name: "build", Mode: "primary", Native: true},
+			{Name: "claude-agent", Description: "Agent with disconnected provider model", Mode: "primary", Native: false, Model: &relay.ModelRef{ProviderID: "anthropic", ID: "claude-3-5-sonnet"}},
+		}
+		client.providers = relay.Providers{
+			All: []relay.Provider{
+				{ID: "anthropic", Models: map[string]json.RawMessage{"claude-3-5-sonnet": json.RawMessage(`{}`)}},
+				{ID: "openai", Models: map[string]json.RawMessage{"gpt-4o": json.RawMessage(`{}`)}},
+			},
+			Connected: []string{"openai"}, // anthropic is not connected!
+		}
+
+		msg := msgFrom("user1", "/agent", reply)
+		text, _, err := r.buildAgentPickerPage(context.Background(), msg, 1)
+		if err != nil {
+			t.Fatalf("buildAgentPickerPage: %v", err)
+		}
+
+		if !strings.Contains(text, "claude-3-5-sonnet ⚠") {
+			t.Fatalf("expected warning marker for disconnected provider, got:\n%s", text)
+		}
+		if !strings.Contains(text, "⚠ Pinned model not found in connected providers") {
+			t.Fatalf("expected footnote warning, got:\n%s", text)
+		}
+	})
 }
 
 func TestAgentSwitch_NumberNameSubstringAndModeFilter(t *testing.T) {
@@ -466,6 +496,37 @@ func TestAgentDelete_SecuritySymlinksAndModeFilter(t *testing.T) {
 		// Target file in external directory must NEVER be deleted
 		if _, err := os.Stat(extSecret); err != nil {
 			t.Fatalf("external secret file was deleted during race! err: %v", err)
+		}
+	})
+
+	t.Run("fifo non-regular file delete promptly rejected without hanging", func(t *testing.T) {
+		fifoWorkdir := t.TempDir()
+		fifoDir := filepath.Join(fifoWorkdir, ".opencode", "agent")
+		if err := os.MkdirAll(fifoDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		fifoPath := filepath.Join(fifoDir, "fifo_agent.md")
+		if err := syscall.Mkfifo(fifoPath, 0666); err != nil {
+			t.Fatalf("Mkfifo: %v", err)
+		}
+
+		done := make(chan error, 1)
+		go func() {
+			done <- validateAndRemoveProjectAgentFile(fifoWorkdir, "fifo_agent", true)
+		}()
+
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Fatal("expected error rejecting FIFO non-regular file")
+			}
+		case <-time.After(1 * time.Second):
+			t.Fatal("delete hung on FIFO file open!")
+		}
+
+		// FIFO must not be removed
+		if _, err := os.Stat(fifoPath); err != nil {
+			t.Fatalf("FIFO should be intact, stat err: %v", err)
 		}
 	})
 

@@ -245,7 +245,7 @@ func validateAndRemoveProjectAgentFile(workdir, agentName string, remove bool) e
 	defer func() { _ = syscall.Close(agentFd) }()
 
 	fileName := agentName + ".md"
-	fileFd, err := syscall.Openat(agentFd, fileName, syscall.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	fileFd, err := syscall.Openat(agentFd, fileName, syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return err
 	}
@@ -429,7 +429,7 @@ func (r *Router) buildAgentPickerPage(ctx context.Context, msg channel.IncomingM
 
 		modelSuffix := ""
 		if a.Model != nil && a.Model.ID != "" {
-			if !providers.HasModel(*a.Model) {
+			if !providers.HasConnectedModel(*a.Model) {
 				anyUnknownModel = true
 				modelSuffix = fmt.Sprintf(" — %s ⚠", a.Model.ID)
 			} else {

@@ -67,6 +67,22 @@ func (p Providers) HasModel(ref ModelRef) bool {
 	return false
 }
 
+func (p Providers) HasConnectedModel(ref ModelRef) bool {
+	if len(p.Connected) > 0 {
+		var connected bool
+		for _, c := range p.Connected {
+			if c == ref.ProviderID {
+				connected = true
+				break
+			}
+		}
+		if !connected {
+			return false
+		}
+	}
+	return p.HasModel(ref)
+}
+
 func (p Providers) Variants(providerID, modelID string) (map[string]json.RawMessage, bool) {
 	for _, provider := range p.All {
 		if provider.ID == providerID {
