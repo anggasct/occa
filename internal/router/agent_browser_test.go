@@ -555,6 +555,54 @@ func TestNewAgentDetectionOnTurnEnd(t *testing.T) {
 			t.Fatalf("expected no notice on agent deletion, got: %v", reply.sends)
 		}
 	})
+
+	t.Run("canceled turn context does not abort detector registry fetch", func(t *testing.T) {
+		reply.sends = nil
+		canceledCtx, cancel := context.WithCancel(context.Background())
+		cancel() // Simulate canceled context from runResponse completion
+
+		if err := os.WriteFile(filepath.Join(agentDir, "turn_end_agent.md"), []byte("# end"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		client.mu.Lock()
+		client.agents = append(client.agents, relay.AgentInfo{Name: "turn_end_agent", Mode: "primary", Native: false})
+		client.mu.Unlock()
+
+		r.detectNewAgents(canceledCtx, msg, inst)
+		if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "turn_end_agent") {
+			t.Fatalf("expected new agent notice despite canceled turn context, got: %v", reply.sends)
+		}
+	})
+}
+
+func TestAgentPicker_CLIBackendUnsupported(t *testing.T) {
+	r, client, reply := newTestRouter()
+	if err := r.store.SessionRepo().SetActive(context.Background(), "telegram", "chat1", "", "user1", "sess-1", 100); err != nil {
+		t.Fatal(err)
+	}
+
+	client.mu.Lock()
+	client.agentsErr = relay.ErrUnsupported
+	client.switchAgentErr = relay.ErrUnsupported
+	client.mu.Unlock()
+
+	msg := msgFrom("user1", "/agent", reply)
+	if err := r.Route(context.Background(), msg); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Agent switching is not supported by the current agent backend") {
+		t.Fatalf("expected unsupported backend message, got: %v", reply.sends)
+	}
+
+	// Also test /agent switch on unsupported backend
+	msgSwitch := msgFrom("user1", "/agent switch reviewer", reply)
+	out, err := r.handleAgent(context.Background(), msgSwitch, "switch reviewer")
+	if err != nil {
+		t.Fatalf("handleAgent: %v", err)
+	}
+	if !strings.Contains(out, "Agent switching is not supported by the current agent backend") {
+		t.Fatalf("expected unsupported backend message on switch, got: %s", out)
+	}
 }
 
 type fakeAgentInstance struct {

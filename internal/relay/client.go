@@ -21,6 +21,7 @@ var (
 	ErrNotFound           = errors.New("agent resource not found")
 	ErrTimeout            = errors.New("agent request timed out")
 	ErrAttachmentTooLarge = errors.New("attachment exceeds size limit")
+	ErrUnsupported        = errors.New("operation not supported by agent backend")
 )
 
 const maxAttachmentSize = 10 * 1024 * 1024

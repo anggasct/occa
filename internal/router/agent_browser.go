@@ -346,6 +346,9 @@ func (r *Router) buildAgentPickerPage(ctx context.Context, msg channel.IncomingM
 
 	allAgents, err := inst.Client().ListAgents(ctx)
 	if err != nil {
+		if errors.Is(err, relay.ErrUnsupported) {
+			return "⚠️ Agent switching is not supported by the current agent backend.", nil, nil
+		}
 		tok, _ := r.agentBrowser.register(agentBrowseAction{
 			kind:    agentActionRefresh,
 			page:    1,
@@ -572,6 +575,9 @@ func (r *Router) switchAgent(ctx context.Context, msg channel.IncomingMessage, t
 
 	allAgents, err := inst.Client().ListAgents(ctx)
 	if err != nil {
+		if errors.Is(err, relay.ErrUnsupported) {
+			return "⚠️ Agent switching is not supported by the current agent backend.", nil
+		}
 		return "⚠️ Agents unavailable — agent server not responding", nil
 	}
 
@@ -614,6 +620,9 @@ func (r *Router) switchAgent(ctx context.Context, msg channel.IncomingMessage, t
 	if err := inst.Client().SwitchAgent(ctx, activeSession.AgentSessionID, matched.Name); err != nil {
 		if errors.Is(err, relay.ErrNotFound) {
 			return "Agent not found — refresh with /agent", nil
+		}
+		if errors.Is(err, relay.ErrUnsupported) {
+			return "⚠️ Agent switching is not supported by the current agent backend.", nil
 		}
 		return "", fmt.Errorf("switch agent: %w", err)
 	}
@@ -693,6 +702,9 @@ func (r *Router) handleAgentDeleteCommand(ctx context.Context, msg channel.Incom
 
 	allAgents, err := inst.Client().ListAgents(ctx)
 	if err != nil {
+		if errors.Is(err, relay.ErrUnsupported) {
+			return "⚠️ Agent switching is not supported by the current agent backend.", nil
+		}
 		return "⚠️ Agents unavailable — agent server not responding", nil
 	}
 
@@ -811,6 +823,13 @@ func (r *Router) executeAgentDelete(ctx context.Context, msg channel.IncomingMes
 
 	allAgents, err := inst.Client().ListAgents(ctx)
 	if err != nil {
+		if errors.Is(err, relay.ErrUnsupported) {
+			if msg.ReplyCtx != nil && msg.CallbackRef != nil {
+				return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "⚠️ Agent switching is not supported by the current agent backend.", nil)
+			}
+			r.reply(msg, "⚠️ Agent switching is not supported by the current agent backend.")
+			return nil
+		}
 		if msg.ReplyCtx != nil && msg.CallbackRef != nil {
 			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "⚠️ Agents unavailable — agent server not responding", nil)
 		}
@@ -877,18 +896,39 @@ func (r *Router) executeAgentDelete(ctx context.Context, msg channel.IncomingMes
 	return nil
 }
 
-func (r *Router) detectNewAgents(ctx context.Context, msg channel.IncomingMessage, inst AgentInstance) {
+func (r *Router) detectNewAgents(_ context.Context, msg channel.IncomingMessage, inst AgentInstance) {
 	if r.agentTracker == nil {
 		return
 	}
 	workdir := inst.Workdir()
 
+	diskAgents := r.agentTracker.snapshotDir(workdir)
+
+	r.agentTracker.mu.Lock()
+	known := r.agentTracker.knownAgents[workdir]
+	var hasNewDiskFiles bool
+	for _, name := range diskAgents {
+		if known == nil || !known[name] {
+			hasNewDiskFiles = true
+			break
+		}
+	}
+	r.agentTracker.mu.Unlock()
+
+	if !hasNewDiskFiles {
+		r.agentTracker.updateAndDiff(workdir, diskAgents)
+		return
+	}
+
+	detectCtx, cancelDetect := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelDetect()
+
 	checkNew := func() []string {
-		diskAgents := r.agentTracker.snapshotDir(workdir)
-		if len(diskAgents) == 0 {
+		disk := r.agentTracker.snapshotDir(workdir)
+		if len(disk) == 0 {
 			return nil
 		}
-		liveAgents, err := inst.Client().ListAgents(ctx)
+		liveAgents, err := inst.Client().ListAgents(detectCtx)
 		if err != nil {
 			return nil
 		}
@@ -899,7 +939,7 @@ func (r *Router) detectNewAgents(ctx context.Context, msg channel.IncomingMessag
 			}
 		}
 		var registeredDiskAgents []string
-		for _, name := range diskAgents {
+		for _, name := range disk {
 			if liveSet[name] {
 				registeredDiskAgents = append(registeredDiskAgents, name)
 			}
@@ -910,7 +950,7 @@ func (r *Router) detectNewAgents(ctx context.Context, msg channel.IncomingMessag
 	newAgents := checkNew()
 	if len(newAgents) == 0 && r.agentTracker.retryDelay > 0 {
 		select {
-		case <-ctx.Done():
+		case <-detectCtx.Done():
 			return
 		case <-time.After(r.agentTracker.retryDelay):
 		}

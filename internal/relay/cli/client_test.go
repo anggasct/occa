@@ -360,11 +360,11 @@ func TestListCommandsReturnsEmpty(t *testing.T) {
 	}
 }
 
-func TestListAgentsReturnsEmpty(t *testing.T) {
+func TestListAgentsReturnsUnsupported(t *testing.T) {
 	c := New("claude")
 	agents, err := c.ListAgents(context.Background())
-	if err != nil {
-		t.Fatalf("ListAgents: %v", err)
+	if !errors.Is(err, relay.ErrUnsupported) {
+		t.Fatalf("expected ErrUnsupported, got %v", err)
 	}
 	if agents != nil {
 		t.Fatalf("expected nil agents, got %v", agents)
@@ -374,7 +374,7 @@ func TestListAgentsReturnsEmpty(t *testing.T) {
 func TestSwitchAgentReturnsUnsupported(t *testing.T) {
 	c := New("claude")
 	err := c.SwitchAgent(context.Background(), "s1", "reviewer")
-	if err == nil || !strings.Contains(err.Error(), "not supported") {
-		t.Fatalf("expected unsupported error, got %v", err)
+	if !errors.Is(err, relay.ErrUnsupported) {
+		t.Fatalf("expected ErrUnsupported, got %v", err)
 	}
 }
