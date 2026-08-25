@@ -75,6 +75,73 @@ func TestBuildPermissionPolicyExactPathIsolation(t *testing.T) {
 	}
 }
 
+func TestBuildPermissionPolicyScopesReadPermissionsToWorkflowRoots(t *testing.T) {
+	const (
+		worktree = "/srv/projects/occa/.worktree/pr-42"
+		docs     = "/srv/vault/1-projects/occa"
+	)
+	permissions := []string{"read", "glob", "grep", "lsp"}
+	paths := []string{
+		worktree + "/internal/webhook/permission.go",
+		docs + "/development-plan.md",
+		"/srv/projects/occa/internal/webhook/permission.go",
+		"/srv/projects/occa/.worktree/other/internal/webhook/permission.go",
+		"/srv/projects/other/internal/webhook/permission.go",
+		"/srv/vault/1-projects/development-plan.md",
+	}
+
+	for _, workflow := range []string{"github_reviewer", "github_fix"} {
+		t.Run(workflow, func(t *testing.T) {
+			policy, err := BuildPermissionPolicy(PermissionPolicyInput{
+				Workflow:        workflow,
+				Repository:      "anggasct/occa",
+				PRNumber:        "42",
+				Branch:          "fix/webhook-permissions",
+				Worktree:        worktree,
+				ProjectDocsRoot: docs,
+			})
+			if err != nil {
+				t.Fatalf("BuildPermissionPolicy: %v", err)
+			}
+			for _, permission := range permissions {
+				for i, path := range paths {
+					want := "deny"
+					if i < 2 {
+						want = "allow"
+					}
+					if got := permissionAction(policy, permission, path); got != want {
+						t.Errorf("%s %s %q = %q, want %q", workflow, permission, path, got, want)
+					}
+				}
+			}
+		})
+	}
+
+	t.Run("github_merged", func(t *testing.T) {
+		policy, err := BuildPermissionPolicy(PermissionPolicyInput{
+			Workflow:        "github_merged",
+			Repository:      "anggasct/occa",
+			PRNumber:        "42",
+			Branch:          "fix/webhook-permissions",
+			Worktree:        worktree,
+			ProjectDocsRoot: docs,
+		})
+		if err != nil {
+			t.Fatalf("BuildPermissionPolicy: %v", err)
+		}
+		for _, permission := range permissions {
+			if got := permissionAction(policy, permission, docs+"/development-plan.md"); got != "allow" {
+				t.Errorf("github_merged %s docs = %q, want allow", permission, got)
+			}
+			for _, path := range append([]string{worktree + "/internal/webhook/permission.go"}, paths[2:]...) {
+				if got := permissionAction(policy, permission, path); got != "deny" {
+					t.Errorf("github_merged %s %q = %q, want deny", permission, path, got)
+				}
+			}
+		}
+	})
+}
+
 func TestBuildPermissionPolicyPostMergeEditsOnlyCanonicalDocsRoot(t *testing.T) {
 	const docsRoot = "/srv/vault/1-projects/occa"
 	policy, err := BuildPermissionPolicy(PermissionPolicyInput{
@@ -132,7 +199,7 @@ func TestBuildPermissionPolicyCommandMatrix(t *testing.T) {
 			denied: []string{
 				"git status --short --untracked-files=all",
 				"gh pr view 42 --repo anggasct/other",
-				"gh pr view 42 --repo anggasct/occa --json files",
+				"gh pr view 42 --repo anggasct/occa --json files --jq '.files[]'",
 				"gh pr view 42 --repo anggasct/occa --json title,state,files",
 				"gh pr review 42 --repo anggasct/occa --approve",
 				"gh pr review 42 --repo anggasct/occa --approve --body-file /tmp/other.md",
@@ -213,6 +280,82 @@ func TestBuildPermissionPolicyCommandMatrix(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestReviewerCommandSequenceAuthorization(t *testing.T) {
+	policy, err := BuildPermissionPolicy(PermissionPolicyInput{
+		Workflow:        "github_reviewer",
+		Repository:      "anggasct/occa",
+		PRNumber:        "125",
+		Branch:          "fix/webhook-permissions",
+		Worktree:        "/srv/projects/occa/.worktree/pr-125",
+		ProjectDocsRoot: "/srv/vault/1-projects/occa",
+	})
+	if err != nil {
+		t.Fatalf("BuildPermissionPolicy: %v", err)
+	}
+
+	allowed := []string{
+		"gh pr view 125 --repo anggasct/occa --json number,title,body,state,isDraft,author,headRefName,baseRefName,headRefOid,reviewDecision,reviews,comments,files,statusCheckRollup,url",
+		"gh pr view 125 --repo anggasct/occa --json headRefOid,reviews,comments,reviewDecision",
+		"gh pr view 125 --repo anggasct/occa --json files",
+		"gh auth status",
+		"gh api user --jq '.login'",
+		"gh pr review 125 --repo anggasct/occa --request-changes --body-file /tmp/review.md",
+		"gh pr review 125 --repo anggasct/occa --approve --body-file /tmp/review.md",
+		"gh pr review 125 --repo anggasct/occa --comment --body-file /tmp/review.md",
+		"git diff origin/main...HEAD --check",
+	}
+	for _, command := range allowed {
+		if got := permissionAction(policy, "bash", command); got != "allow" {
+			t.Errorf("reviewer command %q resolved to %q, want allow", command, got)
+		}
+	}
+
+	denied := []string{
+		"gh pr view 124 --repo anggasct/occa --json number,title,body,state,isDraft,author,headRefName,baseRefName,headRefOid,reviewDecision,reviews,comments,files,statusCheckRollup,url",
+		"gh pr view 125 --repo other/occa --json number,title,body,state,isDraft,author,headRefName,baseRefName,headRefOid,reviewDecision,reviews,comments,files,statusCheckRollup,url",
+		"gh pr view 125 --repo anggasct/occa --json number,title,body,state,isDraft,author,headRefName,baseRefName,headRefOid,reviewDecision,reviews,comments,files,statusCheckRollup,url,labels",
+		"gh pr view 125 --repo anggasct/occa --json files --jq '.files[]'",
+		"gh auth status --hostname github.com",
+		"gh api user --jq '.login' --hostname github.com",
+		"gh pr review 125 --repo anggasct/occa --approve --body-file /tmp/other.md",
+		"gh pr review 125 --repo anggasct/occa --approve --body-file /tmp/review.md --verbose",
+		"gh pr review 125 --repo anggasct/occa --approve --body-file /tmp/review.md; touch /tmp/pwned",
+		"git diff other...HEAD --check",
+		"git diff origin/main...HEAD --check; touch /tmp/pwned",
+		"git diff origin/main...HEAD --check --cached",
+	}
+	for _, command := range denied {
+		if got := permissionAction(policy, "bash", command); got == "allow" {
+			t.Errorf("out-of-scope reviewer command %q was allowed", command)
+		}
+	}
+}
+
+func TestFixerQuotedArgumentsRejectControlCharacters(t *testing.T) {
+	policy, err := BuildPermissionPolicy(PermissionPolicyInput{
+		Workflow:        "github_fix",
+		Repository:      "anggasct/occa",
+		PRNumber:        "125",
+		Branch:          "fix/webhook-permissions",
+		Worktree:        "/srv/projects/occa/.worktree/pr-125",
+		ProjectDocsRoot: "/srv/vault/1-projects/occa",
+	})
+	if err != nil {
+		t.Fatalf("BuildPermissionPolicy: %v", err)
+	}
+
+	for _, command := range []string{
+		"git commit -m \"fix: first line\nsecond line\"",
+		"git commit -m \"fix: first line\rsecond line\"",
+		"gh pr comment 125 --repo anggasct/occa --body \"first line\nsecond line\"",
+		"gh pr comment 125 --repo anggasct/occa --body \"first line\rsecond line\"",
+	} {
+		if got := permissionAction(policy, "bash", command); got == "allow" {
+			t.Errorf("control character command %q was allowed", command)
+		}
 	}
 }
 

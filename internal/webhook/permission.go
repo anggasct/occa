@@ -47,9 +47,11 @@ func BuildPermissionPolicy(input PermissionPolicyInput) (relay.PermissionRuleset
 			policy = append(policy, relay.PermissionRule{Permission: permission, Pattern: filepath.ToSlash(pattern), Action: "allow"})
 		}
 	}
-	allowCurrentWorkspace := func() {
-		for _, permission := range []string{"read", "glob", "grep", "lsp"} {
-			policy = append(policy, relay.PermissionRule{Permission: permission, Pattern: "*", Action: "allow"})
+	allowScopedRead := func() {
+		for _, root := range []string{worktree, docs} {
+			for _, permission := range []string{"read", "glob", "grep", "lsp"} {
+				allowPath(permission, root)
+			}
 		}
 	}
 	allowExternalDocs := func() {
@@ -57,7 +59,7 @@ func BuildPermissionPolicy(input PermissionPolicyInput) (relay.PermissionRuleset
 			relay.PermissionRule{Permission: "external_directory", Pattern: filepath.ToSlash(docs), Action: "allow"},
 			relay.PermissionRule{Permission: "external_directory", Pattern: filepath.ToSlash(docs) + "/**", Action: "allow"},
 		)
-		for _, permission := range []string{"read", "glob", "grep"} {
+		for _, permission := range []string{"read", "glob", "grep", "lsp"} {
 			allowPath(permission, docs)
 		}
 	}
@@ -75,7 +77,7 @@ func BuildPermissionPolicy(input PermissionPolicyInput) (relay.PermissionRuleset
 	}
 	allowSafeQuotedArgument := func(prefix, suffix string) {
 		allowCommand(prefix + "*" + suffix)
-		for _, character := range []string{";", "|", "&", "$", "`", "(", ")", "<", ">", "\\", "\"", "\n", "\r"} {
+		for _, character := range []string{";", "|", "&", "$", "`", "(", ")", "<", ">", "\\", "\"", string('\n'), string('\r')} {
 			deny("bash", prefix+"*"+character+"*"+suffix)
 		}
 	}
@@ -84,12 +86,13 @@ func BuildPermissionPolicy(input PermissionPolicyInput) (relay.PermissionRuleset
 	switch workflow {
 	case "github_reviewer":
 		deny("edit", "*")
-		allowCurrentWorkspace()
+		allowScopedRead()
 		allowExternalWorktree()
 		allowExternalDocs()
 		for _, command := range []string{
 			"git status --short",
 			"git diff --check",
+			"git diff origin/main...HEAD --check",
 			"git diff --stat",
 			"git diff origin/main...HEAD",
 			"git log --oneline -5",
@@ -98,8 +101,13 @@ func BuildPermissionPolicy(input PermissionPolicyInput) (relay.PermissionRuleset
 			"gh pr view " + input.PRNumber + " --repo " + repository + " --json title,state,headRefName,baseRefName",
 			"gh pr view " + input.PRNumber + " --repo " + repository + " --json files,commits,headRefName,baseRefName,title",
 			"gh pr view " + input.PRNumber + " --repo " + repository + " --json mergedAt,mergeCommit,files,additions,deletions,changedFiles,labels,headRefName,baseRefName,title",
+			"gh pr view " + input.PRNumber + " --repo " + repository + " --json number,title,body,state,isDraft,author,headRefName,baseRefName,headRefOid,reviewDecision,reviews,comments,files,statusCheckRollup,url",
+			"gh pr view " + input.PRNumber + " --repo " + repository + " --json headRefOid,reviews,comments,reviewDecision",
+			"gh pr view " + input.PRNumber + " --repo " + repository + " --json files",
 			"gh pr diff " + input.PRNumber + " --repo " + repository,
 			"gh pr checks " + input.PRNumber + " --repo " + repository,
+			"gh auth status",
+			"gh api user --jq '.login'",
 			"gh pr review " + input.PRNumber + " --repo " + repository + " --approve --body-file /tmp/review.md",
 			"gh pr review " + input.PRNumber + " --repo " + repository + " --request-changes --body-file /tmp/review.md",
 			"gh pr review " + input.PRNumber + " --repo " + repository + " --comment --body-file /tmp/review.md",
@@ -107,7 +115,7 @@ func BuildPermissionPolicy(input PermissionPolicyInput) (relay.PermissionRuleset
 			allowCommand(command)
 		}
 	case "github_fix":
-		allowCurrentWorkspace()
+		allowScopedRead()
 		allowExternalWorktree()
 		allowExternalDocs()
 		allowPath("edit", worktree)
@@ -165,6 +173,7 @@ func BuildPermissionPolicy(input PermissionPolicyInput) (relay.PermissionRuleset
 		allowPath("read", docs)
 		allowPath("glob", docs)
 		allowPath("grep", docs)
+		allowPath("lsp", docs)
 		allowPath("edit", docs)
 		allowExternalDocs()
 		for _, command := range []string{
