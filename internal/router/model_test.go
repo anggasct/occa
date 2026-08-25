@@ -506,6 +506,63 @@ func TestParseModelRefVariant(t *testing.T) {
 	})
 }
 
+func TestParseModelRefAcceptsSlashContainingModelIDs(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  relay.ModelRef
+	}{
+		{
+			name:  "slash-containing ID with variant",
+			value: "openrouter/stealth/ox-alpha@max",
+			want:  relay.ModelRef{ProviderID: "openrouter", ID: "stealth/ox-alpha", Variant: "max"},
+		},
+		{
+			name:  "slash-containing ID without variant",
+			value: "provider/model/id",
+			want:  relay.ModelRef{ProviderID: "provider", ID: "model/id"},
+		},
+		{
+			name:  "existing single-slash reference",
+			value: "openai/gpt-5.6-luna@xhigh",
+			want:  relay.ModelRef{ProviderID: "openai", ID: "gpt-5.6-luna", Variant: "xhigh"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseModelRef(tt.value)
+			if err != nil {
+				t.Fatalf("parseModelRef(%q): %v", tt.value, err)
+			}
+			if got != tt.want {
+				t.Fatalf("parseModelRef(%q) = %+v, want %+v", tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseModelRefRejectsMalformedReferences(t *testing.T) {
+	for _, value := range []string{"", "openrouter", "/model-id", "openrouter/", "openrouter/model@", "openrouter/@max"} {
+		t.Run(value, func(t *testing.T) {
+			if _, err := parseModelRef(value); err == nil {
+				t.Fatalf("parseModelRef(%q) returned nil error", value)
+			}
+		})
+	}
+}
+
+func TestFormatParseModelRefRoundTripsSlashContainingID(t *testing.T) {
+	value := "openrouter/stealth/ox-alpha@max"
+	ref, err := parseModelRef(value)
+	if err != nil {
+		t.Fatalf("parseModelRef(%q): %v", value, err)
+	}
+	if got := formatModelRef(ref); got != value {
+		t.Fatalf("formatModelRef(parseModelRef(%q)) = %q, want %q", value, got, value)
+	}
+}
+
 func TestFormatModelRefVariant(t *testing.T) {
 	t.Run("with variant", func(t *testing.T) {
 		ref := relay.ModelRef{ProviderID: "zai-coding-plan", ID: "glm-5.2", Variant: "max"}

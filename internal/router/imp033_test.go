@@ -96,6 +96,65 @@ func TestModelResolutionUsesExplicitLocationBeforeLowerScopes(t *testing.T) {
 	}
 }
 
+func TestSlashContainingStoredModelsResolveAtEveryScope(t *testing.T) {
+	tests := []struct {
+		name  string
+		model string
+		setup func(*fakeStore)
+		msg   channel.IncomingMessage
+	}{
+		{
+			name:  "thread",
+			model: "openrouter/stealth/ox-alpha@max",
+			setup: func(st *fakeStore) {
+				st.threadConfigs = newFakeThreadConfigRepo(st.channelRepo)
+				st.threadConfigs.configs["discord:parent:thread-1"] = &store.ThreadConfig{
+					Platform: "discord", ChannelID: "parent", ThreadID: "thread-1",
+					Model: "openrouter/stealth/ox-alpha@max",
+				}
+			},
+			msg: ownedThreadMsg("thread-1", "hello", &fakeReplyCtx{}),
+		},
+		{
+			name:  "channel",
+			model: "provider/model/id",
+			setup: func(st *fakeStore) {
+				st.channelRepo.channels["telegram:chat1"] = &store.Channel{
+					Platform: "telegram", ChannelID: "chat1", Model: "provider/model/id",
+				}
+			},
+			msg: msgFrom("user1", "hello", &fakeReplyCtx{}),
+		},
+		{
+			name:  "personal",
+			model: "openai/gpt-5.6-luna@xhigh",
+			setup: func(st *fakeStore) {
+				st.overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{
+					Platform: "telegram", ChannelID: "chat1", UserID: "user1",
+					Model: "openai/gpt-5.6-luna@xhigh",
+				}
+			},
+			msg: msgFrom("user1", "hello", &fakeReplyCtx{}),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, _, _, _ := newTestRouterWithAccess()
+			st := r.store.(*fakeStore)
+			tt.setup(st)
+
+			resolution, err := r.resolveModel(context.Background(), tt.msg)
+			if err != nil {
+				t.Fatalf("resolveModel: %v", err)
+			}
+			if resolution.model == nil || formatModelRef(*resolution.model) != tt.model {
+				t.Fatalf("resolved model = %+v, want %q", resolution.model, tt.model)
+			}
+		})
+	}
+}
+
 func TestModelDefaultAllowsLowerScopeWithoutMutatingIt(t *testing.T) {
 	r, _, reply, overrides := newTestRouterWithAccess()
 	st := r.store.(*fakeStore)

@@ -245,10 +245,10 @@ func (r *Router) validateModel(ctx context.Context, msg channel.IncomingMessage,
 }
 
 func parseModelRef(value string) (relay.ModelRef, error) {
-	if strings.Count(value, "/") != 1 {
+	parts := strings.SplitN(value, "/", 2)
+	if len(parts) != 2 {
 		return relay.ModelRef{}, safeReplyError(fmt.Sprintf("invalid model %q; use provider/model-id[@variant]", value), nil)
 	}
-	parts := strings.SplitN(value, "/", 2)
 	providerID, modelIDPart := parts[0], parts[1]
 	if providerID == "" || modelIDPart == "" {
 		return relay.ModelRef{}, safeReplyError(fmt.Sprintf("invalid model %q; use provider/model-id[@variant]", value), nil)
