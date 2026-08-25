@@ -1125,3 +1125,88 @@ func TestGetSession_Agent(t *testing.T) {
 		t.Fatalf("got Agent %q, want reviewer", info.Agent)
 	}
 }
+
+func TestParseModelRef(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    ModelRef
+		wantErr bool
+	}{
+		{
+			name:  "standard provider/model",
+			input: "openai/gpt-4o",
+			want:  ModelRef{ProviderID: "openai", ID: "gpt-4o"},
+		},
+		{
+			name:  "with variant",
+			input: "alibaba-token-plan/deepseek-v4-flash-0731@max",
+			want:  ModelRef{ProviderID: "alibaba-token-plan", ID: "deepseek-v4-flash-0731", Variant: "max"},
+		},
+		{
+			name:  "slash in model id with variant",
+			input: "openrouter/anthropic/claude-3-5-sonnet@high",
+			want:  ModelRef{ProviderID: "openrouter", ID: "anthropic/claude-3-5-sonnet", Variant: "high"},
+		},
+		{
+			name:  "slash in model id without variant",
+			input: "openrouter/meta-llama/llama-3-70b-instruct",
+			want:  ModelRef{ProviderID: "openrouter", ID: "meta-llama/llama-3-70b-instruct"},
+		},
+		{
+			name:    "empty string",
+			input:   "",
+			wantErr: true,
+		},
+		{
+			name:    "no slash",
+			input:   "gpt-4o",
+			wantErr: true,
+		},
+		{
+			name:    "empty provider",
+			input:   "/gpt-4o",
+			wantErr: true,
+		},
+		{
+			name:    "empty model id",
+			input:   "openai/",
+			wantErr: true,
+		},
+		{
+			name:    "empty variant",
+			input:   "openai/gpt-4o@",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseModelRef(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ParseModelRef(%q) err = %v, wantErr = %v", tt.input, err, tt.wantErr)
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Fatalf("ParseModelRef(%q) = %+v, want %+v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatModelRef(t *testing.T) {
+	ref1 := ModelRef{ProviderID: "openai", ID: "gpt-4o"}
+	if got := FormatModelRef(ref1); got != "openai/gpt-4o" {
+		t.Fatalf("FormatModelRef = %q, want openai/gpt-4o", got)
+	}
+	if got := ref1.String(); got != "openai/gpt-4o" {
+		t.Fatalf("ref1.String() = %q, want openai/gpt-4o", got)
+	}
+
+	ref2 := ModelRef{ProviderID: "openrouter", ID: "anthropic/claude-3-5-sonnet", Variant: "max"}
+	if got := FormatModelRef(ref2); got != "openrouter/anthropic/claude-3-5-sonnet@max" {
+		t.Fatalf("FormatModelRef = %q, want openrouter/anthropic/claude-3-5-sonnet@max", got)
+	}
+	if got := ref2.String(); got != "openrouter/anthropic/claude-3-5-sonnet@max" {
+		t.Fatalf("ref2.String() = %q, want openrouter/anthropic/claude-3-5-sonnet@max", got)
+	}
+}

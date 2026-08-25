@@ -253,7 +253,7 @@ func main() {
 						return errors.New("webhook session unavailable")
 					}
 
-					if err := inst.Client().SendMessage(ctx, sessionID, prompt, nil, nil); err != nil {
+					if err := inst.Client().SendMessage(ctx, sessionID, prompt, workCtx.Model, nil); err != nil {
 						send("⚠️ Webhook analysis failed: agent request error")
 						return errors.New("webhook agent request failed")
 					}
@@ -290,6 +290,7 @@ func main() {
 		}
 
 		webhookSrv = webhook.New(cfg.Webhooks, webhookExecutor, db.WebhookDeliveryRepo())
+		webhookSrv.SetChannelStore(db.ChannelRepo())
 		webhookSrv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
 			for _, ch := range channels {
 				if ch.Name() == platform {

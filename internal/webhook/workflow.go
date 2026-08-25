@@ -101,6 +101,12 @@ func formatAuditSummary(envelope WebhookEnvelope, workflow string, statusAndReas
 	if head, base := auditField(stringValue(envelope["head_branch"])), auditField(stringValue(envelope["base_branch"])); head != "" || base != "" {
 		lines = append(lines, "Branch: "+head+" → "+base)
 	}
+	if model := auditField(stringValue(envelope["model"])); model != "" {
+		lines = append(lines, "Model: "+model)
+		if src := auditField(stringValue(envelope["model_source"])); src != "" {
+			lines = append(lines, "Model source: "+src)
+		}
+	}
 	lines = append(lines, "Status: "+status)
 	if reason != "" {
 		lines = append(lines, "Reason: "+clipRunes(auditField(reason), maxErrorSummaryRunes))

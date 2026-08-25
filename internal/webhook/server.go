@@ -22,6 +22,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/anggasct/occa/internal/config"
+	"github.com/anggasct/occa/internal/relay"
 	"github.com/anggasct/occa/internal/store"
 )
 
@@ -56,6 +57,10 @@ type DeliveryStore interface {
 	FailStale(ctx context.Context, cutoff int64, summary string) (int, error)
 }
 
+type ChannelStore interface {
+	Get(ctx context.Context, platform, channelID string) (*store.Channel, error)
+}
+
 type Executor func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error
 
 type Notifier func(ctx context.Context, platform, channelID, text string) error
@@ -67,6 +72,7 @@ type Server struct {
 	executor          Executor
 	notifier          Notifier
 	deliveries        DeliveryStore
+	channels          ChannelStore
 	worktreeResolver  WorktreeResolver
 	httpSrv           *http.Server
 	listener          net.Listener
@@ -111,6 +117,10 @@ func (s *Server) SetWorktreeResolver(r WorktreeResolver) {
 
 func (s *Server) SetNotifier(n Notifier) {
 	s.notifier = n
+}
+
+func (s *Server) SetChannelStore(c ChannelStore) {
+	s.channels = c
 }
 
 func (s *Server) tryAcquireEvent() bool {
@@ -467,6 +477,37 @@ func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, d
 			return
 		}
 		workCtx.Worktree = worktree
+	}
+
+	if s.channels != nil {
+		ch, err := s.channels.Get(context.Background(), ep.Platform, ep.ChannelID)
+		if err != nil {
+			slog.Error("webhook: channel repo get failed", "endpoint", ep.Name, "platform", ep.Platform, "channel_id", ep.ChannelID, "error", err)
+			s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary("channel configuration error: "+err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
+			return
+		}
+		if ch != nil && strings.TrimSpace(ch.Model) != "" {
+			ref, err := relay.ParseModelRef(strings.TrimSpace(ch.Model))
+			if err != nil {
+				slog.Error("webhook: malformed channel model", "endpoint", ep.Name, "platform", ep.Platform, "channel_id", ep.ChannelID, "error", err)
+				s.failDelivery(ep, id, deliveryID, eventType, envelope, "invalid channel model", workCtx)
+				return
+			}
+			workCtx.Model = &ref
+			workCtx.ModelSource = "channel"
+			envelope["model"] = relay.FormatModelRef(ref)
+			envelope["model_source"] = "channel"
+		} else {
+			workCtx.Model = nil
+			workCtx.ModelSource = "fallback"
+			envelope["model"] = "agent/session default"
+			envelope["model_source"] = "fallback"
+		}
+	} else {
+		workCtx.Model = nil
+		workCtx.ModelSource = "fallback"
+		envelope["model"] = "agent/session default"
+		envelope["model_source"] = "fallback"
 	}
 
 	var payload map[string]any
