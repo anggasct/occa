@@ -102,20 +102,35 @@ func (r *GitWorktreeResolver) findRepoDir(repo string) (string, error) {
 	}
 
 	cleanProjectsDir := filepath.Clean(r.ProjectsDir)
+	realProjectsDir, err := filepath.EvalSymlinks(cleanProjectsDir)
+	if err != nil {
+		realProjectsDir = cleanProjectsDir
+	}
+
 	baseName := path.Base(repo)
 	candidates := []string{
-		filepath.Join(cleanProjectsDir, baseName),
 		filepath.Join(cleanProjectsDir, repo),
+		filepath.Join(cleanProjectsDir, baseName),
 	}
 
 	for _, cand := range candidates {
 		cleanCand := filepath.Clean(cand)
-		rel, err := filepath.Rel(cleanProjectsDir, cleanCand)
-		if err != nil || strings.HasPrefix(rel, "..") || rel == "." {
+		relLex, err := filepath.Rel(cleanProjectsDir, cleanCand)
+		if err != nil || strings.HasPrefix(relLex, "..") || relLex == "." {
 			continue
 		}
-		if stat, err := os.Stat(cleanCand); err == nil && stat.IsDir() {
-			return cleanCand, nil
+
+		realCand, err := filepath.EvalSymlinks(cleanCand)
+		if err != nil {
+			continue
+		}
+		relReal, err := filepath.Rel(realProjectsDir, realCand)
+		if err != nil || strings.HasPrefix(relReal, "..") || relReal == "." {
+			continue
+		}
+
+		if stat, err := os.Stat(realCand); err == nil && stat.IsDir() {
+			return realCand, nil
 		}
 	}
 	return "", fmt.Errorf("%w: %q under %s", ErrRepoNotFound, repo, r.ProjectsDir)
@@ -204,7 +219,7 @@ func (r *GitWorktreeResolver) generateWorktreePath(repoDir string, key WebhookEx
 		headRepo = key.Repository
 	}
 	h := sha256.Sum256([]byte(key.Repository + "\x00" + headRepo + "\x00" + key.Branch))
-	hashSuffix := hex.EncodeToString(h[:4])
+	hashHex := hex.EncodeToString(h[:])
 
 	slug := sanitizeBranchSlug(key.Branch)
 	if len(slug) > 30 {
@@ -220,7 +235,7 @@ func (r *GitWorktreeResolver) generateWorktreePath(repoDir string, key WebhookEx
 		slug = owner + "-" + slug
 	}
 
-	folderName := fmt.Sprintf("%s-%s", slug, hashSuffix)
+	folderName := fmt.Sprintf("%s-%s", slug, hashHex)
 	return filepath.Join(repoDir, ".worktree", folderName)
 }
 
@@ -229,15 +244,32 @@ func (r *GitWorktreeResolver) ResolveWorktree(ctx context.Context, key WebhookEx
 		return "", errors.New("missing repository or branch in execution key")
 	}
 
-	repoDir, err := r.findRepoDir(key.Repository)
-	if err != nil {
-		return "", err
+	var repoDir string
+	var err error
+
+	if key.HeadRepository != "" && key.HeadRepository != key.Repository {
+		repoDir, err = r.findRepoDir(key.HeadRepository)
+		if err != nil {
+			baseDir, bErr := r.findRepoDir(key.Repository)
+			if bErr != nil {
+				return "", fmt.Errorf("%w: neither head repo %q nor base repo %q found: %w", ErrRepoNotFound, key.HeadRepository, key.Repository, err)
+			}
+			repoDir = baseDir
+		}
+	} else {
+		repoDir, err = r.findRepoDir(key.Repository)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	mu, _ := r.repoMu.LoadOrStore(repoDir, &sync.Mutex{})
 	lock := mu.(*sync.Mutex)
 	lock.Lock()
 	defer lock.Unlock()
+
+	targetPath := r.generateWorktreePath(repoDir, key)
+	keyFile := targetPath + ".key"
 
 	worktrees, err := r.listWorktrees(ctx, repoDir)
 	if err != nil {
@@ -246,7 +278,12 @@ func (r *GitWorktreeResolver) ResolveWorktree(ctx context.Context, key WebhookEx
 
 	branchRef := "refs/heads/" + key.Branch
 	for _, wt := range worktrees {
-		if wt.Branch == branchRef || wt.Branch == key.Branch {
+		if filepath.Clean(wt.Path) == filepath.Clean(targetPath) && (wt.Branch == branchRef || wt.Branch == key.Branch) {
+			if data, err := os.ReadFile(keyFile); err == nil {
+				if strings.TrimSpace(string(data)) != key.String() {
+					return "", fmt.Errorf("%w: worktree at %s belongs to a different execution key %q", ErrWorktreeConflict, targetPath, string(data))
+				}
+			}
 			dirty, dErr := r.isWorktreeDirty(ctx, wt.Path)
 			if dErr != nil {
 				return "", fmt.Errorf("check worktree status: %w", dErr)
@@ -258,27 +295,8 @@ func (r *GitWorktreeResolver) ResolveWorktree(ctx context.Context, key WebhookEx
 		}
 	}
 
-	targetPath := r.generateWorktreePath(repoDir, key)
-
 	if fi, err := os.Stat(targetPath); err == nil && fi.IsDir() {
-		var isAttachedThisKey bool
-		for _, wt := range worktrees {
-			if filepath.Clean(wt.Path) == filepath.Clean(targetPath) && (wt.Branch == branchRef || wt.Branch == key.Branch) {
-				isAttachedThisKey = true
-				break
-			}
-		}
-		if !isAttachedThisKey {
-			return "", fmt.Errorf("%w: path %s already exists and is not an attached worktree for branch %s", ErrWorktreeConflict, targetPath, key.Branch)
-		}
-		dirty, dErr := r.isWorktreeDirty(ctx, targetPath)
-		if dErr != nil {
-			return "", fmt.Errorf("check worktree status: %w", dErr)
-		}
-		if dirty {
-			return "", fmt.Errorf("%w: worktree at %s has uncommitted changes", ErrWorktreeConflict, targetPath)
-		}
-		return targetPath, nil
+		return "", fmt.Errorf("%w: path %s already exists and is not an attached worktree for %s", ErrWorktreeConflict, targetPath, key.String())
 	}
 
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
@@ -297,9 +315,11 @@ func (r *GitWorktreeResolver) ResolveWorktree(ctx context.Context, key WebhookEx
 				return "", fmt.Errorf("add worktree for remote branch origin/%s: %w", key.Branch, err)
 			}
 		} else {
-			return "", fmt.Errorf("branch %q not found in local or remote refs", key.Branch)
+			return "", fmt.Errorf("branch %q not found in local or remote refs for repo %s", key.Branch, repoDir)
 		}
 	}
+
+	_ = os.WriteFile(keyFile, []byte(key.String()+"\n"), 0644)
 
 	return targetPath, nil
 }

@@ -73,7 +73,6 @@ func TestWorktreeResolverReusesExistingCleanWorktree(t *testing.T) {
 		Branch:     "feat/cool-feature",
 	}
 
-	// Create local branch first so resolver can create worktree
 	cmd := exec.Command("git", "branch", "feat/cool-feature")
 	cmd.Dir = repoDir
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -85,7 +84,6 @@ func TestWorktreeResolverReusesExistingCleanWorktree(t *testing.T) {
 		t.Fatalf("ResolveWorktree 1 failed: %v", err)
 	}
 
-	// Second resolve should reuse the exact same attached clean worktree
 	resolved2, err := resolver.ResolveWorktree(context.Background(), key)
 	if err != nil {
 		t.Fatalf("ResolveWorktree 2 failed: %v", err)
@@ -170,6 +168,39 @@ func TestWorktreeResolverRejectsPathTraversalAndAbsolutePaths(t *testing.T) {
 	}
 }
 
+func TestWorktreeResolverRejectsSymlinkEscapingProjectsDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	projectsDir := filepath.Join(tmpDir, "projects")
+	outsideDir := filepath.Join(tmpDir, "outside_repo")
+	if err := os.MkdirAll(projectsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	initTestGitRepo(t, outsideDir)
+
+	// Create symlink projects/evil_link -> outside_repo
+	symlinkPath := filepath.Join(projectsDir, "evil_link")
+	if err := os.Symlink(outsideDir, symlinkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	resolver := NewGitWorktreeResolver(projectsDir)
+	key := WebhookExecutionKey{
+		Repository: "evil_link",
+		Branch:     "main",
+	}
+
+	_, err := resolver.ResolveWorktree(context.Background(), key)
+	if err == nil {
+		t.Fatal("expected ErrRepoNotFound for symlink escaping projects root, got nil")
+	}
+	if !errors.Is(err, ErrRepoNotFound) {
+		t.Fatalf("expected ErrRepoNotFound, got %v", err)
+	}
+}
+
 func TestWorktreeResolverMissingBranchFailsClosedNoFabrication(t *testing.T) {
 	tmpDir := t.TempDir()
 	repoDir := filepath.Join(tmpDir, "myrepo")
@@ -192,7 +223,6 @@ func TestWorktreeResolverMissingBranchFailsClosedNoFabrication(t *testing.T) {
 		t.Fatalf("expected 'not found in local or remote refs' error, got %q", err.Error())
 	}
 
-	// Verify no branch was created in the git repository
 	cmd := exec.Command("git", "branch", "--list", "non-existent-pr-branch")
 	cmd.Dir = repoDir
 	out, err := cmd.CombinedOutput()
@@ -212,7 +242,6 @@ func TestWorktreeResolverInjectiveUniquePathAndDirectoryConflict(t *testing.T) {
 	}
 	initTestGitRepo(t, repoDir)
 
-	// Create branches
 	for _, b := range []string{
 		"feat/long-branch-name-that-exceeds-thirty-characters-1",
 		"feat/long-branch-name-that-exceeds-thirty-characters-2",
@@ -249,7 +278,7 @@ func TestWorktreeResolverInjectiveUniquePathAndDirectoryConflict(t *testing.T) {
 		t.Fatalf("colliding worktree paths for distinct branches: %q vs %q", path1, path2)
 	}
 
-	// 2. Different head repositories for same branch produce separate worktrees
+	// 2. Different head repositories produce separate worktrees
 	keyFork := WebhookExecutionKey{
 		Repository:     "anggasct/occa",
 		HeadRepository: "contributor/occa",
@@ -282,9 +311,105 @@ func TestWorktreeResolverInjectiveUniquePathAndDirectoryConflict(t *testing.T) {
 	if !errors.Is(err, ErrWorktreeConflict) {
 		t.Fatalf("expected ErrWorktreeConflict, got %v", err)
 	}
-	// Verify file was NOT deleted or mutated
 	if _, err := os.Stat(filepath.Join(unregisteredDir, "somefile.txt")); err != nil {
 		t.Fatal("pre-existing file was destructively deleted or altered")
+	}
+}
+
+func TestWorktreeResolverForkVersusUpstreamSameBranch(t *testing.T) {
+	tmpDir := t.TempDir()
+	upstreamDir := filepath.Join(tmpDir, "occa")
+	forkDir := filepath.Join(tmpDir, "contributor", "occa")
+	if err := os.MkdirAll(upstreamDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(forkDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	initTestGitRepo(t, upstreamDir)
+	initTestGitRepo(t, forkDir)
+
+	for _, d := range []string{upstreamDir, forkDir} {
+		cmd := exec.Command("git", "branch", "fix/shared-name")
+		cmd.Dir = d
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("create branch in %s: %v\n%s", d, err, out)
+		}
+	}
+
+	resolver := NewGitWorktreeResolver(tmpDir)
+
+	upstreamKey := WebhookExecutionKey{
+		Repository:     "anggasct/occa",
+		HeadRepository: "anggasct/occa",
+		Branch:         "fix/shared-name",
+	}
+	forkKey := WebhookExecutionKey{
+		Repository:     "anggasct/occa",
+		HeadRepository: "contributor/occa",
+		Branch:         "fix/shared-name",
+	}
+
+	upstreamPath, err := resolver.ResolveWorktree(context.Background(), upstreamKey)
+	if err != nil {
+		t.Fatalf("resolve upstream: %v", err)
+	}
+	forkPath, err := resolver.ResolveWorktree(context.Background(), forkKey)
+	if err != nil {
+		t.Fatalf("resolve fork: %v", err)
+	}
+
+	if upstreamPath == forkPath {
+		t.Fatalf("fork and upstream shared the same worktree path: %q", upstreamPath)
+	}
+	if !strings.HasPrefix(upstreamPath, upstreamDir) {
+		t.Fatalf("upstream path %q not in %q", upstreamPath, upstreamDir)
+	}
+	if !strings.HasPrefix(forkPath, forkDir) {
+		t.Fatalf("fork path %q not in %q", forkPath, forkDir)
+	}
+}
+
+func TestWorktreeResolverIdentityMismatchConflict(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "occa")
+	if err := os.MkdirAll(repoDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	initTestGitRepo(t, repoDir)
+
+	cmd := exec.Command("git", "branch", "feat/test")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("create branch: %v\n%s", err, out)
+	}
+
+	resolver := NewGitWorktreeResolver(tmpDir)
+	key := WebhookExecutionKey{
+		Repository: "anggasct/occa",
+		Branch:     "feat/test",
+	}
+
+	resolved, err := resolver.ResolveWorktree(context.Background(), key)
+	if err != nil {
+		t.Fatalf("initial resolve: %v", err)
+	}
+
+	// Tamper with key file to simulate identity mismatch
+	keyFile := resolved + ".key"
+	if err := os.WriteFile(keyFile, []byte("different/repo:different/repo:other-branch\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = resolver.ResolveWorktree(context.Background(), key)
+	if err == nil {
+		t.Fatal("expected ErrWorktreeConflict on identity mismatch, got nil")
+	}
+	if !errors.Is(err, ErrWorktreeConflict) {
+		t.Fatalf("expected ErrWorktreeConflict, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "belongs to a different execution key") {
+		t.Fatalf("expected error to mention different execution key, got %q", err.Error())
 	}
 }
 
