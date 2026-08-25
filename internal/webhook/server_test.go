@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -2306,6 +2307,11 @@ func TestWebhookModelResolution_ChannelRepoErrorFailsClosed(t *testing.T) {
 }
 
 func TestWebhookModelResolution_MalformedChannelModelFailsClosed(t *testing.T) {
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
 	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{{
 		Name:      "github",
 		Path:      "/github",
@@ -2315,7 +2321,8 @@ func TestWebhookModelResolution_MalformedChannelModelFailsClosed(t *testing.T) {
 		Prompt:    "analyze",
 	}})
 
-	if err := st.ChannelRepo().UpsertModel(context.Background(), "telegram", "chat-malformed", "invalid_no_slash"); err != nil {
+	malformedCredentialValue := "provider_with_api_key_sk_test_12345_no_slash"
+	if err := st.ChannelRepo().UpsertModel(context.Background(), "telegram", "chat-malformed", malformedCredentialValue); err != nil {
 		t.Fatalf("upsert channel model: %v", err)
 	}
 
@@ -2349,10 +2356,14 @@ func TestWebhookModelResolution_MalformedChannelModelFailsClosed(t *testing.T) {
 		if !strings.Contains(summary, "invalid channel model") {
 			t.Fatalf("audit summary missing 'invalid channel model': %q", summary)
 		}
-		if strings.Contains(summary, "invalid_no_slash") {
+		if strings.Contains(summary, malformedCredentialValue) {
 			t.Fatalf("audit summary leaked raw malformed model string: %q", summary)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("expected audit summary notification")
+	}
+
+	if strings.Contains(logBuf.String(), malformedCredentialValue) {
+		t.Fatalf("captured logs leaked raw malformed model credential string: %q", logBuf.String())
 	}
 }

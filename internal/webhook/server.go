@@ -489,7 +489,7 @@ func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, d
 		if ch != nil && strings.TrimSpace(ch.Model) != "" {
 			ref, err := relay.ParseModelRef(strings.TrimSpace(ch.Model))
 			if err != nil {
-				slog.Error("webhook: malformed channel model", "endpoint", ep.Name, "platform", ep.Platform, "channel_id", ep.ChannelID, "error", err)
+				slog.Error("webhook: malformed channel model", "endpoint", ep.Name, "platform", ep.Platform, "channel_id", ep.ChannelID)
 				s.failDelivery(ep, id, deliveryID, eventType, envelope, "invalid channel model", workCtx)
 				return
 			}

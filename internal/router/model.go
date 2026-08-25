@@ -247,7 +247,7 @@ func (r *Router) validateModel(ctx context.Context, msg channel.IncomingMessage,
 func parseModelRef(value string) (relay.ModelRef, error) {
 	ref, err := relay.ParseModelRef(value)
 	if err != nil {
-		if errors.Is(err, errors.New("invalid variant")) || strings.Contains(err.Error(), "invalid variant") {
+		if errors.Is(err, relay.ErrInvalidVariant) {
 			return relay.ModelRef{}, safeReplyError("invalid variant", nil)
 		}
 		return relay.ModelRef{}, safeReplyError(fmt.Sprintf("invalid model %q; use provider/model-id[@variant]", value), nil)

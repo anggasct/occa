@@ -32,6 +32,8 @@ type Attachment struct {
 	Data     []byte
 }
 
+var ErrInvalidVariant = errors.New("invalid variant")
+
 type ModelRef struct {
 	ProviderID string `json:"providerID"`
 	ID         string `json:"modelID"`
@@ -51,7 +53,7 @@ func ParseModelRef(value string) (ModelRef, error) {
 	var variant string
 	if modelID, v, hasAt := strings.Cut(modelIDPart, "@"); hasAt {
 		if v == "" {
-			return ModelRef{}, errors.New("invalid variant")
+			return ModelRef{}, ErrInvalidVariant
 		}
 		if modelID == "" {
 			return ModelRef{}, fmt.Errorf("invalid model %q; use provider/model-id[@variant]", value)
