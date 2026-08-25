@@ -19,10 +19,11 @@ type PermissionPolicyInput struct {
 
 func BuildPermissionPolicy(input PermissionPolicyInput) (relay.PermissionRuleset, error) {
 	workflow := strings.TrimSpace(strings.ToLower(input.Workflow))
+	repository := strings.TrimSpace(input.Repository)
 	if !isWebhookWorkflow(workflow) {
 		return nil, fmt.Errorf("unsupported webhook workflow %q", input.Workflow)
 	}
-	if !isSafeRepository(input.Repository) || strings.TrimSpace(input.PRNumber) == "" {
+	if !isSafeRepository(repository) || strings.TrimSpace(input.PRNumber) == "" {
 		return nil, fmt.Errorf("repository and pull request are required")
 	}
 	if !isDigits(input.PRNumber) {
@@ -31,15 +32,15 @@ func BuildPermissionPolicy(input PermissionPolicyInput) (relay.PermissionRuleset
 	if workflow == "github_fix" && !isSafeBranch(input.Branch) {
 		return nil, fmt.Errorf("invalid branch scope")
 	}
-	if strings.TrimSpace(input.Worktree) == "" || !filepath.IsAbs(input.Worktree) {
-		return nil, fmt.Errorf("absolute worktree is required")
+	if !isSafeAbsolutePath(input.Worktree) {
+		return nil, fmt.Errorf("safe absolute worktree is required")
 	}
-	if strings.TrimSpace(input.ProjectDocsRoot) == "" || !filepath.IsAbs(input.ProjectDocsRoot) {
-		return nil, fmt.Errorf("absolute project-doc root is required")
+	if !isSafeAbsolutePath(input.ProjectDocsRoot) {
+		return nil, fmt.Errorf("safe absolute project-doc root is required")
 	}
 
-	worktree := canonicalPath(input.Worktree)
-	docs := canonicalPath(input.ProjectDocsRoot)
+	worktree := canonicalPath(strings.TrimSpace(input.Worktree))
+	docs := canonicalPath(strings.TrimSpace(input.ProjectDocsRoot))
 	policy := relay.PermissionRuleset{{Permission: "*", Pattern: "*", Action: "deny"}}
 	allowPath := func(permission, root string) {
 		for _, pattern := range []string{root, root + string(filepath.Separator) + "**"} {
@@ -82,12 +83,17 @@ func BuildPermissionPolicy(input PermissionPolicyInput) (relay.PermissionRuleset
 		allowExternalWorktree()
 		allowExternalDocs()
 		for _, command := range []string{
-			"git status*",
-			"git diff*",
-			"git log*",
-			"gh pr view " + input.PRNumber + " --repo " + input.Repository + "*",
-			"gh pr checks " + input.PRNumber + " --repo " + input.Repository + "*",
-			"gh pr review " + input.PRNumber + " --repo " + input.Repository + "*",
+			"git status --short",
+			"git diff --check",
+			"git diff --stat",
+			"git diff origin/main...HEAD",
+			"git log --oneline -5",
+			"gh pr view " + input.PRNumber + " --repo " + repository,
+			"gh pr diff " + input.PRNumber + " --repo " + repository,
+			"gh pr checks " + input.PRNumber + " --repo " + repository,
+			"gh pr review " + input.PRNumber + " --repo " + repository + " --approve",
+			"gh pr review " + input.PRNumber + " --repo " + repository + " --request-changes",
+			"gh pr review " + input.PRNumber + " --repo " + repository + " --comment",
 		} {
 			allowCommand(command)
 		}
@@ -96,48 +102,52 @@ func BuildPermissionPolicy(input PermissionPolicyInput) (relay.PermissionRuleset
 		allowExternalWorktree()
 		allowExternalDocs()
 		allowPath("edit", worktree)
-		policy = append(policy, relay.PermissionRule{Permission: "edit", Pattern: "*", Action: "allow"})
 		for _, command := range []string{
-			"git status*",
-			"git diff*",
-			"git log*",
-			"git show*",
-			"git add*",
-			"git commit*",
+			"git status --short",
+			"git diff --check",
+			"git diff --stat",
+			"git diff origin/main...HEAD",
+			"git log --oneline -5",
+			"git show --stat --oneline HEAD",
+			"git add --all",
+			"git commit -m \"fix: bound headless webhook permission policy\"",
 			"git push origin " + input.Branch,
-			"go test*",
-			"go vet*",
-			"gofmt*",
-			"make test*",
-			"make lint*",
-			"make check*",
-			"make build*",
-			"gh pr view " + input.PRNumber + " --repo " + input.Repository + "*",
-			"gh pr checks " + input.PRNumber + " --repo " + input.Repository + "*",
-			"gh pr comment " + input.PRNumber + " --repo " + input.Repository + "*",
+			"go test ./... -count=1",
+			"go test -race ./internal/webhook/... ./internal/relay/... ./internal/process/...",
+			"go vet ./...",
+			"gofmt -l .",
+			"make test",
+			"make lint",
+			"make check",
+			"make build",
+			"make fmt",
+			"gh pr view " + input.PRNumber + " --repo " + repository,
+			"gh pr checks " + input.PRNumber + " --repo " + repository,
+			"gh pr comment " + input.PRNumber + " --repo " + repository + " --body \"please re-review @kumasct\"",
 		} {
 			allowCommand(command)
 		}
 		for _, command := range []string{
-			"git push --force*",
-			"git push -f*",
-			"git checkout*",
-			"git switch*",
-			"git worktree*",
-			"git reset*",
-			"git clean*",
-			"git stash*",
-			"gh pr merge*",
-			"gh pr review*",
+			"git push --force",
+			"git push -f",
+			"git checkout",
+			"git switch",
+			"git worktree",
+			"git reset",
+			"git clean",
+			"git stash",
+			"gh pr merge",
+			"gh pr review",
 		} {
 			deny("bash", command)
 		}
 	case "github_merge":
 		deny("edit", "*")
 		for _, command := range []string{
-			"gh pr view " + input.PRNumber + " --repo " + input.Repository + "*",
-			"gh pr checks " + input.PRNumber + " --repo " + input.Repository + "*",
-			"gh pr merge " + input.PRNumber + " --repo " + input.Repository + "*",
+			"gh pr view " + input.PRNumber + " --repo " + repository,
+			"gh pr checks " + input.PRNumber + " --repo " + repository,
+			"gh pr merge " + input.PRNumber + " --repo " + repository + " --squash --delete-branch",
+			"gh pr merge " + input.PRNumber + " --repo " + repository + " --auto --squash --delete-branch",
 		} {
 			allowCommand(command)
 		}
@@ -149,16 +159,17 @@ func BuildPermissionPolicy(input PermissionPolicyInput) (relay.PermissionRuleset
 		policy = append(policy, relay.PermissionRule{Permission: "edit", Pattern: "project-docs/**", Action: "allow"})
 		allowExternalDocs()
 		for _, command := range []string{
-			"gh pr view " + input.PRNumber + " --repo " + input.Repository + "*",
-			"git -C " + filepath.ToSlash(docs) + " status*",
-			"git -C " + filepath.ToSlash(docs) + " diff*",
-			"git -C " + filepath.ToSlash(docs) + " add*",
-			"git -C " + filepath.ToSlash(docs) + " commit*",
-			"git -C " + filepath.ToSlash(docs) + " push*",
+			"gh pr view " + input.PRNumber + " --repo " + repository,
+			"git -C " + filepath.ToSlash(docs) + " status --short",
+			"git -C " + filepath.ToSlash(docs) + " diff --check",
+			"git -C " + filepath.ToSlash(docs) + " diff --stat",
+			"git -C " + filepath.ToSlash(docs) + " add --all",
+			"git -C " + filepath.ToSlash(docs) + " commit -m \"docs: update project documentation\"",
+			"git -C " + filepath.ToSlash(docs) + " push origin main",
 		} {
 			allowCommand(command)
 		}
-		for _, command := range []string{"gh pr review*", "gh pr merge*"} {
+		for _, command := range []string{"gh pr review", "gh pr merge"} {
 			deny("bash", command)
 		}
 	}
@@ -216,6 +227,19 @@ func isSafeBranch(value string) bool {
 
 func isSafeScopeChar(r rune) bool {
 	return r == '-' || r == '_' || r == '.' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9'
+}
+
+func isSafeAbsolutePath(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || !filepath.IsAbs(value) {
+		return false
+	}
+	for _, r := range value {
+		if r == ';' || r == '|' || r == '&' || r == '$' || r == '`' || r == '(' || r == ')' || r == '<' || r == '>' || r == '*' || r == '?' || r == '\n' || r == '\r' {
+			return false
+		}
+	}
+	return filepath.Clean(value) != string(filepath.Separator)
 }
 
 func canonicalPath(value string) string {
