@@ -227,6 +227,7 @@ func declaresNoFindings(value string) bool {
 	return strings.Contains(value, "no actionable finding") ||
 		strings.Contains(value, "actionable findings: 0") ||
 		strings.Contains(value, "actionable findings: none") ||
+		strings.Contains(value, "no blocking findings") ||
 		strings.Contains(value, "findings: none") ||
 		strings.Contains(value, "findings: 0") ||
 		strings.Contains(value, "no findings") ||

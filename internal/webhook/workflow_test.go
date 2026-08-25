@@ -104,6 +104,7 @@ func TestWebhookWorkflowGateMatrix(t *testing.T) {
 		{"github_merge", "pull_request_review", `{"action":"submitted","review":{"state":"approved"}}`, true},
 		{"github_fix", "pull_request_review", `{"action":"submitted","pull_request":{"user":{"login":"kumasct"}},"review":{"state":"commented","body":"**Verdict:** REQUEST_CHANGES\n\nActionable findings: 1","user":{"login":"kumasct"}}}`, true},
 		{"github_merge", "pull_request_review", `{"action":"submitted","pull_request":{"user":{"login":"kumasct"}},"review":{"state":"commented","body":"**Verdict:** APPROVED\n\nNo actionable findings.","user":{"login":"kumasct"}}}`, true},
+		{"github_merge", "pull_request_review", `{"action":"submitted","pull_request":{"user":{"login":"kumasct"}},"review":{"state":"commented","body":"**Verdict:** APPROVED\n\n### Findings\n\nNo blocking findings.","user":{"login":"kumasct"}}}`, true},
 		{"github_merge", "pull_request_review", `{"action":"submitted","pull_request":{"user":{"login":"kumasct"}},"review":{"state":"commented","body":"**Verdict:** APPROVED\n\nActionable findings: 1","user":{"login":"kumasct"}}}`, false},
 		{"github_merge", "pull_request_review", `{"action":"submitted","pull_request":{"user":{"login":"other"}},"review":{"state":"commented","body":"**Verdict:** APPROVED\n\nNo actionable findings.","user":{"login":"kumasct"}}}`, false},
 		{"github_merge", "issue_comment", `{"action":"created","issue":{"number":2},"comment":{"body":"please re-review"}}`, false},
@@ -155,6 +156,31 @@ func TestWebhookMergeSkipsFormalFindingsSelfReview(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("formal findings self-review did not emit an audit summary")
+	}
+}
+
+func TestWebhookMergeAllowsNoBlockingFindingsSelfReview(t *testing.T) {
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{{
+		Name:      "github",
+		Path:      "/github",
+		Secret:    "secret",
+		Workflow:  "github_merge",
+		Platform:  "telegram",
+		ChannelID: "chat",
+		Prompt:    "must run",
+	}})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	body := `{"action":"submitted","repository":{"full_name":"anggasct/occa"},"pull_request":{"number":123,"html_url":"https://github.com/anggasct/occa/pull/123","title":"Webhook UX","user":{"login":"kumasct"}},"review":{"state":"commented","body":"**Verdict:** APPROVED\n\n### Findings\n\nNo blocking findings.","user":{"login":"kumasct"}}}`
+	if response := post(t, ts.URL+"/github?secret=secret", "clean-approval", "pull_request_review", body); response.StatusCode != http.StatusOK {
+		t.Fatalf("POST status = %d, want 200", response.StatusCode)
+	}
+	waitForReceipt(t, st, store.WebhookStatusCompleted)
+	if exec.callCount() != 1 {
+		t.Fatalf("clean self-review invoked executor %d times, want 1", exec.callCount())
 	}
 }
 
