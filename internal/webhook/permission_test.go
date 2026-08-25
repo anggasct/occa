@@ -32,8 +32,10 @@ func TestBuildPermissionPolicyCoversEveryWebhookWorkflow(t *testing.T) {
 				if rule.Permission == "*" && rule.Pattern == "*" && rule.Action == "allow" {
 					t.Fatal("policy contains a global allow rule")
 				}
-				if rule.Permission == "bash" && strings.ContainsAny(rule.Pattern, "*?") {
-					t.Fatalf("bash rule is not an exact command scope: %+v", rule)
+				if rule.Permission == "bash" && rule.Action == "allow" && strings.ContainsAny(rule.Pattern, "*?") {
+					if !strings.HasPrefix(rule.Pattern, "git commit -m \"") && !strings.HasPrefix(rule.Pattern, "gh pr comment 42 --repo anggasct/occa --body \"") {
+						t.Fatalf("bash rule is not a bounded command scope: %+v", rule)
+					}
 				}
 			}
 		})
@@ -120,14 +122,20 @@ func TestBuildPermissionPolicyCommandMatrix(t *testing.T) {
 				"git status --short",
 				"git diff --check",
 				"gh pr view 42 --repo anggasct/occa",
+				"gh pr view 42 --repo anggasct/occa --json title,state",
+				"gh pr view 42 --repo anggasct/occa --json files,commits,headRefName,baseRefName,title",
 				"gh pr checks 42 --repo anggasct/occa",
-				"gh pr review 42 --repo anggasct/occa --approve",
+				"gh pr review 42 --repo anggasct/occa --approve --body-file /tmp/review.md",
+				"gh pr review 42 --repo anggasct/occa --request-changes --body-file /tmp/review.md",
+				"gh pr review 42 --repo anggasct/occa --comment --body-file /tmp/review.md",
 			},
 			denied: []string{
 				"git status --short --untracked-files=all",
 				"gh pr view 42 --repo anggasct/other",
 				"gh pr view 42 --repo anggasct/occa --json files",
-				"gh pr review 42 --repo anggasct/occa --approve --body hacked",
+				"gh pr view 42 --repo anggasct/occa --json title,state,files",
+				"gh pr review 42 --repo anggasct/occa --approve",
+				"gh pr review 42 --repo anggasct/occa --approve --body-file /tmp/other.md",
 				"git status --short; touch /tmp/pwned",
 			},
 		},
@@ -140,7 +148,9 @@ func TestBuildPermissionPolicyCommandMatrix(t *testing.T) {
 				"make test",
 				"gofmt -l .",
 				"git push origin fix/webhook-permissions",
-				"gh pr comment 42 --repo anggasct/occa --body \"please re-review @kumasct\"",
+				"git commit -m \"fix: tighten reviewer command scopes\"",
+				"gh pr comment 42 --repo anggasct/occa --body \"## Review fix: tighten command scopes. Verification passed. Ready for re-review.\"",
+				"gh pr comment 42 --repo anggasct/occa --body-file /tmp/review-fix.md",
 			},
 			denied: []string{
 				"git add --all --no-verify",
@@ -149,6 +159,10 @@ func TestBuildPermissionPolicyCommandMatrix(t *testing.T) {
 				"git push origin fix/webhook-permissions --force",
 				"git push origin other-branch",
 				"gh pr comment 42 --repo other/occa --body \"please re-review @kumasct\"",
+				"git commit -m \"fix: tighten reviewer command scopes\" --no-verify",
+				"git commit -m \"fix: run $(touch /tmp/pwned)\"",
+				"gh pr comment 42 --repo anggasct/occa --body \"details `rm -rf /`\"",
+				"gh pr comment 42 --repo anggasct/occa --body \"review\" --edit-last",
 				"git commit -m \"fix\"; git push origin main",
 			},
 		},

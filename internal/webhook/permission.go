@@ -73,6 +73,12 @@ func BuildPermissionPolicy(input PermissionPolicyInput) (relay.PermissionRuleset
 	allowCommand := func(command string) {
 		policy = append(policy, relay.PermissionRule{Permission: "bash", Pattern: command, Action: "allow"})
 	}
+	allowSafeQuotedArgument := func(prefix, suffix string) {
+		allowCommand(prefix + "*" + suffix)
+		for _, character := range []string{";", "|", "&", "$", "`", "(", ")", "<", ">", "\\", "\"", "\n", "\r"} {
+			deny("bash", prefix+"*"+character+"*"+suffix)
+		}
+	}
 	deny("external_directory", "*")
 
 	switch workflow {
@@ -88,11 +94,15 @@ func BuildPermissionPolicy(input PermissionPolicyInput) (relay.PermissionRuleset
 			"git diff origin/main...HEAD",
 			"git log --oneline -5",
 			"gh pr view " + input.PRNumber + " --repo " + repository,
+			"gh pr view " + input.PRNumber + " --repo " + repository + " --json title,state",
+			"gh pr view " + input.PRNumber + " --repo " + repository + " --json title,state,headRefName,baseRefName",
+			"gh pr view " + input.PRNumber + " --repo " + repository + " --json files,commits,headRefName,baseRefName,title",
+			"gh pr view " + input.PRNumber + " --repo " + repository + " --json mergedAt,mergeCommit,files,additions,deletions,changedFiles,labels,headRefName,baseRefName,title",
 			"gh pr diff " + input.PRNumber + " --repo " + repository,
 			"gh pr checks " + input.PRNumber + " --repo " + repository,
-			"gh pr review " + input.PRNumber + " --repo " + repository + " --approve",
-			"gh pr review " + input.PRNumber + " --repo " + repository + " --request-changes",
-			"gh pr review " + input.PRNumber + " --repo " + repository + " --comment",
+			"gh pr review " + input.PRNumber + " --repo " + repository + " --approve --body-file /tmp/review.md",
+			"gh pr review " + input.PRNumber + " --repo " + repository + " --request-changes --body-file /tmp/review.md",
+			"gh pr review " + input.PRNumber + " --repo " + repository + " --comment --body-file /tmp/review.md",
 		} {
 			allowCommand(command)
 		}
@@ -109,7 +119,6 @@ func BuildPermissionPolicy(input PermissionPolicyInput) (relay.PermissionRuleset
 			"git log --oneline -5",
 			"git show --stat --oneline HEAD",
 			"git add --all",
-			"git commit -m \"fix: bound headless webhook permission policy\"",
 			"git push origin " + input.Branch,
 			"go test ./... -count=1",
 			"go test -race ./internal/webhook/... ./internal/relay/... ./internal/process/...",
@@ -122,10 +131,12 @@ func BuildPermissionPolicy(input PermissionPolicyInput) (relay.PermissionRuleset
 			"make fmt",
 			"gh pr view " + input.PRNumber + " --repo " + repository,
 			"gh pr checks " + input.PRNumber + " --repo " + repository,
-			"gh pr comment " + input.PRNumber + " --repo " + repository + " --body \"please re-review @kumasct\"",
+			"gh pr comment " + input.PRNumber + " --repo " + repository + " --body-file /tmp/review-fix.md",
 		} {
 			allowCommand(command)
 		}
+		allowSafeQuotedArgument("git commit -m \"", "\"")
+		allowSafeQuotedArgument("gh pr comment "+input.PRNumber+" --repo "+repository+" --body \"", "\"")
 		for _, command := range []string{
 			"git push --force",
 			"git push -f",
