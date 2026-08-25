@@ -2,6 +2,8 @@ package relay
 
 import (
 	"context"
+	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/anggasct/occa/internal/store"
@@ -66,6 +68,10 @@ type mockClient struct {
 	sessionExists bool
 	existsErr     error
 	existsCalls   int
+	events        []string
+	permission    []PermissionRuleset
+	permissionErr error
+	sendCalls     int
 }
 
 func (m *mockClient) CreateSession(_ context.Context) (string, error) {
@@ -74,7 +80,13 @@ func (m *mockClient) CreateSession(_ context.Context) (string, error) {
 func (m *mockClient) CreateSessionWithPermission(_ context.Context, _ PermissionRuleset) (string, error) {
 	return m.sessionID, nil
 }
-func (m *mockClient) SetSessionPermission(_ context.Context, _ string, _ PermissionRuleset) error {
+
+func (m *mockClient) SetSessionPermission(_ context.Context, _ string, ruleset PermissionRuleset) error {
+	m.events = append(m.events, "set_permission")
+	m.permission = append(m.permission, ruleset)
+	if m.permissionErr != nil {
+		return m.permissionErr
+	}
 	return nil
 }
 
@@ -91,6 +103,8 @@ func (m *mockClient) SessionExists(_ context.Context, _ string) (bool, error) {
 }
 
 func (m *mockClient) SendMessage(_ context.Context, _, _ string, _ *ModelRef, _ []Attachment) error {
+	m.events = append(m.events, "send")
+	m.sendCalls++
 	return nil
 }
 func (m *mockClient) Providers(_ context.Context) (Providers, error)  { return Providers{}, nil }
@@ -133,6 +147,85 @@ func TestResolveExisting(t *testing.T) {
 	}
 	if client.existsCalls != 0 {
 		t.Fatalf("same-PID fast path must not call SessionExists, got %d calls", client.existsCalls)
+	}
+	if err := client.SendMessage(context.Background(), id, "normal chat", nil, nil); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	if len(client.permission) != 0 {
+		t.Fatal("normal chat must not apply a headless permission policy")
+	}
+}
+
+func TestResolveReusedSessionAppliesPermissionBeforePrompt(t *testing.T) {
+	rules := PermissionRuleset{
+		{Permission: "*", Pattern: "*", Action: "deny"},
+		{Permission: "read", Pattern: "/srv/pr/**", Action: "allow"},
+	}
+
+	t.Run("same agent", func(t *testing.T) {
+		repo := &mockSessionRepo{activeID: "existing", ownerPID: 100}
+		client := &mockClient{sessionID: "new-session"}
+		resolver := NewSessionResolver(repo, client)
+
+		id, err := resolver.ResolveWithPermission(context.Background(), "telegram", "123", "", "user-1", 100, rules)
+		if err != nil {
+			t.Fatalf("ResolveWithPermission: %v", err)
+		}
+		if id != "existing" {
+			t.Fatalf("got %q, want existing", id)
+		}
+		if err := client.SendMessage(context.Background(), id, "webhook", nil, nil); err != nil {
+			t.Fatalf("SendMessage: %v", err)
+		}
+		if !reflect.DeepEqual(client.events, []string{"set_permission", "send"}) {
+			t.Fatalf("events = %v, want [set_permission send]", client.events)
+		}
+		if len(client.permission) != 1 || !reflect.DeepEqual(client.permission[0], rules) {
+			t.Fatalf("permission rules = %#v, want %#v", client.permission, rules)
+		}
+	})
+
+	t.Run("adopted session", func(t *testing.T) {
+		repo := &mockSessionRepo{activeID: "existing", ownerPID: 999}
+		client := &mockClient{sessionExists: true}
+		resolver := NewSessionResolver(repo, client)
+
+		id, err := resolver.ResolveWithPermission(context.Background(), "telegram", "123", "", "user-1", 100, rules)
+		if err != nil {
+			t.Fatalf("ResolveWithPermission: %v", err)
+		}
+		if id != "existing" {
+			t.Fatalf("got %q, want existing", id)
+		}
+		if err := client.SendMessage(context.Background(), id, "webhook", nil, nil); err != nil {
+			t.Fatalf("SendMessage: %v", err)
+		}
+		if !reflect.DeepEqual(client.events, []string{"set_permission", "send"}) {
+			t.Fatalf("events = %v, want [set_permission send]", client.events)
+		}
+		if len(client.permission) != 1 || !reflect.DeepEqual(client.permission[0], rules) {
+			t.Fatalf("permission rules = %#v, want %#v", client.permission, rules)
+		}
+		if len(repo.setCalls) != 1 || repo.setCalls[0].agentPID != 100 {
+			t.Fatalf("adopted session was not stamped with current PID: %+v", repo.setCalls)
+		}
+	})
+}
+
+func TestResolveReusedSessionPermissionFailurePreventsPrompt(t *testing.T) {
+	repo := &mockSessionRepo{activeID: "existing", ownerPID: 100}
+	client := &mockClient{permissionErr: errors.New("patch failed")}
+	resolver := NewSessionResolver(repo, client)
+
+	_, err := resolver.ResolveWithPermission(context.Background(), "telegram", "123", "", "user-1", 100, PermissionRuleset{{Permission: "*", Pattern: "*", Action: "deny"}})
+	if err == nil {
+		t.Fatal("expected permission update failure")
+	}
+	if client.sendCalls != 0 {
+		t.Fatalf("SendMessage calls = %d, want 0 after permission failure", client.sendCalls)
+	}
+	if len(repo.setCalls) != 0 {
+		t.Fatalf("SetActive calls = %d, want 0 after permission failure", len(repo.setCalls))
 	}
 }
 

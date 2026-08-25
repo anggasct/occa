@@ -252,19 +252,6 @@ func main() {
 						send("⚠️ Webhook analysis failed: session error")
 						return errors.New("webhook session unavailable")
 					}
-					if len(workCtx.PermissionRuleset) > 0 {
-						permissionClient, ok := inst.Client().(interface {
-							SetSessionPermission(context.Context, string, relay.PermissionRuleset) error
-						})
-						if !ok {
-							send("⚠️ Webhook analysis failed: permission policy unsupported")
-							return errors.New("webhook permission policy unsupported")
-						}
-						if err := permissionClient.SetSessionPermission(ctx, sessionID, workCtx.PermissionRuleset); err != nil {
-							send("⚠️ Webhook analysis failed: permission policy error")
-							return errors.New("webhook permission policy failed")
-						}
-					}
 
 					if err := inst.Client().SendMessage(ctx, sessionID, prompt, workCtx.Model, nil); err != nil {
 						send("⚠️ Webhook analysis failed: agent request error")
