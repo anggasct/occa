@@ -55,14 +55,28 @@ type agentBrowseAction struct {
 }
 
 type agentBrowserBroker struct {
-	mu     sync.Mutex
-	tokens map[string]agentBrowseAction
+	mu          sync.Mutex
+	tokens      map[string]agentBrowseAction
+	ownerTokens map[string][]string
 }
 
 func newAgentBrowserBroker() *agentBrowserBroker {
 	return &agentBrowserBroker{
-		tokens: make(map[string]agentBrowseAction),
+		tokens:      make(map[string]agentBrowseAction),
+		ownerTokens: make(map[string][]string),
 	}
+}
+
+func (b *agentBrowserBroker) revokeOwner(ownerFP string) {
+	if ownerFP == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, tok := range b.ownerTokens[ownerFP] {
+		delete(b.tokens, tok)
+	}
+	delete(b.ownerTokens, ownerFP)
 }
 
 func (b *agentBrowserBroker) register(action agentBrowseAction) (string, error) {
@@ -86,6 +100,9 @@ func (b *agentBrowserBroker) register(action agentBrowseAction) (string, error) 
 		delete(b.tokens, oldest)
 	}
 	b.tokens[token] = action
+	if action.ownerFP != "" {
+		b.ownerTokens[action.ownerFP] = append(b.ownerTokens[action.ownerFP], token)
+	}
 	return token, nil
 }
 
@@ -187,6 +204,81 @@ func isValidAgentName(name string) bool {
 	return filepath.Base(name) == name
 }
 
+func filterAgents(all []relay.AgentInfo) (switchable []relay.AgentInfo, subagents []string) {
+	for _, a := range all {
+		if hiddenInternalAgents[a.Name] {
+			continue
+		}
+		switch a.Mode {
+		case "primary":
+			switchable = append(switchable, a)
+		case "subagent":
+			subagents = append(subagents, a.Name)
+		default:
+		}
+	}
+	return switchable, subagents
+}
+
+func validateProjectAgentFile(workdir, agentName string) (string, error) {
+	if !isValidAgentName(agentName) {
+		return "", errors.New("invalid agent name")
+	}
+
+	agentDir := filepath.Join(workdir, ".opencode", "agent")
+	agentFile := filepath.Join(agentDir, agentName+".md")
+
+	wInfo, err := os.Lstat(workdir)
+	if err != nil {
+		return "", err
+	}
+	if wInfo.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("symlinked workdir not allowed")
+	}
+
+	dInfo, err := os.Lstat(agentDir)
+	if err != nil {
+		return "", err
+	}
+	if dInfo.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("symlinked agent directory not allowed")
+	}
+
+	fInfo, err := os.Lstat(agentFile)
+	if err != nil {
+		return "", err
+	}
+	if fInfo.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("symlinked agent file not allowed")
+	}
+	if !fInfo.Mode().IsRegular() {
+		return "", errors.New("not a regular file")
+	}
+
+	realWorkdir, err := filepath.EvalSymlinks(workdir)
+	if err != nil {
+		return "", err
+	}
+	realDir, err := filepath.EvalSymlinks(agentDir)
+	if err != nil {
+		return "", err
+	}
+	realFile, err := filepath.EvalSymlinks(agentFile)
+	if err != nil {
+		return "", err
+	}
+
+	expectedDir := filepath.Join(realWorkdir, ".opencode", "agent")
+	if realDir != expectedDir {
+		return "", errors.New("agent directory escaped workdir")
+	}
+	if filepath.Dir(realFile) != expectedDir || filepath.Base(realFile) != agentName+".md" {
+		return "", errors.New("agent file escaped agent directory")
+	}
+
+	return agentFile, nil
+}
+
 func (r *Router) handleAgent(ctx context.Context, msg channel.IncomingMessage, args string) (string, error) {
 	parts := strings.Fields(args)
 	if len(parts) == 0 || parts[0] == "list" || parts[0] == "refresh" {
@@ -250,6 +342,8 @@ func (r *Router) buildAgentPickerPage(ctx context.Context, msg channel.IncomingM
 	}
 
 	fp := agentOwnerFingerprint(msg)
+	r.agentBrowser.revokeOwner(fp)
+
 	allAgents, err := inst.Client().ListAgents(ctx)
 	if err != nil {
 		tok, _ := r.agentBrowser.register(agentBrowseAction{
@@ -272,18 +366,7 @@ func (r *Router) buildAgentPickerPage(ctx context.Context, msg channel.IncomingM
 
 	providers, _ := inst.Client().Providers(ctx)
 
-	var switchable []relay.AgentInfo
-	var subagents []string
-	for _, a := range allAgents {
-		if hiddenInternalAgents[a.Name] {
-			continue
-		}
-		if a.Mode == "subagent" {
-			subagents = append(subagents, a.Name)
-			continue
-		}
-		switchable = append(switchable, a)
-	}
+	switchable, subagents := filterAgents(allAgents)
 
 	totalPages := (len(switchable) + agentsPerPage - 1) / agentsPerPage
 	if totalPages < 1 {
@@ -492,13 +575,7 @@ func (r *Router) switchAgent(ctx context.Context, msg channel.IncomingMessage, t
 		return "⚠️ Agents unavailable — agent server not responding", nil
 	}
 
-	var switchable []relay.AgentInfo
-	for _, a := range allAgents {
-		if hiddenInternalAgents[a.Name] || a.Mode == "subagent" {
-			continue
-		}
-		switchable = append(switchable, a)
-	}
+	switchable, _ := filterAgents(allAgents)
 
 	var matched *relay.AgentInfo
 	if num, err := strconv.Atoi(target); err == nil && num >= 1 && num <= len(switchable) {
@@ -570,6 +647,7 @@ func (r *Router) handleAgentCallback(ctx context.Context, msg channel.IncomingMe
 		return nil
 
 	case agentActionSwitch:
+		r.agentBrowser.revokeOwner(action.ownerFP)
 		replyText, err := r.switchAgent(ctx, msg, action.agentName)
 		if err != nil {
 			if msg.ReplyCtx != nil && msg.CallbackRef != nil {
@@ -584,9 +662,11 @@ func (r *Router) handleAgentCallback(ctx context.Context, msg channel.IncomingMe
 		return nil
 
 	case agentActionDeleteConfirm:
+		r.agentBrowser.revokeOwner(action.ownerFP)
 		return r.executeAgentDelete(ctx, msg, action.agentName)
 
 	case agentActionDeleteCancel:
+		r.agentBrowser.revokeOwner(action.ownerFP)
 		if msg.ReplyCtx != nil && msg.CallbackRef != nil {
 			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "Deletion canceled.", nil)
 		}
@@ -616,23 +696,17 @@ func (r *Router) handleAgentDeleteCommand(ctx context.Context, msg channel.Incom
 		return "⚠️ Agents unavailable — agent server not responding", nil
 	}
 
-	var matched *relay.AgentInfo
-	var switchable []relay.AgentInfo
-	for _, a := range allAgents {
-		if hiddenInternalAgents[a.Name] || a.Mode == "subagent" {
-			continue
-		}
-		switchable = append(switchable, a)
-	}
+	switchable, _ := filterAgents(allAgents)
 
+	var matched *relay.AgentInfo
 	if num, err := strconv.Atoi(target); err == nil && num >= 1 && num <= len(switchable) {
 		matched = &switchable[num-1]
 	}
 
 	if matched == nil {
-		for i := range allAgents {
-			if strings.EqualFold(allAgents[i].Name, target) {
-				matched = &allAgents[i]
+		for i := range switchable {
+			if strings.EqualFold(switchable[i].Name, target) {
+				matched = &switchable[i]
 				break
 			}
 		}
@@ -641,7 +715,7 @@ func (r *Router) handleAgentDeleteCommand(ctx context.Context, msg channel.Incom
 	if matched == nil {
 		lowerTarget := strings.ToLower(target)
 		var matches []relay.AgentInfo
-		for _, a := range allAgents {
+		for _, a := range switchable {
 			if strings.Contains(strings.ToLower(a.Name), lowerTarget) {
 				matches = append(matches, a)
 			}
@@ -659,31 +733,21 @@ func (r *Router) handleAgentDeleteCommand(ctx context.Context, msg channel.Incom
 		return "⚠️ Built-in agents cannot be deleted.", nil
 	}
 
-	if !isValidAgentName(matched.Name) {
-		return "⚠️ Invalid agent name.", nil
-	}
-
 	workdir, err := r.effectiveWorkdir(ctx, msg)
 	if err != nil {
 		return "", fmt.Errorf("effective workdir: %w", err)
 	}
 
-	agentDir := filepath.Join(workdir, ".opencode", "agent")
-	agentFile := filepath.Join(agentDir, matched.Name+".md")
-	cleanFile := filepath.Clean(agentFile)
-	rel, err := filepath.Rel(agentDir, cleanFile)
-	if err != nil || strings.HasPrefix(rel, "..") || rel != matched.Name+".md" {
-		return "⚠️ Invalid agent name.", nil
-	}
-
-	if _, err := os.Stat(cleanFile); err != nil {
+	if _, err := validateProjectAgentFile(workdir, matched.Name); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return "⚠️ Global agents cannot be deleted from chat.", nil
 		}
-		return "", fmt.Errorf("stat agent file: %w", err)
+		return "⚠️ Invalid agent file path.", nil
 	}
 
 	fp := agentOwnerFingerprint(msg)
+	r.agentBrowser.revokeOwner(fp)
+
 	confirmTok, _ := r.agentBrowser.register(agentBrowseAction{
 		kind:      agentActionDeleteConfirm,
 		agentName: matched.Name,
@@ -754,10 +818,12 @@ func (r *Router) executeAgentDelete(ctx context.Context, msg channel.IncomingMes
 		return nil
 	}
 
+	switchable, _ := filterAgents(allAgents)
+
 	var matched *relay.AgentInfo
-	for i := range allAgents {
-		if allAgents[i].Name == agentName {
-			matched = &allAgents[i]
+	for i := range switchable {
+		if switchable[i].Name == agentName {
+			matched = &switchable[i]
 			break
 		}
 	}
@@ -781,19 +847,8 @@ func (r *Router) executeAgentDelete(ctx context.Context, msg channel.IncomingMes
 		return fmt.Errorf("effective workdir: %w", err)
 	}
 
-	agentDir := filepath.Join(workdir, ".opencode", "agent")
-	agentFile := filepath.Join(agentDir, matched.Name+".md")
-	cleanFile := filepath.Clean(agentFile)
-	rel, err := filepath.Rel(agentDir, cleanFile)
-	if err != nil || strings.HasPrefix(rel, "..") || rel != matched.Name+".md" {
-		if msg.ReplyCtx != nil && msg.CallbackRef != nil {
-			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "⚠️ Invalid agent name.", nil)
-		}
-		r.reply(msg, "⚠️ Invalid agent name.")
-		return nil
-	}
-
-	if _, err := os.Stat(cleanFile); err != nil {
+	agentFile, err := validateProjectAgentFile(workdir, matched.Name)
+	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			if msg.ReplyCtx != nil && msg.CallbackRef != nil {
 				return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "⚠️ Global agents cannot be deleted from chat.", nil)
@@ -801,10 +856,14 @@ func (r *Router) executeAgentDelete(ctx context.Context, msg channel.IncomingMes
 			r.reply(msg, "⚠️ Global agents cannot be deleted from chat.")
 			return nil
 		}
-		return fmt.Errorf("stat agent file: %w", err)
+		if msg.ReplyCtx != nil && msg.CallbackRef != nil {
+			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "⚠️ Invalid agent file path.", nil)
+		}
+		r.reply(msg, "⚠️ Invalid agent file path.")
+		return nil
 	}
 
-	if err := os.Remove(cleanFile); err != nil {
+	if err := os.Remove(agentFile); err != nil {
 		return fmt.Errorf("delete agent file: %w", err)
 	}
 
@@ -823,17 +882,39 @@ func (r *Router) detectNewAgents(ctx context.Context, msg channel.IncomingMessag
 		return
 	}
 	workdir := inst.Workdir()
-	current := r.agentTracker.snapshotDir(workdir)
-	newAgents := r.agentTracker.updateAndDiff(workdir, current)
 
+	checkNew := func() []string {
+		diskAgents := r.agentTracker.snapshotDir(workdir)
+		if len(diskAgents) == 0 {
+			return nil
+		}
+		liveAgents, err := inst.Client().ListAgents(ctx)
+		if err != nil {
+			return nil
+		}
+		liveSet := make(map[string]bool)
+		for _, a := range liveAgents {
+			if a.Mode == "primary" || a.Mode == "subagent" {
+				liveSet[a.Name] = true
+			}
+		}
+		var registeredDiskAgents []string
+		for _, name := range diskAgents {
+			if liveSet[name] {
+				registeredDiskAgents = append(registeredDiskAgents, name)
+			}
+		}
+		return r.agentTracker.updateAndDiff(workdir, registeredDiskAgents)
+	}
+
+	newAgents := checkNew()
 	if len(newAgents) == 0 && r.agentTracker.retryDelay > 0 {
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(r.agentTracker.retryDelay):
 		}
-		current = r.agentTracker.snapshotDir(workdir)
-		newAgents = r.agentTracker.updateAndDiff(workdir, current)
+		newAgents = checkNew()
 	}
 
 	for _, agentName := range newAgents {
