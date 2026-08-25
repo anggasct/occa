@@ -143,6 +143,7 @@ type SessionInfo struct {
 	// CostKnown is false when the backend cannot provide provider pricing.
 	CostKnown bool
 	Model     ModelRef
+	Agent     string
 	// ContextTokens holds the prompt size (input + cache read) of the most
 	// recent completed assistant request: the current window occupancy,
 	// as opposed to the cumulative Tokens counters.
@@ -213,6 +214,14 @@ type MessageInfo struct {
 	Created int64
 }
 
+type AgentInfo struct {
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	Mode        string    `json:"mode"`
+	Native      bool      `json:"native"`
+	Model       *ModelRef `json:"model,omitempty"`
+}
+
 type Client interface {
 	CreateSession(ctx context.Context) (string, error)
 	GetSession(ctx context.Context, sessionID string) (*SessionInfo, error)
@@ -225,6 +234,8 @@ type Client interface {
 	AnswerQuestion(ctx context.Context, requestID string, answers [][]string) error
 	RejectQuestion(ctx context.Context, requestID string) error
 	ListCommands(ctx context.Context) ([]CommandInfo, error)
+	ListAgents(ctx context.Context) ([]AgentInfo, error)
+	SwitchAgent(ctx context.Context, sessionID, name string) error
 	AbortSession(ctx context.Context, sessionID string) error
 	SummarizeSession(ctx context.Context, sessionID, providerID, modelID string) error
 	RevertMessage(ctx context.Context, sessionID, messageID string) error
@@ -288,6 +299,7 @@ func (c *HTTPClient) GetSession(ctx context.Context, sessionID string) (*Session
 	}
 
 	var raw struct {
+		Agent string          `json:"agent"`
 		Cost  json.RawMessage `json:"cost"`
 		Model struct {
 			ID         string `json:"id"`
@@ -377,6 +389,7 @@ func (c *HTTPClient) GetSession(ctx context.Context, sessionID string) (*Session
 			ID:         raw.Model.ID,
 			Variant:    raw.Model.Variant,
 		},
+		Agent: raw.Agent,
 	}, nil
 }
 
@@ -590,6 +603,70 @@ func (c *HTTPClient) ListCommands(ctx context.Context) ([]CommandInfo, error) {
 		commands[i] = CommandInfo{Name: r.Name, Description: r.Description, Source: r.Source}
 	}
 	return commands, nil
+}
+
+func (c *HTTPClient) ListAgents(ctx context.Context) ([]AgentInfo, error) {
+	resp, err := c.get(ctx, "/agent")
+	if err != nil {
+		return nil, fmt.Errorf("relay: list agents: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("relay: list agents: unexpected status %d", resp.StatusCode)
+	}
+
+	var raw []struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Mode        string `json:"mode"`
+		Native      bool   `json:"native"`
+		Model       *struct {
+			ProviderID string `json:"providerID"`
+			ModelID    string `json:"modelID"`
+		} `json:"model"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, fmt.Errorf("relay: list agents: decode response: %w", err)
+	}
+
+	agents := make([]AgentInfo, len(raw))
+	for i, r := range raw {
+		agents[i] = AgentInfo{
+			Name:        r.Name,
+			Description: r.Description,
+			Mode:        r.Mode,
+			Native:      r.Native,
+		}
+		if r.Model != nil && (r.Model.ProviderID != "" || r.Model.ModelID != "") {
+			agents[i].Model = &ModelRef{
+				ProviderID: r.Model.ProviderID,
+				ID:         r.Model.ModelID,
+			}
+		}
+	}
+	return agents, nil
+}
+
+func (c *HTTPClient) SwitchAgent(ctx context.Context, sessionID, name string) error {
+	payload := struct {
+		Name string `json:"name"`
+	}{
+		Name: name,
+	}
+	resp, err := c.post(ctx, "/session/"+sessionID+"/agent", payload)
+	if err != nil {
+		return fmt.Errorf("relay: switch agent: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return ErrNotFound
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("relay: switch agent: unexpected status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func splitCommand(command string) (name, args string) {

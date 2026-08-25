@@ -998,3 +998,130 @@ func TestListMessages(t *testing.T) {
 		}
 	})
 }
+
+func TestListAgents(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet || r.URL.Path != "/agent" {
+				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[
+				{"name":"build","description":"General agent","mode":"primary","native":true},
+				{"name":"plan","description":"Architect","mode":"primary","native":true,"model":{"providerID":"anthropic","modelID":"claude-3-5-sonnet"}},
+				{"name":"reviewer","description":"Code reviewer","mode":"primary","native":false,"model":{"providerID":"openrouter","modelID":"glm-5.2"}},
+				{"name":"general","description":"Subagent","mode":"subagent","native":true}
+			]`))
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		agents, err := c.ListAgents(context.Background())
+		if err != nil {
+			t.Fatalf("ListAgents: %v", err)
+		}
+		if len(agents) != 4 {
+			t.Fatalf("got %d agents, want 4", len(agents))
+		}
+		if agents[0].Name != "build" || !agents[0].Native || agents[0].Model != nil {
+			t.Fatalf("unexpected agent 0: %+v", agents[0])
+		}
+		if agents[1].Name != "plan" || agents[1].Model == nil || agents[1].Model.ID != "claude-3-5-sonnet" {
+			t.Fatalf("unexpected agent 1: %+v", agents[1])
+		}
+		if agents[2].Name != "reviewer" || agents[2].Native || agents[2].Model == nil || agents[2].Model.ID != "glm-5.2" {
+			t.Fatalf("unexpected agent 2: %+v", agents[2])
+		}
+		if agents[3].Name != "general" || agents[3].Mode != "subagent" {
+			t.Fatalf("unexpected agent 3: %+v", agents[3])
+		}
+	})
+
+	t.Run("server error", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		_, err := c.ListAgents(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "unexpected status 500") {
+			t.Fatalf("expected error containing unexpected status 500, got %v", err)
+		}
+	})
+}
+
+func TestSwitchAgent(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		var gotBody map[string]string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost || r.URL.Path != "/session/sess-1/agent" {
+				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			}
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode body: %v", err)
+			}
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		if err := c.SwitchAgent(context.Background(), "sess-1", "reviewer"); err != nil {
+			t.Fatalf("SwitchAgent: %v", err)
+		}
+		if gotBody["name"] != "reviewer" {
+			t.Fatalf("got body name %q, want reviewer", gotBody["name"])
+		}
+	})
+
+	t.Run("not found 404", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		err := c.SwitchAgent(context.Background(), "sess-1", "unknown-agent")
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("expected ErrNotFound, got %v", err)
+		}
+	})
+
+	t.Run("server error 500", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		err := c.SwitchAgent(context.Background(), "sess-1", "reviewer")
+		if err == nil || !strings.Contains(err.Error(), "unexpected status 500") {
+			t.Fatalf("expected error containing unexpected status 500, got %v", err)
+		}
+	})
+}
+
+func TestGetSession_Agent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"id":"sess-1",
+			"agent":"reviewer",
+			"model":{"id":"gpt-4o","providerID":"openai","variant":""},
+			"tokens":{"input":100,"output":50,"reasoning":0,"cache":{"read":0,"write":0}},
+			"cost":0.01
+		}`))
+	}))
+	defer srv.Close()
+
+	c := NewHTTPClient(srv.URL)
+	info, err := c.GetSession(context.Background(), "sess-1")
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if info.Agent != "reviewer" {
+		t.Fatalf("got Agent %q, want reviewer", info.Agent)
+	}
+}

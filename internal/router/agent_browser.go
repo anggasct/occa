@@ -1,0 +1,668 @@
+package router
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+
+	"github.com/anggasct/occa/internal/channel"
+	"github.com/anggasct/occa/internal/relay"
+	"github.com/anggasct/occa/internal/store"
+)
+
+const (
+	agentCallbackPrefix = "agent:"
+	agentsPerPage       = 6
+	agentsMaxPages      = 5
+	maxTruncatedDescLen = 60
+)
+
+var hiddenInternalAgents = map[string]bool{
+	"compaction": true,
+	"summary":    true,
+	"title":      true,
+}
+
+type agentTracker struct {
+	mu          sync.Mutex
+	knownAgents map[string]map[string]bool
+}
+
+func newAgentTracker() *agentTracker {
+	return &agentTracker{
+		knownAgents: make(map[string]map[string]bool),
+	}
+}
+
+func (t *agentTracker) diffAndUpdate(workdir string, current []string) ([]string, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	known, exists := t.knownAgents[workdir]
+	if !exists {
+		known = make(map[string]bool)
+		for _, name := range current {
+			known[name] = true
+		}
+		t.knownAgents[workdir] = known
+		return nil, true
+	}
+
+	var added []string
+	currMap := make(map[string]bool)
+	for _, name := range current {
+		currMap[name] = true
+		if !known[name] {
+			added = append(added, name)
+		}
+	}
+	t.knownAgents[workdir] = currMap
+	return added, false
+}
+
+func agentOwnerFingerprint(msg channel.IncomingMessage) string {
+	threadID, userID := conversationKey(msg)
+	sum := sha256.Sum256([]byte(msg.Platform + "|" + msg.ChannelID + "|" + threadID + "|" + userID))
+	return hex.EncodeToString(sum[:8])
+}
+
+func agentCallbackValid(msg channel.IncomingMessage, action string) bool {
+	idx := strings.LastIndex(action, ":")
+	if idx <= 0 {
+		return false
+	}
+	return action[idx+1:] == agentOwnerFingerprint(msg)
+}
+
+func (r *Router) handleAgent(ctx context.Context, msg channel.IncomingMessage, args string) (string, error) {
+	parts := strings.Fields(args)
+	if len(parts) == 0 || parts[0] == "list" || parts[0] == "refresh" {
+		return r.renderAgentPicker(ctx, msg)
+	}
+
+	if page, err := strconv.Atoi(parts[0]); err == nil && page >= 1 {
+		return r.renderAgentPickerPage(ctx, msg, page)
+	}
+
+	switch parts[0] {
+	case "switch":
+		if len(parts) < 2 {
+			return "Usage: /agent switch <n|name>", nil
+		}
+		target := strings.Join(parts[1:], " ")
+		return r.switchAgent(ctx, msg, target)
+	case "delete":
+		if len(parts) < 2 {
+			return "Usage: /agent delete <n|name>", nil
+		}
+		target := strings.Join(parts[1:], " ")
+		return r.handleAgentDeleteCommand(ctx, msg, target)
+	default:
+		return r.switchAgent(ctx, msg, strings.Join(parts, " "))
+	}
+}
+
+func (r *Router) renderAgentPicker(ctx context.Context, msg channel.IncomingMessage, headerOverride ...string) (string, error) {
+	return r.renderAgentPickerPage(ctx, msg, 1, headerOverride...)
+}
+
+func (r *Router) renderAgentPickerPage(ctx context.Context, msg channel.IncomingMessage, page int, headerOverride ...string) (string, error) {
+	text, buttons, err := r.buildAgentPickerPage(ctx, msg, page, headerOverride...)
+	if err != nil {
+		return "", err
+	}
+	if msg.ReplyCtx != nil {
+		if _, err := msg.ReplyCtx.SendWithButtons(text, buttons); err != nil {
+			return "", err
+		}
+		return "", errReplied
+	}
+	return text, nil
+}
+
+func (r *Router) buildAgentPickerPage(ctx context.Context, msg channel.IncomingMessage, page int, headerOverride ...string) (string, []channel.Button, error) {
+	inst, err := r.clientFor(ctx, msg)
+	if err != nil {
+		return "⚠️ Agent unreachable", nil, nil
+	}
+	defer inst.End()
+
+	threadID, userID := conversationKey(msg)
+	activeSession, err := r.findActiveSession(ctx, msg.Platform, msg.ChannelID, threadID, userID)
+	if err != nil {
+		return "", nil, fmt.Errorf("agent picker: %w", err)
+	}
+	if activeSession == nil {
+		return "No active session yet. Send a message first to start a conversation, then use /agent to switch agents.", nil, nil
+	}
+
+	fp := agentOwnerFingerprint(msg)
+	allAgents, err := inst.Client().ListAgents(ctx)
+	if err != nil {
+		retryButton := channel.Button{
+			Label: "⟳ Refresh",
+			Value: fmt.Sprintf("%srefresh:1:%s", agentCallbackPrefix, fp),
+			Row:   1,
+		}
+		return "⚠️ Agents unavailable — agent server not responding", []channel.Button{retryButton}, nil
+	}
+
+	activeAgentName := "build"
+	if sessInfo, err := inst.Client().GetSession(ctx, activeSession.AgentSessionID); err == nil && sessInfo != nil && sessInfo.Agent != "" {
+		activeAgentName = sessInfo.Agent
+	}
+
+	providers, _ := inst.Client().Providers(ctx)
+
+	var switchable []relay.AgentInfo
+	var subagents []string
+	for _, a := range allAgents {
+		if hiddenInternalAgents[a.Name] {
+			continue
+		}
+		if a.Mode == "subagent" {
+			subagents = append(subagents, a.Name)
+			continue
+		}
+		switchable = append(switchable, a)
+	}
+
+	totalPages := (len(switchable) + agentsPerPage - 1) / agentsPerPage
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	if totalPages > agentsMaxPages {
+		totalPages = agentsMaxPages
+	}
+
+	clampedPage := page
+	if clampedPage < 1 {
+		clampedPage = 1
+	}
+	if clampedPage > totalPages {
+		clampedPage = totalPages
+	}
+
+	start := (clampedPage - 1) * agentsPerPage
+	end := start + agentsPerPage
+	if start > len(switchable) {
+		start = len(switchable)
+	}
+	if end > len(switchable) {
+		end = len(switchable)
+	}
+
+	var sb strings.Builder
+	if len(headerOverride) > 0 && headerOverride[0] != "" {
+		sb.WriteString(headerOverride[0])
+		sb.WriteString("\n")
+	} else {
+		fmt.Fprintf(&sb, "Page %d/%d · Agents\n", clampedPage, totalPages)
+	}
+
+	activeDisplay := activeAgentName
+	if activeAgentName == "build" {
+		activeDisplay = "build (default)"
+	} else {
+		for _, a := range switchable {
+			if a.Name == activeAgentName && a.Model != nil && a.Model.ID != "" {
+				if a.Model.ProviderID != "" {
+					activeDisplay = fmt.Sprintf("%s (%s/%s)", a.Name, a.Model.ProviderID, a.Model.ID)
+				} else {
+					activeDisplay = fmt.Sprintf("%s (%s)", a.Name, a.Model.ID)
+				}
+				break
+			}
+		}
+	}
+	fmt.Fprintf(&sb, "Active: %s\n\n", activeDisplay)
+
+	var buttons []channel.Button
+	var anyUnknownModel bool
+	for i := start; i < end; i++ {
+		a := switchable[i]
+		num := i + 1
+		marker := "  "
+		if a.Name == activeAgentName {
+			marker = "→ "
+		}
+
+		nameLabel := a.Name
+		if !a.Native {
+			nameLabel += " [custom]"
+		}
+
+		desc := cleanOneLine(a.Description, maxTruncatedDescLen)
+
+		modelSuffix := ""
+		if a.Model != nil && a.Model.ID != "" {
+			if !providers.HasModel(*a.Model) {
+				anyUnknownModel = true
+				modelSuffix = fmt.Sprintf(" — %s ⚠", a.Model.ID)
+			} else {
+				modelSuffix = fmt.Sprintf(" — %s", a.Model.ID)
+			}
+		}
+
+		if desc != "" {
+			fmt.Fprintf(&sb, "%d. %s%s — %s%s\n", num, marker, nameLabel, desc, modelSuffix)
+		} else {
+			fmt.Fprintf(&sb, "%d. %s%s%s\n", num, marker, nameLabel, modelSuffix)
+		}
+
+		row := agentButtonRow(msg.Platform, i-start)
+		buttons = append(buttons, channel.Button{
+			Label: fmt.Sprintf("%d", num),
+			Value: fmt.Sprintf("%sswitch:%s:%s", agentCallbackPrefix, a.Name, fp),
+			Row:   row,
+		})
+	}
+
+	if len(subagents) > 0 {
+		fmt.Fprintf(&sb, "\nSubagents (info only): %s\n", strings.Join(subagents, ", "))
+	}
+
+	if anyUnknownModel {
+		sb.WriteString("\n⚠ Pinned model not found in connected providers\n")
+	}
+
+	if len(switchable) > agentsMaxPages*agentsPerPage {
+		fmt.Fprintf(&sb, "\nShowing %d of %d agents. Use /agent switch <name> for others.\n", agentsMaxPages*agentsPerPage, len(switchable))
+	}
+
+	sb.WriteString("\n💡 Ask in chat to create new agents (e.g. \"create an agent named reviewer that...\")")
+
+	navRow := agentNavRow(msg.Platform, end-start)
+	if clampedPage > 1 {
+		buttons = append(buttons, channel.Button{
+			Label: "◀️ Prev",
+			Value: fmt.Sprintf("%spage:%d:%s", agentCallbackPrefix, clampedPage-1, fp),
+			Row:   navRow,
+		})
+	}
+	if clampedPage < totalPages {
+		buttons = append(buttons, channel.Button{
+			Label: "Next ▶️",
+			Value: fmt.Sprintf("%spage:%d:%s", agentCallbackPrefix, clampedPage+1, fp),
+			Row:   navRow,
+		})
+	}
+	buttons = append(buttons, channel.Button{
+		Label: "⟳ Refresh",
+		Value: fmt.Sprintf("%srefresh:%d:%s", agentCallbackPrefix, clampedPage, fp),
+		Row:   navRow,
+	})
+
+	return strings.TrimRight(sb.String(), "\n"), buttons, nil
+}
+
+func agentButtonRow(platform string, index int) int {
+	if platform == "discord" {
+		return index/5 + 1
+	}
+	return index/2 + 1
+}
+
+func agentNavRow(platform string, count int) int {
+	if count <= 0 {
+		return 1
+	}
+	return agentButtonRow(platform, count-1) + 1
+}
+
+func cleanOneLine(s string, maxRunes int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.Join(strings.Fields(s), " ")
+	runes := []rune(s)
+	if len(runes) > maxRunes {
+		return string(runes[:maxRunes-1]) + "…"
+	}
+	return s
+}
+
+func (r *Router) findActiveSession(ctx context.Context, platform, channelID, threadID, userID string) (*store.Session, error) {
+	sessions, err := r.store.SessionRepo().ListConversation(ctx, platform, channelID, threadID, userID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range sessions {
+		if sessions[i].Active {
+			return &sessions[i], nil
+		}
+	}
+	return nil, nil
+}
+
+func (r *Router) switchAgent(ctx context.Context, msg channel.IncomingMessage, target string) (string, error) {
+	inst, err := r.clientFor(ctx, msg)
+	if err != nil {
+		return "⚠️ Agent unreachable", nil
+	}
+	defer inst.End()
+
+	threadID, userID := conversationKey(msg)
+	activeSession, err := r.findActiveSession(ctx, msg.Platform, msg.ChannelID, threadID, userID)
+	if err != nil {
+		return "", fmt.Errorf("switch agent: %w", err)
+	}
+	if activeSession == nil {
+		return "No active session yet. Send a message first to start a conversation, then use /agent to switch agents.", nil
+	}
+
+	allAgents, err := inst.Client().ListAgents(ctx)
+	if err != nil {
+		return "⚠️ Agents unavailable — agent server not responding", nil
+	}
+
+	var switchable []relay.AgentInfo
+	for _, a := range allAgents {
+		if hiddenInternalAgents[a.Name] || a.Mode == "subagent" {
+			continue
+		}
+		switchable = append(switchable, a)
+	}
+
+	var matched *relay.AgentInfo
+	if num, err := strconv.Atoi(target); err == nil && num >= 1 && num <= len(switchable) {
+		matched = &switchable[num-1]
+	}
+
+	if matched == nil {
+		for i := range switchable {
+			if strings.EqualFold(switchable[i].Name, target) {
+				matched = &switchable[i]
+				break
+			}
+		}
+	}
+
+	if matched == nil {
+		lowerTarget := strings.ToLower(target)
+		var matches []relay.AgentInfo
+		for _, a := range switchable {
+			if strings.Contains(strings.ToLower(a.Name), lowerTarget) {
+				matches = append(matches, a)
+			}
+		}
+		if len(matches) == 1 {
+			matched = &matches[0]
+		} else if len(matches) > 1 {
+			header := fmt.Sprintf("Ambiguous agent \"%s\". Pick from below:", target)
+			return r.renderAgentPickerPage(ctx, msg, 1, header)
+		}
+	}
+
+	if matched == nil {
+		return "Agent not found — refresh with /agent", nil
+	}
+
+	if err := inst.Client().SwitchAgent(ctx, activeSession.AgentSessionID, matched.Name); err != nil {
+		if errors.Is(err, relay.ErrNotFound) {
+			return "Agent not found — refresh with /agent", nil
+		}
+		return "", fmt.Errorf("switch agent: %w", err)
+	}
+
+	if matched.Model != nil && matched.Model.ID != "" {
+		return fmt.Sprintf("✅ Switched to agent %s (%s)", matched.Name, matched.Model.ID), nil
+	}
+	return fmt.Sprintf("✅ Switched to agent %s", matched.Name), nil
+}
+
+func (r *Router) handleAgentCallback(ctx context.Context, msg channel.IncomingMessage) error {
+	action := strings.TrimPrefix(msg.CallbackData, agentCallbackPrefix)
+	if !agentCallbackValid(msg, action) {
+		if msg.ReplyCtx != nil && msg.CallbackRef != nil {
+			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "⚠️ Expired — use /agent again.", nil)
+		}
+		return nil
+	}
+
+	idx := strings.LastIndex(action, ":")
+	body := action[:idx]
+
+	switch {
+	case strings.HasPrefix(body, "page:"):
+		pageStr := strings.TrimPrefix(body, "page:")
+		page, err := strconv.Atoi(pageStr)
+		if err != nil {
+			page = 1
+		}
+		text, buttons, err := r.buildAgentPickerPage(ctx, msg, page)
+		if err != nil {
+			return err
+		}
+		if msg.ReplyCtx != nil && msg.CallbackRef != nil {
+			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, text, buttons)
+		}
+		r.reply(msg, text)
+		return nil
+
+	case strings.HasPrefix(body, "refresh:"):
+		pageStr := strings.TrimPrefix(body, "refresh:")
+		page, err := strconv.Atoi(pageStr)
+		if err != nil {
+			page = 1
+		}
+		text, buttons, err := r.buildAgentPickerPage(ctx, msg, page)
+		if err != nil {
+			return err
+		}
+		if msg.ReplyCtx != nil && msg.CallbackRef != nil {
+			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, text, buttons)
+		}
+		r.reply(msg, text)
+		return nil
+
+	case strings.HasPrefix(body, "switch:"):
+		agentName := strings.TrimPrefix(body, "switch:")
+		replyText, err := r.switchAgent(ctx, msg, agentName)
+		if err != nil {
+			if msg.ReplyCtx != nil && msg.CallbackRef != nil {
+				return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "⚠️ Error switching agent.", nil)
+			}
+			return err
+		}
+		if msg.ReplyCtx != nil && msg.CallbackRef != nil {
+			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, replyText, nil)
+		}
+		r.reply(msg, replyText)
+		return nil
+
+	case strings.HasPrefix(body, "del:"):
+		rem := strings.TrimPrefix(body, "del:")
+		if strings.HasSuffix(rem, ":confirm") {
+			agentName := strings.TrimSuffix(rem, ":confirm")
+			return r.executeAgentDelete(ctx, msg, agentName)
+		}
+		if strings.HasSuffix(rem, ":cancel") {
+			if msg.ReplyCtx != nil && msg.CallbackRef != nil {
+				return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "Deletion canceled.", nil)
+			}
+			return nil
+		}
+	}
+	return nil
+}
+
+func (r *Router) handleAgentDeleteCommand(ctx context.Context, msg channel.IncomingMessage, target string) (string, error) {
+	if !r.isAdmin(ctx, msg) {
+		return accessDeniedMessage, nil
+	}
+
+	inst, err := r.clientFor(ctx, msg)
+	if err != nil {
+		return "⚠️ Agent unreachable", nil
+	}
+	defer inst.End()
+
+	allAgents, err := inst.Client().ListAgents(ctx)
+	if err != nil {
+		return "⚠️ Agents unavailable — agent server not responding", nil
+	}
+
+	var matched *relay.AgentInfo
+	var switchable []relay.AgentInfo
+	for _, a := range allAgents {
+		if hiddenInternalAgents[a.Name] || a.Mode == "subagent" {
+			continue
+		}
+		switchable = append(switchable, a)
+	}
+
+	if num, err := strconv.Atoi(target); err == nil && num >= 1 && num <= len(switchable) {
+		matched = &switchable[num-1]
+	}
+
+	if matched == nil {
+		for i := range allAgents {
+			if strings.EqualFold(allAgents[i].Name, target) {
+				matched = &allAgents[i]
+				break
+			}
+		}
+	}
+
+	if matched == nil {
+		lowerTarget := strings.ToLower(target)
+		var matches []relay.AgentInfo
+		for _, a := range allAgents {
+			if strings.Contains(strings.ToLower(a.Name), lowerTarget) {
+				matches = append(matches, a)
+			}
+		}
+		if len(matches) == 1 {
+			matched = &matches[0]
+		}
+	}
+
+	if matched == nil {
+		return "Agent not found — refresh with /agent", nil
+	}
+
+	if matched.Native {
+		return "⚠️ Built-in agents cannot be deleted.", nil
+	}
+
+	workdir, err := r.effectiveWorkdir(ctx, msg)
+	if err != nil {
+		return "", fmt.Errorf("effective workdir: %w", err)
+	}
+
+	agentFile := filepath.Join(workdir, ".opencode", "agent", matched.Name+".md")
+	if _, err := os.Stat(agentFile); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "⚠️ Global agents cannot be deleted from chat.", nil
+		}
+		return "", fmt.Errorf("stat agent file: %w", err)
+	}
+
+	fp := agentOwnerFingerprint(msg)
+	text := fmt.Sprintf("Are you sure you want to delete custom agent **%s**?\nThis will remove `.opencode/agent/%s.md`.", matched.Name, matched.Name)
+	buttons := []channel.Button{
+		{
+			Label: fmt.Sprintf("🗑 Delete %s", matched.Name),
+			Value: fmt.Sprintf("%sdel:%s:confirm:%s", agentCallbackPrefix, matched.Name, fp),
+			Row:   1,
+		},
+		{
+			Label: "Cancel",
+			Value: fmt.Sprintf("%sdel:%s:cancel:%s", agentCallbackPrefix, matched.Name, fp),
+			Row:   1,
+		},
+	}
+
+	if msg.ReplyCtx != nil {
+		if _, err := msg.ReplyCtx.SendWithButtons(text, buttons); err != nil {
+			return "", err
+		}
+		return "", errReplied
+	}
+	return text, nil
+}
+
+func (r *Router) executeAgentDelete(ctx context.Context, msg channel.IncomingMessage, agentName string) error {
+	if !r.isAdmin(ctx, msg) {
+		if msg.ReplyCtx != nil && msg.CallbackRef != nil {
+			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, accessDeniedMessage, nil)
+		}
+		r.reply(msg, accessDeniedMessage)
+		return nil
+	}
+
+	workdir, err := r.effectiveWorkdir(ctx, msg)
+	if err != nil {
+		return fmt.Errorf("effective workdir: %w", err)
+	}
+
+	agentFile := filepath.Join(workdir, ".opencode", "agent", agentName+".md")
+	if _, err := os.Stat(agentFile); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			if msg.ReplyCtx != nil && msg.CallbackRef != nil {
+				return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "Agent file not found.", nil)
+			}
+			r.reply(msg, "Agent file not found.")
+			return nil
+		}
+		return fmt.Errorf("stat agent file: %w", err)
+	}
+
+	if err := os.Remove(agentFile); err != nil {
+		return fmt.Errorf("delete agent file: %w", err)
+	}
+
+	slog.Info("agent deleted", "agent", agentName, "workdir", workdir, "user_id", msg.UserID, "platform", msg.Platform, "channel_id", msg.ChannelID)
+
+	replyText := fmt.Sprintf("🗑 Deleted custom agent %s.", agentName)
+	if msg.ReplyCtx != nil && msg.CallbackRef != nil {
+		return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, replyText, nil)
+	}
+	r.reply(msg, replyText)
+	return nil
+}
+
+func (r *Router) detectNewAgents(ctx context.Context, msg channel.IncomingMessage, inst AgentInstance) {
+	if r.agentTracker == nil {
+		return
+	}
+	workdir := inst.Workdir()
+	dir := filepath.Join(workdir, ".opencode", "agent")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			r.agentTracker.diffAndUpdate(workdir, nil)
+		}
+		return
+	}
+
+	var current []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasSuffix(name, ".md") {
+			agentName := strings.TrimSuffix(name, ".md")
+			if agentName != "" {
+				current = append(current, agentName)
+			}
+		}
+	}
+
+	newAgents, isFirstCheck := r.agentTracker.diffAndUpdate(workdir, current)
+	if isFirstCheck || len(newAgents) == 0 {
+		return
+	}
+
+	for _, agentName := range newAgents {
+		r.reply(msg, fmt.Sprintf("🆕 Agent `%s` available — /agent to switch", agentName))
+	}
+}

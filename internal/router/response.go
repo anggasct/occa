@@ -272,6 +272,9 @@ func (r *Router) runResponse(
 	if streamErr != nil && !errors.Is(streamErr, context.Canceled) {
 		slog.Warn("response stream ended", "platform", key.platform, "channel_id", key.channelID, "thread_id", key.threadID, "user_id", key.userID, "error", streamErr)
 	}
+	if outcome == "complete" {
+		r.detectNewAgents(ctx, msg, inst)
+	}
 }
 
 func progressNotice(seconds int64) string {

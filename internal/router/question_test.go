@@ -52,6 +52,12 @@ func (c *questionClient) UnrevertSession(_ context.Context, _ string) error     
 func (c *questionClient) ListMessages(_ context.Context, _ string) ([]relay.MessageInfo, error) {
 	return nil, nil
 }
+func (c *questionClient) ListAgents(_ context.Context) ([]relay.AgentInfo, error) {
+	return nil, nil
+}
+func (c *questionClient) SwitchAgent(_ context.Context, _, _ string) error {
+	return nil
+}
 
 func (c *questionClient) AnswerQuestion(_ context.Context, requestID string, answers [][]string) error {
 	c.mu.Lock()
