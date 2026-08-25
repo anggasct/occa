@@ -149,6 +149,9 @@ func (r *Router) runResponse(
 		reply:     msg.ReplyCtx,
 	}
 	slog.Info("response started", "platform", key.platform, "channel_id", key.channelID, "thread_id", key.threadID, "user_id", key.userID)
+	if r.agentTracker != nil {
+		r.agentTracker.snapshotWorkdir(inst.Workdir())
+	}
 	defer func() {
 		r.recordUsage(msg, inst, sessionID)
 		r.permissions.expireOwner(owner)

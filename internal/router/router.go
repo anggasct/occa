@@ -89,6 +89,7 @@ type Router struct {
 	permissions            *permissionBroker
 	questions              *questionBroker
 	modelBrowser           *modelBrowserBroker
+	agentBrowser           *agentBrowserBroker
 	agentTracker           *agentTracker
 	renderer               render.Renderer
 	streamerNoEventTimeout time.Duration
@@ -119,6 +120,7 @@ func New(instances InstanceProvider, st store.Store, defaultWorkdir string, admi
 		permissions:    newPermissionBroker(st.PermissionRuleRepo()),
 		questions:      newQuestionBroker(),
 		modelBrowser:   newModelBrowserBroker(),
+		agentBrowser:   newAgentBrowserBroker(),
 		agentTracker:   newAgentTracker(),
 		renderer:       render.New(),
 	}

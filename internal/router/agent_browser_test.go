@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/relay"
@@ -263,12 +264,21 @@ func TestAgentCallback_SwitchAndExpired(t *testing.T) {
 	t.Run("valid switch callback clears buttons", func(t *testing.T) {
 		ref := fakeRef{id: "msg-1"}
 		fp := agentOwnerFingerprint(channel.IncomingMessage{Platform: "telegram", ChannelID: "chat1", UserID: "user1"})
+		tok, err := r.agentBrowser.register(agentBrowseAction{
+			kind:      agentActionSwitch,
+			agentName: "reviewer",
+			ownerFP:   fp,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
 		msg := channel.IncomingMessage{
 			Platform:     "telegram",
 			ChannelID:    "chat1",
 			UserID:       "user1",
 			IsCallback:   true,
-			CallbackData: fmt.Sprintf("agent:switch:reviewer:%s", fp),
+			CallbackData: fmt.Sprintf("agent:%s", tok),
 			CallbackRef:  ref,
 			ReplyCtx:     reply,
 		}
@@ -294,7 +304,7 @@ func TestAgentCallback_SwitchAndExpired(t *testing.T) {
 			ChannelID:    "chat1",
 			UserID:       "user1",
 			IsCallback:   true,
-			CallbackData: "agent:switch:reviewer:invalid-fp",
+			CallbackData: "agent:unregistered-token",
 			CallbackRef:  ref,
 			ReplyCtx:     reply,
 		}
@@ -314,7 +324,7 @@ func TestAgentCallback_SwitchAndExpired(t *testing.T) {
 	})
 }
 
-func TestAgentDelete_Flow(t *testing.T) {
+func TestAgentDelete_SecurityAndFlow(t *testing.T) {
 	r, client, reply, overrideRepo := newTestRouterWithAccess()
 	overrideRepo.overrides["telegram:chat1:admin1"] = &store.UserOverride{
 		ChannelID: "chat1",
@@ -379,6 +389,67 @@ func TestAgentDelete_Flow(t *testing.T) {
 		}
 	})
 
+	t.Run("traversal target refused in delete command", func(t *testing.T) {
+		msg := msgFrom("admin1", "/agent delete ../../secret", reply)
+		out, err := r.handleAgent(context.Background(), msg, "delete ../../secret")
+		if err != nil {
+			t.Fatalf("handleAgent: %v", err)
+		}
+		if !strings.Contains(out, "Agent not found — refresh with /agent") {
+			t.Fatalf("expected agent not found for traversal name, got %s", out)
+		}
+	})
+
+	t.Run("spoofed traversal callback refused", func(t *testing.T) {
+		fp := agentOwnerFingerprint(channel.IncomingMessage{Platform: "telegram", ChannelID: "chat1", UserID: "admin1"})
+		tok, _ := r.agentBrowser.register(agentBrowseAction{
+			kind:      agentActionDeleteConfirm,
+			agentName: "../../etc/passwd",
+			ownerFP:   fp,
+		})
+		cbMsg := channel.IncomingMessage{
+			Platform:     "telegram",
+			ChannelID:    "chat1",
+			UserID:       "admin1",
+			IsCallback:   true,
+			CallbackData: fmt.Sprintf("agent:%s", tok),
+			CallbackRef:  fakeRef{id: "del-msg"},
+			ReplyCtx:     reply,
+		}
+		if err := r.handleCallback(context.Background(), cbMsg); err != nil {
+			t.Fatalf("handleCallback: %v", err)
+		}
+		edit := reply.edits[len(reply.edits)-1]
+		if !strings.Contains(edit, "Invalid agent name") {
+			t.Fatalf("expected invalid agent name for traversal callback, got: %s", edit)
+		}
+	})
+
+	t.Run("spoofed unlisted agent callback refused", func(t *testing.T) {
+		fp := agentOwnerFingerprint(channel.IncomingMessage{Platform: "telegram", ChannelID: "chat1", UserID: "admin1"})
+		tok, _ := r.agentBrowser.register(agentBrowseAction{
+			kind:      agentActionDeleteConfirm,
+			agentName: "unlisted_agent",
+			ownerFP:   fp,
+		})
+		cbMsg := channel.IncomingMessage{
+			Platform:     "telegram",
+			ChannelID:    "chat1",
+			UserID:       "admin1",
+			IsCallback:   true,
+			CallbackData: fmt.Sprintf("agent:%s", tok),
+			CallbackRef:  fakeRef{id: "del-msg"},
+			ReplyCtx:     reply,
+		}
+		if err := r.handleCallback(context.Background(), cbMsg); err != nil {
+			t.Fatalf("handleCallback: %v", err)
+		}
+		edit := reply.edits[len(reply.edits)-1]
+		if !strings.Contains(edit, "Agent not found — refresh with /agent") {
+			t.Fatalf("expected agent not found for unlisted callback, got: %s", edit)
+		}
+	})
+
 	t.Run("project custom agent renders confirm buttons and executes deletion", func(t *testing.T) {
 		msg := msgFrom("admin1", "/agent delete mycustom", reply)
 		_, err := r.handleAgent(context.Background(), msg, "delete mycustom")
@@ -393,13 +464,17 @@ func TestAgentDelete_Flow(t *testing.T) {
 			t.Fatalf("unexpected prompt text: %s", prompt)
 		}
 
-		fp := agentOwnerFingerprint(msg)
+		// Find the confirm button from reply.buttons
+		if len(reply.buttons) == 0 || len(reply.buttons[len(reply.buttons)-1]) == 0 {
+			t.Fatal("expected buttons in reply")
+		}
+		confirmBtn := reply.buttons[len(reply.buttons)-1][0]
 		cbMsg := channel.IncomingMessage{
 			Platform:     "telegram",
 			ChannelID:    "chat1",
 			UserID:       "admin1",
 			IsCallback:   true,
-			CallbackData: fmt.Sprintf("agent:del:mycustom:confirm:%s", fp),
+			CallbackData: confirmBtn.Value,
 			CallbackRef:  fakeRef{id: "del-msg"},
 			ReplyCtx:     reply,
 		}
@@ -454,36 +529,53 @@ func TestNewAgentDetectionOnTurnEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	r.agentTracker.retryDelay = 10 * time.Millisecond
 	inst := &fakeAgentInstance{workdir: tmpDir}
 	msg := msgFrom("user1", "hello", reply)
 
-	// First turn with initial agent: no notice
-	if err := os.WriteFile(filepath.Join(agentDir, "initial.md"), []byte("# initial"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	r.detectNewAgents(context.Background(), msg, inst)
-	if len(reply.sends) != 0 {
-		t.Fatalf("expected no notice on initial scan, got: %v", reply.sends)
-	}
+	t.Run("custom agent created during first turn is announced", func(t *testing.T) {
+		reply.sends = nil
+		// Pre-turn baseline snapshot taken before prompt execution
+		r.agentTracker.snapshotWorkdir(tmpDir)
 
-	// Turn where agent creates a new agent: notice sent
-	if err := os.WriteFile(filepath.Join(agentDir, "reviewer.md"), []byte("# reviewer"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	r.detectNewAgents(context.Background(), msg, inst)
-	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "reviewer") || !strings.Contains(reply.sends[0], "available — /agent to switch") {
-		t.Fatalf("expected new agent notice, got: %v", reply.sends)
-	}
+		// File created during first turn
+		if err := os.WriteFile(filepath.Join(agentDir, "first_turn_agent.md"), []byte("# agent"), 0644); err != nil {
+			t.Fatal(err)
+		}
 
-	// Turn where agent is deleted: no notice sent
-	reply.sends = nil
-	if err := os.Remove(filepath.Join(agentDir, "reviewer.md")); err != nil {
-		t.Fatal(err)
-	}
-	r.detectNewAgents(context.Background(), msg, inst)
-	if len(reply.sends) != 0 {
-		t.Fatalf("expected no notice on agent deletion, got: %v", reply.sends)
-	}
+		r.detectNewAgents(context.Background(), msg, inst)
+		if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "first_turn_agent") || !strings.Contains(reply.sends[0], "available — /agent to switch") {
+			t.Fatalf("expected new agent notice on first turn, got: %v", reply.sends)
+		}
+	})
+
+	t.Run("delayed file appearance via bounded retry announces agent", func(t *testing.T) {
+		reply.sends = nil
+		// Pre-turn snapshot already has first_turn_agent.md
+		r.agentTracker.snapshotWorkdir(tmpDir)
+
+		// Start a goroutine that writes the file after 5ms (during retry delay)
+		go func() {
+			time.Sleep(5 * time.Millisecond)
+			_ = os.WriteFile(filepath.Join(agentDir, "delayed_agent.md"), []byte("# delayed"), 0644)
+		}()
+
+		r.detectNewAgents(context.Background(), msg, inst)
+		if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "delayed_agent") {
+			t.Fatalf("expected delayed agent notice via retry, got: %v", reply.sends)
+		}
+	})
+
+	t.Run("turn where agent is deleted produces no notice", func(t *testing.T) {
+		reply.sends = nil
+		if err := os.Remove(filepath.Join(agentDir, "delayed_agent.md")); err != nil {
+			t.Fatal(err)
+		}
+		r.detectNewAgents(context.Background(), msg, inst)
+		if len(reply.sends) != 0 {
+			t.Fatalf("expected no notice on agent deletion, got: %v", reply.sends)
+		}
+	})
 }
 
 type fakeAgentInstance struct {
