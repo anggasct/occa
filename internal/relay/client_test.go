@@ -34,6 +34,60 @@ func TestCreateSession(t *testing.T) {
 	}
 }
 
+func TestCreateSessionWithPermission(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/session" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"sess-policy"}`))
+	}))
+	defer srv.Close()
+
+	rules := PermissionRuleset{{Permission: "edit", Pattern: "/srv/pr/**", Action: "deny"}}
+	id, err := NewHTTPClient(srv.URL).CreateSessionWithPermission(context.Background(), rules)
+	if err != nil {
+		t.Fatalf("CreateSessionWithPermission: %v", err)
+	}
+	if id != "sess-policy" {
+		t.Fatalf("id = %q, want sess-policy", id)
+	}
+	permission, ok := gotBody["permission"].([]any)
+	if !ok || len(permission) != 1 {
+		t.Fatalf("permission payload = %#v", gotBody["permission"])
+	}
+}
+
+func TestSetSessionPermissionReplacesCurrentDeliveryPolicy(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch || r.URL.Path != "/session/sess-reused" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	rules := PermissionRuleset{
+		{Permission: "*", Pattern: "*", Action: "deny"},
+		{Permission: "edit", Pattern: "/srv/docs/**", Action: "allow"},
+	}
+	if err := NewHTTPClient(srv.URL).SetSessionPermission(context.Background(), "sess-reused", rules); err != nil {
+		t.Fatalf("SetSessionPermission: %v", err)
+	}
+	permission, ok := gotBody["permission"].([]any)
+	if !ok || len(permission) != len(rules) {
+		t.Fatalf("permission payload = %#v", gotBody["permission"])
+	}
+}
+
 func TestSendMessage(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/session/s1/prompt_async" {

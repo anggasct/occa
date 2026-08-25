@@ -247,10 +247,23 @@ func main() {
 					defer inst.End()
 
 					resolver := relay.NewSessionResolver(db.SessionRepo(), inst.Client())
-					sessionID, err := resolver.Resolve(ctx, platform, channelID, workCtx.SessionKey, "", inst.PID())
+					sessionID, err := resolver.ResolveWithPermission(ctx, platform, channelID, workCtx.SessionKey, "", inst.PID(), workCtx.PermissionRuleset)
 					if err != nil {
 						send("⚠️ Webhook analysis failed: session error")
 						return errors.New("webhook session unavailable")
+					}
+					if len(workCtx.PermissionRuleset) > 0 {
+						permissionClient, ok := inst.Client().(interface {
+							SetSessionPermission(context.Context, string, relay.PermissionRuleset) error
+						})
+						if !ok {
+							send("⚠️ Webhook analysis failed: permission policy unsupported")
+							return errors.New("webhook permission policy unsupported")
+						}
+						if err := permissionClient.SetSessionPermission(ctx, sessionID, workCtx.PermissionRuleset); err != nil {
+							send("⚠️ Webhook analysis failed: permission policy error")
+							return errors.New("webhook permission policy failed")
+						}
 					}
 
 					if err := inst.Client().SendMessage(ctx, sessionID, prompt, workCtx.Model, nil); err != nil {
@@ -279,6 +292,12 @@ func main() {
 						case "error":
 							send("⚠️ Webhook analysis failed: agent response error")
 							return errors.New("webhook agent response failed")
+						case "permission_asked":
+							if ev.Permission != nil {
+								_ = inst.Client().ReplyPermission(ctx, ev.Permission.ID, relay.PermissionReject)
+							}
+							send("⚠️ Webhook analysis failed: permission denied")
+							return errors.New("webhook permission denied")
 						}
 					}
 					send("⚠️ Webhook analysis failed: incomplete response")

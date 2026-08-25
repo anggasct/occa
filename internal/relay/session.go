@@ -17,6 +17,10 @@ func NewSessionResolver(repo store.SessionRepo, client Client) *SessionResolver 
 }
 
 func (r *SessionResolver) Resolve(ctx context.Context, platform, channelID, threadID, userID string, agentPID int) (string, error) {
+	return r.ResolveWithPermission(ctx, platform, channelID, threadID, userID, agentPID, nil)
+}
+
+func (r *SessionResolver) ResolveWithPermission(ctx context.Context, platform, channelID, threadID, userID string, agentPID int, ruleset PermissionRuleset) (string, error) {
 	sessionID, ownerPID, err := r.repo.Active(ctx, platform, channelID, threadID, userID)
 	if err != nil {
 		return "", fmt.Errorf("relay: resolve session: %w", err)
@@ -38,7 +42,18 @@ func (r *SessionResolver) Resolve(ctx context.Context, platform, channelID, thre
 		}
 	}
 
-	sessionID, err = r.client.CreateSession(ctx)
+	if ruleset != nil {
+		creator, ok := r.client.(interface {
+			CreateSessionWithPermission(context.Context, PermissionRuleset) (string, error)
+		})
+		if ok {
+			sessionID, err = creator.CreateSessionWithPermission(ctx, ruleset)
+		} else {
+			sessionID, err = r.client.CreateSession(ctx)
+		}
+	} else {
+		sessionID, err = r.client.CreateSession(ctx)
+	}
 	if err != nil {
 		return "", fmt.Errorf("relay: resolve session: create: %w", err)
 	}

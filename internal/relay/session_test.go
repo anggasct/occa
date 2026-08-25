@@ -71,6 +71,12 @@ type mockClient struct {
 func (m *mockClient) CreateSession(_ context.Context) (string, error) {
 	return m.sessionID, nil
 }
+func (m *mockClient) CreateSessionWithPermission(_ context.Context, _ PermissionRuleset) (string, error) {
+	return m.sessionID, nil
+}
+func (m *mockClient) SetSessionPermission(_ context.Context, _ string, _ PermissionRuleset) error {
+	return nil
+}
 
 func (m *mockClient) GetSession(_ context.Context, _ string) (*SessionInfo, error) {
 	return &SessionInfo{}, nil

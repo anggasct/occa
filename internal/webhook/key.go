@@ -30,11 +30,15 @@ func (k WebhookExecutionKey) IsZero() bool {
 }
 
 type WebhookWorkContext struct {
-	Key         WebhookExecutionKey
-	Worktree    string
-	SessionKey  string
-	Model       *relay.ModelRef
-	ModelSource string
+	Key               WebhookExecutionKey
+	Repository        string
+	PRNumber          string
+	Worktree          string
+	ProjectDocsRoot   string
+	SessionKey        string
+	Model             *relay.ModelRef
+	ModelSource       string
+	PermissionRuleset relay.PermissionRuleset
 }
 
 func ExtractExecutionKey(body []byte) WebhookExecutionKey {

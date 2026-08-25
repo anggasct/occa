@@ -74,6 +74,14 @@ func (c *Client) CreateSession(ctx context.Context) (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+func (c *Client) CreateSessionWithPermission(ctx context.Context, _ relay.PermissionRuleset) (string, error) {
+	return c.CreateSession(ctx)
+}
+
+func (c *Client) SetSessionPermission(context.Context, string, relay.PermissionRuleset) error {
+	return nil
+}
+
 func (c *Client) GetSession(ctx context.Context, sessionID string) (*relay.SessionInfo, error) {
 	return &relay.SessionInfo{}, nil
 }

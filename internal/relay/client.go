@@ -263,6 +263,14 @@ const (
 	PermissionReject PermissionReply = "reject"
 )
 
+type PermissionRule struct {
+	Permission string `json:"permission"`
+	Pattern    string `json:"pattern"`
+	Action     string `json:"action"`
+}
+
+type PermissionRuleset []PermissionRule
+
 type MessageInfo struct {
 	ID      string
 	Role    string
@@ -317,11 +325,21 @@ func NewHTTPClient(base string) *HTTPClient {
 }
 
 func (c *HTTPClient) CreateSession(ctx context.Context) (string, error) {
-	resp, err := c.post(ctx, "/session", nil)
+	return c.CreateSessionWithPermission(ctx, nil)
+}
+
+func (c *HTTPClient) CreateSessionWithPermission(ctx context.Context, ruleset PermissionRuleset) (string, error) {
+	var payload any
+	if ruleset != nil {
+		payload = struct {
+			Permission PermissionRuleset `json:"permission"`
+		}{Permission: ruleset}
+	}
+	resp, err := c.post(ctx, "/session", payload)
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotFound {
 		return "", ErrNotFound
@@ -337,6 +355,27 @@ func (c *HTTPClient) CreateSession(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("relay: create session: decode response: %w", err)
 	}
 	return body.ID, nil
+}
+
+func (c *HTTPClient) SetSessionPermission(ctx context.Context, sessionID string, ruleset PermissionRuleset) error {
+	payload := struct {
+		Permission PermissionRuleset `json:"permission"`
+	}{Permission: ruleset}
+	resp, err := c.patch(ctx, "/session/"+sessionID, payload)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		return fmt.Errorf("relay: update session permission: drain body: %w", err)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return ErrNotFound
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= 300 {
+		return fmt.Errorf("relay: update session permission: unexpected status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func (c *HTTPClient) GetSession(ctx context.Context, sessionID string) (*SessionInfo, error) {
@@ -908,6 +947,23 @@ func (c *HTTPClient) post(ctx context.Context, path string, payload any) (*http.
 		req.Header.Set("Content-Type", "application/json")
 	}
 
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, c.wrapTransportErr(err)
+	}
+	return resp, nil
+}
+
+func (c *HTTPClient) patch(ctx context.Context, path string, payload any) (*http.Response, error) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("relay: marshal request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.base+path, bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("relay: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, c.wrapTransportErr(err)

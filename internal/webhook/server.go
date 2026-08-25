@@ -479,6 +479,29 @@ func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, d
 		workCtx.Worktree = worktree
 	}
 
+	if isWebhookWorkflow(ep.Workflow) {
+		if key.IsZero() || workCtx.Worktree == "" {
+			s.failDelivery(ep, id, deliveryID, eventType, envelope, "webhook permission policy requires an exact PR worktree", workCtx)
+			return
+		}
+		workCtx.Repository = key.Repository
+		workCtx.PRNumber = stringValue(envelope["pr_number"])
+		workCtx.ProjectDocsRoot = projectDocsRoot(workCtx.Worktree)
+		ruleset, policyErr := BuildPermissionPolicy(PermissionPolicyInput{
+			Workflow:        ep.Workflow,
+			Repository:      workCtx.Repository,
+			PRNumber:        workCtx.PRNumber,
+			Worktree:        workCtx.Worktree,
+			ProjectDocsRoot: workCtx.ProjectDocsRoot,
+			Branch:          key.Branch,
+		})
+		if policyErr != nil {
+			s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary("webhook permission policy failed: "+policyErr.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
+			return
+		}
+		workCtx.PermissionRuleset = ruleset
+	}
+
 	if s.channels != nil {
 		ch, err := s.channels.Get(context.Background(), ep.Platform, ep.ChannelID)
 		if err != nil {

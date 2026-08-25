@@ -169,12 +169,13 @@ func TestWebhookMergeAllowsNoBlockingFindingsSelfReview(t *testing.T) {
 		ChannelID: "chat",
 		Prompt:    "must run",
 	}})
+	srv.SetWorktreeResolver(&fakeWorktreeResolver{worktree: "/projects/occa/.worktree/pr-123"})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleRequest)
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	body := `{"action":"submitted","repository":{"full_name":"anggasct/occa"},"pull_request":{"number":123,"html_url":"https://github.com/anggasct/occa/pull/123","title":"Webhook UX","user":{"login":"kumasct"}},"review":{"state":"commented","body":"**Verdict:** APPROVED\n\n### Findings\n\nNo blocking findings.","user":{"login":"kumasct"}}}`
+	body := `{"action":"submitted","repository":{"full_name":"anggasct/occa"},"pull_request":{"number":123,"html_url":"https://github.com/anggasct/occa/pull/123","title":"Webhook UX","user":{"login":"kumasct"},"head":{"ref":"fix/webhook-permissions","repo":{"full_name":"anggasct/occa"}},"base":{"ref":"main","repo":{"full_name":"anggasct/occa"}}},"review":{"state":"commented","body":"**Verdict:** APPROVED\n\n### Findings\n\nNo blocking findings.","user":{"login":"kumasct"}}}`
 	if response := post(t, ts.URL+"/github?secret=secret", "clean-approval", "pull_request_review", body); response.StatusCode != http.StatusOK {
 		t.Fatalf("POST status = %d, want 200", response.StatusCode)
 	}
