@@ -203,6 +203,63 @@ func TestModelBrowserSetPersonalForCaller(t *testing.T) {
 	}
 }
 
+func TestModelBrowserRoundTripsSlashContainingModelID(t *testing.T) {
+	r, client, _, overrideRepo := newTestRouterWithAccess()
+	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+	}
+	providers := browseProviders()
+	providers.All = append(providers.All, relay.Provider{
+		ID:     "openrouter",
+		Models: map[string]json.RawMessage{"stealth/ox-alpha": json.RawMessage(`{}`)},
+	})
+	client.providers = providers
+
+	openReply := newBrowseReplyCtx()
+	m := msg("/model", openReply.fakeReplyCtx)
+	m.ReplyCtx = openReply
+	if err := r.Route(context.Background(), m); err != nil {
+		t.Fatalf("Route open browser: %v", err)
+	}
+
+	providerToken := buttonValue(openReply.sendSnapshot(), "openrouter")
+	if providerToken == "" {
+		t.Fatal("missing openrouter provider button")
+	}
+	modelsReply := newBrowseReplyCtx()
+	if err := r.Route(context.Background(), callbackMsg("user1", providerToken, modelsReply)); err != nil {
+		t.Fatalf("Route provider callback: %v", err)
+	}
+	_, modelButtons := modelsReply.editSnapshot()
+	modelToken := buttonValue(modelButtons, "stealth/ox-alpha")
+	if modelToken == "" {
+		t.Fatalf("missing slash-containing model button: %v", labelsOf(modelButtons))
+	}
+
+	setReply := newBrowseReplyCtx()
+	if err := r.Route(context.Background(), callbackMsg("user1", modelToken, setReply)); err != nil {
+		t.Fatalf("Route model callback: %v", err)
+	}
+	text, buttons := setReply.editSnapshot()
+	if text != "✅ Personal model set: openrouter/stealth/ox-alpha\nScope: personal override" {
+		t.Fatalf("set text = %q", text)
+	}
+	if len(buttons) != 0 {
+		t.Fatalf("set buttons = %v, want removed", buttons)
+	}
+	if got := overrideRepo.overrides["telegram:chat1:user1"].Model; got != "openrouter/stealth/ox-alpha" {
+		t.Fatalf("stored model = %q, want openrouter/stealth/ox-alpha", got)
+	}
+
+	resolution, err := r.resolveModel(context.Background(), msg("hello", &fakeReplyCtx{}))
+	if err != nil {
+		t.Fatalf("resolveModel: %v", err)
+	}
+	if resolution.model == nil || formatModelRef(*resolution.model) != "openrouter/stealth/ox-alpha" {
+		t.Fatalf("resolved model = %+v", resolution.model)
+	}
+}
+
 func TestModelBrowserInvalidModelKeepsButtons(t *testing.T) {
 	r, client, _ := newTestRouter()
 	client.providers = browseProviders()
