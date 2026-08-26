@@ -12,6 +12,7 @@ import (
 	"github.com/anggasct/occa/internal/attribution"
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/health"
+	"github.com/anggasct/occa/internal/process"
 	"github.com/anggasct/occa/internal/relay"
 	"github.com/anggasct/occa/internal/render"
 	"github.com/anggasct/occa/internal/store"
@@ -91,6 +92,8 @@ type Router struct {
 	modelBrowser           *modelBrowserBroker
 	agentBrowser           *agentBrowserBroker
 	agentTracker           *agentTracker
+	recovery               *recoveryCoordinator
+	recoveryBudget         time.Duration
 	renderer               render.Renderer
 	streamerNoEventTimeout time.Duration
 }
@@ -122,6 +125,7 @@ func New(instances InstanceProvider, st store.Store, defaultWorkdir string, admi
 		modelBrowser:   newModelBrowserBroker(),
 		agentBrowser:   newAgentBrowserBroker(),
 		agentTracker:   newAgentTracker(),
+		recovery:       newRecoveryCoordinator(),
 		renderer:       render.New(),
 	}
 	r.registerDefaults()
@@ -441,9 +445,29 @@ func (r *Router) executePassthrough(taskCtx context.Context, cancel context.Canc
 
 	inst, err := r.clientFor(ctx, msg)
 	if err != nil {
-		r.recordHealthError("agent unreachable")
+		if errors.Is(err, process.ErrReadinessTimeout) {
+			workdir := ""
+			if wd, wdErr := r.effectiveWorkdir(ctx, msg); wdErr == nil {
+				workdir = wd
+			}
+			r.recordHealthError("agent not ready")
+			r.recordRecoveryEvent(ctx, store.RecoveryEvent{
+				Platform:      msg.Platform,
+				ChannelID:     msg.ChannelID,
+				ThreadID:      threadID,
+				UserID:        userID,
+				Workdir:       workdir,
+				Trigger:       store.RecoveryTriggerReadinessTimeout,
+				Outcome:       store.RecoveryOutcomeFailed,
+				CorrelationID: newRecoveryID(),
+				Detail:        truncateDetail(err.Error()),
+			})
+			r.reply(msg, agentStartFailedMessage)
+		} else {
+			r.recordHealthError("agent unreachable")
+			r.reply(msg, "⚠️ Agent unreachable")
+		}
 		r.responses.release(key)
-		r.reply(msg, "⚠️ Agent unreachable")
 		r.dispatchDrained(key, r.responses.drain(key))
 		return nil
 	}

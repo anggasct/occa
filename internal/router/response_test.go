@@ -483,7 +483,7 @@ func TestProgressNoticeText(t *testing.T) {
 	}
 }
 
-func TestResponseTimeoutForceStopsAndReplies(t *testing.T) {
+func TestResponseTimeoutTriggersRecoveryAndReplies(t *testing.T) {
 	client := newResponseClient(func(ctx context.Context, events chan<- relay.Event) error {
 		return relay.ErrTimeout
 	})
@@ -504,13 +504,16 @@ func TestResponseTimeoutForceStopsAndReplies(t *testing.T) {
 	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "hello", reply)); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
-	waitForReply(t, reply, "The agent stopped responding")
+	waitForReply(t, reply, "session resumed")
 	waitForResponse(t, r)
 
 	if provider.stopped != "/default-workdir" {
 		t.Fatalf("stopped = %q, want /default-workdir", provider.stopped)
 	}
-	if !reply.contains("⚠️ The agent stopped responding after 3 minutes and was restarted automatically. Please send your message again.") {
+	if provider.calls != 2 {
+		t.Fatalf("Instance calls = %d, want 2 (initial + recovery respawn)", provider.calls)
+	}
+	if !reply.contains("🔄 The agent was restarted and your session resumed") || !reply.contains("/status") {
 		t.Fatalf("unexpected reply text: %v", reply.texts())
 	}
 }

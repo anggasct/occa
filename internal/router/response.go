@@ -265,15 +265,17 @@ func (r *Router) runResponse(
 		slog.Warn("response dispatch failed", "platform", key.platform, "channel_id", key.channelID, "thread_id", key.threadID, "user_id", key.userID, "error", dispatchErr)
 		if errors.Is(dispatchErr, relay.ErrAttachmentTooLarge) {
 			r.reply(msg, "⚠️ "+dispatchErr.Error())
-		} else if errors.Is(dispatchErr, relay.ErrTimeout) {
-			r.instances.ForceStop(inst.Workdir())
-			r.reply(msg, "⚠️ The agent stopped responding after 3 minutes and was restarted automatically. Please send your message again.")
+		} else if trigger, classified := classifyDispatchFailure(dispatchErr); classified {
+			r.recoverAfterFailure(ctx, msg, key, inst, trigger, dispatchErr)
 		} else {
 			r.reply(msg, "⚠️ Agent unreachable")
 		}
 	}
 	if streamErr != nil && !errors.Is(streamErr, context.Canceled) {
 		slog.Warn("response stream ended", "platform", key.platform, "channel_id", key.channelID, "thread_id", key.threadID, "user_id", key.userID, "error", streamErr)
+		if errors.Is(streamErr, relay.ErrIncompleteStream) {
+			r.recoverAfterFailure(ctx, msg, key, inst, store.RecoveryTriggerStreamEnded, streamErr)
+		}
 	}
 	if outcome == "complete" {
 		r.detectNewAgents(ctx, msg, inst)

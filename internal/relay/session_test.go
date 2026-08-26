@@ -271,3 +271,56 @@ func TestResolveLegacyRowValidates(t *testing.T) {
 		}
 	})
 }
+
+func TestResolveDetailedOutcomes(t *testing.T) {
+	t.Run("owner match resumes without backend check", func(t *testing.T) {
+		repo := &mockSessionRepo{activeID: "stored", ownerPID: 100}
+		client := &mockClient{sessionID: "fresh"}
+		res, err := NewSessionResolver(repo, client).ResolveDetailed(context.Background(), "telegram", "1", "", "u", 100)
+		if err != nil {
+			t.Fatalf("ResolveDetailed: %v", err)
+		}
+		if !res.Resumed || !res.HadStored || res.SessionID != "stored" {
+			t.Fatalf("resolution = %+v, want resumed stored session", res)
+		}
+		if client.existsCalls != 0 {
+			t.Fatalf("SessionExists calls = %d, want 0", client.existsCalls)
+		}
+	})
+
+	t.Run("verified session resumes across agent restart", func(t *testing.T) {
+		repo := &mockSessionRepo{activeID: "stored", ownerPID: 100}
+		client := &mockClient{sessionID: "fresh", sessionExists: true}
+		res, err := NewSessionResolver(repo, client).ResolveDetailed(context.Background(), "telegram", "1", "", "u", 200)
+		if err != nil {
+			t.Fatalf("ResolveDetailed: %v", err)
+		}
+		if !res.Resumed || !res.HadStored || res.SessionID != "stored" {
+			t.Fatalf("resolution = %+v, want resumed stored session", res)
+		}
+	})
+
+	t.Run("missing session recreates with HadStored", func(t *testing.T) {
+		repo := &mockSessionRepo{activeID: "stored", ownerPID: 100}
+		client := &mockClient{sessionID: "fresh", sessionExists: false}
+		res, err := NewSessionResolver(repo, client).ResolveDetailed(context.Background(), "telegram", "1", "", "u", 200)
+		if err != nil {
+			t.Fatalf("ResolveDetailed: %v", err)
+		}
+		if res.Resumed || !res.HadStored || res.SessionID != "fresh" {
+			t.Fatalf("resolution = %+v, want recreated session with HadStored", res)
+		}
+	})
+
+	t.Run("no stored session creates fresh without HadStored", func(t *testing.T) {
+		repo := &mockSessionRepo{}
+		client := &mockClient{sessionID: "fresh"}
+		res, err := NewSessionResolver(repo, client).ResolveDetailed(context.Background(), "telegram", "1", "", "u", 100)
+		if err != nil {
+			t.Fatalf("ResolveDetailed: %v", err)
+		}
+		if res.Resumed || res.HadStored || res.SessionID != "fresh" {
+			t.Fatalf("resolution = %+v, want fresh session without HadStored", res)
+		}
+	})
+}
