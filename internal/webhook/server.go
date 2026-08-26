@@ -116,7 +116,13 @@ func (s *Server) SetWorktreeResolver(r WorktreeResolver) {
 }
 
 func (s *Server) SetNotifier(n Notifier) {
-	s.notifier = n
+	if n == nil {
+		s.notifier = nil
+		return
+	}
+	s.notifier = func(ctx context.Context, platform, channelID, text string) error {
+		return n(ctx, platform, channelID, FormatWebhookMessage(text))
+	}
 }
 
 func (s *Server) SetChannelStore(c ChannelStore) {

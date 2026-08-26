@@ -10,6 +10,7 @@ import (
 
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/store"
+	"github.com/anggasct/occa/internal/webhook"
 )
 
 type stubChannel struct {
@@ -123,6 +124,33 @@ func TestNotifyPassesThroughDiscord(t *testing.T) {
 
 	if got == "" || !strings.Contains(got, "<x>") {
 		t.Fatalf("discord content altered: %q", got)
+	}
+}
+
+func TestNotifyWebhookAddsSeparatorToLifecycleMessage(t *testing.T) {
+	var got string
+	notifyWebhook(&captureChannel{
+		name: "telegram",
+		send: func(_, text string) { got = text },
+	}, "chat1", "📨 Webhook: analyzing...")
+
+	if want := webhook.FormatWebhookMessage("📨 Webhook: analyzing..."); got != want {
+		t.Fatalf("webhook notification = %q, want %q", got, want)
+	}
+}
+
+func TestNotifyLeavesOrdinaryChatUnchanged(t *testing.T) {
+	var got string
+	notify(&captureChannel{
+		name: "telegram",
+		send: func(_, text string) { got = text },
+	}, "chat1", "ordinary chat")
+
+	if got != "ordinary chat" {
+		t.Fatalf("ordinary notification = %q, want ordinary chat", got)
+	}
+	if strings.Contains(got, "━━━━━━━━━━━━━━━━━━━━━━━━") {
+		t.Fatalf("ordinary chat received webhook separator: %q", got)
 	}
 }
 
