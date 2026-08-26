@@ -100,6 +100,12 @@ func TestOwnMessageDroppedOnceIdentityKnown(t *testing.T) {
 		Author:    &discordgo.User{ID: "someone", Bot: true},
 		Content:   "other bot",
 	}}, deliver)
+	a.onMessage(&discordgo.MessageCreate{Message: &discordgo.Message{
+		ChannelID: "chan",
+		Author:    &discordgo.User{ID: "someone", Bot: true},
+		Mentions:  []*discordgo.User{{ID: "bot-42"}},
+		Content:   "mentioned bot",
+	}}, deliver)
 
 	if delivered != 0 {
 		t.Fatalf("delivered = %d, want 0", delivered)
