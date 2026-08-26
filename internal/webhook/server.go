@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,6 +30,7 @@ import (
 const (
 	maxWebhookBodySize         int64 = 10 * 1024 * 1024
 	maxConcurrentWebhookEvents       = 16
+	maxQueuedPerKey                  = 8
 
 	maxDeliveryIDRunes   = 128
 	maxEventTypeRunes    = 64
@@ -39,6 +41,8 @@ const (
 	pruneInterval     = 10 * time.Minute
 	processingTimeout = 30 * time.Minute
 	claimGrace        = processingTimeout + 2*time.Minute
+	dispatcherIdleTTL = time.Hour
+	retryAfterSeconds = 30
 
 	readHeaderTimeout = 10 * time.Second
 	readTimeout       = 30 * time.Second
@@ -77,8 +81,13 @@ type Server struct {
 	httpSrv           *http.Server
 	listener          net.Listener
 	eventSlots        chan struct{}
-	sessionMu         sync.Map
+	dispatchMu        sync.Mutex
+	dispatchers       map[string]*dispatcher
+	dispatchWG        sync.WaitGroup
+	shutdownCtx       context.Context
+	shutdownCancel    context.CancelFunc
 	processingTimeout time.Duration
+	dispatcherIdleTTL time.Duration
 	pruneMu           sync.Mutex
 	lastPrune         time.Time
 	pruneInterval     time.Duration
@@ -96,13 +105,18 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 		ep.Workflow = strings.TrimSpace(strings.ToLower(ep.Workflow))
 		endpoints[ep.Path] = ep
 	}
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	return &Server{
 		bind:              cfg.Bind,
 		endpoints:         endpoints,
 		executor:          executor,
 		deliveries:        deliveries,
 		eventSlots:        make(chan struct{}, maxConcurrentWebhookEvents),
+		dispatchers:       make(map[string]*dispatcher),
+		shutdownCtx:       shutdownCtx,
+		shutdownCancel:    shutdownCancel,
 		processingTimeout: processingTimeout,
+		dispatcherIdleTTL: dispatcherIdleTTL,
 		pruneInterval:     pruneInterval,
 		readHeaderTimeout: readHeaderTimeout,
 		readTimeout:       readTimeout,
@@ -127,19 +141,6 @@ func (s *Server) SetNotifier(n Notifier) {
 
 func (s *Server) SetChannelStore(c ChannelStore) {
 	s.channels = c
-}
-
-func (s *Server) tryAcquireEvent() bool {
-	select {
-	case s.eventSlots <- struct{}{}:
-		return true
-	default:
-		return false
-	}
-}
-
-func (s *Server) releaseEvent() {
-	<-s.eventSlots
 }
 
 // recoverStale marks deliveries a previous process left in flight as failed so
@@ -209,6 +210,7 @@ func (s *Server) Start(ctx context.Context) error {
 	go func() {
 		<-ctx.Done()
 		s.listening.Store(false)
+		s.shutdownCancel()
 		_ = s.httpSrv.Close()
 	}()
 
@@ -229,11 +231,23 @@ func (s *Server) Addr() string { return s.bindAddr }
 func (s *Server) Healthy() bool { return s.listening.Load() }
 
 func (s *Server) Stop(ctx context.Context) error {
-	if s.httpSrv == nil {
-		return nil
-	}
 	s.listening.Store(false)
-	return s.httpSrv.Shutdown(ctx)
+	var err error
+	if s.httpSrv != nil {
+		err = s.httpSrv.Shutdown(ctx)
+	}
+	s.shutdownCancel()
+	done := make(chan struct{})
+	go func() {
+		s.dispatchWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		slog.Warn("webhook: shutdown drain timed out", "error", ctx.Err())
+	}
+	return err
 }
 
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
@@ -285,155 +299,337 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if !s.tryAcquireEvent() {
-		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
-		return
-	}
-
 	payloadHash := sha256Hex(body)
 	eventType := providerEventType(r, body)
 	deliveryID := providerDeliveryID(r, payloadHash)
 
-	receipt, shouldProcess, alreadyClaimed, err := s.claimReceipt(r.Context(), ep, deliveryID, eventType, payloadHash)
-	if err != nil {
-		s.releaseEvent()
-		slog.Error("webhook: receipt claim failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
-		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
-		return
+	item := dispatchItem{
+		ep:          ep,
+		body:        body,
+		deliveryID:  deliveryID,
+		eventType:   eventType,
+		payloadHash: payloadHash,
 	}
-
-	if !shouldProcess {
-		slog.Info("webhook: duplicate delivery", "endpoint", ep.Name, "delivery_id", deliveryID, "event_type", eventType, "observed_status", receipt.Status)
-		s.releaseEvent()
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-	if s.shouldSkip(ep, eventType) {
-		reason := "configured event skip"
-		envelope := normalizeWebhook(body, eventType, deliveryID, true, reason)
-		summary := redactAuditSummary(formatAuditSummary(envelope, ep.Workflow, "SKIP", reason), ep.Secret)
-		if ok, tErr := s.deliveries.Transition(r.Context(), receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived, store.WebhookStatusAccepted, store.WebhookStatusProcessing}, store.WebhookStatusSkipped, summary); tErr != nil {
-			slog.Error("webhook: skip transition failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", tErr)
-			s.releaseEvent()
-			http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
-			return
-		} else if !ok {
-			slog.Warn("webhook: skip transition lost race", "endpoint", ep.Name, "delivery_id", deliveryID, "observed_status", receipt.Status)
-		} else {
-			slog.Info("webhook: delivery skipped", "endpoint", ep.Name, "delivery_id", deliveryID, "event_type", eventType)
-			s.emitAudit(r.Context(), ep, envelope, "SKIP", reason)
-		}
-		s.releaseEvent()
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-	if !alreadyClaimed {
-		claimed, claimErr := s.claimProcessing(r.Context(), receipt, deliveryID)
-		if claimErr != nil {
-			s.releaseEvent()
-			http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		if !claimed {
-			s.releaseEvent()
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-	}
-
-	slog.Info("webhook: delivery accepted", "endpoint", ep.Name, "delivery_id", deliveryID, "event_type", eventType, "status", store.WebhookStatusProcessing)
-	w.WriteHeader(http.StatusOK)
-
-	go func() {
-		defer s.releaseEvent()
-		s.processAsync(ep, body, receipt.ID, deliveryID, eventType)
-		s.pruneIfDue()
-	}()
-}
-
-// claimReceipt inserts a durable receipt for a validated delivery. A brand-new
-// delivery reports shouldProcess=true. A duplicate of a terminal delivery, or
-// one still being processed within the claim grace window, observes the
-// existing status and does not start a second session. A receipt still in
-// received has not completed its first state transition, so it remains
-// retryable; the next handler step performs the transition with CAS. A
-// duplicate whose in-flight attempt went stale (the earlier process died
-// mid-request) is re-claimed atomically via ClaimStale and reports
-// alreadyClaimed so the handler skips the redundant CAS.
-func (s *Server) claimReceipt(ctx context.Context, ep config.EndpointConfig, deliveryID, eventType, payloadHash string) (*store.WebhookDelivery, bool, bool, error) {
-	created, err := s.deliveries.Create(ctx, store.WebhookDelivery{
-		Endpoint:    ep.Name,
-		DeliveryID:  deliveryID,
-		EventType:   eventType,
-		PayloadHash: payloadHash,
-		Attempt:     1,
-	})
-	if err != nil {
-		return nil, false, false, err
-	}
-
-	receipt, err := s.deliveries.Get(ctx, ep.Name, deliveryID)
-	if err != nil {
-		return nil, false, false, err
-	}
-	if receipt == nil {
-		return nil, false, false, errors.New("receipt missing after claim")
-	}
-	if created {
-		return receipt, true, false, nil
-	}
-
-	if isTerminal(receipt.Status) {
-		return receipt, false, false, nil
-	}
-	if receipt.Status == store.WebhookStatusReceived {
-		return receipt, true, false, nil
-	}
-	if time.Now().Unix()-receipt.UpdatedAt < int64(claimGrace.Seconds()) {
-		return receipt, false, false, nil
-	}
-
-	ok, tErr := s.deliveries.ClaimStale(ctx, receipt.ID, time.Now().Add(-claimGrace).Unix())
-	if tErr != nil {
-		return nil, false, false, tErr
-	}
+	d, ok := s.enqueue(ep, ExtractExecutionKey(body), item)
 	if !ok {
-		return receipt, false, false, nil
+		slog.Warn("webhook: queue full",
+			"endpoint", ep.Name,
+			"delivery_id", deliveryID,
+			"event_type", eventType,
+		)
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
+		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
+		return
 	}
-	receipt.Status = store.WebhookStatusProcessing
-	return receipt, true, true, nil
+
+	slog.Info("webhook: delivery enqueued", "endpoint", ep.Name, "delivery_id", deliveryID, "event_type", eventType, "lock", d.key)
+	w.WriteHeader(http.StatusOK)
 }
 
-// claimProcessing moves a fresh receipt to processing under compare-and-swap
-// so a lost race leaves the delivery retryable instead of double-starting a
-// session. Receipts already claimed through ClaimStale skip this call.
-func (s *Server) claimProcessing(ctx context.Context, receipt *store.WebhookDelivery, deliveryID string) (bool, error) {
-	ok, err := s.deliveries.Transition(ctx, receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived}, store.WebhookStatusProcessing, "")
-	if err != nil {
-		slog.Error("webhook: processing claim failed", "endpoint", receipt.Endpoint, "delivery_id", deliveryID, "error", err)
-		return false, err
-	}
-	return ok, nil
-}
-
-func (s *Server) sessionLock(ep config.EndpointConfig, key WebhookExecutionKey) *sync.Mutex {
+// enqueue atomically resolves the live dispatcher for a lock identity and
+// appends the item to its queue. Lookup, retirement checks, and the channel
+// send all happen under dispatchMu — retirement also flips exiting under that
+// lock before any drain — so an accepted send is always ordered before
+// retirement completes and can never land in a channel nobody will read. A
+// rejected send (queue full) leaves the dispatcher untouched.
+func (s *Server) enqueue(ep config.EndpointConfig, key WebhookExecutionKey, item dispatchItem) (*dispatcher, bool) {
 	var lockKey string
 	if key.IsZero() {
 		lockKey = "endpoint:" + ep.Platform + "|" + ep.ChannelID
 	} else {
 		lockKey = "key:" + key.String()
 	}
-	mu, _ := s.sessionMu.LoadOrStore(lockKey, &sync.Mutex{})
-	return mu.(*sync.Mutex)
+	s.dispatchMu.Lock()
+	defer s.dispatchMu.Unlock()
+	d, ok := s.dispatchers[lockKey]
+	if !ok || d.exiting {
+		d = &dispatcher{server: s, key: lockKey, ch: make(chan dispatchItem, maxQueuedPerKey)}
+		s.dispatchers[lockKey] = d
+		s.dispatchWG.Add(1)
+		go d.run(s.shutdownCtx)
+	}
+	select {
+	case d.ch <- item:
+		return d, true
+	default:
+		return nil, false
+	}
 }
 
-func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, deliveryID, eventType string) {
+func (s *Server) dispatcherCount() int {
+	s.dispatchMu.Lock()
+	defer s.dispatchMu.Unlock()
+	return len(s.dispatchers)
+}
+
+func (s *Server) tryAcquireEvent() bool {
+	select {
+	case s.eventSlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) acquireEvent(ctx context.Context) bool {
+	select {
+	case s.eventSlots <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (s *Server) releaseEvent() {
+	<-s.eventSlots
+}
+
+type dispatchItem struct {
+	ep          config.EndpointConfig
+	body        []byte
+	deliveryID  string
+	eventType   string
+	payloadHash string
+}
+
+type dispatcher struct {
+	server  *Server
+	key     string
+	ch      chan dispatchItem
+	exiting bool
+}
+
+// run serially executes queued deliveries until the queue stays idle for the
+// eviction TTL or the shutdown context is cancelled. Idle retirement only
+// succeeds while the queue is provably empty under dispatchMu, so no accepted
+// send is ever stranded; on shutdown every leftover is recorded as failed.
+func (d *dispatcher) run(ctx context.Context) {
+	defer d.server.dispatchWG.Done()
+	timer := time.NewTimer(d.server.dispatcherIdleTTL)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			d.retire("shutting down")
+			return
+		case item := <-d.ch:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(d.server.dispatcherIdleTTL)
+			if ctx.Err() != nil {
+				d.server.abandon(item, "shutting down")
+				continue
+			}
+			d.handle(item)
+		case <-timer.C:
+			if !d.tryRetireIdle() {
+				timer.Reset(d.server.dispatcherIdleTTL)
+				continue
+			}
+			return
+		}
+	}
+}
+
+// tryRetireIdle retires the dispatcher only when its queue is empty under the
+// registry lock. Because enqueues take the same lock, a successful retirement
+// freezes an empty channel that no future send can reach; a failed attempt
+// means activity raced the timer and the dispatcher stays live.
+func (d *dispatcher) tryRetireIdle() bool {
+	s := d.server
+	s.dispatchMu.Lock()
+	defer s.dispatchMu.Unlock()
+	if len(d.ch) > 0 {
+		return false
+	}
+	d.exiting = true
+	if current, ok := s.dispatchers[d.key]; ok && current == d {
+		delete(s.dispatchers, d.key)
+	}
+	return true
+}
+
+// retire marks the dispatcher exiting under the registry lock — after this,
+// enqueues build a fresh dispatcher — and records every queued item as failed.
+// Leftovers are never executed here so a retiring dispatcher cannot overlap a
+// replacement on the same identity.
+func (d *dispatcher) retire(reason string) {
+	s := d.server
+	s.dispatchMu.Lock()
+	d.exiting = true
+	if current, ok := s.dispatchers[d.key]; ok && current == d {
+		delete(s.dispatchers, d.key)
+	}
+	s.dispatchMu.Unlock()
+	for {
+		select {
+		case item := <-d.ch:
+			s.abandon(item, reason)
+		default:
+			return
+		}
+	}
+}
+
+func (d *dispatcher) handle(item dispatchItem) {
+	s := d.server
+	receipt := s.beginExecution(item)
+	if receipt == nil {
+		return
+	}
+	if !s.acquireEvent(s.shutdownCtx) {
+		s.failAbandonedReceipt(receipt, "shutting down")
+		return
+	}
+	defer s.releaseEvent()
+	s.executeDelivery(item.ep, item.body, receipt.ID, item.deliveryID, item.eventType)
+	s.pruneIfDue()
+}
+
+// beginExecution claims a delivery at the moment it reaches the head of its
+// queue: the receipt row is created here and moved to processing with a fresh
+// updated_at, so the stale-claim grace window always measures active execution
+// time rather than queue wait. Duplicate deliveries resolve against the stored
+// receipt exactly as before; only the winner proceeds.
+func (s *Server) beginExecution(item dispatchItem) *store.WebhookDelivery {
+	ctx := context.Background()
+	ep := item.ep
+
+	created, err := s.deliveries.Create(ctx, store.WebhookDelivery{
+		Endpoint:    ep.Name,
+		DeliveryID:  item.deliveryID,
+		EventType:   item.eventType,
+		PayloadHash: item.payloadHash,
+		Attempt:     1,
+	})
+	if err != nil {
+		slog.Error("webhook: receipt claim failed", "endpoint", ep.Name, "delivery_id", item.deliveryID, "error", err)
+		return nil
+	}
+
+	receipt, err := s.deliveries.Get(ctx, ep.Name, item.deliveryID)
+	if err != nil {
+		slog.Error("webhook: receipt load failed", "endpoint", ep.Name, "delivery_id", item.deliveryID, "error", err)
+		return nil
+	}
+	if receipt == nil {
+		slog.Error("webhook: receipt missing after claim", "endpoint", ep.Name, "delivery_id", item.deliveryID)
+		return nil
+	}
+
+	staleClaimed := false
+	if !created {
+		switch {
+		case isTerminal(receipt.Status):
+			s.logDuplicate(item, receipt.Status)
+			return nil
+		case receipt.Status == store.WebhookStatusReceived:
+		case time.Now().Unix()-receipt.UpdatedAt < int64(claimGrace.Seconds()):
+			s.logDuplicate(item, receipt.Status)
+			return nil
+		default:
+			ok, tErr := s.deliveries.ClaimStale(ctx, receipt.ID, time.Now().Add(-claimGrace).Unix())
+			if tErr != nil {
+				slog.Error("webhook: stale claim failed", "endpoint", ep.Name, "delivery_id", item.deliveryID, "error", tErr)
+				return nil
+			}
+			if !ok {
+				s.logDuplicate(item, receipt.Status)
+				return nil
+			}
+			staleClaimed = true
+		}
+	}
+
+	if s.shouldSkip(ep, item.eventType) {
+		reason := "configured event skip"
+		envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, true, reason)
+		summary := redactAuditSummary(formatAuditSummary(envelope, ep.Workflow, "SKIP", reason), ep.Secret)
+		ok, tErr := s.deliveries.Transition(ctx, receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived, store.WebhookStatusAccepted, store.WebhookStatusProcessing}, store.WebhookStatusSkipped, summary)
+		if tErr != nil {
+			slog.Error("webhook: skip transition failed", "endpoint", ep.Name, "delivery_id", item.deliveryID, "error", tErr)
+			return nil
+		}
+		if !ok {
+			slog.Warn("webhook: skip transition lost race", "endpoint", ep.Name, "delivery_id", item.deliveryID, "observed_status", receipt.Status)
+			return nil
+		}
+		slog.Info("webhook: delivery skipped", "endpoint", ep.Name, "delivery_id", item.deliveryID, "event_type", item.eventType)
+		s.emitAudit(ctx, ep, envelope, "SKIP", reason)
+		return nil
+	}
+
+	if !staleClaimed {
+		ok, tErr := s.deliveries.Transition(ctx, receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived}, store.WebhookStatusProcessing, "")
+		if tErr != nil {
+			slog.Error("webhook: processing claim failed", "endpoint", ep.Name, "delivery_id", item.deliveryID, "error", tErr)
+			return nil
+		}
+		if !ok {
+			slog.Warn("webhook: processing claim lost race", "endpoint", ep.Name, "delivery_id", item.deliveryID, "observed_status", receipt.Status)
+			return nil
+		}
+	}
+
+	slog.Info("webhook: delivery accepted", "endpoint", ep.Name, "delivery_id", item.deliveryID, "event_type", item.eventType, "status", store.WebhookStatusProcessing)
+	return receipt
+}
+
+func (s *Server) logDuplicate(item dispatchItem, observed store.WebhookStatus) {
+	slog.Info("webhook: duplicate delivery",
+		"endpoint", item.ep.Name,
+		"delivery_id", item.deliveryID,
+		"event_type", item.eventType,
+		"observed_status", observed,
+	)
+}
+
+// abandon records a delivery that was accepted but will never execute — the
+// process is shutting down with it still queued. The receipt is created only
+// now so overload rejections and queue waits leave no rows behind.
+func (s *Server) abandon(item dispatchItem, reason string) {
+	ctx := context.Background()
+	created, err := s.deliveries.Create(ctx, store.WebhookDelivery{
+		Endpoint:    item.ep.Name,
+		DeliveryID:  item.deliveryID,
+		EventType:   item.eventType,
+		PayloadHash: item.payloadHash,
+		Attempt:     1,
+	})
+	if err != nil {
+		slog.Error("webhook: abandoned delivery receipt failed", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "error", err)
+		return
+	}
+	if !created {
+		return
+	}
+	receipt, err := s.deliveries.Get(ctx, item.ep.Name, item.deliveryID)
+	if err != nil || receipt == nil {
+		slog.Error("webhook: abandoned delivery receipt missing", "endpoint", item.ep.Name, "delivery_id", item.deliveryID)
+		return
+	}
+	s.failAbandonedReceipt(receipt, reason)
+}
+
+func (s *Server) failAbandonedReceipt(receipt *store.WebhookDelivery, reason string) {
+	ok, err := s.deliveries.Transition(context.Background(), receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived, store.WebhookStatusAccepted, store.WebhookStatusProcessing}, store.WebhookStatusFailed, reason)
+	if err != nil {
+		slog.Error("webhook: abandoned delivery transition failed", "endpoint", receipt.Endpoint, "delivery_id", receipt.DeliveryID, "error", err)
+		return
+	}
+	if ok {
+		slog.Warn("webhook: delivery abandoned", "endpoint", receipt.Endpoint, "delivery_id", receipt.DeliveryID, "reason", reason)
+	}
+}
+
+// executeDelivery runs the claimed delivery. It must be called with the event
+// slot held and only after beginExecution succeeded for this receipt.
+func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64, deliveryID, eventType string) {
 	key := ExtractExecutionKey(body)
-	mu := s.sessionLock(ep, key)
-	mu.Lock()
-	defer mu.Unlock()
 
 	var workCtx WebhookWorkContext
 	workCtx.Key = key
@@ -455,6 +651,11 @@ func (s *Server) processAsync(ep config.EndpointConfig, body []byte, id int64, d
 			s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary(fmt.Sprintf("panic: %v", r), maxErrorSummaryRunes, ep.Secret), workCtx)
 		}
 	}()
+
+	if allowed, reason := workflowAllows(ep.Workflow, envelope); !allowed {
+		s.markSkipped(id, ep, envelope, reason)
+		return
+	}
 
 	if allowed, reason := workflowAllows(ep.Workflow, envelope); !allowed {
 		s.markSkipped(id, ep, envelope, reason)
