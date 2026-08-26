@@ -1,6 +1,7 @@
 package discord
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -378,6 +379,93 @@ func TestTrustedBotAdmission(t *testing.T) {
 			}}, func(channel.IncomingMessage) { delivered++ })
 			if got := delivered == 1; got != tt.want {
 				t.Fatalf("delivered = %d, want match=%v", delivered, tt.want)
+			}
+		})
+	}
+}
+
+func TestTrustedBotThreadAdmission(t *testing.T) {
+	const (
+		trustedBotID = "trusted-bot"
+		occaBotID    = "occa-bot"
+		threadID     = "thread-1"
+		parentID     = "parent-channel"
+	)
+
+	tests := []struct {
+		name        string
+		authorID    string
+		bot         bool
+		channelType discordgo.ChannelType
+		parentID    string
+		lookupErr   error
+		lookupNil   bool
+		owned       bool
+		ownedErr    error
+		mention     bool
+		want        bool
+	}{
+		{name: "owned public thread", authorID: trustedBotID, bot: true, channelType: discordgo.ChannelTypeGuildPublicThread, parentID: parentID, owned: true, mention: true, want: true},
+		{name: "owned private thread", authorID: trustedBotID, bot: true, channelType: discordgo.ChannelTypeGuildPrivateThread, parentID: parentID, owned: true, mention: true, want: true},
+		{name: "owned news thread", authorID: trustedBotID, bot: true, channelType: discordgo.ChannelTypeGuildNewsThread, parentID: parentID, owned: true, mention: true, want: true},
+		{name: "unowned thread", authorID: trustedBotID, bot: true, channelType: discordgo.ChannelTypeGuildPublicThread, parentID: parentID, mention: true},
+		{name: "lookup failure", authorID: trustedBotID, bot: true, lookupErr: errors.New("lookup failed"), mention: true},
+		{name: "empty lookup result", authorID: trustedBotID, bot: true, lookupNil: true, mention: true},
+		{name: "missing parent", authorID: trustedBotID, bot: true, channelType: discordgo.ChannelTypeGuildPublicThread, owned: true, mention: true},
+		{name: "sender mismatch", authorID: "other-bot", bot: true, channelType: discordgo.ChannelTypeGuildPublicThread, parentID: parentID, owned: true, mention: true},
+		{name: "parent mismatch", authorID: trustedBotID, bot: true, channelType: discordgo.ChannelTypeGuildPublicThread, parentID: "other-parent", owned: true, mention: true},
+		{name: "missing mention", authorID: trustedBotID, bot: true, channelType: discordgo.ChannelTypeGuildPublicThread, parentID: parentID, owned: true},
+		{name: "ownership lookup failure", authorID: trustedBotID, bot: true, channelType: discordgo.ChannelTypeGuildPublicThread, parentID: parentID, ownedErr: errors.New("ownership lookup failed"), mention: true},
+		{name: "self bot", authorID: occaBotID, bot: true, channelType: discordgo.ChannelTypeGuildPublicThread, parentID: parentID, owned: true, mention: true},
+		{name: "human compatibility", authorID: "human", channelType: discordgo.ChannelTypeGuildPublicThread, parentID: parentID, mention: false, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			policy := TrustedBotPolicy{TrustedBotSenders: []TrustedBotSender{{
+				UserID:     trustedBotID,
+				ChannelIDs: []string{parentID},
+			}}}
+			a := NewWithPolicy("fake-token", nil, policy)
+			a.setBotID(occaBotID)
+			a.channelLookup = func(string) (*discordgo.Channel, error) {
+				if tt.lookupErr != nil {
+					return nil, tt.lookupErr
+				}
+				if tt.lookupNil {
+					return nil, nil
+				}
+				return &discordgo.Channel{Type: tt.channelType, ParentID: tt.parentID}, nil
+			}
+			a.SetOwnedThreadCheck(func(string) (bool, error) { return tt.owned, tt.ownedErr })
+
+			var got channel.IncomingMessage
+			delivered := 0
+			message := &discordgo.Message{
+				GuildID:   "guild",
+				ChannelID: threadID,
+				Author:    &discordgo.User{ID: tt.authorID, Bot: tt.bot},
+			}
+			if tt.mention {
+				message.Mentions = []*discordgo.User{{ID: occaBotID}}
+			}
+			a.onMessage(&discordgo.MessageCreate{Message: message}, func(message channel.IncomingMessage) {
+				delivered++
+				got = message
+			})
+
+			if (delivered == 1) != tt.want {
+				t.Fatalf("delivered = %d, want %v", delivered, tt.want)
+			}
+			if !tt.want || !tt.bot {
+				return
+			}
+			if got.ChannelID != parentID || got.ParentChannelID != parentID || got.ThreadID != threadID || !got.IsThread || !got.IsMention {
+				t.Fatalf("unexpected normalized thread message: %+v", got)
+			}
+			rc, ok := got.ReplyCtx.(*replyContext)
+			if !ok || rc.channelID != threadID {
+				t.Fatalf("reply context channel = %q, want %q", rc.channelID, threadID)
 			}
 		})
 	}
