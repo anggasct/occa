@@ -123,6 +123,12 @@ func newRecoveryTestRouter(provider InstanceProvider, client *fakeRelayClient, s
 		UserID:    "user2",
 		Role:      "allow",
 	}
+	overrideRepo.overrides["telegram:chat1:user3"] = &store.UserOverride{
+		ChannelID: "chat1",
+		Platform:  "telegram",
+		UserID:    "user3",
+		Role:      "allow",
+	}
 	if sessions == nil {
 		sessions = &fakeSessionRepo{}
 	}
@@ -162,6 +168,27 @@ func TestRecoveryCoordinatorSingleFlight(t *testing.T) {
 	c.finishAttempt("/w", store.RecoveryOutcomeResumed)
 	if ok, reason := c.beginAttempt("/w"); !ok {
 		t.Fatalf("beginAttempt after finish refused: %s", reason)
+	}
+}
+
+func TestRecoveryCoordinatorSuppressedTriggersLeaveBackoffUnchanged(t *testing.T) {
+	now := time.Unix(1000, 0)
+	c := newRecoveryCoordinator()
+	c.now = func() time.Time { return now }
+	c.baseDelay = 10 * time.Second
+
+	if ok, _ := c.beginAttempt("/w"); !ok {
+		t.Fatal("first attempt must be allowed")
+	}
+	c.finishAttempt("/w", store.RecoveryOutcomeFailed)
+	for i := 0; i < 3; i++ {
+		if ok, reason := c.beginAttempt("/w"); ok || reason != "backoff" {
+			t.Fatalf("refused trigger %d = (%v, %q), want backoff refusal", i, ok, reason)
+		}
+	}
+	now = now.Add(10 * time.Second)
+	if ok, reason := c.beginAttempt("/w"); !ok {
+		t.Fatalf("retry at base backoff refused (%s) — refusals must not extend the window", reason)
 	}
 }
 
@@ -505,5 +532,138 @@ func TestRecoveryCanceledDuringRespawnTerminates(t *testing.T) {
 	r.responses.mu.Unlock()
 	if active != 0 {
 		t.Fatalf("response slot leaked after canceled recovery: %d active", active)
+	}
+}
+
+func TestRecoveryThirdTriggerDuringInFlightRecoveryStaysSuppressed(t *testing.T) {
+	client := &fakeRelayClient{sessionID: "sess-0"}
+	client.sendErr = fmt.Errorf("relay: %w: connection refused", relay.ErrUnreachable)
+	provider := newRecoveryProvider(client)
+	unblock := make(chan struct{})
+	provider.blockOnStop = unblock // stall the first recovery respawn
+	r, repo := newRecoveryTestRouter(provider, client, nil)
+
+	reply1 := &fakeReplyCtx{}
+	if err := r.Route(context.Background(), msgFrom("user1", "first", reply1)); err != nil {
+		t.Fatalf("Route user1: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && provider.stopCount() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	if provider.stopCount() != 1 {
+		t.Fatalf("first recovery did not start, stops = %d", provider.stopCount())
+	}
+
+	reply2 := &fakeReplyCtx{}
+	if err := r.Route(context.Background(), msgFrom("user2", "second", reply2)); err != nil {
+		t.Fatalf("Route user2: %v", err)
+	}
+	waitForReplyContaining(t, reply2, "skipped")
+
+	reply3 := &fakeReplyCtx{}
+	if err := r.Route(context.Background(), msgFrom("user3", "third", reply3)); err != nil {
+		t.Fatalf("Route user3: %v", err)
+	}
+	waitForReplyContaining(t, reply3, "skipped")
+
+	close(unblock)
+	waitForResponse(t, r)
+
+	if provider.stopCount() != 1 {
+		t.Errorf("ForceStop calls = %d, want 1 — a suppressed trigger must not clear the in-flight slot", provider.stopCount())
+	}
+	if provider.calls != 4 {
+		t.Errorf("Instance calls = %d, want 4 (three initial spawns + one respawn)", provider.calls)
+	}
+	events := repo.snapshot()
+	if len(events) != 3 {
+		t.Fatalf("recovery events = %d, want 3", len(events))
+	}
+	nonSuppressed := 0
+	for _, ev := range events {
+		if ev.Outcome != store.RecoveryOutcomeSuppressed {
+			nonSuppressed++
+		}
+	}
+	if nonSuppressed != 1 {
+		t.Errorf("non-suppressed recovery outcomes = %d, want exactly 1", nonSuppressed)
+	}
+	if last := events[len(events)-1]; last.Outcome != store.RecoveryOutcomeResumed {
+		t.Errorf("final outcome = %q, want resumed — the in-flight attempt must finish undisturbed", last.Outcome)
+	}
+}
+
+func TestRecoveryRepeatedSuppressionDoesNotEscalateBackoff(t *testing.T) {
+	client := &fakeRelayClient{sessionID: "sess-0"}
+	client.sendErr = fmt.Errorf("relay: %w: connection refused", relay.ErrUnreachable)
+	provider := newRecoveryProvider(client)
+	provider.spawnErrOn[2] = errors.New("spawn failed")
+	r, _ := newRecoveryTestRouter(provider, client, nil)
+
+	current := time.Unix(1000, 0)
+	r.recovery.now = func() time.Time { return current }
+	r.recovery.baseDelay = time.Hour
+	r.recovery.maxDelay = 4 * time.Hour
+
+	reply1 := &fakeReplyCtx{}
+	if err := r.Route(context.Background(), msgFrom("user1", "first", reply1)); err != nil {
+		t.Fatalf("Route user1: %v", err)
+	}
+	waitForReplyContaining(t, reply1, "recovery failed")
+
+	reply2 := &fakeReplyCtx{}
+	if err := r.Route(context.Background(), msgFrom("user2", "second", reply2)); err != nil {
+		t.Fatalf("Route user2: %v", err)
+	}
+	waitForReplyContaining(t, reply2, "skipped")
+
+	current = current.Add(time.Hour + time.Minute)
+
+	reply3 := &fakeReplyCtx{}
+	if err := r.Route(context.Background(), msgFrom("user3", "third", reply3)); err != nil {
+		t.Fatalf("Route user3: %v", err)
+	}
+	waitForReplyContaining(t, reply3, "restarted")
+	if strings.Contains(reply3.sentText(), "skipped") {
+		t.Fatalf("suppression must not extend the backoff window: %q", reply3.sentText())
+	}
+}
+
+func TestRecoveryDispatchAndStreamBothTerminalRunSingleRecovery(t *testing.T) {
+	client := &fakeRelayClient{sessionID: "sess-0"}
+	client.sendErr = fmt.Errorf("relay: %w: connection refused", relay.ErrUnreachable)
+	client.closeEventsOnSendErr = true
+	provider := newRecoveryProvider(client)
+	r, repo := newRecoveryTestRouter(provider, client, nil)
+	reply := &fakeReplyCtx{}
+
+	if err := r.Route(context.Background(), msg("double failure", reply)); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	waitForResponse(t, r)
+
+	events := repo.snapshot()
+	if len(events) != 1 {
+		t.Fatalf("recovery events = %d, want exactly 1 for a double-terminal response", len(events))
+	}
+	if events[0].Trigger != store.RecoveryTriggerProcessExit {
+		t.Errorf("trigger = %q, want process_exit — the dispatch root cause wins", events[0].Trigger)
+	}
+	if events[0].Outcome != store.RecoveryOutcomeResumed {
+		t.Errorf("outcome = %q, want resumed", events[0].Outcome)
+	}
+	if provider.stopCount() != 1 {
+		t.Errorf("ForceStop calls = %d, want 1", provider.stopCount())
+	}
+	if provider.calls != 2 {
+		t.Errorf("Instance calls = %d, want 2 (initial + one respawn)", provider.calls)
+	}
+	joined := reply.sentText()
+	if strings.Count(joined, "The agent was restarted") != 1 {
+		t.Errorf("expected exactly one recovery outcome notice, got: %q", joined)
+	}
+	if strings.Contains(joined, "skipped") {
+		t.Errorf("a single response must never report suppression: %q", joined)
 	}
 }

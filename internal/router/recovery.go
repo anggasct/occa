@@ -188,8 +188,11 @@ func (r *Router) recoverAfterFailure(ctx context.Context, msg channel.IncomingMe
 		return
 	}
 
+	// Only the goroutine that claimed the recovery slot may finish it: a
+	// refused trigger must leave the in-flight attempt and the backoff
+	// window untouched, or a later trigger could start a second concurrent
+	// restart and suppression would artificially escalate the backoff.
 	if ok, reason := r.recovery.beginAttempt(workdir); !ok {
-		r.recovery.finishAttempt(workdir, store.RecoveryOutcomeSuppressed)
 		r.recordRecoveryEvent(rctx, store.RecoveryEvent{
 			Platform: msg.Platform, ChannelID: msg.ChannelID, ThreadID: key.threadID, UserID: key.userID,
 			Workdir: workdir, Trigger: trigger, Outcome: store.RecoveryOutcomeSuppressed,

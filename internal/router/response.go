@@ -261,21 +261,30 @@ func (r *Router) runResponse(
 		}
 	}
 
+	// One recovery decision per response: when dispatch and stream both
+	// terminate with real errors, the dispatch-side failure is the root
+	// cause and the stream error only its consequence — recovering for
+	// each independently would restart the agent twice and notify twice.
+	var recoveryTrigger store.RecoveryTrigger
+	var recoveryCause error
 	if dispatchErr != nil && !errors.Is(dispatchErr, context.Canceled) {
 		slog.Warn("response dispatch failed", "platform", key.platform, "channel_id", key.channelID, "thread_id", key.threadID, "user_id", key.userID, "error", dispatchErr)
 		if errors.Is(dispatchErr, relay.ErrAttachmentTooLarge) {
 			r.reply(msg, "⚠️ "+dispatchErr.Error())
 		} else if trigger, classified := classifyDispatchFailure(dispatchErr); classified {
-			r.recoverAfterFailure(ctx, msg, key, inst, trigger, dispatchErr)
+			recoveryTrigger, recoveryCause = trigger, dispatchErr
 		} else {
 			r.reply(msg, "⚠️ Agent unreachable")
 		}
 	}
 	if streamErr != nil && !errors.Is(streamErr, context.Canceled) {
 		slog.Warn("response stream ended", "platform", key.platform, "channel_id", key.channelID, "thread_id", key.threadID, "user_id", key.userID, "error", streamErr)
-		if errors.Is(streamErr, relay.ErrIncompleteStream) {
-			r.recoverAfterFailure(ctx, msg, key, inst, store.RecoveryTriggerStreamEnded, streamErr)
+		if recoveryTrigger == "" && errors.Is(streamErr, relay.ErrIncompleteStream) {
+			recoveryTrigger, recoveryCause = store.RecoveryTriggerStreamEnded, streamErr
 		}
+	}
+	if recoveryTrigger != "" {
+		r.recoverAfterFailure(ctx, msg, key, inst, recoveryTrigger, recoveryCause)
 	}
 	if outcome == "complete" {
 		r.detectNewAgents(ctx, msg, inst)

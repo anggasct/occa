@@ -107,9 +107,10 @@ type fakeRelayClient struct {
 
 	customEvents []relay.Event
 
-	sendErr          error
-	missingSessions  map[string]bool
-	incompleteStream bool
+	sendErr              error
+	missingSessions      map[string]bool
+	incompleteStream     bool
+	closeEventsOnSendErr bool
 
 	mu           sync.Mutex
 	responses    []pendingResponse
@@ -160,8 +161,12 @@ func (f *fakeRelayClient) SendMessage(_ context.Context, _, text string, model *
 	}
 	f.lastMsg = text
 	sendErr := f.sendErr
+	closeEvents := f.closeEventsOnSendErr
 	f.mu.Unlock()
 	if sendErr != nil {
+		if closeEvents {
+			f.closePendingResponse()
+		}
 		return sendErr
 	}
 	if f.deltaBeforeDone != "" {
@@ -170,6 +175,21 @@ func (f *fakeRelayClient) SendMessage(_ context.Context, _, text string, model *
 		f.finishResponse()
 	}
 	return nil
+}
+
+// closePendingResponse simulates a dropped connection: the event channel
+// closes without a done event (the streamer reports an incomplete stream)
+// while the dispatch call itself fails.
+func (f *fakeRelayClient) closePendingResponse() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.responses) == 0 {
+		return
+	}
+	resp := f.responses[0]
+	f.responses = f.responses[1:]
+	close(resp.events)
+	close(resp.dispatchDone)
 }
 
 func (f *fakeRelayClient) finishResponseWithDelta(delta string) {
