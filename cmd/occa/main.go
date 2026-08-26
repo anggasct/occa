@@ -118,7 +118,16 @@ func main() {
 		channels = append(channels, telegram.New(telegramToken, menu))
 	}
 	if discordToken != "" {
-		da := discord.New(discordToken, menu)
+		policy := discord.TrustedBotPolicy{
+			TriggerRoleIDs: cfg.Discord.TriggerRoleIDs,
+		}
+		for _, sender := range cfg.Discord.TrustedBotSenders {
+			policy.TrustedBotSenders = append(policy.TrustedBotSenders, discord.TrustedBotSender{
+				UserID:     sender.UserID,
+				ChannelIDs: sender.ChannelIDs,
+			})
+		}
+		da := discord.NewWithPolicy(discordToken, menu, policy)
 		da.SetAutoThreadPolicy(func(channelID string) (bool, error) {
 			ch, err := db.ChannelRepo().Get(context.Background(), "discord", channelID)
 			if err != nil {

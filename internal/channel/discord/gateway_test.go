@@ -100,6 +100,12 @@ func TestOwnMessageDroppedOnceIdentityKnown(t *testing.T) {
 		Author:    &discordgo.User{ID: "someone", Bot: true},
 		Content:   "other bot",
 	}}, deliver)
+	a.onMessage(&discordgo.MessageCreate{Message: &discordgo.Message{
+		ChannelID: "chan",
+		Author:    &discordgo.User{ID: "someone", Bot: true},
+		Mentions:  []*discordgo.User{{ID: "bot-42"}},
+		Content:   "mentioned bot",
+	}}, deliver)
 
 	if delivered != 0 {
 		t.Fatalf("delivered = %d, want 0", delivered)
@@ -327,4 +333,82 @@ func TestIdentityWriteAndReadAreConcurrencySafe(t *testing.T) {
 		}}, func(channel.IncomingMessage) {})
 	}()
 	wg.Wait()
+}
+
+func TestTrustedBotAdmission(t *testing.T) {
+	policy := TrustedBotPolicy{
+		TriggerRoleIDs: []string{"role-1"},
+		TrustedBotSenders: []TrustedBotSender{{
+			UserID:     "trusted-bot",
+			ChannelIDs: []string{"allowed-channel"},
+		}},
+	}
+	a := NewWithPolicy("fake-token", nil, policy)
+	a.onReady(&discordgo.Ready{User: &discordgo.User{ID: "occa-bot"}})
+	a.channelLookup = func(string) (*discordgo.Channel, error) {
+		return &discordgo.Channel{Type: discordgo.ChannelTypeGuildText}, nil
+	}
+
+	tests := []struct {
+		name       string
+		authorID   string
+		channelID  string
+		mentions   []*discordgo.User
+		mentionIDs []string
+		want       bool
+	}{
+		{name: "user mention", authorID: "trusted-bot", channelID: "allowed-channel", mentions: []*discordgo.User{{ID: "occa-bot"}}, want: true},
+		{name: "configured role mention", authorID: "trusted-bot", channelID: "allowed-channel", mentionIDs: []string{"role-1"}, want: true},
+		{name: "sender mismatch", authorID: "other-bot", channelID: "allowed-channel", mentions: []*discordgo.User{{ID: "occa-bot"}}},
+		{name: "channel mismatch", authorID: "trusted-bot", channelID: "other-channel", mentions: []*discordgo.User{{ID: "occa-bot"}}},
+		{name: "missing mention", authorID: "trusted-bot", channelID: "allowed-channel"},
+		{name: "unconfigured role", authorID: "trusted-bot", channelID: "allowed-channel", mentionIDs: []string{"other-role"}},
+		{name: "self bot", authorID: "occa-bot", channelID: "allowed-channel", mentions: []*discordgo.User{{ID: "occa-bot"}}, mentionIDs: []string{"role-1"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			delivered := 0
+			a.onMessage(&discordgo.MessageCreate{Message: &discordgo.Message{
+				GuildID:      "guild",
+				ChannelID:    tt.channelID,
+				Author:       &discordgo.User{ID: tt.authorID, Bot: true},
+				Mentions:     tt.mentions,
+				MentionRoles: tt.mentionIDs,
+			}}, func(channel.IncomingMessage) { delivered++ })
+			if got := delivered == 1; got != tt.want {
+				t.Fatalf("delivered = %d, want match=%v", delivered, tt.want)
+			}
+		})
+	}
+}
+
+func TestConfiguredRoleMentionNormalization(t *testing.T) {
+	a := NewWithPolicy("fake-token", nil, TrustedBotPolicy{TriggerRoleIDs: []string{"role-1"}})
+	a.channelLookup = func(string) (*discordgo.Channel, error) {
+		return &discordgo.Channel{Type: discordgo.ChannelTypeGuildText}, nil
+	}
+
+	tests := []struct {
+		name       string
+		mentionIDs []string
+		want       bool
+	}{
+		{name: "configured role", mentionIDs: []string{"role-1"}, want: true},
+		{name: "arbitrary role", mentionIDs: []string{"role-2"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got channel.IncomingMessage
+			a.onMessage(&discordgo.MessageCreate{Message: &discordgo.Message{
+				GuildID:      "guild",
+				ChannelID:    "channel",
+				Author:       &discordgo.User{ID: "human"},
+				MentionRoles: tt.mentionIDs,
+			}}, func(message channel.IncomingMessage) { got = message })
+			if got.IsMention != tt.want {
+				t.Fatalf("IsMention = %v, want %v", got.IsMention, tt.want)
+			}
+		})
+	}
 }

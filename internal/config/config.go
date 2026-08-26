@@ -17,6 +17,7 @@ type Config struct {
 	AdminID  string
 	Agent    AgentConfig    `yaml:"agent"`
 	Database DatabaseConfig `yaml:"database"`
+	Discord  DiscordConfig  `yaml:"discord"`
 	Logging  LoggingConfig  `yaml:"logging"`
 	Webhooks WebhookConfig  `yaml:"webhooks"`
 }
@@ -32,6 +33,16 @@ type AgentConfig struct {
 
 type DatabaseConfig struct {
 	Path string `yaml:"path"`
+}
+
+type DiscordConfig struct {
+	TriggerRoleIDs    []string                 `yaml:"trigger_role_ids"`
+	TrustedBotSenders []TrustedBotSenderConfig `yaml:"trusted_bot_senders"`
+}
+
+type TrustedBotSenderConfig struct {
+	UserID     string   `yaml:"user_id"`
+	ChannelIDs []string `yaml:"channel_ids"`
 }
 
 type LoggingConfig struct {
@@ -68,6 +79,7 @@ type fileConfig struct {
 	Database struct {
 		Path string `yaml:"path"`
 	} `yaml:"database"`
+	Discord DiscordConfig `yaml:"discord"`
 	Logging struct {
 		Format string `yaml:"format"`
 	} `yaml:"logging"`
@@ -234,6 +246,9 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	if err := validateDiscordPolicy(&fc.Discord); err != nil {
+		return Config{}, err
+	}
 
 	if len(fc.Webhooks.Endpoints) > 0 {
 		if fc.Webhooks.Bind == "" {
@@ -291,9 +306,55 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 			AutoInstall:    fc.Agent.AutoInstall,
 		},
 		Database: DatabaseConfig{Path: dbPath},
+		Discord:  fc.Discord,
 		Logging:  LoggingConfig{Format: fc.Logging.Format},
 		Webhooks: fc.Webhooks,
 	}, nil
+}
+
+func validateDiscordPolicy(policy *DiscordConfig) error {
+	roleIDs := make(map[string]struct{}, len(policy.TriggerRoleIDs))
+	for i := range policy.TriggerRoleIDs {
+		roleID := strings.TrimSpace(policy.TriggerRoleIDs[i])
+		if roleID == "" {
+			return fmt.Errorf("config: discord.trigger_role_ids[%d] must not be empty", i)
+		}
+		if _, exists := roleIDs[roleID]; exists {
+			return fmt.Errorf("config: discord.trigger_role_ids[%d] duplicates %q", i, roleID)
+		}
+		policy.TriggerRoleIDs[i] = roleID
+		roleIDs[roleID] = struct{}{}
+	}
+
+	senderIDs := make(map[string]struct{}, len(policy.TrustedBotSenders))
+	for i := range policy.TrustedBotSenders {
+		sender := &policy.TrustedBotSenders[i]
+		sender.UserID = strings.TrimSpace(sender.UserID)
+		if sender.UserID == "" {
+			return fmt.Errorf("config: discord.trusted_bot_senders[%d].user_id must not be empty", i)
+		}
+		if _, exists := senderIDs[sender.UserID]; exists {
+			return fmt.Errorf("config: discord.trusted_bot_senders[%d].user_id duplicates %q", i, sender.UserID)
+		}
+		senderIDs[sender.UserID] = struct{}{}
+		if len(sender.ChannelIDs) == 0 {
+			return fmt.Errorf("config: discord.trusted_bot_senders[%d].channel_ids must not be empty", i)
+		}
+
+		channelIDs := make(map[string]struct{}, len(sender.ChannelIDs))
+		for j := range sender.ChannelIDs {
+			channelID := strings.TrimSpace(sender.ChannelIDs[j])
+			if channelID == "" {
+				return fmt.Errorf("config: discord.trusted_bot_senders[%d].channel_ids[%d] must not be empty", i, j)
+			}
+			if _, exists := channelIDs[channelID]; exists {
+				return fmt.Errorf("config: discord.trusted_bot_senders[%d].channel_ids[%d] duplicates %q", i, j, channelID)
+			}
+			sender.ChannelIDs[j] = channelID
+			channelIDs[channelID] = struct{}{}
+		}
+	}
+	return nil
 }
 
 func loadPromptFile(configDir, promptFile string) (string, error) {

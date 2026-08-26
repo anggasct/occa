@@ -444,3 +444,56 @@ func TestWebhookAuthModeValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadDiscordPolicy(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
+	path := writeConfig(t, t.TempDir(), `discord:
+  trigger_role_ids:
+    - " role-1 "
+  trusted_bot_senders:
+    - user_id: " bot-1 "
+      channel_ids:
+        - " channel-1 "
+        - channel-2
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Discord.TriggerRoleIDs) != 1 || cfg.Discord.TriggerRoleIDs[0] != "role-1" {
+		t.Fatalf("TriggerRoleIDs = %#v, want [role-1]", cfg.Discord.TriggerRoleIDs)
+	}
+	if len(cfg.Discord.TrustedBotSenders) != 1 {
+		t.Fatalf("TrustedBotSenders = %#v, want one sender", cfg.Discord.TrustedBotSenders)
+	}
+	sender := cfg.Discord.TrustedBotSenders[0]
+	if sender.UserID != "bot-1" || strings.Join(sender.ChannelIDs, ",") != "channel-1,channel-2" {
+		t.Fatalf("trusted sender = %#v, want trimmed IDs", sender)
+	}
+}
+
+func TestLoadDiscordPolicyValidation(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
+	tests := []struct {
+		name      string
+		yaml      string
+		errSubstr string
+	}{
+		{name: "empty user", yaml: "discord:\n  trusted_bot_senders:\n    - user_id: \" \"\n      channel_ids: [channel-1]\n", errSubstr: "discord.trusted_bot_senders[0].user_id"},
+		{name: "empty channels", yaml: "discord:\n  trusted_bot_senders:\n    - user_id: bot-1\n      channel_ids: []\n", errSubstr: "discord.trusted_bot_senders[0].channel_ids"},
+		{name: "empty channel", yaml: "discord:\n  trusted_bot_senders:\n    - user_id: bot-1\n      channel_ids: [\" \"]\n", errSubstr: "discord.trusted_bot_senders[0].channel_ids[0]"},
+		{name: "duplicate channel", yaml: "discord:\n  trusted_bot_senders:\n    - user_id: bot-1\n      channel_ids: [channel-1, channel-1]\n", errSubstr: "discord.trusted_bot_senders[0].channel_ids[1]"},
+		{name: "duplicate sender", yaml: "discord:\n  trusted_bot_senders:\n    - user_id: bot-1\n      channel_ids: [channel-1]\n    - user_id: bot-1\n      channel_ids: [channel-2]\n", errSubstr: "discord.trusted_bot_senders[1].user_id"},
+		{name: "duplicate role", yaml: "discord:\n  trigger_role_ids: [role-1, role-1]\n", errSubstr: "discord.trigger_role_ids[1]"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(writeConfig(t, t.TempDir(), tt.yaml))
+			if err == nil || !strings.Contains(err.Error(), tt.errSubstr) {
+				t.Fatalf("Load error = %v, want substring %q", err, tt.errSubstr)
+			}
+		})
+	}
+}
