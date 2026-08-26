@@ -363,7 +363,15 @@ func (a *Adapter) acceptsTrustedBotMessage(m *discordgo.Message) bool {
 	if !ok {
 		return false
 	}
-	if _, ok := channels[m.ChannelID]; !ok {
+	if _, ok := channels[m.ChannelID]; ok {
+		return a.hasOCCAMention(m)
+	}
+
+	parentChannelID, isThread, scopeUnresolved := a.channelScope(m.GuildID, m.ChannelID)
+	if !isThread || scopeUnresolved || parentChannelID == "" || !a.isOwnedThread(m.ChannelID) {
+		return false
+	}
+	if _, ok := channels[parentChannelID]; !ok {
 		return false
 	}
 	return a.hasOCCAMention(m)
@@ -544,6 +552,10 @@ func (a *Adapter) channelScope(guildID, channelID string) (string, bool, bool) {
 	ch, err := a.lookupChannel(channelID)
 	if err != nil {
 		slog.Warn("discord: channel scope lookup failed", "channel_id", channelID, "error", err)
+		return "", false, true
+	}
+	if ch == nil {
+		slog.Warn("discord: channel scope lookup returned no channel", "channel_id", channelID)
 		return "", false, true
 	}
 	if !isThreadType(ch.Type) {
