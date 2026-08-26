@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	schemaVersion    = 11
+	schemaVersion    = 12
 	SchemaVersion    = schemaVersion
 	busyTimeoutMilli = 5000
 )
@@ -28,6 +28,30 @@ var migrations = []func(s *SQLiteStore, tx *sql.Tx) error{
 	ensureUsageAndWebhookTables,
 	ensureUsageAndWebhookTables,
 	cleanupLegacyPermissionRules,
+	addRecoveryEvents,
+}
+
+func addRecoveryEvents(_ *SQLiteStore, tx *sql.Tx) error {
+	ddl := `
+CREATE TABLE IF NOT EXISTS recovery_event (
+	id             INTEGER PRIMARY KEY AUTOINCREMENT,
+	platform       TEXT NOT NULL,
+	channel_id     TEXT NOT NULL,
+	thread_id      TEXT NOT NULL DEFAULT '',
+	user_id        TEXT NOT NULL DEFAULT '',
+	workdir        TEXT NOT NULL DEFAULT '',
+	trigger_kind   TEXT NOT NULL,
+	outcome        TEXT NOT NULL,
+	correlation_id TEXT NOT NULL DEFAULT '',
+	detail         TEXT NOT NULL DEFAULT '',
+	created_at     INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_recovery_event_created ON recovery_event (created_at);
+`
+	if _, err := tx.Exec(ddl); err != nil {
+		return fmt.Errorf("store: migrate recovery events: %w", err)
+	}
+	return nil
 }
 
 func cleanupLegacyPermissionRules(_ *SQLiteStore, tx *sql.Tx) error {
@@ -278,6 +302,7 @@ type SQLiteStore struct {
 	permissionRules   *sqlitePermissionRuleRepo
 	usage             *sqliteUsageRepo
 	webhookDeliveries *sqliteWebhookDeliveryRepo
+	recoveryEvents    *sqliteRecoveryEventRepo
 	defaultWorkdir    string
 }
 
@@ -324,6 +349,7 @@ func OpenWithDefaultWorkdir(path, defaultWorkdir string) (*SQLiteStore, error) {
 	s.permissionRules = &sqlitePermissionRuleRepo{db: db}
 	s.usage = &sqliteUsageRepo{db: db}
 	s.webhookDeliveries = &sqliteWebhookDeliveryRepo{db: db}
+	s.recoveryEvents = &sqliteRecoveryEventRepo{db: db}
 	return s, nil
 }
 
@@ -361,6 +387,7 @@ func (s *SQLiteStore) ThreadConfigRepo() ThreadConfigRepo       { return s.threa
 func (s *SQLiteStore) PermissionRuleRepo() PermissionRuleRepo   { return s.permissionRules }
 func (s *SQLiteStore) UsageRepo() UsageRepo                     { return s.usage }
 func (s *SQLiteStore) WebhookDeliveryRepo() WebhookDeliveryRepo { return s.webhookDeliveries }
+func (s *SQLiteStore) RecoveryEventRepo() RecoveryEventRepo     { return s.recoveryEvents }
 
 func (s *SQLiteStore) Close() error {
 	return s.db.Close()

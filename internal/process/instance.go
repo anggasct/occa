@@ -2,6 +2,7 @@ package process
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -15,6 +16,11 @@ import (
 
 	"github.com/anggasct/occa/internal/relay"
 )
+
+// ErrReadinessTimeout marks a spawn whose HTTP health endpoint never became
+// healthy within the readiness window, distinguishing "process started but
+// not ready" from other spawn failures.
+var ErrReadinessTimeout = errors.New("process: agent not ready within timeout")
 
 const (
 	defaultReadinessTimeout = 30 * time.Second
@@ -136,7 +142,7 @@ func waitReady(ctx context.Context, addr string, timeout time.Duration) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("not ready within %s: %w", timeout, ctx.Err())
+			return fmt.Errorf("%w after %s: %w", ErrReadinessTimeout, timeout, ctx.Err())
 		case <-ticker.C:
 			if healthy() {
 				return nil

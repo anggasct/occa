@@ -20,6 +20,7 @@ import (
 )
 
 type fakeReplyCtx struct {
+	mu      sync.Mutex
 	sends   []string
 	buttons [][]channel.Button
 	edits   []string
@@ -27,22 +28,36 @@ type fakeReplyCtx struct {
 
 func (f *fakeReplyCtx) SendTyping() error { return nil }
 func (f *fakeReplyCtx) Send(text string) (channel.MessageRef, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.sends = append(f.sends, text)
 	return fakeRef{id: "1"}, nil
 }
 func (f *fakeReplyCtx) Edit(ref channel.MessageRef, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.edits = append(f.edits, text)
 	return nil
 }
 func (f *fakeReplyCtx) EditWithButtons(ref channel.MessageRef, text string, buttons []channel.Button) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.edits = append(f.edits, text)
 	f.buttons = append(f.buttons, buttons)
 	return nil
 }
 func (f *fakeReplyCtx) SendWithButtons(text string, buttons []channel.Button) (channel.MessageRef, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.sends = append(f.sends, text)
 	f.buttons = append(f.buttons, buttons)
 	return fakeRef{id: "1"}, nil
+}
+
+func (f *fakeReplyCtx) sentText() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return strings.Join(f.sends, "\n")
 }
 
 type fakeRef struct{ id string }
@@ -92,6 +107,11 @@ type fakeRelayClient struct {
 
 	customEvents []relay.Event
 
+	sendErr              error
+	missingSessions      map[string]bool
+	incompleteStream     bool
+	closeEventsOnSendErr bool
+
 	mu           sync.Mutex
 	responses    []pendingResponse
 	dispatchDone chan struct{}
@@ -114,7 +134,10 @@ func (f *fakeRelayClient) GetSession(_ context.Context, _ string) (*relay.Sessio
 	}
 	return &relay.SessionInfo{}, nil
 }
-func (f *fakeRelayClient) SessionExists(_ context.Context, _ string) (bool, error) {
+func (f *fakeRelayClient) SessionExists(_ context.Context, sessionID string) (bool, error) {
+	if f.missingSessions[sessionID] {
+		return false, nil
+	}
 	return true, nil
 }
 func (f *fakeRelayClient) AbortSession(_ context.Context, sessionID string) error {
@@ -137,13 +160,36 @@ func (f *fakeRelayClient) SendMessage(_ context.Context, _, text string, model *
 		text = text[:idx]
 	}
 	f.lastMsg = text
+	sendErr := f.sendErr
+	closeEvents := f.closeEventsOnSendErr
 	f.mu.Unlock()
+	if sendErr != nil {
+		if closeEvents {
+			f.closePendingResponse()
+		}
+		return sendErr
+	}
 	if f.deltaBeforeDone != "" {
 		f.finishResponseWithDelta(f.deltaBeforeDone)
 	} else {
 		f.finishResponse()
 	}
 	return nil
+}
+
+// closePendingResponse simulates a dropped connection: the event channel
+// closes without a done event (the streamer reports an incomplete stream)
+// while the dispatch call itself fails.
+func (f *fakeRelayClient) closePendingResponse() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.responses) == 0 {
+		return
+	}
+	resp := f.responses[0]
+	f.responses = f.responses[1:]
+	close(resp.events)
+	close(resp.dispatchDone)
 }
 
 func (f *fakeRelayClient) finishResponseWithDelta(delta string) {
@@ -177,7 +223,9 @@ func (f *fakeRelayClient) finishResponse() {
 	for _, ev := range f.customEvents {
 		resp.events <- ev
 	}
-	resp.events <- relay.Event{Type: "done"}
+	if !f.incompleteStream {
+		resp.events <- relay.Event{Type: "done"}
+	}
 	close(resp.events)
 	close(resp.dispatchDone)
 }
@@ -382,6 +430,7 @@ type fakeStore struct {
 	threadConfigs   *fakeThreadConfigRepo
 	permissionRules *fakePermissionRuleRepo
 	usage           *fakeUsageRepo
+	recoveryEvents  *fakeRecoveryEventRepo
 }
 
 func (f *fakeStore) SessionRepo() store.SessionRepo   { return f.sessionRepo }
@@ -413,7 +462,14 @@ func (f *fakeStore) UsageRepo() store.UsageRepo {
 	return f.usage
 }
 func (f *fakeStore) WebhookDeliveryRepo() store.WebhookDeliveryRepo { return nil }
-func (f *fakeStore) Close() error                                   { return nil }
+
+func (f *fakeStore) RecoveryEventRepo() store.RecoveryEventRepo {
+	if f.recoveryEvents == nil {
+		f.recoveryEvents = newFakeRecoveryEventRepo()
+	}
+	return f.recoveryEvents
+}
+func (f *fakeStore) Close() error { return nil }
 
 type fakePermissionRuleRepo struct {
 	mu        sync.Mutex
@@ -863,6 +919,7 @@ type fakeInstanceProvider struct {
 	err     error
 	calls   int
 	stopped string
+	pidSeq  int
 }
 
 func (p *fakeInstanceProvider) Instance(_ context.Context, workdir string) (AgentInstance, error) {
@@ -870,7 +927,8 @@ func (p *fakeInstanceProvider) Instance(_ context.Context, workdir string) (Agen
 	if p.err != nil {
 		return nil, p.err
 	}
-	return &fakeInstance{client: p.client, workdir: workdir}, nil
+	p.pidSeq++
+	return &fakeInstance{client: p.client, workdir: workdir, pid: p.pidSeq}, nil
 }
 
 func (p *fakeInstanceProvider) ForceStop(workdir string) {

@@ -100,6 +100,38 @@ type WebhookDelivery struct {
 	CompletedAt  int64
 }
 
+type RecoveryTrigger string
+
+const (
+	RecoveryTriggerProcessExit      RecoveryTrigger = "process_exit"
+	RecoveryTriggerSendTimeout      RecoveryTrigger = "send_timeout"
+	RecoveryTriggerStreamEnded      RecoveryTrigger = "stream_terminated"
+	RecoveryTriggerReadinessTimeout RecoveryTrigger = "readiness_timeout"
+)
+
+type RecoveryOutcome string
+
+const (
+	RecoveryOutcomeResumed    RecoveryOutcome = "resumed"
+	RecoveryOutcomeRecreated  RecoveryOutcome = "recreated"
+	RecoveryOutcomeFailed     RecoveryOutcome = "failed"
+	RecoveryOutcomeSuppressed RecoveryOutcome = "suppressed"
+)
+
+type RecoveryEvent struct {
+	ID            int64
+	Platform      string
+	ChannelID     string
+	ThreadID      string
+	UserID        string
+	Workdir       string
+	Trigger       RecoveryTrigger
+	Outcome       RecoveryOutcome
+	CorrelationID string
+	Detail        string
+	CreatedAt     int64
+}
+
 type SessionRepo interface {
 	Active(ctx context.Context, platform, channelID, threadID, userID string) (sessionID string, agentPID int, err error)
 	SetActive(ctx context.Context, platform, channelID, threadID, userID, sessionID string, agentPID int) error
@@ -171,6 +203,14 @@ type WebhookDeliveryRepo interface {
 	FailStale(ctx context.Context, cutoff int64, summary string) (int, error)
 }
 
+type RecoveryEventRepo interface {
+	// Put records one recovery attempt outcome; old rows are pruned so the
+	// diagnostics log stays bounded.
+	Put(ctx context.Context, e RecoveryEvent) error
+	// List returns the most recent recovery events, newest first, capped at limit.
+	List(ctx context.Context, limit int) ([]RecoveryEvent, error)
+}
+
 type Store interface {
 	SessionRepo() SessionRepo
 	ChannelRepo() ChannelRepo
@@ -180,5 +220,6 @@ type Store interface {
 	ThreadConfigRepo() ThreadConfigRepo
 	PermissionRuleRepo() PermissionRuleRepo
 	WebhookDeliveryRepo() WebhookDeliveryRepo
+	RecoveryEventRepo() RecoveryEventRepo
 	Close() error
 }
