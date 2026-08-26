@@ -232,8 +232,9 @@ func main() {
 			for _, ch := range channels {
 				if ch.Name() == platform {
 					send := func(text string) { notify(ch, channelID, text) }
+					sendWebhook := func(text string) { notifyWebhook(ch, channelID, text) }
 
-					send("📨 Webhook: analyzing...")
+					sendWebhook("📨 Webhook: analyzing...")
 					workdir := cfg.Agent.DefaultWorkdir
 					if workCtx.Worktree != "" {
 						workdir = workCtx.Worktree
@@ -241,7 +242,7 @@ func main() {
 
 					inst, err := manager.Instance(ctx, workdir)
 					if err != nil {
-						send("⚠️ Webhook analysis failed: agent unreachable")
+						sendWebhook("⚠️ Webhook analysis failed: agent unreachable")
 						return errors.New("webhook agent unavailable")
 					}
 					defer inst.End()
@@ -249,18 +250,18 @@ func main() {
 					resolver := relay.NewSessionResolver(db.SessionRepo(), inst.Client())
 					sessionID, err := resolver.Resolve(ctx, platform, channelID, workCtx.SessionKey, "", inst.PID())
 					if err != nil {
-						send("⚠️ Webhook analysis failed: session error")
+						sendWebhook("⚠️ Webhook analysis failed: session error")
 						return errors.New("webhook session unavailable")
 					}
 
 					if err := inst.Client().SendMessage(ctx, sessionID, prompt, workCtx.Model, nil); err != nil {
-						send("⚠️ Webhook analysis failed: agent request error")
+						sendWebhook("⚠️ Webhook analysis failed: agent request error")
 						return errors.New("webhook agent request failed")
 					}
 
 					events, err := inst.Client().Events(ctx, sessionID)
 					if err != nil {
-						send("⚠️ Webhook analysis failed: events error")
+						sendWebhook("⚠️ Webhook analysis failed: events error")
 						return errors.New("webhook event stream failed")
 					}
 
@@ -277,11 +278,11 @@ func main() {
 							send(result)
 							return nil
 						case "error":
-							send("⚠️ Webhook analysis failed: agent response error")
+							sendWebhook("⚠️ Webhook analysis failed: agent response error")
 							return errors.New("webhook agent response failed")
 						}
 					}
-					send("⚠️ Webhook analysis failed: incomplete response")
+					sendWebhook("⚠️ Webhook analysis failed: incomplete response")
 					return errors.New("webhook response incomplete")
 				}
 			}
@@ -396,6 +397,10 @@ func notify(ch channel.Channel, channelID, text string) {
 			return
 		}
 	}
+}
+
+func notifyWebhook(ch channel.Channel, channelID, text string) {
+	notify(ch, channelID, webhook.FormatWebhookMessage(text))
 }
 
 type messageRouter interface {
