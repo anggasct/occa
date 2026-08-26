@@ -2738,3 +2738,141 @@ func TestWebhookDispatcherIdleEviction(t *testing.T) {
 	}
 	waitForCompletedCount(t, st, 2)
 }
+
+func TestWebhookEnqueueRacingIdleEvictionNeverLosesDelivery(t *testing.T) {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+		return nil
+	}
+
+	cfg := config.WebhookConfig{
+		Bind: "127.0.0.1:0",
+		Endpoints: []config.EndpointConfig{
+			{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+		},
+	}
+	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	srv := New(cfg, exec, st.WebhookDeliveryRepo())
+	srv.dispatcherIdleTTL = time.Millisecond
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	const total = 25
+	url := ts.URL + "/github?secret=s3cret"
+	ctx := context.Background()
+	repo := st.WebhookDeliveryRepo()
+	for i := 0; i < total; i++ {
+		id := fmt.Sprintf("delivery-race-%d", i)
+		resp := post(t, url, id, "pull_request", `{}`)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s expected accepted 200, got %d", id, resp.StatusCode)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			receipt, err := repo.Get(ctx, "github", id)
+			if err != nil {
+				t.Fatalf("Get %s: %v", id, err)
+			}
+			if receipt != nil && isTerminal(receipt.Status) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("accepted delivery %s was neither executed nor recorded: %+v", id, receipt)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		time.Sleep(2 * srv.dispatcherIdleTTL)
+	}
+}
+
+func TestWebhookEnqueueRacingShutdownNeverLosesDelivery(t *testing.T) {
+	var startedOnce sync.Once
+	started := make(chan struct{})
+	released := make(chan struct{})
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+		startedOnce.Do(func() { close(started) })
+		select {
+		case <-released:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		return nil
+	}
+
+	cfg := config.WebhookConfig{
+		Bind: "127.0.0.1:0",
+		Endpoints: []config.EndpointConfig{
+			{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+		},
+	}
+	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	srv := New(cfg, exec, st.WebhookDeliveryRepo())
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	url := ts.URL + "/github?secret=s3cret"
+	if resp := post(t, url, "delivery-inflight", "pull_request", `{}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("in-flight delivery expected 200, got %d", resp.StatusCode)
+	}
+	<-started
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- srv.Stop(context.Background()) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for srv.shutdownCtx.Err() == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("shutdown context was never cancelled")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	accepted := []string{}
+	for i := 0; i < 5; i++ {
+		id := fmt.Sprintf("delivery-late-%d", i)
+		resp := post(t, url, id, "pull_request", `{}`)
+		switch resp.StatusCode {
+		case http.StatusOK:
+			accepted = append(accepted, id)
+		case http.StatusTooManyRequests:
+		default:
+			t.Fatalf("%s unexpected status %d", id, resp.StatusCode)
+		}
+	}
+
+	close(released)
+	if err := <-stopDone; err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	ctx := context.Background()
+	repo := st.WebhookDeliveryRepo()
+	expected := append([]string{"delivery-inflight"}, accepted...)
+	for _, id := range expected {
+		receipt, err := repo.Get(ctx, "github", id)
+		if err != nil {
+			t.Fatalf("Get %s: %v", id, err)
+		}
+		if receipt == nil || !isTerminal(receipt.Status) {
+			t.Fatalf("accepted delivery %s was neither executed nor recorded on shutdown: %+v", id, receipt)
+		}
+	}
+	inflight, _ := repo.Get(ctx, "github", "delivery-inflight")
+	if inflight.Status != store.WebhookStatusCompleted {
+		t.Fatalf("in-flight delivery did not finish normally: %+v", inflight)
+	}
+	if srv.dispatcherCount() != 0 {
+		t.Fatalf("dispatchers left registered after Stop: %d", srv.dispatcherCount())
+	}
+}

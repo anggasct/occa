@@ -310,15 +310,12 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		eventType:   eventType,
 		payloadHash: payloadHash,
 	}
-	d := s.dispatcherFor(ep, ExtractExecutionKey(body))
-	select {
-	case d.ch <- item:
-	default:
+	d, ok := s.enqueue(ep, ExtractExecutionKey(body), item)
+	if !ok {
 		slog.Warn("webhook: queue full",
 			"endpoint", ep.Name,
 			"delivery_id", deliveryID,
 			"event_type", eventType,
-			"lock", d.key,
 		)
 		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
 		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
@@ -329,12 +326,13 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// dispatcherFor returns the live dispatcher for a lock identity, creating one
-// if none exists or the previous one is draining. Creation and eviction are
-// serialized under dispatchMu so an enqueue can never target a stopped
-// dispatcher: once exiting is set under the same lock, later enqueues build a
-// fresh queue while the retired channel is drained by its own goroutine.
-func (s *Server) dispatcherFor(ep config.EndpointConfig, key WebhookExecutionKey) *dispatcher {
+// enqueue atomically resolves the live dispatcher for a lock identity and
+// appends the item to its queue. Lookup, retirement checks, and the channel
+// send all happen under dispatchMu — retirement also flips exiting under that
+// lock before any drain — so an accepted send is always ordered before
+// retirement completes and can never land in a channel nobody will read. A
+// rejected send (queue full) leaves the dispatcher untouched.
+func (s *Server) enqueue(ep config.EndpointConfig, key WebhookExecutionKey, item dispatchItem) (*dispatcher, bool) {
 	var lockKey string
 	if key.IsZero() {
 		lockKey = "endpoint:" + ep.Platform + "|" + ep.ChannelID
@@ -343,14 +341,19 @@ func (s *Server) dispatcherFor(ep config.EndpointConfig, key WebhookExecutionKey
 	}
 	s.dispatchMu.Lock()
 	defer s.dispatchMu.Unlock()
-	if d, ok := s.dispatchers[lockKey]; ok && !d.exiting {
-		return d
+	d, ok := s.dispatchers[lockKey]
+	if !ok || d.exiting {
+		d = &dispatcher{server: s, key: lockKey, ch: make(chan dispatchItem, maxQueuedPerKey)}
+		s.dispatchers[lockKey] = d
+		s.dispatchWG.Add(1)
+		go d.run(s.shutdownCtx)
 	}
-	d := &dispatcher{server: s, key: lockKey, ch: make(chan dispatchItem, maxQueuedPerKey)}
-	s.dispatchers[lockKey] = d
-	s.dispatchWG.Add(1)
-	go d.run(s.shutdownCtx)
-	return d
+	select {
+	case d.ch <- item:
+		return d, true
+	default:
+		return nil, false
+	}
 }
 
 func (s *Server) dispatcherCount() int {
@@ -397,15 +400,17 @@ type dispatcher struct {
 }
 
 // run serially executes queued deliveries until the queue stays idle for the
-// eviction TTL or the shutdown context is cancelled. Registry cleanup and any
-// leftover items are handled by finish.
+// eviction TTL or the shutdown context is cancelled. Idle retirement only
+// succeeds while the queue is provably empty under dispatchMu, so no accepted
+// send is ever stranded; on shutdown every leftover is recorded as failed.
 func (d *dispatcher) run(ctx context.Context) {
-	defer d.finish(ctx)
+	defer d.server.dispatchWG.Done()
 	timer := time.NewTimer(d.server.dispatcherIdleTTL)
 	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			d.retire("shutting down")
 			return
 		case item := <-d.ch:
 			if !timer.Stop() {
@@ -421,15 +426,38 @@ func (d *dispatcher) run(ctx context.Context) {
 			}
 			d.handle(item)
 		case <-timer.C:
+			if !d.tryRetireIdle() {
+				timer.Reset(d.server.dispatcherIdleTTL)
+				continue
+			}
 			return
 		}
 	}
 }
 
-// finish removes the dispatcher from the registry before draining leftovers so
-// concurrent enqueues never observe a half-live entry. Items stranded during a
-// shutdown are recorded as failed; items stranded by idle eviction still run.
-func (d *dispatcher) finish(ctx context.Context) {
+// tryRetireIdle retires the dispatcher only when its queue is empty under the
+// registry lock. Because enqueues take the same lock, a successful retirement
+// freezes an empty channel that no future send can reach; a failed attempt
+// means activity raced the timer and the dispatcher stays live.
+func (d *dispatcher) tryRetireIdle() bool {
+	s := d.server
+	s.dispatchMu.Lock()
+	defer s.dispatchMu.Unlock()
+	if len(d.ch) > 0 {
+		return false
+	}
+	d.exiting = true
+	if current, ok := s.dispatchers[d.key]; ok && current == d {
+		delete(s.dispatchers, d.key)
+	}
+	return true
+}
+
+// retire marks the dispatcher exiting under the registry lock — after this,
+// enqueues build a fresh dispatcher — and records every queued item as failed.
+// Leftovers are never executed here so a retiring dispatcher cannot overlap a
+// replacement on the same identity.
+func (d *dispatcher) retire(reason string) {
 	s := d.server
 	s.dispatchMu.Lock()
 	d.exiting = true
@@ -440,13 +468,8 @@ func (d *dispatcher) finish(ctx context.Context) {
 	for {
 		select {
 		case item := <-d.ch:
-			if ctx.Err() != nil {
-				s.abandon(item, "shutting down")
-				continue
-			}
-			d.handle(item)
+			s.abandon(item, reason)
 		default:
-			s.dispatchWG.Done()
 			return
 		}
 	}
