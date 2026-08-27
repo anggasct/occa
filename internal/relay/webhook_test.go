@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -111,8 +112,61 @@ func emptyEvents() func() <-chan Event {
 
 func runWebhookTurn(t *testing.T, client *fakeWebhookTurnClient, ctx context.Context) (WebhookTurnResult, error) {
 	t.Helper()
-	turn := WebhookTurn{Client: client, Prompt: "analyze", Scope: "test", AbortTimeout: 50 * time.Millisecond}
+	turn := WebhookTurn{
+		Client:       client,
+		Prompt:       "analyze",
+		Platform:     "telegram",
+		ChannelID:    "chat-1",
+		DeliveryID:   "delivery-9",
+		ExecutionKey: "owner/repo:main",
+		Attempt:      1,
+		AbortTimeout: 50 * time.Millisecond,
+	}
 	return turn.Run(ctx)
+}
+
+type capturedRecord struct {
+	msg   string
+	attrs map[string]any
+	level slog.Level
+}
+
+type captureHandler struct {
+	mu      sync.Mutex
+	records []capturedRecord
+}
+
+func (h *captureHandler) Enabled(_ context.Context, level slog.Level) bool { return true }
+
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	rec := capturedRecord{msg: r.Message, level: r.Level, attrs: map[string]any{}}
+	r.Attrs(func(a slog.Attr) bool {
+		rec.attrs[a.Key] = a.Value.Any()
+		return true
+	})
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, rec)
+	return nil
+}
+
+func (h *captureHandler) WithAttrs(attrs []slog.Attr) slog.Handler { return h }
+
+func (h *captureHandler) WithGroup(name string) slog.Handler { return h }
+
+func (h *captureHandler) snapshot() []capturedRecord {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]capturedRecord(nil), h.records...)
+}
+
+func captureWebhookLogs(t *testing.T) *captureHandler {
+	t.Helper()
+	previous := slog.Default()
+	handler := &captureHandler{}
+	slog.SetDefault(slog.New(handler))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return handler
 }
 
 func TestWebhookTurnSubscribesBeforeSend(t *testing.T) {
@@ -320,5 +374,94 @@ func TestWebhookTurnAbortFailureDoesNotChangeOutcome(t *testing.T) {
 	}
 	if len(client.abortCalls) != 1 {
 		t.Fatalf("abort must be attempted exactly once, got %v", client.abortCalls)
+	}
+}
+
+func findRecord(t *testing.T, handler *captureHandler, msg string) capturedRecord {
+	t.Helper()
+	for _, rec := range handler.snapshot() {
+		if rec.msg == msg {
+			return rec
+		}
+	}
+	t.Fatalf("no captured record %q; captured=%v", msg, handler.snapshot())
+	return capturedRecord{}
+}
+
+func requireTurnAttrs(t *testing.T, rec capturedRecord) {
+	t.Helper()
+	want := map[string]any{
+		"platform":      "telegram",
+		"channel":       "chat-1",
+		"delivery_id":   "delivery-9",
+		"execution_key": "owner/repo:main",
+		"attempt":       int64(1),
+		"session_id":    "sess-1",
+	}
+	for key, value := range want {
+		got, ok := rec.attrs[key]
+		if !ok {
+			t.Fatalf("record %q missing attribute %q; attrs=%v", rec.msg, key, rec.attrs)
+		}
+		if got != value {
+			t.Fatalf("record %q attribute %q = %v, want %v", rec.msg, key, got, value)
+		}
+	}
+}
+
+func TestWebhookTurnSuccessLogCarriesDeliveryAndSession(t *testing.T) {
+	handler := captureWebhookLogs(t)
+	client := newWebhookTurnClient(eventsWith(Event{Type: "done"}))
+
+	res, err := runWebhookTurn(t, client, context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Aborted || res.AbortOK {
+		t.Fatalf("successful turn must not report an abort: %+v", res)
+	}
+
+	rec := findRecord(t, handler, "relay: webhook session created")
+	requireTurnAttrs(t, rec)
+	for _, captured := range handler.snapshot() {
+		if captured.msg == "relay: webhook session aborted" || captured.msg == "relay: webhook session abort failed" {
+			t.Fatalf("successful turn must not emit abort records: %v", handler.snapshot())
+		}
+	}
+}
+
+func TestWebhookTurnAbortSuccessLogCarriesDeliveryAndSession(t *testing.T) {
+	handler := captureWebhookLogs(t)
+	client := newWebhookTurnClient(eventsWith(Event{Type: "error", Delta: "boom"}))
+
+	res, err := runWebhookTurn(t, client, context.Background())
+	if !errors.Is(err, ErrWebhookAgentResponse) {
+		t.Fatalf("expected ErrWebhookAgentResponse, got %v", err)
+	}
+	if !res.Aborted || !res.AbortOK {
+		t.Fatalf("expected recorded successful abort, got %+v", res)
+	}
+
+	rec := findRecord(t, handler, "relay: webhook session aborted")
+	requireTurnAttrs(t, rec)
+}
+
+func TestWebhookTurnAbortFailureLogCarriesDeliverySessionAndError(t *testing.T) {
+	handler := captureWebhookLogs(t)
+	client := newWebhookTurnClient(eventsWith(Event{Type: "error", Delta: "boom"}))
+	client.abortErr = errors.New("abort endpoint down")
+
+	res, err := runWebhookTurn(t, client, context.Background())
+	if !errors.Is(err, ErrWebhookAgentResponse) {
+		t.Fatalf("expected ErrWebhookAgentResponse, got %v", err)
+	}
+	if !res.Aborted || res.AbortOK {
+		t.Fatalf("expected recorded failed abort, got %+v", res)
+	}
+
+	rec := findRecord(t, handler, "relay: webhook session abort failed")
+	requireTurnAttrs(t, rec)
+	if rec.attrs["error"] == nil {
+		t.Fatalf("abort failure record must carry the error; attrs=%v", rec.attrs)
 	}
 }

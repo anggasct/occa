@@ -29,16 +29,22 @@ type WebhookTurn struct {
 	Client       Client
 	Prompt       string
 	Model        *ModelRef
-	Scope        string
+	Platform     string
+	ChannelID    string
+	DeliveryID   string
+	ExecutionKey string
+	Attempt      int
 	AbortTimeout time.Duration
 }
 
 type WebhookTurnResult struct {
 	SessionID string
 	Output    string
+	Aborted   bool
+	AbortOK   bool
 }
 
-func (t WebhookTurn) Run(ctx context.Context) (WebhookTurnResult, error) {
+func (t WebhookTurn) Run(ctx context.Context) (res WebhookTurnResult, err error) {
 	if t.Client == nil {
 		return WebhookTurnResult{}, errors.New("relay: webhook turn: nil client")
 	}
@@ -50,12 +56,14 @@ func (t WebhookTurn) Run(ctx context.Context) (WebhookTurnResult, error) {
 	if err != nil {
 		return WebhookTurnResult{}, fmt.Errorf("%w: %w", ErrWebhookSessionCreate, err)
 	}
-	t.log(sessionID, "relay: webhook session created")
+	res.SessionID = sessionID
+	slog.Info("relay: webhook session created", t.attrs(sessionID)...)
 
 	completed := false
 	defer func() {
 		if !completed {
-			t.abort(sessionID)
+			res.Aborted = true
+			res.AbortOK = t.abort(sessionID)
 		}
 	}()
 
@@ -63,47 +71,57 @@ func (t WebhookTurn) Run(ctx context.Context) (WebhookTurnResult, error) {
 	defer cancel()
 	events, err := t.Client.Events(streamCtx, sessionID)
 	if err != nil {
-		return WebhookTurnResult{SessionID: sessionID}, fmt.Errorf("%w: %w", ErrWebhookEventStream, err)
+		return res, fmt.Errorf("%w: %w", ErrWebhookEventStream, err)
 	}
 
 	if err := t.Client.SendMessage(ctx, sessionID, t.Prompt, t.Model, nil); err != nil {
-		return WebhookTurnResult{SessionID: sessionID}, fmt.Errorf("%w: %w", ErrWebhookPrompt, err)
+		return res, fmt.Errorf("%w: %w", ErrWebhookPrompt, err)
 	}
 
 	var buf strings.Builder
 	for {
 		select {
 		case <-ctx.Done():
-			return WebhookTurnResult{SessionID: sessionID}, fmt.Errorf("relay: webhook turn: %w", ctx.Err())
+			return res, fmt.Errorf("relay: webhook turn: %w", ctx.Err())
 		case ev, ok := <-events:
 			if !ok {
-				return WebhookTurnResult{SessionID: sessionID}, fmt.Errorf("%w: event stream ended", ErrWebhookResponseIncomplete)
+				return res, fmt.Errorf("%w: event stream ended", ErrWebhookResponseIncomplete)
 			}
 			switch ev.Type {
 			case "delta":
 				buf.WriteString(ev.Delta)
 			case "done":
 				completed = true
-				return WebhookTurnResult{SessionID: sessionID, Output: buf.String()}, nil
+				res.Output = buf.String()
+				return res, nil
 			case "stream_error":
-				return WebhookTurnResult{SessionID: sessionID}, fmt.Errorf("%w: %v", ErrWebhookEventStream, ev.Err)
+				return res, fmt.Errorf("%w: %v", ErrWebhookEventStream, ev.Err)
 			case "error":
-				return WebhookTurnResult{SessionID: sessionID}, ErrWebhookAgentResponse
+				return res, ErrWebhookAgentResponse
 			}
 		}
 	}
 }
 
-func (t WebhookTurn) abort(sessionID string) {
+func (t WebhookTurn) attrs(sessionID string, extra ...any) []any {
+	attrs := []any{
+		"platform", t.Platform,
+		"channel", t.ChannelID,
+		"delivery_id", t.DeliveryID,
+		"execution_key", t.ExecutionKey,
+		"attempt", t.Attempt,
+		"session_id", sessionID,
+	}
+	return append(attrs, extra...)
+}
+
+func (t WebhookTurn) abort(sessionID string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), t.AbortTimeout)
 	defer cancel()
 	if err := t.Client.AbortSession(ctx, sessionID); err != nil {
-		slog.Warn("relay: webhook session abort failed", "scope", t.Scope, "session_id", sessionID, "error", err)
-		return
+		slog.Warn("relay: webhook session abort failed", t.attrs(sessionID, "error", err)...)
+		return false
 	}
-	slog.Info("relay: webhook session aborted", "scope", t.Scope, "session_id", sessionID)
-}
-
-func (t WebhookTurn) log(sessionID, msg string) {
-	slog.Info(msg, "scope", t.Scope, "session_id", sessionID)
+	slog.Info("relay: webhook session aborted", t.attrs(sessionID)...)
+	return true
 }

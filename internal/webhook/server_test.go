@@ -51,10 +51,10 @@ type execCall struct {
 	platform  string
 	channelID string
 	prompt    string
-	workCtx   WebhookWorkContext
+	workCtx   *WebhookWorkContext
 }
 
-func (f *fakeExecutor) exec(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+func (f *fakeExecutor) exec(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 	if f.block != nil {
 		select {
 		case <-f.block:
@@ -751,7 +751,7 @@ func TestWebhookSerializesSameSessionDeliveries(t *testing.T) {
 	firstReleased := make(chan struct{})
 	secondStarted := make(chan struct{})
 
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		mu.Lock()
 		starts++
 		call := starts
@@ -836,7 +836,7 @@ func TestWebhookProcessingTimeoutStartsAtExecution(t *testing.T) {
 	firstStarted := make(chan struct{})
 	firstReleased := make(chan struct{})
 
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		deadline, ok := ctx.Deadline()
 		if !ok {
 			t.Error("executor context has no deadline")
@@ -1378,7 +1378,7 @@ func TestWebhookProjectAwareSerializationSameKey(t *testing.T) {
 	firstReleased := make(chan struct{})
 	secondStarted := make(chan struct{})
 
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		mu.Lock()
 		starts++
 		call := starts
@@ -1454,7 +1454,7 @@ func TestWebhookProjectAwareParallelismDifferentBranches(t *testing.T) {
 
 	var deliveryIDs sync.Map
 
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		deliveryIDs.Store(workCtx.Key.Branch, workCtx.DeliveryID)
 		switch workCtx.Key.Branch {
 		case "feat/branch-1":
@@ -1529,7 +1529,7 @@ func TestWebhookProjectAwareParallelismDifferentRepos(t *testing.T) {
 
 	var deliveryIDs sync.Map
 
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		deliveryIDs.Store(workCtx.Key.Repository, workCtx.DeliveryID)
 		switch workCtx.Key.Repository {
 		case "anggasct/occa":
@@ -1628,7 +1628,7 @@ func (f *fakeWorkspaceResolver) callCount() int {
 
 func TestWebhookWorktreeResolutionIntegration(t *testing.T) {
 	var observedWorktree string
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		observedWorktree = workCtx.Worktree
 		return nil
 	}
@@ -1663,7 +1663,7 @@ func TestWebhookWorktreeResolutionIntegration(t *testing.T) {
 }
 
 func TestWebhookWorktreeConflictFailsDelivery(t *testing.T) {
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		return nil
 	}
 
@@ -1737,7 +1737,7 @@ func TestWebhookGitEndpointWithoutResolverFailsClosed(t *testing.T) {
 func TestWebhookExecutorPanicRecoversAndFailsDelivery(t *testing.T) {
 	var mu sync.Mutex
 	calls := 0
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		mu.Lock()
 		calls++
 		c := calls
@@ -1789,7 +1789,7 @@ func TestWebhookExecutorPanicRecoversAndFailsDelivery(t *testing.T) {
 
 func TestWebhookGitHubHMACSuccess(t *testing.T) {
 	executed := make(chan struct{})
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		close(executed)
 		return nil
 	}
@@ -1863,7 +1863,7 @@ func TestWebhookGitHubHMACSuccess(t *testing.T) {
 
 func TestWebhookGitHubHMACUnauthorizedNegativeCases(t *testing.T) {
 	var execCalled bool
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		execCalled = true
 		return nil
 	}
@@ -1997,7 +1997,7 @@ func TestWebhookGitHubHMACUnauthorizedNegativeCases(t *testing.T) {
 
 func TestWebhookWhitespacePaddedHMACModeRequiresSignatureAndRejectsLegacy(t *testing.T) {
 	executed := make(chan struct{})
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		close(executed)
 		return nil
 	}
@@ -2420,7 +2420,7 @@ func TestWebhookFIFOOrderSameKey(t *testing.T) {
 	var completions []string
 	var execCount int
 
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		mu.Lock()
 		execCount++
 		completions = append(completions, fmt.Sprintf("call-%d", execCount))
@@ -2465,7 +2465,7 @@ func TestWebhookQueuedDeliveryHasNoRow(t *testing.T) {
 	var startedOnce sync.Once
 	started := make(chan struct{})
 	released := make(chan struct{})
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		startedOnce.Do(func() { close(started) })
 		select {
 		case <-released:
@@ -2524,7 +2524,7 @@ func TestWebhookQueuedDeliveryHasNoRow(t *testing.T) {
 func TestWebhookQueueFullReturns429WithoutRow(t *testing.T) {
 	release := make(chan struct{})
 	blocked := make(chan struct{}, maxConcurrentWebhookEvents+maxQueuedPerKey+2)
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		blocked <- struct{}{}
 		select {
 		case <-release:
@@ -2585,7 +2585,7 @@ func TestWebhookSlotCapBoundedAcrossKeys(t *testing.T) {
 	running, peak := 0, 0
 	release := make(chan struct{})
 
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		mu.Lock()
 		running++
 		if running > peak {
@@ -2653,7 +2653,7 @@ func TestWebhookShutdownDrainsQueue(t *testing.T) {
 	var startedOnce sync.Once
 	started := make(chan struct{})
 	released := make(chan struct{})
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		startedOnce.Do(func() { close(started) })
 		select {
 		case <-released:
@@ -2759,7 +2759,7 @@ func TestWebhookDispatcherIdleEviction(t *testing.T) {
 }
 
 func TestWebhookEnqueueRacingIdleEvictionNeverLosesDelivery(t *testing.T) {
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		return nil
 	}
 
@@ -2813,7 +2813,7 @@ func TestWebhookEnqueueRacingShutdownNeverLosesDelivery(t *testing.T) {
 	var startedOnce sync.Once
 	started := make(chan struct{})
 	released := make(chan struct{})
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		startedOnce.Do(func() { close(started) })
 		select {
 		case <-released:
@@ -2922,7 +2922,7 @@ func TestWebhookIngressPrefixAcceptedOnce(t *testing.T) {
 
 func TestWebhookNoneWorkspaceNeverInvokesResolver(t *testing.T) {
 	var worktrees []string
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		worktrees = append(worktrees, workCtx.Worktree)
 		return nil
 	}

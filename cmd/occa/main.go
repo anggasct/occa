@@ -237,7 +237,7 @@ func main() {
 
 	var webhookSrv *webhook.Server
 	if len(cfg.Webhooks.Endpoints) > 0 {
-		webhookExecutor := func(ctx context.Context, platform, channelID, prompt string, workCtx webhook.WebhookWorkContext) error {
+		webhookExecutor := func(ctx context.Context, platform, channelID, prompt string, workCtx *webhook.WebhookWorkContext) error {
 			for _, ch := range channels {
 				if ch.Name() == platform {
 					send := func(text string) { notify(ch, channelID, text) }
@@ -257,13 +257,19 @@ func main() {
 					defer inst.End()
 
 					turn := relay.WebhookTurn{
-						Client: inst.Client(),
-						Prompt: prompt,
-						Model:  workCtx.Model,
-						Scope: fmt.Sprintf("platform=%s channel=%s delivery=%s key=%s attempt=%d",
-							platform, channelID, workCtx.DeliveryID, workCtx.Key.String(), workCtx.Attempt),
+						Client:       inst.Client(),
+						Prompt:       prompt,
+						Model:        workCtx.Model,
+						Platform:     platform,
+						ChannelID:    channelID,
+						DeliveryID:   workCtx.DeliveryID,
+						ExecutionKey: workCtx.Key.String(),
+						Attempt:      workCtx.Attempt,
 					}
 					result, err := turn.Run(ctx)
+					workCtx.SessionID = result.SessionID
+					workCtx.SessionAborted = result.Aborted
+					workCtx.SessionAbortOK = result.AbortOK
 					if err != nil {
 						switch {
 						case errors.Is(err, relay.ErrWebhookSessionCreate):

@@ -31,12 +31,15 @@ func (k WebhookExecutionKey) IsZero() bool {
 }
 
 type WebhookWorkContext struct {
-	Key         WebhookExecutionKey
-	Worktree    string
-	DeliveryID  string
-	Attempt     int
-	Model       *relay.ModelRef
-	ModelSource string
+	Key            WebhookExecutionKey
+	Worktree       string
+	DeliveryID     string
+	Attempt        int
+	SessionID      string
+	SessionAborted bool
+	SessionAbortOK bool
+	Model          *relay.ModelRef
+	ModelSource    string
 }
 
 func ExtractExecutionKey(body []byte) WebhookExecutionKey {
