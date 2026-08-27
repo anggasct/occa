@@ -83,6 +83,7 @@ type permissionBroker struct {
 	batches     map[pendingBatchKey]*pendingBatch
 	nextBatchID uint64
 	rules       store.PermissionRuleRepo
+	window      time.Duration
 }
 
 type permissionPromptHandler struct {
@@ -103,6 +104,7 @@ func newPermissionBroker(rules store.PermissionRuleRepo) *permissionBroker {
 		records: make(map[string]*permissionRecord),
 		batches: make(map[pendingBatchKey]*pendingBatch),
 		rules:   rules,
+		window:  permissionBatchWindow,
 	}
 }
 
@@ -139,7 +141,7 @@ func (h *permissionPromptHandler) Prompt(ctx context.Context, request relay.Perm
 		requests: []relay.PermissionRequest{request},
 		key:      key,
 	}
-	batch.timer = time.AfterFunc(permissionBatchWindow, func() {
+	batch.timer = time.AfterFunc(h.broker.window, func() {
 		h.broker.flushBatch(batch)
 	})
 	h.broker.batches[key] = batch

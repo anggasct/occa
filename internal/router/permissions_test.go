@@ -40,7 +40,9 @@ func waitForSendCount(reply *permissionReply, n int) {
 
 func newPermissionPromptWithRules(t *testing.T, client relay.Client, rules store.PermissionRuleRepo) (*permissionBroker, *permissionPromptHandler, *permissionReply) {
 	t.Helper()
-	broker := newPermissionBroker(rules)
+	broker := fastPermissionBroker()
+	broker.rules = rules
+	broker.window = 15 * time.Millisecond
 	owner := &permissionOwner{}
 	reply := &permissionReply{}
 	handler := &permissionPromptHandler{
@@ -154,7 +156,8 @@ func TestPermissionAutoApplyDifferentConversationPrompts(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	broker := newPermissionBroker(rules)
+	broker := fastPermissionBroker()
+	broker.rules = rules
 	owner := &permissionOwner{}
 	reply := &permissionReply{}
 	handler := &permissionPromptHandler{
@@ -282,7 +285,8 @@ func TestPermissionAlwaysTapPersistFailureStillAllows(t *testing.T) {
 func TestPermissionAlwaysTapMissingIdentityFailsClosed(t *testing.T) {
 	client := &permissionClient{}
 	rules := newFakePermissionRuleRepo()
-	broker := newPermissionBroker(rules)
+	broker := fastPermissionBroker()
+	broker.rules = rules
 	owner := &permissionOwner{}
 	reply := &permissionReply{}
 	handler := &permissionPromptHandler{
@@ -404,6 +408,7 @@ func TestPermissionDeleteStopsAutoApply(t *testing.T) {
 func permissionsTestRouter(t *testing.T) (*Router, *fakeStore) {
 	t.Helper()
 	r, st := newResponseRouter(&permissionClient{})
+	r.permissions.window = 15 * time.Millisecond
 	return r, st
 }
 
