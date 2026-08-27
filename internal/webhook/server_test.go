@@ -290,7 +290,7 @@ func TestWebhookTemplateRendering(t *testing.T) {
 	srv.executeDelivery(config.EndpointConfig{
 		Name: "github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1",
 		Prompt: `Analyze PR #{{.payload.number}} action={{.payload.action}}`,
-	}, []byte(`{"action":"opened","number":42}`), 0, "delivery-1", "pull_request")
+	}, []byte(`{"action":"opened","number":42}`), 0, "delivery-1", "pull_request", nil)
 
 	if len(exec.calls) != 1 {
 		t.Fatalf("expected 1 executor call, got %d", len(exec.calls))
@@ -314,7 +314,7 @@ func TestWebhookUntrustedPayloadWrapper(t *testing.T) {
 
 	srv.executeDelivery(config.EndpointConfig{
 		Prompt: "static prompt", Platform: "telegram", ChannelID: "c1",
-	}, []byte(`{"foo":"bar"}`), 0, "delivery-1", "")
+	}, []byte(`{"foo":"bar"}`), 0, "delivery-1", "", nil)
 
 	if len(exec.calls) != 1 {
 		t.Fatalf("expected 1 call, got %d", len(exec.calls))
@@ -332,7 +332,7 @@ func TestWebhookEscapesClosingPayloadWrapper(t *testing.T) {
 		{Name: "test", Path: "/test", Secret: "s", Platform: "telegram", ChannelID: "c1", Prompt: `{{.json}}`},
 	})
 
-	srv.executeDelivery(config.EndpointConfig{Prompt: `{{.json}}`}, []byte(`{"payload":"</untrusted_payload>"}`), 0, "delivery-1", "")
+	srv.executeDelivery(config.EndpointConfig{Prompt: `{{.json}}`}, []byte(`{"payload":"</untrusted_payload>"}`), 0, "delivery-1", "", nil)
 
 	if len(exec.calls) != 1 {
 		t.Fatalf("expected 1 call, got %d", len(exec.calls))
@@ -351,7 +351,7 @@ func TestWebhookTemplateErrorFailsClosed(t *testing.T) {
 	})
 	body := []byte(`{"foo":"bar"}`)
 
-	srv.executeDelivery(config.EndpointConfig{Prompt: "broken {{"}, body, 0, "delivery-1", "")
+	srv.executeDelivery(config.EndpointConfig{Prompt: "broken {{"}, body, 0, "delivery-1", "", nil)
 
 	if len(exec.calls) != 0 {
 		t.Fatalf("template failure must not invoke executor, got %d calls", len(exec.calls))
@@ -1401,7 +1401,7 @@ func TestWebhookProjectAwareSerializationSameKey(t *testing.T) {
 	cfg := config.WebhookConfig{
 		Bind: "127.0.0.1:0",
 		Endpoints: []config.EndpointConfig{
-			{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+			{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze", Workspace: config.EndpointWorkspace{Type: config.WorkspaceTypeGit, Path: "/projects/occa", Mode: config.WorkspaceModeIsolated}},
 		},
 	}
 	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
@@ -1410,7 +1410,7 @@ func TestWebhookProjectAwareSerializationSameKey(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	srv := New(cfg, exec, st.WebhookDeliveryRepo())
-	srv.SetWorktreeResolver(&fakeWorktreeResolver{worktree: "/projects/occa/.worktree/feat-branch-1"})
+	srv.SetWorkspaceResolver(&fakeWorkspaceResolver{path: "/projects/occa/.worktree/feat-branch-1"})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleRequest)
 	ts := httptest.NewServer(mux)
@@ -1474,7 +1474,7 @@ func TestWebhookProjectAwareParallelismDifferentBranches(t *testing.T) {
 	cfg := config.WebhookConfig{
 		Bind: "127.0.0.1:0",
 		Endpoints: []config.EndpointConfig{
-			{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+			{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze", Workspace: config.EndpointWorkspace{Type: config.WorkspaceTypeGit, Path: "/projects/occa", Mode: config.WorkspaceModeIsolated}},
 		},
 	}
 	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
@@ -1483,7 +1483,7 @@ func TestWebhookProjectAwareParallelismDifferentBranches(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	srv := New(cfg, exec, st.WebhookDeliveryRepo())
-	srv.SetWorktreeResolver(&fakeWorktreeResolver{worktree: "/projects/occa/.worktree/branch"})
+	srv.SetWorkspaceResolver(&fakeWorkspaceResolver{path: "/projects/occa/.worktree/branch"})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleRequest)
 	ts := httptest.NewServer(mux)
@@ -1549,7 +1549,7 @@ func TestWebhookProjectAwareParallelismDifferentRepos(t *testing.T) {
 	cfg := config.WebhookConfig{
 		Bind: "127.0.0.1:0",
 		Endpoints: []config.EndpointConfig{
-			{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+			{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze", Workspace: config.EndpointWorkspace{Type: config.WorkspaceTypeGit, Path: "/projects/occa", Mode: config.WorkspaceModeIsolated}},
 		},
 	}
 	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
@@ -1558,7 +1558,7 @@ func TestWebhookProjectAwareParallelismDifferentRepos(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	srv := New(cfg, exec, st.WebhookDeliveryRepo())
-	srv.SetWorktreeResolver(&fakeWorktreeResolver{worktree: "/projects/repo/.worktree/main"})
+	srv.SetWorkspaceResolver(&fakeWorkspaceResolver{path: "/projects/repo/.worktree/main"})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleRequest)
 	ts := httptest.NewServer(mux)
@@ -1596,16 +1596,34 @@ func TestWebhookProjectAwareParallelismDifferentRepos(t *testing.T) {
 	}
 }
 
-type fakeWorktreeResolver struct {
-	worktree string
+type fakeWorkspaceResolver struct {
+	path     string
 	err      error
+	failures int
+	mu       sync.Mutex
+	calls    int
 }
 
-func (f *fakeWorktreeResolver) ResolveWorktree(ctx context.Context, key WebhookExecutionKey) (string, error) {
-	if f.err != nil {
-		return "", f.err
+func (f *fakeWorkspaceResolver) ResolveWorkspace(ctx context.Context, req WorkspaceRequest) (*WorkspaceLease, error) {
+	f.mu.Lock()
+	f.calls++
+	failures := f.failures
+	f.failures--
+	if failures > 0 {
+		f.mu.Unlock()
+		return nil, ErrWorkspaceLeased
 	}
-	return f.worktree, nil
+	f.mu.Unlock()
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &WorkspaceLease{Path: f.path, Mode: req.Mode}, nil
+}
+
+func (f *fakeWorkspaceResolver) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
 }
 
 func TestWebhookWorktreeResolutionIntegration(t *testing.T) {
@@ -1618,7 +1636,7 @@ func TestWebhookWorktreeResolutionIntegration(t *testing.T) {
 	cfg := config.WebhookConfig{
 		Bind: "127.0.0.1:0",
 		Endpoints: []config.EndpointConfig{
-			{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+			{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze", Workspace: config.EndpointWorkspace{Type: config.WorkspaceTypeGit, Path: "/projects/occa", Mode: config.WorkspaceModeIsolated}},
 		},
 	}
 	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
@@ -1627,7 +1645,7 @@ func TestWebhookWorktreeResolutionIntegration(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	srv := New(cfg, exec, st.WebhookDeliveryRepo())
-	srv.SetWorktreeResolver(&fakeWorktreeResolver{worktree: "/projects/occa/.worktree/my-fix"})
+	srv.SetWorkspaceResolver(&fakeWorkspaceResolver{path: "/projects/occa/.worktree/my-fix"})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleRequest)
 	ts := httptest.NewServer(mux)
@@ -1652,7 +1670,7 @@ func TestWebhookWorktreeConflictFailsDelivery(t *testing.T) {
 	cfg := config.WebhookConfig{
 		Bind: "127.0.0.1:0",
 		Endpoints: []config.EndpointConfig{
-			{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+			{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze", Workspace: config.EndpointWorkspace{Type: config.WorkspaceTypeGit, Path: "/projects/occa", Mode: config.WorkspaceModeIsolated}},
 		},
 	}
 	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
@@ -1661,7 +1679,7 @@ func TestWebhookWorktreeConflictFailsDelivery(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	srv := New(cfg, exec, st.WebhookDeliveryRepo())
-	srv.SetWorktreeResolver(&fakeWorktreeResolver{err: ErrWorktreeConflict})
+	srv.SetWorkspaceResolver(&fakeWorkspaceResolver{err: ErrWorktreeConflict})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleRequest)
 	ts := httptest.NewServer(mux)
@@ -1681,12 +1699,13 @@ func TestWebhookWorktreeConflictFailsDelivery(t *testing.T) {
 	}
 }
 
-func TestWebhookNonZeroKeyWithoutResolverFailsDelivery(t *testing.T) {
+func TestWebhookGitEndpointWithoutResolverFailsClosed(t *testing.T) {
 	exec := &fakeExecutor{}
 	cfg := config.WebhookConfig{
 		Bind: "127.0.0.1:0",
 		Endpoints: []config.EndpointConfig{
-			{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+			{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze",
+				Workspace: config.EndpointWorkspace{Type: config.WorkspaceTypeGit, Path: "/projects/occa", Mode: config.WorkspaceModeIsolated}},
 		},
 	}
 	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
@@ -1695,7 +1714,7 @@ func TestWebhookNonZeroKeyWithoutResolverFailsDelivery(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	srv := New(cfg, exec.exec, st.WebhookDeliveryRepo())
-	srv.worktreeResolver = nil
+	srv.workspaceResolver = nil
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleRequest)
 	ts := httptest.NewServer(mux)
@@ -1703,15 +1722,12 @@ func TestWebhookNonZeroKeyWithoutResolverFailsDelivery(t *testing.T) {
 
 	payload := `{"repository":{"full_name":"anggasct/occa"},"pull_request":{"base":{"repo":{"full_name":"anggasct/occa"}},"head":{"repo":{"full_name":"anggasct/occa"},"ref":"feat/no-resolver"}}}`
 	if resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-1", "pull_request", payload); resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
+		t.Fatalf("delivery-1 expected 200, got %d", resp.StatusCode)
 	}
 
 	receipt := waitForReceipt(t, st, store.WebhookStatusFailed)
-	if receipt.Status != store.WebhookStatusFailed {
-		t.Fatalf("expected failed status, got %s", receipt.Status)
-	}
-	if !strings.Contains(receipt.ErrorSummary, "worktree resolver required") {
-		t.Fatalf("expected 'worktree resolver required', got %q", receipt.ErrorSummary)
+	if !strings.Contains(receipt.ErrorSummary, "workspace resolver unavailable") {
+		t.Fatalf("expected 'workspace resolver unavailable', got %q", receipt.ErrorSummary)
 	}
 	if exec.callCount() != 0 {
 		t.Fatalf("executor should not have been called without resolver, called %d times", exec.callCount())
@@ -1735,7 +1751,7 @@ func TestWebhookExecutorPanicRecoversAndFailsDelivery(t *testing.T) {
 	cfg := config.WebhookConfig{
 		Bind: "127.0.0.1:0",
 		Endpoints: []config.EndpointConfig{
-			{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+			{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze", Workspace: config.EndpointWorkspace{Type: config.WorkspaceTypeGit, Path: "/projects/occa", Mode: config.WorkspaceModeIsolated}},
 		},
 	}
 	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
@@ -1744,7 +1760,7 @@ func TestWebhookExecutorPanicRecoversAndFailsDelivery(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	srv := New(cfg, exec, st.WebhookDeliveryRepo())
-	srv.SetWorktreeResolver(&fakeWorktreeResolver{worktree: "/projects/occa/.worktree/fix"})
+	srv.SetWorkspaceResolver(&fakeWorkspaceResolver{path: "/projects/occa/.worktree/fix"})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleRequest)
 	ts := httptest.NewServer(mux)
@@ -1790,6 +1806,7 @@ func TestWebhookGitHubHMACSuccess(t *testing.T) {
 				Platform:  "telegram",
 				ChannelID: "chat1",
 				Prompt:    "Analyze review",
+				Workspace: config.EndpointWorkspace{Type: config.WorkspaceTypeGit, Path: "/projects/occa", Mode: config.WorkspaceModeIsolated},
 			},
 		},
 	}
@@ -1801,7 +1818,7 @@ func TestWebhookGitHubHMACSuccess(t *testing.T) {
 	t.Cleanup(func() { _ = st.Close() })
 
 	srv := New(cfg, exec, st.WebhookDeliveryRepo())
-	srv.SetWorktreeResolver(&fakeWorktreeResolver{worktree: "/projects/occa/.worktree/hmac"})
+	srv.SetWorkspaceResolver(&fakeWorkspaceResolver{path: "/projects/occa/.worktree/hmac"})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleRequest)
 	ts := httptest.NewServer(mux)
@@ -1863,6 +1880,7 @@ func TestWebhookGitHubHMACUnauthorizedNegativeCases(t *testing.T) {
 				Platform:  "telegram",
 				ChannelID: "chat1",
 				Prompt:    "Analyze review",
+				Workspace: config.EndpointWorkspace{Type: config.WorkspaceTypeGit, Path: "/projects/occa", Mode: config.WorkspaceModeIsolated},
 			},
 		},
 	}
@@ -1874,7 +1892,7 @@ func TestWebhookGitHubHMACUnauthorizedNegativeCases(t *testing.T) {
 	t.Cleanup(func() { _ = st.Close() })
 
 	srv := New(cfg, exec, st.WebhookDeliveryRepo())
-	srv.SetWorktreeResolver(&fakeWorktreeResolver{worktree: "/projects/occa/.worktree/hmac"})
+	srv.SetWorkspaceResolver(&fakeWorkspaceResolver{path: "/projects/occa/.worktree/hmac"})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleRequest)
 	ts := httptest.NewServer(mux)
@@ -1996,6 +2014,7 @@ func TestWebhookWhitespacePaddedHMACModeRequiresSignatureAndRejectsLegacy(t *tes
 				Platform:  "telegram",
 				ChannelID: "chat1",
 				Prompt:    "Analyze review",
+				Workspace: config.EndpointWorkspace{Type: config.WorkspaceTypeGit, Path: "/projects/occa", Mode: config.WorkspaceModeIsolated},
 			},
 		},
 	}
@@ -2007,7 +2026,7 @@ func TestWebhookWhitespacePaddedHMACModeRequiresSignatureAndRejectsLegacy(t *tes
 	t.Cleanup(func() { _ = st.Close() })
 
 	srv := New(cfg, exec, st.WebhookDeliveryRepo())
-	srv.SetWorktreeResolver(&fakeWorktreeResolver{worktree: "/projects/occa/.worktree/hmac"})
+	srv.SetWorkspaceResolver(&fakeWorkspaceResolver{path: "/projects/occa/.worktree/hmac"})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleRequest)
 	ts := httptest.NewServer(mux)
@@ -2592,7 +2611,7 @@ func TestWebhookSlotCapBoundedAcrossKeys(t *testing.T) {
 	cfg := config.WebhookConfig{
 		Bind: "127.0.0.1:0",
 		Endpoints: []config.EndpointConfig{
-			{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+			{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze", Workspace: config.EndpointWorkspace{Type: config.WorkspaceTypeGit, Path: "/projects/occa", Mode: config.WorkspaceModeIsolated}},
 		},
 	}
 	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
@@ -2601,7 +2620,7 @@ func TestWebhookSlotCapBoundedAcrossKeys(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	srv := New(cfg, exec, st.WebhookDeliveryRepo())
-	srv.SetWorktreeResolver(&fakeWorktreeResolver{worktree: "/projects/occa/.worktree/branch"})
+	srv.SetWorkspaceResolver(&fakeWorkspaceResolver{path: "/projects/occa/.worktree/branch"})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleRequest)
 	ts := httptest.NewServer(mux)
@@ -2874,5 +2893,150 @@ func TestWebhookEnqueueRacingShutdownNeverLosesDelivery(t *testing.T) {
 	}
 	if srv.dispatcherCount() != 0 {
 		t.Fatalf("dispatchers left registered after Stop: %d", srv.dispatcherCount())
+	}
+}
+
+func TestWebhookIngressPrefixAcceptedOnce(t *testing.T) {
+	srv, _, st := newTestServerFull(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github/review", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	if resp := post(t, ts.URL+"/github/review?secret=s3cret", "delivery-direct", "pull_request", `{}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("direct suffix path expected 200, got %d", resp.StatusCode)
+	}
+	waitForCompletedCount(t, st, 1)
+
+	if resp := post(t, ts.URL+"/occa/github/review?secret=s3cret", "delivery-prefixed", "pull_request", `{}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("ingress-prefixed path expected 200, got %d", resp.StatusCode)
+	}
+	waitForCompletedCount(t, st, 2)
+
+	if resp := post(t, ts.URL+"/occa/occa/github/review?secret=s3cret", "delivery-double", "pull_request", `{}`); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("duplicated ingress prefix must not match twice, got %d", resp.StatusCode)
+	}
+}
+
+func TestWebhookNoneWorkspaceNeverInvokesResolver(t *testing.T) {
+	var worktrees []string
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+		worktrees = append(worktrees, workCtx.Worktree)
+		return nil
+	}
+	cfg := config.WebhookConfig{
+		Bind: "127.0.0.1:0",
+		Endpoints: []config.EndpointConfig{
+			{Name: "sentry", Path: "/sentry/aura", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze",
+				Workspace: config.EndpointWorkspace{Type: config.WorkspaceTypeNone}},
+		},
+	}
+	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	srv := New(cfg, exec, st.WebhookDeliveryRepo())
+	resolver := &fakeWorkspaceResolver{path: "/should/not/be/used"}
+	srv.SetWorkspaceResolver(resolver)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	payload := `{"repository":{"full_name":"anggasct/occa"},"pull_request":{"base":{"repo":{"full_name":"anggasct/occa"}},"head":{"repo":{"full_name":"anggasct/occa"},"ref":"main","sha":"0123456789abcdef0123456789abcdef01234567"}}}`
+	if resp := post(t, ts.URL+"/sentry/aura?secret=s3cret", "delivery-1", "pull_request", payload); resp.StatusCode != http.StatusOK {
+		t.Fatalf("repo-shaped payload on none endpoint expected 200, got %d", resp.StatusCode)
+	}
+	waitForCompletedCount(t, st, 1)
+
+	if resolver.callCount() != 0 {
+		t.Fatalf("none endpoint must never invoke the workspace resolver, got %d calls", resolver.callCount())
+	}
+	if len(worktrees) != 1 || worktrees[0] != "" {
+		t.Fatalf("none endpoint must execute with an empty worktree, got %v", worktrees)
+	}
+}
+
+func TestWebhookRevisionRequiredFailsClosedWithoutExecutor(t *testing.T) {
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze",
+			Workspace: config.EndpointWorkspace{Type: config.WorkspaceTypeGit, Path: "/projects/occa", Mode: config.WorkspaceModeIsolated}},
+	})
+	srv.SetWorkspaceResolver(&fakeWorkspaceResolver{err: ErrRevisionRequired})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	if resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-1", "pull_request", `{}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected accepted 200, got %d", resp.StatusCode)
+	}
+	receipt := waitForReceipt(t, st, store.WebhookStatusFailed)
+	if !strings.Contains(receipt.ErrorSummary, "workspace revision required") {
+		t.Fatalf("expected 'workspace revision required' in summary, got %q", receipt.ErrorSummary)
+	}
+	if exec.callCount() != 0 {
+		t.Fatalf("revision-less isolated delivery must not execute, got %d calls", exec.callCount())
+	}
+}
+
+func TestWebhookMutableConflictRetriesThenSucceeds(t *testing.T) {
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze",
+			Workspace: config.EndpointWorkspace{Type: config.WorkspaceTypeGit, Path: "/projects/occa", Mode: config.WorkspaceModeMutable}},
+	})
+	resolver := &fakeWorkspaceResolver{path: "/projects/occa/.worktree/fix", failures: 2}
+	srv.SetWorkspaceResolver(resolver)
+	srv.workspaceRetryBackoff = []time.Duration{0, 0, 0}
+	srv.workspaceRetrySleep = func(ctx context.Context, d time.Duration) bool { return true }
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	if resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-1", "pull_request", `{}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected accepted 200, got %d", resp.StatusCode)
+	}
+	waitForCompletedCount(t, st, 1)
+	if resolver.callCount() != 3 {
+		t.Fatalf("expected 3 resolution attempts (2 busy + 1 success), got %d", resolver.callCount())
+	}
+	if exec.callCount() != 1 {
+		t.Fatalf("expected exactly one execution, got %d", exec.callCount())
+	}
+	if calls := exec.getCalls(); len(calls) == 1 && calls[0].workCtx.Worktree != "/projects/occa/.worktree/fix" {
+		t.Fatalf("expected execution inside leased worktree, got %q", calls[0].workCtx.Worktree)
+	}
+}
+
+func TestWebhookMutableConflictExhaustsRetriesAndFails(t *testing.T) {
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze",
+			Workspace: config.EndpointWorkspace{Type: config.WorkspaceTypeGit, Path: "/projects/occa", Mode: config.WorkspaceModeMutable}},
+	})
+	resolver := &fakeWorkspaceResolver{failures: 1000}
+	srv.SetWorkspaceResolver(resolver)
+	srv.workspaceRetryBackoff = []time.Duration{0, 0, 0}
+	srv.workspaceRetrySleep = func(ctx context.Context, d time.Duration) bool { return true }
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	if resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-1", "pull_request", `{}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected accepted 200, got %d", resp.StatusCode)
+	}
+	receipt := waitForReceipt(t, st, store.WebhookStatusFailed)
+	if !strings.Contains(receipt.ErrorSummary, "workspace leased") {
+		t.Fatalf("expected 'workspace leased' in terminal summary, got %q", receipt.ErrorSummary)
+	}
+	if resolver.callCount() != 4 {
+		t.Fatalf("expected exactly 4 attempts (initial + 3 retries), got %d", resolver.callCount())
+	}
+	if exec.callCount() != 0 {
+		t.Fatalf("busy workspace must never execute, got %d calls", exec.callCount())
 	}
 }

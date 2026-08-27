@@ -310,7 +310,7 @@ func main() {
 			}
 			return errors.New("webhook channel adapter unavailable")
 		})
-		webhookSrv.SetWorktreeResolver(webhook.NewGitWorktreeResolver(""))
+		webhookSrv.SetWorkspaceResolver(webhook.NewWorkspaceManager())
 		if err := webhookSrv.Start(ctx); err != nil {
 			slog.Error("failed to start webhook server", "error", err)
 		}

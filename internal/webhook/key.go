@@ -12,6 +12,7 @@ type WebhookExecutionKey struct {
 	Repository     string
 	HeadRepository string
 	Branch         string
+	HeadRevision   string
 }
 
 func (k WebhookExecutionKey) String() string {
@@ -44,6 +45,7 @@ func ExtractExecutionKey(body []byte) WebhookExecutionKey {
 
 	var raw struct {
 		Ref         string `json:"ref"`
+		After       string `json:"after"`
 		Repository  any    `json:"repository"`
 		PullRequest *struct {
 			Base struct {
@@ -53,10 +55,15 @@ func ExtractExecutionKey(body []byte) WebhookExecutionKey {
 			Head struct {
 				Repo any    `json:"repo"`
 				Ref  string `json:"ref"`
+				SHA  string `json:"sha"`
 			} `json:"head"`
 		} `json:"pull_request"`
+		HeadCommit *struct {
+			ID string `json:"id"`
+		} `json:"head_commit"`
 		HeadRepository any    `json:"head_repository"`
 		HeadRepo       any    `json:"head_repo"`
+		HeadRevision   string `json:"head_revision"`
 		Branch         string `json:"branch"`
 		Repo           any    `json:"repo"`
 	}
@@ -64,6 +71,21 @@ func ExtractExecutionKey(body []byte) WebhookExecutionKey {
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return WebhookExecutionKey{}
 	}
+
+	revision := ""
+	if raw.PullRequest != nil {
+		revision = raw.PullRequest.Head.SHA
+	}
+	if revision == "" && raw.HeadCommit != nil {
+		revision = raw.HeadCommit.ID
+	}
+	if revision == "" {
+		revision = raw.After
+	}
+	if revision == "" {
+		revision = raw.HeadRevision
+	}
+	revision = normalizeRevision(revision)
 
 	var baseRepo, headRepo, branch string
 
@@ -82,6 +104,7 @@ func ExtractExecutionKey(body []byte) WebhookExecutionKey {
 			Repository:     baseRepo,
 			HeadRepository: headRepo,
 			Branch:         branch,
+			HeadRevision:   revision,
 		}
 	}
 
@@ -121,7 +144,21 @@ func ExtractExecutionKey(body []byte) WebhookExecutionKey {
 		Repository:     baseRepo,
 		HeadRepository: headRepo,
 		Branch:         branch,
+		HeadRevision:   revision,
 	}
+}
+
+func normalizeRevision(rev string) string {
+	rev = strings.ToLower(strings.TrimSpace(rev))
+	if len(rev) < 7 || len(rev) > 40 {
+		return ""
+	}
+	for _, r := range rev {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return ""
+		}
+	}
+	return rev
 }
 
 func isValidRepoFullName(s string) bool {
@@ -141,6 +178,10 @@ func isValidRepoFullName(s string) bool {
 		}
 	}
 	return true
+}
+
+func isAllowedRepoChar(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.'
 }
 
 func extractRepoFullName(v any) string {

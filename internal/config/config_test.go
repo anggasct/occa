@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -267,7 +268,7 @@ func TestWebhookLoopbackValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.bind, func(t *testing.T) {
-			yaml := fmt.Sprintf("webhooks:\n  bind: %q\n  endpoints:\n    - name: test\n      path: /test\n      secret: s\n      platform: telegram\n      channel_id: c1\n      prompt: p\n", tt.bind)
+			yaml := fmt.Sprintf("webhooks:\n  bind: %q\n  endpoints:\n    - name: test\n      path: /test\n      secret: s\n      platform: telegram\n      channel_id: c1\n      prompt: p\n      workspace:\n        type: none\n", tt.bind)
 			path := writeConfig(t, t.TempDir(), yaml)
 			_, err := Load(path)
 			if tt.wantErr && err == nil {
@@ -301,6 +302,8 @@ func TestWebhookEmptySecretValidation(t *testing.T) {
       platform: telegram
       channel_id: c1
       prompt: p
+      workspace:
+        type: none
 `)
 
 	_, err := Load(path)
@@ -322,12 +325,16 @@ func TestWebhookDuplicatePathValidation(t *testing.T) {
       platform: telegram
       channel_id: c1
       prompt: p
+      workspace:
+        type: none
     - name: second
       path: /same
       secret: second-secret
       platform: telegram
       channel_id: c2
       prompt: p
+      workspace:
+        type: none
 `)
 
 	_, err := Load(path)
@@ -358,7 +365,9 @@ func TestWebhookAuthModeValidation(t *testing.T) {
       secret: supersecret
       platform: discord
       channel_id: c1
-      prompt: p`,
+      prompt: p
+      workspace:
+        type: none`,
 			wantErr: false,
 		},
 		{
@@ -371,7 +380,9 @@ func TestWebhookAuthModeValidation(t *testing.T) {
       secret: supersecret
       platform: discord
       channel_id: c1
-      prompt: p`,
+      prompt: p
+      workspace:
+        type: none`,
 			wantErr: false,
 		},
 		{
@@ -384,7 +395,9 @@ func TestWebhookAuthModeValidation(t *testing.T) {
       secret: supersecret
       platform: discord
       channel_id: c1
-      prompt: p`,
+      prompt: p
+      workspace:
+        type: none`,
 			wantErr: false,
 		},
 		{
@@ -397,7 +410,9 @@ func TestWebhookAuthModeValidation(t *testing.T) {
       secret: supersecret
       platform: discord
       channel_id: c1
-      prompt: p`,
+      prompt: p
+      workspace:
+        type: none`,
 			wantErr:   true,
 			errSubstr: "webhooks.endpoints[0].auth is unsupported",
 		},
@@ -411,7 +426,9 @@ func TestWebhookAuthModeValidation(t *testing.T) {
       secret: "   "
       platform: discord
       channel_id: c1
-      prompt: p`,
+      prompt: p
+      workspace:
+        type: none`,
 			wantErr:   true,
 			errSubstr: "webhooks.endpoints[0].secret must not be empty",
 		},
@@ -495,5 +512,67 @@ func TestLoadDiscordPolicyValidation(t *testing.T) {
 				t.Fatalf("Load error = %v, want substring %q", err, tt.errSubstr)
 			}
 		})
+	}
+}
+
+func TestEndpointWorkspaceValidation(t *testing.T) {
+	cases := []struct {
+		name      string
+		workspace string
+		repo      string
+		wantErr   string
+	}{
+		{"missing type", "", "", `workspace.type is required`},
+		{"invalid type", "      workspace:\n        type: filesystem\n", "", `workspace.type is required`},
+		{"none rejects path", "      workspace:\n        type: none\n        path: /tmp/x\n", "", "must be empty when workspace.type is none"},
+		{"none rejects mode", "      workspace:\n        type: none\n        mode: isolated\n", "", "must be empty when workspace.type is none"},
+		{"git requires path", "      workspace:\n        type: git\n        mode: isolated\n", "github.com/o/r", "workspace.path is required"},
+		{"git requires mode", "      workspace:\n        type: git\n        path: /tmp/x\n", "github.com/o/r", "workspace.mode is required"},
+		{"git invalid mode", "      workspace:\n        type: git\n        path: /tmp/x\n        mode: adhoc\n", "github.com/o/r", "workspace.mode is required"},
+		{"git requires repository", "      workspace:\n        type: git\n        path: /tmp/x\n        mode: isolated\n", "", "repository binding is required"},
+		{"git invalid repository", "      workspace:\n        type: git\n        path: /tmp/x\n        mode: isolated\n", "a/b/c/d/e", "must be owner/repo or host/owner/repo"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			yaml := "webhooks:\n  endpoints:\n    - name: test\n      path: /test\n      secret: s\n      platform: telegram\n      channel_id: c1\n      prompt: p\n" + tt.workspace
+			if tt.repo != "" {
+				yaml += "      repository: " + tt.repo + "\n"
+			}
+			path := writeConfig(t, t.TempDir(), yaml)
+			if _, err := Load(path); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Load error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestEndpointWorkspaceGitBindingNormalizes(t *testing.T) {
+	dir := t.TempDir()
+	yaml := "webhooks:\n  endpoints:\n    - name: gh\n      path: /gh\n      secret: s\n      platform: telegram\n      channel_id: c1\n      prompt: p\n      repository: https://GitHub.com/TestOwner/MyRepo.git\n      workspace:\n        type: git\n        path: relative/checkout\n        mode: isolated\n"
+	path := writeConfig(t, dir, yaml)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	ep := cfg.Webhooks.Endpoints[0]
+	if ep.Repository != "github.com/testowner/myrepo" {
+		t.Fatalf("repository binding = %q, want canonical github.com/testowner/myrepo", ep.Repository)
+	}
+	want := filepath.Clean(filepath.Join(dir, "relative/checkout"))
+	if ep.Workspace.Path != want {
+		t.Fatalf("workspace path = %q, want config-relative %q", ep.Workspace.Path, want)
+	}
+	if ep.Workspace.Mode != WorkspaceModeIsolated {
+		t.Fatalf("mode = %q", ep.Workspace.Mode)
+	}
+}
+
+func TestEndpointPathIngressPrefixRejected(t *testing.T) {
+	for _, p := range []string{"/occa", "/occa/gh", "/gh?x=1", "/a/../b", "gh"} {
+		yaml := "webhooks:\n  endpoints:\n    - name: test\n      path: " + strconv.Quote(p) + "\n      secret: s\n      platform: telegram\n      channel_id: c1\n      prompt: p\n      workspace:\n        type: none\n"
+		path := writeConfig(t, t.TempDir(), yaml)
+		if _, err := Load(path); err == nil {
+			t.Fatalf("path %q must fail validation", p)
+		}
 	}
 }
