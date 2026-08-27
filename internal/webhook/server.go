@@ -70,32 +70,34 @@ type Executor func(ctx context.Context, platform, channelID, prompt string, work
 type Notifier func(ctx context.Context, platform, channelID, text string) error
 
 type Server struct {
-	bind              string
-	bindAddr          string
-	endpoints         map[string]config.EndpointConfig
-	executor          Executor
-	notifier          Notifier
-	deliveries        DeliveryStore
-	channels          ChannelStore
-	worktreeResolver  WorktreeResolver
-	httpSrv           *http.Server
-	listener          net.Listener
-	eventSlots        chan struct{}
-	dispatchMu        sync.Mutex
-	dispatchers       map[string]*dispatcher
-	dispatchWG        sync.WaitGroup
-	shutdownCtx       context.Context
-	shutdownCancel    context.CancelFunc
-	processingTimeout time.Duration
-	dispatcherIdleTTL time.Duration
-	pruneMu           sync.Mutex
-	lastPrune         time.Time
-	pruneInterval     time.Duration
-	readHeaderTimeout time.Duration
-	readTimeout       time.Duration
-	writeTimeout      time.Duration
-	idleTimeout       time.Duration
-	listening         atomic.Bool
+	bind                  string
+	bindAddr              string
+	endpoints             map[string]config.EndpointConfig
+	executor              Executor
+	notifier              Notifier
+	deliveries            DeliveryStore
+	channels              ChannelStore
+	workspaceResolver     WorkspaceResolver
+	httpSrv               *http.Server
+	listener              net.Listener
+	eventSlots            chan struct{}
+	dispatchMu            sync.Mutex
+	dispatchers           map[string]*dispatcher
+	dispatchWG            sync.WaitGroup
+	shutdownCtx           context.Context
+	shutdownCancel        context.CancelFunc
+	processingTimeout     time.Duration
+	dispatcherIdleTTL     time.Duration
+	workspaceRetryBackoff []time.Duration
+	workspaceRetrySleep   func(ctx context.Context, d time.Duration) bool
+	pruneMu               sync.Mutex
+	lastPrune             time.Time
+	pruneInterval         time.Duration
+	readHeaderTimeout     time.Duration
+	readTimeout           time.Duration
+	writeTimeout          time.Duration
+	idleTimeout           time.Duration
+	listening             atomic.Bool
 }
 
 func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) *Server {
@@ -117,16 +119,22 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 		shutdownCancel:    shutdownCancel,
 		processingTimeout: processingTimeout,
 		dispatcherIdleTTL: dispatcherIdleTTL,
-		pruneInterval:     pruneInterval,
-		readHeaderTimeout: readHeaderTimeout,
-		readTimeout:       readTimeout,
-		writeTimeout:      writeTimeout,
-		idleTimeout:       idleTimeout,
+		workspaceRetryBackoff: []time.Duration{
+			30 * time.Second,
+			60 * time.Second,
+			120 * time.Second,
+		},
+		workspaceRetrySleep: sleepWithContext,
+		pruneInterval:       pruneInterval,
+		readHeaderTimeout:   readHeaderTimeout,
+		readTimeout:         readTimeout,
+		writeTimeout:        writeTimeout,
+		idleTimeout:         idleTimeout,
 	}
 }
 
-func (s *Server) SetWorktreeResolver(r WorktreeResolver) {
-	s.worktreeResolver = r
+func (s *Server) SetWorkspaceResolver(r WorkspaceResolver) {
+	s.workspaceResolver = r
 }
 
 func (s *Server) SetNotifier(n Notifier) {
@@ -182,6 +190,13 @@ func (s *Server) pruneIfDue() {
 	}
 	if pruned > 0 {
 		slog.Info("webhook: pruned old deliveries", "pruned", pruned)
+	}
+	if reaper, ok := s.workspaceResolver.(interface {
+		ReapExpiredWorkspaces(ctx context.Context) int
+	}); ok {
+		if reaped := reaper.ReapExpiredWorkspaces(context.Background()); reaped > 0 {
+			slog.Info("webhook: reaped expired isolated workspaces", "reaped", reaped)
+		}
 	}
 }
 
@@ -251,7 +266,11 @@ func (s *Server) Stop(ctx context.Context) error {
 }
 
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
-	ep, ok := s.endpoints[r.URL.Path]
+	requestPath := r.URL.Path
+	if strings.HasPrefix(requestPath, "/occa/") {
+		requestPath = strings.TrimPrefix(requestPath, "/occa")
+	}
+	ep, ok := s.endpoints[requestPath]
 	if !ok {
 		http.NotFound(w, r)
 		return
@@ -481,13 +500,70 @@ func (d *dispatcher) handle(item dispatchItem) {
 	if receipt == nil {
 		return
 	}
-	if !s.acquireEvent(s.shutdownCtx) {
-		s.failAbandonedReceipt(receipt, "shutting down")
+	for attempt := 0; ; attempt++ {
+		if !s.acquireEvent(s.shutdownCtx) {
+			s.failAbandonedReceipt(receipt, "shutting down")
+			return
+		}
+		lease, werr := s.resolveWorkspace(item)
+		if werr == nil {
+			s.executeDelivery(item.ep, item.body, receipt.ID, item.deliveryID, item.eventType, lease)
+			s.releaseEvent()
+			s.pruneIfDue()
+			return
+		}
+		s.releaseEvent()
+		if IsWorkspaceRetryable(werr) && attempt < len(s.workspaceRetryBackoff) {
+			slog.Warn("webhook: workspace busy, retrying",
+				"endpoint", item.ep.Name,
+				"delivery_id", item.deliveryID,
+				"attempt", attempt+1,
+				"error", werr,
+			)
+			if !s.workspaceRetrySleep(s.shutdownCtx, s.workspaceRetryBackoff[attempt]) {
+				s.failAbandonedReceipt(receipt, "shutting down")
+				return
+			}
+			continue
+		}
+		s.failWorkspace(item, receipt, werr)
 		return
 	}
-	defer s.releaseEvent()
-	s.executeDelivery(item.ep, item.body, receipt.ID, item.deliveryID, item.eventType)
-	s.pruneIfDue()
+}
+
+func (s *Server) resolveWorkspace(item dispatchItem) (*WorkspaceLease, error) {
+	ep := item.ep
+	if ep.Workspace.Type != config.WorkspaceTypeGit {
+		return nil, nil
+	}
+	if s.workspaceResolver == nil {
+		return nil, fmt.Errorf("%w: workspace resolver unavailable", ErrWorkspaceUnavailable)
+	}
+	req := WorkspaceRequest{
+		Repository: ep.Repository,
+		Path:       ep.Workspace.Path,
+		Mode:       ep.Workspace.Mode,
+		Key:        ExtractExecutionKey(item.body),
+		DeliveryID: item.deliveryID,
+	}
+	lease, err := s.workspaceResolver.ResolveWorkspace(context.Background(), req)
+	if err != nil {
+		slog.Warn("webhook: workspace resolution failed",
+			"endpoint", ep.Name,
+			"delivery_id", item.deliveryID,
+			"mode", ep.Workspace.Mode,
+			"error", err,
+		)
+		return nil, err
+	}
+	return lease, nil
+}
+
+func (s *Server) failWorkspace(item dispatchItem, receipt *store.WebhookDelivery, err error) {
+	envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, false, "")
+	workCtx := WebhookWorkContext{Key: ExtractExecutionKey(item.body)}
+	summary := redactSummary(err.Error(), maxErrorSummaryRunes, item.ep.Secret)
+	s.failDelivery(item.ep, receipt.ID, item.deliveryID, item.eventType, envelope, summary, workCtx)
 }
 
 // beginExecution claims a delivery at the moment it reaches the head of its
@@ -627,14 +703,24 @@ func (s *Server) failAbandonedReceipt(receipt *store.WebhookDelivery, reason str
 }
 
 // executeDelivery runs the claimed delivery. It must be called with the event
-// slot held and only after beginExecution succeeded for this receipt.
-func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64, deliveryID, eventType string) {
+// slot held and only after beginExecution succeeded for this receipt. The
+// lease, when present, is released after the terminal transition so workspace
+// cleanup failure cannot change the delivery outcome.
+func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64, deliveryID, eventType string, lease *WorkspaceLease) {
 	key := ExtractExecutionKey(body)
 
 	var workCtx WebhookWorkContext
 	workCtx.Key = key
 	if !key.IsZero() {
 		workCtx.SessionKey = key.String()
+	}
+	if lease != nil {
+		workCtx.Worktree = lease.Path
+		defer func() {
+			if rErr := lease.Release(context.Background()); rErr != nil {
+				slog.Warn("webhook: workspace cleanup failed", "endpoint", ep.Name, "delivery_id", deliveryID, "workspace", lease.Path, "error", rErr)
+			}
+		}()
 	}
 	envelope := normalizeWebhook(body, eventType, deliveryID, false, "")
 
@@ -660,30 +746,6 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 	if allowed, reason := workflowAllows(ep.Workflow, envelope); !allowed {
 		s.markSkipped(id, ep, envelope, reason)
 		return
-	}
-
-	if !key.IsZero() {
-		if s.worktreeResolver == nil {
-			slog.Warn("webhook: worktree resolver missing for project key",
-				"endpoint", ep.Name,
-				"delivery_id", deliveryID,
-				"execution_key", key.String(),
-			)
-			s.failDelivery(ep, id, deliveryID, eventType, envelope, "worktree resolver required for project execution key", workCtx)
-			return
-		}
-
-		worktree, err := s.worktreeResolver.ResolveWorktree(context.Background(), key)
-		if err != nil {
-			slog.Warn("webhook: worktree resolution failed", "endpoint", ep.Name, "delivery_id", deliveryID, "execution_key", key.String(), "error", err)
-			if errors.Is(err, ErrWorktreeConflict) {
-				s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary("worktree conflict: "+err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
-			} else {
-				s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary("worktree resolution failed: "+err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
-			}
-			return
-		}
-		workCtx.Worktree = worktree
 	}
 
 	if s.channels != nil {
@@ -830,6 +892,15 @@ func providerEventType(r *http.Request, body []byte) string {
 		}
 	}
 	return ""
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-time.After(d):
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func sha256Hex(b []byte) string {

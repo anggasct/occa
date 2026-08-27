@@ -26,6 +26,8 @@ func TestWebhookPromptFileLoadsRelativeToConfigDirectory(t *testing.T) {
       platform: discord
       channel_id: channel
       prompt_file: webhooks/review.md
+      workspace:
+        type: none
 `)
 
 	cfg, err := Load(path)
@@ -125,6 +127,8 @@ func TestWebhookPromptFileValidation(t *testing.T) {
       channel_id: channel
       prompt: %q
       prompt_file: %q
+      workspace:
+        type: none
 `, tt.prompt, tt.promptFile)
 			_, err := Load(writeConfig(t, dir, content))
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
@@ -145,6 +149,8 @@ func TestWebhookUnknownWorkflowFailsConfigLoad(t *testing.T) {
       platform: discord
       channel_id: channel
       prompt: inline
+      workspace:
+        type: none
 `)
 	_, err := Load(path)
 	if err == nil || !strings.Contains(err.Error(), "workflow is unsupported") {
@@ -162,6 +168,8 @@ func TestWebhookInlinePromptRemainsCompatibleWithoutWorkflow(t *testing.T) {
       platform: discord
       channel_id: channel
       prompt: inline prompt
+      workspace:
+        type: none
 `)
 
 	cfg, err := Load(path)

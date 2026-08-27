@@ -148,3 +148,41 @@ func TestExtractExecutionKeyMissingOrAmbiguousFallback(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractExecutionKeyHeadRevision(t *testing.T) {
+	prBody := []byte(`{"repository":{"full_name":"anggasct/occa"},"pull_request":{"base":{"repo":{"full_name":"anggasct/occa"}},"head":{"repo":{"full_name":"anggasct/occa"},"ref":"feat/x","sha":"ABCDEF0123456789abcdef0123456789abcdef01"}}}`)
+	key := ExtractExecutionKey(prBody)
+	if key.HeadRevision != "abcdef0123456789abcdef0123456789abcdef01" {
+		t.Fatalf("PR head revision = %q", key.HeadRevision)
+	}
+
+	pushBody := []byte(`{"repository":{"full_name":"anggasct/occa"},"ref":"refs/heads/main","after":"1234567890abcdef1234567890abcdef12345678"}`)
+	key = ExtractExecutionKey(pushBody)
+	if key.HeadRevision != "1234567890abcdef1234567890abcdef12345678" {
+		t.Fatalf("push after revision = %q", key.HeadRevision)
+	}
+
+	headCommitBody := []byte(`{"repository":{"full_name":"anggasct/occa"},"ref":"refs/heads/main","head_commit":{"id":"fedcba9876543210fedcba9876543210fedcba98"}}`)
+	key = ExtractExecutionKey(headCommitBody)
+	if key.HeadRevision != "fedcba9876543210fedcba9876543210fedcba98" {
+		t.Fatalf("head_commit revision = %q", key.HeadRevision)
+	}
+
+	genericBody := []byte(`{"repo":{"full_name":"anggasct/occa"},"branch":"main","head_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
+	key = ExtractExecutionKey(genericBody)
+	if key.HeadRevision != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("generic head_revision = %q", key.HeadRevision)
+	}
+
+	invalidBody := []byte(`{"repo":{"full_name":"anggasct/occa"},"branch":"main","head_revision":"not-a-sha!"}`)
+	key = ExtractExecutionKey(invalidBody)
+	if key.HeadRevision != "" {
+		t.Fatalf("invalid revision must be dropped, got %q", key.HeadRevision)
+	}
+
+	shortBody := []byte(`{"repo":{"full_name":"anggasct/occa"},"branch":"main","head_revision":"abc12"}`)
+	key = ExtractExecutionKey(shortBody)
+	if key.HeadRevision != "" {
+		t.Fatalf("too-short revision must be dropped, got %q", key.HeadRevision)
+	}
+}

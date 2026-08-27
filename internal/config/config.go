@@ -55,16 +55,75 @@ type WebhookConfig struct {
 }
 
 type EndpointConfig struct {
-	Name       string   `yaml:"name"`
-	Path       string   `yaml:"path"`
-	Auth       string   `yaml:"auth,omitempty"`
-	Secret     string   `yaml:"secret"`
-	Workflow   string   `yaml:"workflow,omitempty"`
-	Platform   string   `yaml:"platform"`
-	ChannelID  string   `yaml:"channel_id"`
-	Prompt     string   `yaml:"prompt"`
-	PromptFile string   `yaml:"prompt_file,omitempty"`
-	SkipEvents []string `yaml:"skip_events,omitempty"`
+	Name       string            `yaml:"name"`
+	Path       string            `yaml:"path"`
+	Auth       string            `yaml:"auth,omitempty"`
+	Secret     string            `yaml:"secret"`
+	Workflow   string            `yaml:"workflow,omitempty"`
+	Platform   string            `yaml:"platform"`
+	ChannelID  string            `yaml:"channel_id"`
+	Prompt     string            `yaml:"prompt"`
+	PromptFile string            `yaml:"prompt_file,omitempty"`
+	SkipEvents []string          `yaml:"skip_events,omitempty"`
+	Repository string            `yaml:"repository,omitempty"`
+	Workspace  EndpointWorkspace `yaml:"workspace"`
+}
+
+type EndpointWorkspace struct {
+	Type string `yaml:"type"`
+	Path string `yaml:"path,omitempty"`
+	Mode string `yaml:"mode,omitempty"`
+}
+
+const (
+	WorkspaceTypeNone = "none"
+	WorkspaceTypeGit  = "git"
+
+	WorkspaceModeIsolated = "isolated"
+	WorkspaceModeMutable  = "mutable"
+)
+
+func CanonicalRepository(repo string) (string, error) {
+	s := strings.TrimSpace(strings.ToLower(repo))
+	if s == "" {
+		return "", fmt.Errorf("config: empty repository identity")
+	}
+	for _, prefix := range []string{"https://", "http://", "ssh://", "git://"} {
+		s = strings.TrimPrefix(s, prefix)
+	}
+	if at := strings.Index(s, "@"); at >= 0 && !strings.Contains(s[:at], "/") {
+		s = s[at+1:]
+	}
+	s = strings.ReplaceAll(s, ":", "/")
+	s = strings.TrimSuffix(s, ".git")
+	s = strings.TrimSuffix(s, "/")
+	parts := strings.Split(s, "/")
+	if len(parts) < 2 || len(parts) > 3 {
+		return "", fmt.Errorf("config: repository identity %q must be owner/repo or host/owner/repo", repo)
+	}
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return "", fmt.Errorf("config: invalid repository identity component in %q", repo)
+		}
+		for _, r := range part {
+			if !isAllowedRepositoryChar(r) {
+				return "", fmt.Errorf("config: invalid character %q in repository identity %q", r, repo)
+			}
+		}
+	}
+	return strings.Join(parts, "/"), nil
+}
+
+func isAllowedRepositoryChar(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.'
+}
+
+func RepositoryPath(identity string) string {
+	parts := strings.Split(identity, "/")
+	if len(parts) == 3 {
+		return strings.Join(parts[1:], "/")
+	}
+	return identity
 }
 
 type fileConfig struct {
@@ -262,6 +321,12 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 			endpoint := &fc.Webhooks.Endpoints[i]
 			endpoint.Auth = strings.TrimSpace(strings.ToLower(endpoint.Auth))
 			endpoint.Workflow = strings.TrimSpace(strings.ToLower(endpoint.Workflow))
+			if err := validateEndpointPath(endpoint.Path); err != nil {
+				return Config{}, fmt.Errorf("config: webhooks.endpoints[%d].path: %w", i, err)
+			}
+			if err := validateEndpointWorkspace(endpoint, configDir); err != nil {
+				return Config{}, fmt.Errorf("config: webhooks.endpoints[%d] (%s): %w", i, endpoint.Name, err)
+			}
 			if endpoint.Workflow != "" {
 				switch endpoint.Workflow {
 				case "github_reviewer", "github_fix", "github_merge", "github_merged":
@@ -354,6 +419,73 @@ func validateDiscordPolicy(policy *DiscordConfig) error {
 			channelIDs[channelID] = struct{}{}
 		}
 	}
+	return nil
+}
+
+func validateEndpointPath(p string) error {
+	if p == "" {
+		return fmt.Errorf("must not be empty")
+	}
+	if !strings.HasPrefix(p, "/") {
+		return fmt.Errorf("must begin with /")
+	}
+	if p == "/occa" || strings.HasPrefix(p, "/occa/") {
+		return fmt.Errorf("must not include the deployment ingress prefix /occa; configure the suffix path only")
+	}
+	if strings.ContainsAny(p, "?#") {
+		return fmt.Errorf("must not contain query or fragment components")
+	}
+	segments := strings.Split(strings.Trim(p, "/"), "/")
+	for _, seg := range segments {
+		if seg == "" || seg == "." || seg == ".." {
+			return fmt.Errorf("must not contain empty or traversal segments")
+		}
+	}
+	return nil
+}
+
+func validateEndpointWorkspace(endpoint *EndpointConfig, configDir string) error {
+	ws := &endpoint.Workspace
+	ws.Type = strings.TrimSpace(strings.ToLower(ws.Type))
+	ws.Mode = strings.TrimSpace(strings.ToLower(ws.Mode))
+	ws.Path = strings.TrimSpace(ws.Path)
+
+	switch ws.Type {
+	case WorkspaceTypeNone:
+		if ws.Path != "" || ws.Mode != "" {
+			return fmt.Errorf("workspace path and mode must be empty when workspace.type is none")
+		}
+		return nil
+	case WorkspaceTypeGit:
+	default:
+		return fmt.Errorf("workspace.type is required and must be %q or %q", WorkspaceTypeNone, WorkspaceTypeGit)
+	}
+
+	if ws.Path == "" {
+		return fmt.Errorf("workspace.path is required when workspace.type is git")
+	}
+	if !filepath.IsAbs(ws.Path) {
+		ws.Path = filepath.Join(configDir, ws.Path)
+	}
+	ws.Path = filepath.Clean(ws.Path)
+	if strings.HasPrefix(ws.Path, "..") || !filepath.IsAbs(ws.Path) {
+		return fmt.Errorf("workspace.path %q must resolve to an absolute path", ws.Path)
+	}
+
+	switch ws.Mode {
+	case WorkspaceModeIsolated, WorkspaceModeMutable:
+	default:
+		return fmt.Errorf("workspace.mode is required and must be %q or %q when workspace.type is git", WorkspaceModeIsolated, WorkspaceModeMutable)
+	}
+
+	if strings.TrimSpace(endpoint.Repository) == "" {
+		return fmt.Errorf("repository binding is required when workspace.type is git")
+	}
+	canonical, err := CanonicalRepository(endpoint.Repository)
+	if err != nil {
+		return err
+	}
+	endpoint.Repository = canonical
 	return nil
 }
 
