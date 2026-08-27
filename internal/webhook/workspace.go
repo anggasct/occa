@@ -82,7 +82,9 @@ func (l *WorkspaceLease) Release(ctx context.Context) error {
 		return nil
 	}
 	if l.Mode == config.WorkspaceModeIsolated {
-		return l.manager.removeIsolated(ctx, l.Path)
+		err := l.manager.removeIsolated(ctx, l.Path)
+		l.manager.leases.Delete(l.Path)
+		return err
 	}
 	l.manager.leases.Delete(l.Path)
 	return nil
@@ -222,6 +224,7 @@ func (m *WorkspaceManager) resolveIsolated(ctx context.Context, root string, req
 		"revision", req.Key.HeadRevision,
 		"delivery_id", req.DeliveryID,
 	)
+	m.leases.Store(target, &workspaceLeaseEntry{Holder: req.DeliveryID, Acquired: now})
 	return &WorkspaceLease{manager: m, Path: target, Mode: config.WorkspaceModeIsolated}, nil
 }
 
@@ -249,8 +252,13 @@ func (m *WorkspaceManager) resolveMutable(ctx context.Context, root string, req 
 		return nil, err
 	}
 	lease.Path = path
-	m.leases.Delete(target)
-	m.leases.Store(lease.Path, &workspaceLeaseEntry{Holder: req.DeliveryID, Acquired: m.now()})
+	if finalPath := filepath.Clean(path); finalPath != filepath.Clean(target) {
+		if _, loaded := m.leases.LoadOrStore(finalPath, &workspaceLeaseEntry{Holder: req.DeliveryID, Acquired: m.now()}); loaded {
+			m.leases.Delete(target)
+			return nil, fmt.Errorf("%w: mutable workspace %s is held by another delivery", ErrWorkspaceLeased, finalPath)
+		}
+		m.leases.Delete(target)
+	}
 	return lease, nil
 }
 

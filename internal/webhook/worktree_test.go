@@ -414,6 +414,9 @@ func TestWorkspaceReapExpiredIsolatedOnly(t *testing.T) {
 		t.Fatalf("fresh workspace removed prematurely: %v", err)
 	}
 
+	// simulates a crashed process that lost its in-memory lease
+	m.leases.Delete(lease.Path)
+
 	expired := isolatedMetadata{
 		Owner:      "occa",
 		DeliveryID: "delivery-test",
@@ -433,6 +436,108 @@ func TestWorkspaceReapExpiredIsolatedOnly(t *testing.T) {
 	}
 	if reaped := m.ReapExpiredWorkspaces(context.Background()); reaped != 0 {
 		t.Fatalf("reap must be idempotent, reaped %d", reaped)
+	}
+}
+
+func TestWorkspaceMutableLeaseOnPreexistingWorktree(t *testing.T) {
+	root := t.TempDir()
+	initTestGitRepo(t, root)
+	branchCmd := exec.Command("git", "branch", "feat/cool-feature")
+	branchCmd.Dir = root
+	if out, err := branchCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git branch: %v\n%s", err, out)
+	}
+	attached := filepath.Join(root, "preexisting-wt")
+	wtCmd := exec.Command("git", "worktree", "add", attached, "feat/cool-feature")
+	wtCmd.Dir = root
+	if out, err := wtCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, out)
+	}
+
+	m := NewWorkspaceManager()
+	key := WebhookExecutionKey{Repository: "testowner/myrepo", Branch: "feat/cool-feature"}
+
+	reqA := gitEndpointRequest(key, config.WorkspaceModeMutable)
+	reqA.Path = root
+	reqA.DeliveryID = "delivery-a"
+	leaseA, err := m.ResolveWorkspace(context.Background(), reqA)
+	if err != nil {
+		t.Fatalf("ResolveWorkspace A: %v", err)
+	}
+	defer func() { _ = leaseA.Release(context.Background()) }()
+	if filepath.Clean(leaseA.Path) != filepath.Clean(attached) {
+		t.Fatalf("expected reuse of pre-existing worktree %q, got %q", attached, leaseA.Path)
+	}
+
+	reqB := gitEndpointRequest(key, config.WorkspaceModeMutable)
+	reqB.Path = root
+	reqB.DeliveryID = "delivery-b"
+	_, err = m.ResolveWorkspace(context.Background(), reqB)
+	if !errors.Is(err, ErrWorkspaceLeased) {
+		t.Fatalf("expected ErrWorkspaceLeased while pre-existing worktree is in use, got %v", err)
+	}
+	if !IsWorkspaceRetryable(err) {
+		t.Fatal("lease conflict on pre-existing worktree must be retryable")
+	}
+
+	if err := leaseA.Release(context.Background()); err != nil {
+		t.Fatalf("Release A: %v", err)
+	}
+
+	reqC := gitEndpointRequest(key, config.WorkspaceModeMutable)
+	reqC.Path = root
+	reqC.DeliveryID = "delivery-c"
+	leaseC, err := m.ResolveWorkspace(context.Background(), reqC)
+	if err != nil {
+		t.Fatalf("ResolveWorkspace after release: %v", err)
+	}
+	if filepath.Clean(leaseC.Path) != filepath.Clean(attached) {
+		t.Fatalf("expected reused worktree path %q, got %q", attached, leaseC.Path)
+	}
+	if err := leaseC.Release(context.Background()); err != nil {
+		t.Fatalf("Release C: %v", err)
+	}
+}
+
+func TestReaperSkipsActiveIsolatedLease(t *testing.T) {
+	root := t.TempDir()
+	initTestGitRepo(t, root)
+	rev := headRevision(t, root)
+	m := NewWorkspaceManager()
+
+	req := gitEndpointRequest(WebhookExecutionKey{Repository: "testowner/myrepo", Branch: "main", HeadRevision: rev}, config.WorkspaceModeIsolated)
+	req.Path = root
+	lease, err := m.ResolveWorkspace(context.Background(), req)
+	if err != nil {
+		t.Fatalf("ResolveWorkspace: %v", err)
+	}
+
+	expired := isolatedMetadata{
+		Owner:      "occa",
+		DeliveryID: "delivery-test",
+		Revision:   rev,
+		CreatedAt:  time.Now().Add(-2 * time.Hour).Unix(),
+		ExpiresAt:  time.Now().Add(-time.Hour).Unix(),
+	}
+	if err := writeIsolatedMetadata(lease.Path, expired); err != nil {
+		t.Fatalf("rewrite metadata: %v", err)
+	}
+
+	if reaped := m.ReapExpiredWorkspaces(context.Background()); reaped != 0 {
+		t.Fatalf("expired-but-active isolated lease must not be reaped, reaped %d", reaped)
+	}
+	if _, err := os.Stat(lease.Path); err != nil {
+		t.Fatalf("actively leased workspace was removed by reaper: %v", err)
+	}
+
+	if err := lease.Release(context.Background()); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if _, err := os.Stat(lease.Path); !os.IsNotExist(err) {
+		t.Fatal("workspace still exists after release")
+	}
+	if reaped := m.ReapExpiredWorkspaces(context.Background()); reaped != 0 {
+		t.Fatalf("released workspace must not be reaped again, reaped %d", reaped)
 	}
 }
 
