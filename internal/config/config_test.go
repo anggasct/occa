@@ -516,6 +516,7 @@ func TestLoadDiscordPolicyValidation(t *testing.T) {
 }
 
 func TestEndpointWorkspaceValidation(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
 	cases := []struct {
 		name      string
 		workspace string
@@ -547,6 +548,7 @@ func TestEndpointWorkspaceValidation(t *testing.T) {
 }
 
 func TestEndpointWorkspaceGitBindingNormalizes(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
 	dir := t.TempDir()
 	yaml := "webhooks:\n  endpoints:\n    - name: gh\n      path: /gh\n      secret: s\n      platform: telegram\n      channel_id: c1\n      prompt: p\n      repository: https://GitHub.com/TestOwner/MyRepo.git\n      workspace:\n        type: git\n        path: relative/checkout\n        mode: isolated\n"
 	path := writeConfig(t, dir, yaml)
@@ -568,6 +570,7 @@ func TestEndpointWorkspaceGitBindingNormalizes(t *testing.T) {
 }
 
 func TestEndpointPathIngressPrefixRejected(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
 	for _, p := range []string{"/occa", "/occa/gh", "/gh?x=1", "/a/../b", "gh"} {
 		yaml := "webhooks:\n  endpoints:\n    - name: test\n      path: " + strconv.Quote(p) + "\n      secret: s\n      platform: telegram\n      channel_id: c1\n      prompt: p\n      workspace:\n        type: none\n"
 		path := writeConfig(t, t.TempDir(), yaml)
