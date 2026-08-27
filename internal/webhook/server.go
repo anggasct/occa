@@ -561,7 +561,11 @@ func (s *Server) resolveWorkspace(item dispatchItem) (*WorkspaceLease, error) {
 
 func (s *Server) failWorkspace(item dispatchItem, receipt *store.WebhookDelivery, err error) {
 	envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, false, "")
-	workCtx := &WebhookWorkContext{Key: ExtractExecutionKey(item.body)}
+	workCtx := &WebhookWorkContext{
+		Key:        ExtractExecutionKey(item.body),
+		DeliveryID: item.deliveryID,
+		Attempt:    receipt.Attempt,
+	}
 	summary := redactSummary(err.Error(), maxErrorSummaryRunes, item.ep.Secret)
 	s.failDelivery(item.ep, receipt.ID, item.deliveryID, item.eventType, envelope, summary, workCtx)
 }
@@ -570,11 +574,11 @@ func sessionLogAttrs(workCtx *WebhookWorkContext) []any {
 	if workCtx == nil || workCtx.SessionID == "" {
 		return nil
 	}
-	attrs := []any{"session_id", workCtx.SessionID}
-	if workCtx.SessionAborted {
-		attrs = append(attrs, "session_aborted", true, "session_abort_ok", workCtx.SessionAbortOK)
+	return []any{
+		"session_id", workCtx.SessionID,
+		"session_aborted", workCtx.SessionAborted,
+		"session_abort_ok", workCtx.SessionAbortOK,
 	}
-	return attrs
 }
 
 // beginExecution claims a delivery at the moment it reaches the head of its
@@ -849,6 +853,7 @@ func (s *Server) failDelivery(ep config.EndpointConfig, id int64, deliveryID, ev
 			"endpoint", ep.Name,
 			"delivery_id", deliveryID,
 			"event_type", eventType,
+			"attempt", workCtx.Attempt,
 			"execution_key", workCtx.Key.String(),
 			"worktree", workCtx.Worktree,
 			"error_summary", summary,

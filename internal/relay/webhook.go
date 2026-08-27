@@ -61,9 +61,12 @@ func (t WebhookTurn) Run(ctx context.Context) (res WebhookTurnResult, err error)
 
 	completed := false
 	defer func() {
-		if !completed {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("relay: webhook turn: panic: %v", r)
+		}
+		if !completed && res.SessionID != "" {
 			res.Aborted = true
-			res.AbortOK = t.abort(sessionID)
+			res.AbortOK = t.abort(res.SessionID)
 		}
 	}()
 

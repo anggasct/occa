@@ -24,6 +24,7 @@ type fakeWebhookTurnClient struct {
 	newEvents func() <-chan Event
 	eventsErr error
 	sendErr   error
+	sendPanic bool
 	abortErr  error
 	sendGate  chan struct{}
 }
@@ -64,6 +65,9 @@ func (f *fakeWebhookTurnClient) Events(_ context.Context, sessionID string) (<-c
 func (f *fakeWebhookTurnClient) SendMessage(_ context.Context, sessionID, _ string, _ *ModelRef, _ []Attachment) error {
 	if f.sendGate != nil {
 		<-f.sendGate
+	}
+	if f.sendPanic {
+		panic("client exploded during prompt dispatch")
 	}
 	f.mu.Lock()
 	f.sendCalls = append(f.sendCalls, sessionID)
@@ -464,4 +468,27 @@ func TestWebhookTurnAbortFailureLogCarriesDeliverySessionAndError(t *testing.T) 
 	if rec.attrs["error"] == nil {
 		t.Fatalf("abort failure record must carry the error; attrs=%v", rec.attrs)
 	}
+}
+
+func TestWebhookTurnRecoversPanicAfterSessionCreation(t *testing.T) {
+	handler := captureWebhookLogs(t)
+	client := newWebhookTurnClient(eventsWith(Event{Type: "done"}))
+	client.sendPanic = true
+
+	res, err := runWebhookTurn(t, client, context.Background())
+	if err == nil || !strings.Contains(err.Error(), "panic: client exploded") {
+		t.Fatalf("expected wrapped panic error, got %v", err)
+	}
+	if res.SessionID != "sess-1" {
+		t.Fatalf("panic path must preserve the owned session id, got %q", res.SessionID)
+	}
+	if !res.Aborted || !res.AbortOK {
+		t.Fatalf("panic path must record the abort outcome, got %+v", res)
+	}
+	if len(client.abortCalls) != 1 || client.abortCalls[0] != "sess-1" {
+		t.Fatalf("expected exactly one abort of the owned session, got %v", client.abortCalls)
+	}
+
+	rec := findRecord(t, handler, "relay: webhook session aborted")
+	requireTurnAttrs(t, rec)
 }

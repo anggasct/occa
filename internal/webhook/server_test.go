@@ -2633,15 +2633,24 @@ func TestWebhookSlotCapBoundedAcrossKeys(t *testing.T) {
 			t.Fatalf("delivery-%d expected accepted 200, got %d", i, resp.StatusCode)
 		}
 	}
-	time.Sleep(150 * time.Millisecond)
+	peakSnapshot := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return peak
+	}
 
-	mu.Lock()
-	observedPeak := peak
-	mu.Unlock()
-	if observedPeak > maxConcurrentWebhookEvents {
+	deadline := time.Now().Add(10 * time.Second)
+	for peakSnapshot() < maxConcurrentWebhookEvents {
+		if time.Now().After(deadline) {
+			t.Fatalf("concurrent executions never reached the cap %d under full queue admission, peak = %d", maxConcurrentWebhookEvents, peakSnapshot())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if observedPeak := peakSnapshot(); observedPeak > maxConcurrentWebhookEvents {
 		t.Fatalf("concurrent executions peaked at %d, cap is %d", observedPeak, maxConcurrentWebhookEvents)
 	}
-	if observedPeak < 2 {
+	if observedPeak := peakSnapshot(); observedPeak < 2 {
 		t.Fatalf("distinct keys did not execute in parallel, peak = %d", observedPeak)
 	}
 
@@ -3038,5 +3047,156 @@ func TestWebhookMutableConflictExhaustsRetriesAndFails(t *testing.T) {
 	}
 	if exec.callCount() != 0 {
 		t.Fatalf("busy workspace must never execute, got %d calls", exec.callCount())
+	}
+}
+
+type capturedLogRecord struct {
+	msg   string
+	attrs map[string]any
+}
+
+type logCapture struct {
+	mu      sync.Mutex
+	records []capturedLogRecord
+}
+
+func (h *logCapture) Enabled(_ context.Context, _ slog.Level) bool { return true }
+
+func (h *logCapture) Handle(_ context.Context, r slog.Record) error {
+	rec := capturedLogRecord{msg: r.Message, attrs: map[string]any{}}
+	r.Attrs(func(a slog.Attr) bool {
+		rec.attrs[a.Key] = a.Value.Any()
+		return true
+	})
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, rec)
+	return nil
+}
+
+func (h *logCapture) WithAttrs(attrs []slog.Attr) slog.Handler { return h }
+
+func (h *logCapture) WithGroup(name string) slog.Handler { return h }
+
+func (h *logCapture) find(t *testing.T, msg string) capturedLogRecord {
+	t.Helper()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, rec := range h.records {
+		if rec.msg == msg {
+			return rec
+		}
+	}
+	t.Fatalf("no captured log record %q; captured=%d records", msg, len(h.records))
+	return capturedLogRecord{}
+}
+
+func captureServerLogs(t *testing.T) *logCapture {
+	t.Helper()
+	previous := slog.Default()
+	handler := &logCapture{}
+	slog.SetDefault(slog.New(handler))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return handler
+}
+
+func TestWebhookCompletedRecordCarriesSessionAndAttempt(t *testing.T) {
+	handler := captureServerLogs(t)
+	srv, _ := newTestServer(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "p"},
+	})
+
+	executor := srv.executor
+	srv.executor = func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+		workCtx.SessionID = "sess-done"
+		return executor(ctx, platform, channelID, prompt, workCtx)
+	}
+
+	srv.executeDelivery(config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Prompt: "p"}, []byte(`{"repository":{"full_name":"testowner/myrepo"}}`), 0, "delivery-1", "pull_request", 2, nil)
+
+	rec := handler.find(t, "webhook: delivery completed")
+	if rec.attrs["attempt"] != int64(2) {
+		t.Fatalf("completed record attempt = %v, want 2", rec.attrs["attempt"])
+	}
+	if rec.attrs["session_id"] != "sess-done" {
+		t.Fatalf("completed record session_id = %v", rec.attrs["session_id"])
+	}
+	if rec.attrs["session_aborted"] != false || rec.attrs["session_abort_ok"] != false {
+		t.Fatalf("completed record must carry explicit no-abort outcome, attrs=%v", rec.attrs)
+	}
+}
+
+func TestWebhookFailedRecordCarriesSessionAndAttempt(t *testing.T) {
+	handler := captureServerLogs(t)
+	srv, _ := newTestServer(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "p"},
+	})
+
+	srv.executor = func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+		workCtx.SessionID = "sess-fail"
+		workCtx.SessionAborted = true
+		workCtx.SessionAbortOK = true
+		return errors.New("agent exploded")
+	}
+
+	srv.executeDelivery(config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Prompt: "p"}, []byte(`{"repository":{"full_name":"testowner/myrepo"}}`), 0, "delivery-1", "pull_request", 1, nil)
+
+	rec := handler.find(t, "webhook: delivery failed")
+	if rec.attrs["attempt"] != int64(1) {
+		t.Fatalf("failed record attempt = %v, want 1", rec.attrs["attempt"])
+	}
+	if rec.attrs["session_id"] != "sess-fail" {
+		t.Fatalf("failed record session_id = %v", rec.attrs["session_id"])
+	}
+	if rec.attrs["session_aborted"] != true || rec.attrs["session_abort_ok"] != true {
+		t.Fatalf("failed record must carry abort outcome, attrs=%v", rec.attrs)
+	}
+}
+
+func TestWebhookWorkspaceFailureRecordCarriesAttempt(t *testing.T) {
+	handler := captureServerLogs(t)
+	srv, _ := newTestServer(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "p"},
+	})
+
+	body := []byte(`{"repository":{"full_name":"testowner/myrepo"}}`)
+	srv.failWorkspace(dispatchItem{ep: config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1"}, body: body, deliveryID: "delivery-9", eventType: "pull_request"}, &store.WebhookDelivery{ID: 7, Attempt: 3}, errors.New("worktree dirty"))
+
+	rec := handler.find(t, "webhook: delivery failed")
+	if rec.attrs["attempt"] != int64(3) {
+		t.Fatalf("workspace failure record attempt = %v, want 3", rec.attrs["attempt"])
+	}
+	if rec.attrs["delivery_id"] != "delivery-9" {
+		t.Fatalf("workspace failure record delivery_id = %v", rec.attrs["delivery_id"])
+	}
+	if _, ok := rec.attrs["session_id"]; ok {
+		t.Fatalf("workspace failure has no owned session, attrs=%v", rec.attrs)
+	}
+}
+
+func TestWebhookPanicRecoveredRecordCarriesSession(t *testing.T) {
+	handler := captureServerLogs(t)
+	srv, _ := newTestServer(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "p"},
+	})
+
+	srv.executor = func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+		workCtx.SessionID = "sess-panic"
+		workCtx.SessionAborted = true
+		panic("executor exploded")
+	}
+
+	srv.executeDelivery(config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Prompt: "p"}, []byte(`{"repository":{"full_name":"testowner/myrepo"}}`), 0, "delivery-1", "pull_request", 1, nil)
+
+	rec := handler.find(t, "webhook: panic recovered in delivery processing")
+	if rec.attrs["session_id"] != "sess-panic" {
+		t.Fatalf("panic record session_id = %v", rec.attrs["session_id"])
+	}
+	if rec.attrs["session_aborted"] != true {
+		t.Fatalf("panic record must carry the abort attempt, attrs=%v", rec.attrs)
+	}
+	failed := handler.find(t, "webhook: delivery failed")
+	if failed.attrs["session_id"] != "sess-panic" {
+		t.Fatalf("terminal failure record session_id = %v", failed.attrs["session_id"])
 	}
 }
