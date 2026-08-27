@@ -256,43 +256,38 @@ func main() {
 					}
 					defer inst.End()
 
-					resolver := relay.NewSessionResolver(db.SessionRepo(), inst.Client())
-					sessionID, err := resolver.Resolve(ctx, platform, channelID, workCtx.SessionKey, "", inst.PID())
+					turn := relay.WebhookTurn{
+						Client: inst.Client(),
+						Prompt: prompt,
+						Model:  workCtx.Model,
+						Scope: fmt.Sprintf("platform=%s channel=%s delivery=%s key=%s attempt=%d",
+							platform, channelID, workCtx.DeliveryID, workCtx.Key.String(), workCtx.Attempt),
+					}
+					result, err := turn.Run(ctx)
 					if err != nil {
-						sendWebhook("⚠️ Webhook analysis failed: session error")
-						return errors.New("webhook session unavailable")
-					}
-
-					if err := inst.Client().SendMessage(ctx, sessionID, prompt, workCtx.Model, nil); err != nil {
-						sendWebhook("⚠️ Webhook analysis failed: agent request error")
-						return errors.New("webhook agent request failed")
-					}
-
-					events, err := inst.Client().Events(ctx, sessionID)
-					if err != nil {
-						sendWebhook("⚠️ Webhook analysis failed: events error")
-						return errors.New("webhook event stream failed")
-					}
-
-					var buf strings.Builder
-					for ev := range events {
-						switch ev.Type {
-						case "delta":
-							buf.WriteString(ev.Delta)
-						case "done":
-							result := buf.String()
-							if result == "" {
-								result = "(no output)"
-							}
-							send(result)
-							return nil
-						case "error":
+						switch {
+						case errors.Is(err, relay.ErrWebhookSessionCreate):
+							sendWebhook("⚠️ Webhook analysis failed: session error")
+						case errors.Is(err, relay.ErrWebhookPrompt):
+							sendWebhook("⚠️ Webhook analysis failed: agent request error")
+						case errors.Is(err, relay.ErrWebhookEventStream):
+							sendWebhook("⚠️ Webhook analysis failed: events error")
+						case errors.Is(err, relay.ErrWebhookAgentResponse):
 							sendWebhook("⚠️ Webhook analysis failed: agent response error")
-							return errors.New("webhook agent response failed")
+						case errors.Is(err, relay.ErrWebhookResponseIncomplete):
+							sendWebhook("⚠️ Webhook analysis failed: incomplete response")
+						default:
+							sendWebhook("⚠️ Webhook analysis failed: agent error")
 						}
+						return err
 					}
-					sendWebhook("⚠️ Webhook analysis failed: incomplete response")
-					return errors.New("webhook response incomplete")
+
+					output := result.Output
+					if output == "" {
+						output = "(no output)"
+					}
+					send(output)
+					return nil
 				}
 			}
 			slog.Warn("webhook: no channel adapter", "platform", platform, "channel_id", channelID)

@@ -33,7 +33,8 @@ func (k WebhookExecutionKey) IsZero() bool {
 type WebhookWorkContext struct {
 	Key         WebhookExecutionKey
 	Worktree    string
-	SessionKey  string
+	DeliveryID  string
+	Attempt     int
 	Model       *relay.ModelRef
 	ModelSource string
 }

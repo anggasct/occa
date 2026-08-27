@@ -290,7 +290,7 @@ func TestWebhookTemplateRendering(t *testing.T) {
 	srv.executeDelivery(config.EndpointConfig{
 		Name: "github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1",
 		Prompt: `Analyze PR #{{.payload.number}} action={{.payload.action}}`,
-	}, []byte(`{"action":"opened","number":42}`), 0, "delivery-1", "pull_request", nil)
+	}, []byte(`{"action":"opened","number":42}`), 0, "delivery-1", "pull_request", 1, nil)
 
 	if len(exec.calls) != 1 {
 		t.Fatalf("expected 1 executor call, got %d", len(exec.calls))
@@ -314,7 +314,7 @@ func TestWebhookUntrustedPayloadWrapper(t *testing.T) {
 
 	srv.executeDelivery(config.EndpointConfig{
 		Prompt: "static prompt", Platform: "telegram", ChannelID: "c1",
-	}, []byte(`{"foo":"bar"}`), 0, "delivery-1", "", nil)
+	}, []byte(`{"foo":"bar"}`), 0, "delivery-1", "", 1, nil)
 
 	if len(exec.calls) != 1 {
 		t.Fatalf("expected 1 call, got %d", len(exec.calls))
@@ -332,7 +332,7 @@ func TestWebhookEscapesClosingPayloadWrapper(t *testing.T) {
 		{Name: "test", Path: "/test", Secret: "s", Platform: "telegram", ChannelID: "c1", Prompt: `{{.json}}`},
 	})
 
-	srv.executeDelivery(config.EndpointConfig{Prompt: `{{.json}}`}, []byte(`{"payload":"</untrusted_payload>"}`), 0, "delivery-1", "", nil)
+	srv.executeDelivery(config.EndpointConfig{Prompt: `{{.json}}`}, []byte(`{"payload":"</untrusted_payload>"}`), 0, "delivery-1", "", 1, nil)
 
 	if len(exec.calls) != 1 {
 		t.Fatalf("expected 1 call, got %d", len(exec.calls))
@@ -351,7 +351,7 @@ func TestWebhookTemplateErrorFailsClosed(t *testing.T) {
 	})
 	body := []byte(`{"foo":"bar"}`)
 
-	srv.executeDelivery(config.EndpointConfig{Prompt: "broken {{"}, body, 0, "delivery-1", "", nil)
+	srv.executeDelivery(config.EndpointConfig{Prompt: "broken {{"}, body, 0, "delivery-1", "", 1, nil)
 
 	if len(exec.calls) != 0 {
 		t.Fatalf("template failure must not invoke executor, got %d calls", len(exec.calls))
@@ -1452,10 +1452,10 @@ func TestWebhookProjectAwareParallelismDifferentBranches(t *testing.T) {
 	bothRunning := make(chan struct{})
 	release := make(chan struct{})
 
-	var sessionKeys sync.Map
+	var deliveryIDs sync.Map
 
 	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
-		sessionKeys.Store(workCtx.Key.Branch, workCtx.SessionKey)
+		deliveryIDs.Store(workCtx.Key.Branch, workCtx.DeliveryID)
 		switch workCtx.Key.Branch {
 		case "feat/branch-1":
 			close(firstStarted)
@@ -1514,10 +1514,10 @@ func TestWebhookProjectAwareParallelismDifferentBranches(t *testing.T) {
 	close(release)
 	waitForCompletedCount(t, st, 2)
 
-	sk1, _ := sessionKeys.Load("feat/branch-1")
-	sk2, _ := sessionKeys.Load("feat/branch-2")
-	if sk1 == "" || sk2 == "" || sk1 == sk2 {
-		t.Fatalf("expected different session keys for different branches: %v vs %v", sk1, sk2)
+	id1, _ := deliveryIDs.Load("feat/branch-1")
+	id2, _ := deliveryIDs.Load("feat/branch-2")
+	if id1 == "" || id2 == "" || id1 == id2 {
+		t.Fatalf("expected distinct delivery identities per branch: %v vs %v", id1, id2)
 	}
 }
 
@@ -1527,10 +1527,10 @@ func TestWebhookProjectAwareParallelismDifferentRepos(t *testing.T) {
 	bothRunning := make(chan struct{})
 	release := make(chan struct{})
 
-	var sessionKeys sync.Map
+	var deliveryIDs sync.Map
 
 	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
-		sessionKeys.Store(workCtx.Key.Repository, workCtx.SessionKey)
+		deliveryIDs.Store(workCtx.Key.Repository, workCtx.DeliveryID)
 		switch workCtx.Key.Repository {
 		case "anggasct/occa":
 			close(firstStarted)
@@ -1589,10 +1589,10 @@ func TestWebhookProjectAwareParallelismDifferentRepos(t *testing.T) {
 	close(release)
 	waitForCompletedCount(t, st, 2)
 
-	sk1, _ := sessionKeys.Load("anggasct/occa")
-	sk2, _ := sessionKeys.Load("anggasct/dispatch")
-	if sk1 == "" || sk2 == "" || sk1 == sk2 {
-		t.Fatalf("expected different session keys for different repos: %v vs %v", sk1, sk2)
+	id1, _ := deliveryIDs.Load("anggasct/occa")
+	id2, _ := deliveryIDs.Load("anggasct/dispatch")
+	if id1 == "" || id2 == "" || id1 == id2 {
+		t.Fatalf("expected distinct delivery identities per repo: %v vs %v", id1, id2)
 	}
 }
 

@@ -507,7 +507,7 @@ func (d *dispatcher) handle(item dispatchItem) {
 		}
 		lease, werr := s.resolveWorkspace(item)
 		if werr == nil {
-			s.executeDelivery(item.ep, item.body, receipt.ID, item.deliveryID, item.eventType, lease)
+			s.executeDelivery(item.ep, item.body, receipt.ID, item.deliveryID, item.eventType, receipt.Attempt, lease)
 			s.releaseEvent()
 			s.pruneIfDue()
 			return
@@ -706,14 +706,13 @@ func (s *Server) failAbandonedReceipt(receipt *store.WebhookDelivery, reason str
 // slot held and only after beginExecution succeeded for this receipt. The
 // lease, when present, is released after the terminal transition so workspace
 // cleanup failure cannot change the delivery outcome.
-func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64, deliveryID, eventType string, lease *WorkspaceLease) {
+func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64, deliveryID, eventType string, attempt int, lease *WorkspaceLease) {
 	key := ExtractExecutionKey(body)
 
 	var workCtx WebhookWorkContext
 	workCtx.Key = key
-	if !key.IsZero() {
-		workCtx.SessionKey = key.String()
-	}
+	workCtx.DeliveryID = deliveryID
+	workCtx.Attempt = attempt
 	if lease != nil {
 		workCtx.Worktree = lease.Path
 		defer func() {
@@ -737,11 +736,6 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 			s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary(fmt.Sprintf("panic: %v", r), maxErrorSummaryRunes, ep.Secret), workCtx)
 		}
 	}()
-
-	if allowed, reason := workflowAllows(ep.Workflow, envelope); !allowed {
-		s.markSkipped(id, ep, envelope, reason)
-		return
-	}
 
 	if allowed, reason := workflowAllows(ep.Workflow, envelope); !allowed {
 		s.markSkipped(id, ep, envelope, reason)
@@ -818,6 +812,7 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 			"endpoint", ep.Name,
 			"delivery_id", deliveryID,
 			"event_type", eventType,
+			"attempt", attempt,
 			"execution_key", workCtx.Key.String(),
 			"worktree", workCtx.Worktree,
 		)
