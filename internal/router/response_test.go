@@ -1056,7 +1056,8 @@ func TestResponseTimeoutPermissionCopy(t *testing.T) {
 	r, _ := newResponseRouter(client)
 	// Longer than the permission flush window so the pending record exists
 	// before the no-event timeout fires.
-	r.streamerNoEventTimeout = 3000 * time.Millisecond
+	r.permissions.window = 15 * time.Millisecond
+	r.streamerNoEventTimeout = 150 * time.Millisecond
 	reply := newResponseReply()
 
 	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "hello", reply)); err != nil {

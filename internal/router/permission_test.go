@@ -170,9 +170,15 @@ func waitForSends(reply *permissionReply) {
 	}
 }
 
+func fastPermissionBroker() *permissionBroker {
+	broker := newPermissionBroker(nil)
+	broker.window = 15 * time.Millisecond
+	return broker
+}
+
 func newPermissionPrompt(t *testing.T, client relay.Client) (*permissionBroker, *permissionOwner, *permissionReply, string, channel.MessageRef) {
 	t.Helper()
-	broker := newPermissionBroker(nil)
+	broker := fastPermissionBroker()
 	owner := &permissionOwner{}
 	reply := &permissionReply{}
 	handler := &permissionPromptHandler{
@@ -254,6 +260,7 @@ func TestPermissionBrokerUsesCapturedClientAndClearsButtons(t *testing.T) {
 func TestRoutePermissionCallbackUsesGenericCapturedClient(t *testing.T) {
 	client := &permissionClient{}
 	r, _ := newResponseRouter(client)
+	r.permissions.window = 15 * time.Millisecond
 	provider := r.instances.(*fakeInstanceProvider)
 	owner := &permissionOwner{}
 	reply := &permissionReply{}
@@ -392,7 +399,7 @@ func TestPermissionBrokerExpiresOwnerAndUnknownTokens(t *testing.T) {
 		t.Fatal("expired callback called backend")
 	}
 
-	newBroker := newPermissionBroker(nil)
+	newBroker := fastPermissionBroker()
 	unknown := permissionCallback("after-restart", origin, reply)
 	if err := newBroker.handle(context.Background(), unknown); err != nil {
 		t.Fatalf("unknown handle: %v", err)
@@ -450,7 +457,7 @@ func TestCallbackNotSerializedBehindBlockedBackend(t *testing.T) {
 		release:        make(chan struct{}),
 		blockFirstCall: true,
 	}
-	broker := newPermissionBroker(nil)
+	broker := fastPermissionBroker()
 
 	newPrompt := func(requestID string) (channel.MessageRef, string, channel.ReplyContext) {
 		reply := &permissionReply{}
@@ -519,7 +526,8 @@ func TestPermissionPromptTextWithPatterns(t *testing.T) {
 
 func TestPermissionBatchingEquivalentRequestsWithinWindow(t *testing.T) {
 	client := &permissionClient{}
-	broker := newPermissionBroker(nil)
+	broker := fastPermissionBroker()
+	broker.window = 300 * time.Millisecond
 	owner := &permissionOwner{}
 	reply := &permissionReply{}
 	handler := &permissionPromptHandler{
@@ -765,7 +773,7 @@ func TestPermissionEmptyIdentityIsolatedAndNotPersisted(t *testing.T) {
 
 func TestPermissionBatchArrivingDuringFlushStartsFreshGroup(t *testing.T) {
 	client := &permissionClient{}
-	broker := newPermissionBroker(nil)
+	broker := fastPermissionBroker()
 	owner := &permissionOwner{}
 	base := &permissionReply{}
 	reply := &blockingPermissionReply{
@@ -824,7 +832,8 @@ func TestPermissionBatchArrivingDuringFlushStartsFreshGroup(t *testing.T) {
 
 func TestPermissionBatchingRequestsSeparatedBeyondWindow(t *testing.T) {
 	client := &permissionClient{}
-	broker := newPermissionBroker(nil)
+	broker := fastPermissionBroker()
+	broker.window = 30 * time.Millisecond
 	owner := &permissionOwner{}
 	reply := &permissionReply{}
 	handler := &permissionPromptHandler{
@@ -865,20 +874,25 @@ func TestPermissionBatchingRequestsSeparatedBeyondWindow(t *testing.T) {
 		t.Fatalf("Prompt 2: %v", err)
 	}
 
-	// Wait for second batch window
-	time.Sleep(1600 * time.Millisecond)
-
-	reply.mu.Lock()
-	count2 := len(reply.sends)
-	reply.mu.Unlock()
-	if count2 != 2 {
-		t.Fatalf("sends after req2 = %d, want 2", count2)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		reply.mu.Lock()
+		count2 := len(reply.sends)
+		reply.mu.Unlock()
+		if count2 == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("sends after req2 = %d, want 2", count2)
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 }
 
 func TestPermissionBatchingExpireBeforeWindowElapses(t *testing.T) {
 	client := &permissionClient{}
-	broker := newPermissionBroker(nil)
+	broker := fastPermissionBroker()
+	broker.window = 500 * time.Millisecond
 	owner := &permissionOwner{}
 	reply := &permissionReply{}
 	handler := &permissionPromptHandler{
@@ -902,12 +916,12 @@ func TestPermissionBatchingExpireBeforeWindowElapses(t *testing.T) {
 	}
 
 	// Sleep briefly while batch is pending
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 
 	broker.expireOwner(owner)
 
 	// Sleep past the batch window
-	time.Sleep(1600 * time.Millisecond)
+	time.Sleep(600 * time.Millisecond)
 
 	reply.mu.Lock()
 	count := len(reply.sends)
@@ -922,7 +936,7 @@ func TestPermissionBrokerBatchRetryOnlyUnresolvedIDs(t *testing.T) {
 	client := &permissionClient{
 		errors: []error{nil, errors.New("backend error 2nd id")},
 	}
-	broker := newPermissionBroker(nil)
+	broker := fastPermissionBroker()
 	owner := &permissionOwner{}
 	reply := &permissionReply{}
 	handler := &permissionPromptHandler{
@@ -1028,7 +1042,7 @@ func TestPermissionBrokerBatchRetryOnlyUnresolvedIDs(t *testing.T) {
 
 func newPermissionBatchPrompt(t *testing.T, client relay.Client, ids ...string) (*permissionBroker, *permissionReply, string, channel.MessageRef) {
 	t.Helper()
-	broker := newPermissionBroker(nil)
+	broker := fastPermissionBroker()
 	owner := &permissionOwner{}
 	reply := &permissionReply{}
 	handler := &permissionPromptHandler{
@@ -1195,7 +1209,7 @@ func (r *blockingPermissionReply) SendWithButtons(text string, buttons []channel
 
 func TestPermissionBrokerFreshSendNeverExpires(t *testing.T) {
 	client := &permissionClient{}
-	broker := newPermissionBroker(nil)
+	broker := fastPermissionBroker()
 	owner := &permissionOwner{}
 	base := &permissionReply{}
 	reply := &blockingPermissionReply{

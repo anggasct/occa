@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
@@ -167,23 +168,53 @@ func Clamp(s string, limit int) string {
 // (e.g. Clamp("<b>xstring", 2) == "…" instead of "<…"). The marker alone is
 // the guaranteed floor, so the result is always balanced and within limit.
 func clampHardCut(s string, end, limit int, marker string) string {
+	// Closes for any cut are a subset of the tag text in the window, so
+	// their units bound every candidate from above; that bound both skips
+	// candidates that cannot fit and stops the backward walk once no
+	// remaining candidate can measure longer than the best found.
+	maxCloseUnits := tagUnits(s[:end])
 	best := ""
-	for e := end; e >= 0; e = prevRuneBoundary(s, e) {
-		cand := s[:e] + closeTags(openTagStack(s[:e])) + marker
-		if measure(cand) > limit || !htmlBalanced(cand) {
-			continue
+	bestUnits := 0
+	units := measure(s[:end])
+	for e := end; ; e = prevRuneBoundary(s, e) {
+		if best != "" && units+maxCloseUnits+1 <= bestUnits {
+			break
 		}
-		if measure(cand) > measure(best) {
-			best = cand
+		if units+1 <= limit {
+			cand := s[:e] + closeTags(openTagStack(s[:e])) + marker
+			if m := measure(cand); m <= limit && htmlBalanced(cand) && m > bestUnits {
+				best = cand
+				bestUnits = m
+			}
 		}
 		if e == 0 {
 			break
 		}
+		r, _ := utf8.DecodeLastRuneInString(s[:e])
+		units -= utf16Len(r)
 	}
 	if best == "" {
 		return marker
 	}
 	return best
+}
+
+func tagUnits(s string) int {
+	total := 0
+	for i := 0; i < len(s); {
+		if _, n, ok := matchOpenTag(s[i:]); ok {
+			total += measure(s[i : i+n])
+			i += n
+			continue
+		}
+		if n, ok := matchCloseTag(s[i:]); ok {
+			total += measure(s[i : i+n])
+			i += n
+			continue
+		}
+		i++
+	}
+	return total
 }
 
 // prevRuneBoundary returns the byte index of the rune boundary that precedes
