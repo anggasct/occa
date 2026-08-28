@@ -65,7 +65,7 @@ type ChannelStore interface {
 	Get(ctx context.Context, platform, channelID string) (*store.Channel, error)
 }
 
-type Executor func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error
+type Executor func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error
 
 type Notifier func(ctx context.Context, platform, channelID, text string) error
 
@@ -507,7 +507,7 @@ func (d *dispatcher) handle(item dispatchItem) {
 		}
 		lease, werr := s.resolveWorkspace(item)
 		if werr == nil {
-			s.executeDelivery(item.ep, item.body, receipt.ID, item.deliveryID, item.eventType, lease)
+			s.executeDelivery(item.ep, item.body, receipt.ID, item.deliveryID, item.eventType, receipt.Attempt, lease)
 			s.releaseEvent()
 			s.pruneIfDue()
 			return
@@ -561,9 +561,24 @@ func (s *Server) resolveWorkspace(item dispatchItem) (*WorkspaceLease, error) {
 
 func (s *Server) failWorkspace(item dispatchItem, receipt *store.WebhookDelivery, err error) {
 	envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, false, "")
-	workCtx := WebhookWorkContext{Key: ExtractExecutionKey(item.body)}
+	workCtx := &WebhookWorkContext{
+		Key:        ExtractExecutionKey(item.body),
+		DeliveryID: item.deliveryID,
+		Attempt:    receipt.Attempt,
+	}
 	summary := redactSummary(err.Error(), maxErrorSummaryRunes, item.ep.Secret)
 	s.failDelivery(item.ep, receipt.ID, item.deliveryID, item.eventType, envelope, summary, workCtx)
+}
+
+func sessionLogAttrs(workCtx *WebhookWorkContext) []any {
+	if workCtx == nil || workCtx.SessionID == "" {
+		return nil
+	}
+	return []any{
+		"session_id", workCtx.SessionID,
+		"session_aborted", workCtx.SessionAborted,
+		"session_abort_ok", workCtx.SessionAbortOK,
+	}
 }
 
 // beginExecution claims a delivery at the moment it reaches the head of its
@@ -706,13 +721,13 @@ func (s *Server) failAbandonedReceipt(receipt *store.WebhookDelivery, reason str
 // slot held and only after beginExecution succeeded for this receipt. The
 // lease, when present, is released after the terminal transition so workspace
 // cleanup failure cannot change the delivery outcome.
-func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64, deliveryID, eventType string, lease *WorkspaceLease) {
+func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64, deliveryID, eventType string, attempt int, lease *WorkspaceLease) {
 	key := ExtractExecutionKey(body)
 
-	var workCtx WebhookWorkContext
-	workCtx.Key = key
-	if !key.IsZero() {
-		workCtx.SessionKey = key.String()
+	workCtx := &WebhookWorkContext{
+		Key:        key,
+		DeliveryID: deliveryID,
+		Attempt:    attempt,
 	}
 	if lease != nil {
 		workCtx.Worktree = lease.Path
@@ -727,21 +742,17 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("webhook: panic recovered in delivery processing",
-				"endpoint", ep.Name,
-				"delivery_id", deliveryID,
-				"event_type", eventType,
-				"execution_key", workCtx.Key.String(),
-				"worktree", workCtx.Worktree,
-				"panic", fmt.Sprint(r),
-			)
+				append([]any{
+					"endpoint", ep.Name,
+					"delivery_id", deliveryID,
+					"event_type", eventType,
+					"execution_key", workCtx.Key.String(),
+					"worktree", workCtx.Worktree,
+					"panic", fmt.Sprint(r),
+				}, sessionLogAttrs(workCtx)...)...)
 			s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary(fmt.Sprintf("panic: %v", r), maxErrorSummaryRunes, ep.Secret), workCtx)
 		}
 	}()
-
-	if allowed, reason := workflowAllows(ep.Workflow, envelope); !allowed {
-		s.markSkipped(id, ep, envelope, reason)
-		return
-	}
 
 	if allowed, reason := workflowAllows(ep.Workflow, envelope); !allowed {
 		s.markSkipped(id, ep, envelope, reason)
@@ -815,12 +826,14 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 			s.emitAudit(context.Background(), ep, envelope, "COMPLETED", "")
 		}
 		slog.Info("webhook: delivery completed",
-			"endpoint", ep.Name,
-			"delivery_id", deliveryID,
-			"event_type", eventType,
-			"execution_key", workCtx.Key.String(),
-			"worktree", workCtx.Worktree,
-		)
+			append([]any{
+				"endpoint", ep.Name,
+				"delivery_id", deliveryID,
+				"event_type", eventType,
+				"attempt", attempt,
+				"execution_key", workCtx.Key.String(),
+				"worktree", workCtx.Worktree,
+			}, sessionLogAttrs(workCtx)...)...)
 	case errors.Is(err, context.DeadlineExceeded), ctx.Err() == context.DeadlineExceeded:
 		s.failDelivery(ep, id, deliveryID, eventType, envelope, "timed out after "+s.processingTimeout.String(), workCtx)
 	default:
@@ -828,7 +841,7 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 	}
 }
 
-func (s *Server) failDelivery(ep config.EndpointConfig, id int64, deliveryID, eventType string, envelope WebhookEnvelope, summary string, workCtx WebhookWorkContext) {
+func (s *Server) failDelivery(ep config.EndpointConfig, id int64, deliveryID, eventType string, envelope WebhookEnvelope, summary string, workCtx *WebhookWorkContext) {
 	ok, err := s.deliveries.Transition(context.Background(), id, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusFailed, summary)
 	if err != nil {
 		slog.Error("webhook: failed transition", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
@@ -836,13 +849,15 @@ func (s *Server) failDelivery(ep config.EndpointConfig, id int64, deliveryID, ev
 		s.emitAudit(context.Background(), ep, envelope, "FAILED", summary)
 	}
 	slog.Warn("webhook: delivery failed",
-		"endpoint", ep.Name,
-		"delivery_id", deliveryID,
-		"event_type", eventType,
-		"execution_key", workCtx.Key.String(),
-		"worktree", workCtx.Worktree,
-		"error_summary", summary,
-	)
+		append([]any{
+			"endpoint", ep.Name,
+			"delivery_id", deliveryID,
+			"event_type", eventType,
+			"attempt", workCtx.Attempt,
+			"execution_key", workCtx.Key.String(),
+			"worktree", workCtx.Worktree,
+			"error_summary", summary,
+		}, sessionLogAttrs(workCtx)...)...)
 }
 
 func (s *Server) shouldSkip(ep config.EndpointConfig, eventType string) bool {

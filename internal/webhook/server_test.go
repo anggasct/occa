@@ -51,10 +51,10 @@ type execCall struct {
 	platform  string
 	channelID string
 	prompt    string
-	workCtx   WebhookWorkContext
+	workCtx   *WebhookWorkContext
 }
 
-func (f *fakeExecutor) exec(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+func (f *fakeExecutor) exec(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 	if f.block != nil {
 		select {
 		case <-f.block:
@@ -290,7 +290,7 @@ func TestWebhookTemplateRendering(t *testing.T) {
 	srv.executeDelivery(config.EndpointConfig{
 		Name: "github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1",
 		Prompt: `Analyze PR #{{.payload.number}} action={{.payload.action}}`,
-	}, []byte(`{"action":"opened","number":42}`), 0, "delivery-1", "pull_request", nil)
+	}, []byte(`{"action":"opened","number":42}`), 0, "delivery-1", "pull_request", 1, nil)
 
 	if len(exec.calls) != 1 {
 		t.Fatalf("expected 1 executor call, got %d", len(exec.calls))
@@ -314,7 +314,7 @@ func TestWebhookUntrustedPayloadWrapper(t *testing.T) {
 
 	srv.executeDelivery(config.EndpointConfig{
 		Prompt: "static prompt", Platform: "telegram", ChannelID: "c1",
-	}, []byte(`{"foo":"bar"}`), 0, "delivery-1", "", nil)
+	}, []byte(`{"foo":"bar"}`), 0, "delivery-1", "", 1, nil)
 
 	if len(exec.calls) != 1 {
 		t.Fatalf("expected 1 call, got %d", len(exec.calls))
@@ -332,7 +332,7 @@ func TestWebhookEscapesClosingPayloadWrapper(t *testing.T) {
 		{Name: "test", Path: "/test", Secret: "s", Platform: "telegram", ChannelID: "c1", Prompt: `{{.json}}`},
 	})
 
-	srv.executeDelivery(config.EndpointConfig{Prompt: `{{.json}}`}, []byte(`{"payload":"</untrusted_payload>"}`), 0, "delivery-1", "", nil)
+	srv.executeDelivery(config.EndpointConfig{Prompt: `{{.json}}`}, []byte(`{"payload":"</untrusted_payload>"}`), 0, "delivery-1", "", 1, nil)
 
 	if len(exec.calls) != 1 {
 		t.Fatalf("expected 1 call, got %d", len(exec.calls))
@@ -351,7 +351,7 @@ func TestWebhookTemplateErrorFailsClosed(t *testing.T) {
 	})
 	body := []byte(`{"foo":"bar"}`)
 
-	srv.executeDelivery(config.EndpointConfig{Prompt: "broken {{"}, body, 0, "delivery-1", "", nil)
+	srv.executeDelivery(config.EndpointConfig{Prompt: "broken {{"}, body, 0, "delivery-1", "", 1, nil)
 
 	if len(exec.calls) != 0 {
 		t.Fatalf("template failure must not invoke executor, got %d calls", len(exec.calls))
@@ -751,7 +751,7 @@ func TestWebhookSerializesSameSessionDeliveries(t *testing.T) {
 	firstReleased := make(chan struct{})
 	secondStarted := make(chan struct{})
 
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		mu.Lock()
 		starts++
 		call := starts
@@ -836,7 +836,7 @@ func TestWebhookProcessingTimeoutStartsAtExecution(t *testing.T) {
 	firstStarted := make(chan struct{})
 	firstReleased := make(chan struct{})
 
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		deadline, ok := ctx.Deadline()
 		if !ok {
 			t.Error("executor context has no deadline")
@@ -1378,7 +1378,7 @@ func TestWebhookProjectAwareSerializationSameKey(t *testing.T) {
 	firstReleased := make(chan struct{})
 	secondStarted := make(chan struct{})
 
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		mu.Lock()
 		starts++
 		call := starts
@@ -1452,10 +1452,10 @@ func TestWebhookProjectAwareParallelismDifferentBranches(t *testing.T) {
 	bothRunning := make(chan struct{})
 	release := make(chan struct{})
 
-	var sessionKeys sync.Map
+	var deliveryIDs sync.Map
 
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
-		sessionKeys.Store(workCtx.Key.Branch, workCtx.SessionKey)
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+		deliveryIDs.Store(workCtx.Key.Branch, workCtx.DeliveryID)
 		switch workCtx.Key.Branch {
 		case "feat/branch-1":
 			close(firstStarted)
@@ -1514,10 +1514,10 @@ func TestWebhookProjectAwareParallelismDifferentBranches(t *testing.T) {
 	close(release)
 	waitForCompletedCount(t, st, 2)
 
-	sk1, _ := sessionKeys.Load("feat/branch-1")
-	sk2, _ := sessionKeys.Load("feat/branch-2")
-	if sk1 == "" || sk2 == "" || sk1 == sk2 {
-		t.Fatalf("expected different session keys for different branches: %v vs %v", sk1, sk2)
+	id1, _ := deliveryIDs.Load("feat/branch-1")
+	id2, _ := deliveryIDs.Load("feat/branch-2")
+	if id1 == "" || id2 == "" || id1 == id2 {
+		t.Fatalf("expected distinct delivery identities per branch: %v vs %v", id1, id2)
 	}
 }
 
@@ -1527,10 +1527,10 @@ func TestWebhookProjectAwareParallelismDifferentRepos(t *testing.T) {
 	bothRunning := make(chan struct{})
 	release := make(chan struct{})
 
-	var sessionKeys sync.Map
+	var deliveryIDs sync.Map
 
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
-		sessionKeys.Store(workCtx.Key.Repository, workCtx.SessionKey)
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+		deliveryIDs.Store(workCtx.Key.Repository, workCtx.DeliveryID)
 		switch workCtx.Key.Repository {
 		case "anggasct/occa":
 			close(firstStarted)
@@ -1589,10 +1589,10 @@ func TestWebhookProjectAwareParallelismDifferentRepos(t *testing.T) {
 	close(release)
 	waitForCompletedCount(t, st, 2)
 
-	sk1, _ := sessionKeys.Load("anggasct/occa")
-	sk2, _ := sessionKeys.Load("anggasct/dispatch")
-	if sk1 == "" || sk2 == "" || sk1 == sk2 {
-		t.Fatalf("expected different session keys for different repos: %v vs %v", sk1, sk2)
+	id1, _ := deliveryIDs.Load("anggasct/occa")
+	id2, _ := deliveryIDs.Load("anggasct/dispatch")
+	if id1 == "" || id2 == "" || id1 == id2 {
+		t.Fatalf("expected distinct delivery identities per repo: %v vs %v", id1, id2)
 	}
 }
 
@@ -1628,7 +1628,7 @@ func (f *fakeWorkspaceResolver) callCount() int {
 
 func TestWebhookWorktreeResolutionIntegration(t *testing.T) {
 	var observedWorktree string
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		observedWorktree = workCtx.Worktree
 		return nil
 	}
@@ -1663,7 +1663,7 @@ func TestWebhookWorktreeResolutionIntegration(t *testing.T) {
 }
 
 func TestWebhookWorktreeConflictFailsDelivery(t *testing.T) {
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		return nil
 	}
 
@@ -1737,7 +1737,7 @@ func TestWebhookGitEndpointWithoutResolverFailsClosed(t *testing.T) {
 func TestWebhookExecutorPanicRecoversAndFailsDelivery(t *testing.T) {
 	var mu sync.Mutex
 	calls := 0
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		mu.Lock()
 		calls++
 		c := calls
@@ -1789,7 +1789,7 @@ func TestWebhookExecutorPanicRecoversAndFailsDelivery(t *testing.T) {
 
 func TestWebhookGitHubHMACSuccess(t *testing.T) {
 	executed := make(chan struct{})
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		close(executed)
 		return nil
 	}
@@ -1863,7 +1863,7 @@ func TestWebhookGitHubHMACSuccess(t *testing.T) {
 
 func TestWebhookGitHubHMACUnauthorizedNegativeCases(t *testing.T) {
 	var execCalled bool
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		execCalled = true
 		return nil
 	}
@@ -1997,7 +1997,7 @@ func TestWebhookGitHubHMACUnauthorizedNegativeCases(t *testing.T) {
 
 func TestWebhookWhitespacePaddedHMACModeRequiresSignatureAndRejectsLegacy(t *testing.T) {
 	executed := make(chan struct{})
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		close(executed)
 		return nil
 	}
@@ -2420,7 +2420,7 @@ func TestWebhookFIFOOrderSameKey(t *testing.T) {
 	var completions []string
 	var execCount int
 
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		mu.Lock()
 		execCount++
 		completions = append(completions, fmt.Sprintf("call-%d", execCount))
@@ -2465,7 +2465,7 @@ func TestWebhookQueuedDeliveryHasNoRow(t *testing.T) {
 	var startedOnce sync.Once
 	started := make(chan struct{})
 	released := make(chan struct{})
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		startedOnce.Do(func() { close(started) })
 		select {
 		case <-released:
@@ -2524,7 +2524,7 @@ func TestWebhookQueuedDeliveryHasNoRow(t *testing.T) {
 func TestWebhookQueueFullReturns429WithoutRow(t *testing.T) {
 	release := make(chan struct{})
 	blocked := make(chan struct{}, maxConcurrentWebhookEvents+maxQueuedPerKey+2)
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		blocked <- struct{}{}
 		select {
 		case <-release:
@@ -2585,7 +2585,7 @@ func TestWebhookSlotCapBoundedAcrossKeys(t *testing.T) {
 	running, peak := 0, 0
 	release := make(chan struct{})
 
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		mu.Lock()
 		running++
 		if running > peak {
@@ -2633,15 +2633,24 @@ func TestWebhookSlotCapBoundedAcrossKeys(t *testing.T) {
 			t.Fatalf("delivery-%d expected accepted 200, got %d", i, resp.StatusCode)
 		}
 	}
-	time.Sleep(150 * time.Millisecond)
+	peakSnapshot := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return peak
+	}
 
-	mu.Lock()
-	observedPeak := peak
-	mu.Unlock()
-	if observedPeak > maxConcurrentWebhookEvents {
+	deadline := time.Now().Add(10 * time.Second)
+	for peakSnapshot() < maxConcurrentWebhookEvents {
+		if time.Now().After(deadline) {
+			t.Fatalf("concurrent executions never reached the cap %d under full queue admission, peak = %d", maxConcurrentWebhookEvents, peakSnapshot())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if observedPeak := peakSnapshot(); observedPeak > maxConcurrentWebhookEvents {
 		t.Fatalf("concurrent executions peaked at %d, cap is %d", observedPeak, maxConcurrentWebhookEvents)
 	}
-	if observedPeak < 2 {
+	if observedPeak := peakSnapshot(); observedPeak < 2 {
 		t.Fatalf("distinct keys did not execute in parallel, peak = %d", observedPeak)
 	}
 
@@ -2653,7 +2662,7 @@ func TestWebhookShutdownDrainsQueue(t *testing.T) {
 	var startedOnce sync.Once
 	started := make(chan struct{})
 	released := make(chan struct{})
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		startedOnce.Do(func() { close(started) })
 		select {
 		case <-released:
@@ -2759,7 +2768,7 @@ func TestWebhookDispatcherIdleEviction(t *testing.T) {
 }
 
 func TestWebhookEnqueueRacingIdleEvictionNeverLosesDelivery(t *testing.T) {
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		return nil
 	}
 
@@ -2813,7 +2822,7 @@ func TestWebhookEnqueueRacingShutdownNeverLosesDelivery(t *testing.T) {
 	var startedOnce sync.Once
 	started := make(chan struct{})
 	released := make(chan struct{})
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		startedOnce.Do(func() { close(started) })
 		select {
 		case <-released:
@@ -2922,7 +2931,7 @@ func TestWebhookIngressPrefixAcceptedOnce(t *testing.T) {
 
 func TestWebhookNoneWorkspaceNeverInvokesResolver(t *testing.T) {
 	var worktrees []string
-	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx WebhookWorkContext) error {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		worktrees = append(worktrees, workCtx.Worktree)
 		return nil
 	}
@@ -3038,5 +3047,156 @@ func TestWebhookMutableConflictExhaustsRetriesAndFails(t *testing.T) {
 	}
 	if exec.callCount() != 0 {
 		t.Fatalf("busy workspace must never execute, got %d calls", exec.callCount())
+	}
+}
+
+type capturedLogRecord struct {
+	msg   string
+	attrs map[string]any
+}
+
+type logCapture struct {
+	mu      sync.Mutex
+	records []capturedLogRecord
+}
+
+func (h *logCapture) Enabled(_ context.Context, _ slog.Level) bool { return true }
+
+func (h *logCapture) Handle(_ context.Context, r slog.Record) error {
+	rec := capturedLogRecord{msg: r.Message, attrs: map[string]any{}}
+	r.Attrs(func(a slog.Attr) bool {
+		rec.attrs[a.Key] = a.Value.Any()
+		return true
+	})
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, rec)
+	return nil
+}
+
+func (h *logCapture) WithAttrs(attrs []slog.Attr) slog.Handler { return h }
+
+func (h *logCapture) WithGroup(name string) slog.Handler { return h }
+
+func (h *logCapture) find(t *testing.T, msg string) capturedLogRecord {
+	t.Helper()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, rec := range h.records {
+		if rec.msg == msg {
+			return rec
+		}
+	}
+	t.Fatalf("no captured log record %q; captured=%d records", msg, len(h.records))
+	return capturedLogRecord{}
+}
+
+func captureServerLogs(t *testing.T) *logCapture {
+	t.Helper()
+	previous := slog.Default()
+	handler := &logCapture{}
+	slog.SetDefault(slog.New(handler))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return handler
+}
+
+func TestWebhookCompletedRecordCarriesSessionAndAttempt(t *testing.T) {
+	handler := captureServerLogs(t)
+	srv, _ := newTestServer(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "p"},
+	})
+
+	executor := srv.executor
+	srv.executor = func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+		workCtx.SessionID = "sess-done"
+		return executor(ctx, platform, channelID, prompt, workCtx)
+	}
+
+	srv.executeDelivery(config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Prompt: "p"}, []byte(`{"repository":{"full_name":"testowner/myrepo"}}`), 0, "delivery-1", "pull_request", 2, nil)
+
+	rec := handler.find(t, "webhook: delivery completed")
+	if rec.attrs["attempt"] != int64(2) {
+		t.Fatalf("completed record attempt = %v, want 2", rec.attrs["attempt"])
+	}
+	if rec.attrs["session_id"] != "sess-done" {
+		t.Fatalf("completed record session_id = %v", rec.attrs["session_id"])
+	}
+	if rec.attrs["session_aborted"] != false || rec.attrs["session_abort_ok"] != false {
+		t.Fatalf("completed record must carry explicit no-abort outcome, attrs=%v", rec.attrs)
+	}
+}
+
+func TestWebhookFailedRecordCarriesSessionAndAttempt(t *testing.T) {
+	handler := captureServerLogs(t)
+	srv, _ := newTestServer(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "p"},
+	})
+
+	srv.executor = func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+		workCtx.SessionID = "sess-fail"
+		workCtx.SessionAborted = true
+		workCtx.SessionAbortOK = true
+		return errors.New("agent exploded")
+	}
+
+	srv.executeDelivery(config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Prompt: "p"}, []byte(`{"repository":{"full_name":"testowner/myrepo"}}`), 0, "delivery-1", "pull_request", 1, nil)
+
+	rec := handler.find(t, "webhook: delivery failed")
+	if rec.attrs["attempt"] != int64(1) {
+		t.Fatalf("failed record attempt = %v, want 1", rec.attrs["attempt"])
+	}
+	if rec.attrs["session_id"] != "sess-fail" {
+		t.Fatalf("failed record session_id = %v", rec.attrs["session_id"])
+	}
+	if rec.attrs["session_aborted"] != true || rec.attrs["session_abort_ok"] != true {
+		t.Fatalf("failed record must carry abort outcome, attrs=%v", rec.attrs)
+	}
+}
+
+func TestWebhookWorkspaceFailureRecordCarriesAttempt(t *testing.T) {
+	handler := captureServerLogs(t)
+	srv, _ := newTestServer(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "p"},
+	})
+
+	body := []byte(`{"repository":{"full_name":"testowner/myrepo"}}`)
+	srv.failWorkspace(dispatchItem{ep: config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1"}, body: body, deliveryID: "delivery-9", eventType: "pull_request"}, &store.WebhookDelivery{ID: 7, Attempt: 3}, errors.New("worktree dirty"))
+
+	rec := handler.find(t, "webhook: delivery failed")
+	if rec.attrs["attempt"] != int64(3) {
+		t.Fatalf("workspace failure record attempt = %v, want 3", rec.attrs["attempt"])
+	}
+	if rec.attrs["delivery_id"] != "delivery-9" {
+		t.Fatalf("workspace failure record delivery_id = %v", rec.attrs["delivery_id"])
+	}
+	if _, ok := rec.attrs["session_id"]; ok {
+		t.Fatalf("workspace failure has no owned session, attrs=%v", rec.attrs)
+	}
+}
+
+func TestWebhookPanicRecoveredRecordCarriesSession(t *testing.T) {
+	handler := captureServerLogs(t)
+	srv, _ := newTestServer(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "p"},
+	})
+
+	srv.executor = func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+		workCtx.SessionID = "sess-panic"
+		workCtx.SessionAborted = true
+		panic("executor exploded")
+	}
+
+	srv.executeDelivery(config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Prompt: "p"}, []byte(`{"repository":{"full_name":"testowner/myrepo"}}`), 0, "delivery-1", "pull_request", 1, nil)
+
+	rec := handler.find(t, "webhook: panic recovered in delivery processing")
+	if rec.attrs["session_id"] != "sess-panic" {
+		t.Fatalf("panic record session_id = %v", rec.attrs["session_id"])
+	}
+	if rec.attrs["session_aborted"] != true {
+		t.Fatalf("panic record must carry the abort attempt, attrs=%v", rec.attrs)
+	}
+	failed := handler.find(t, "webhook: delivery failed")
+	if failed.attrs["session_id"] != "sess-panic" {
+		t.Fatalf("terminal failure record session_id = %v", failed.attrs["session_id"])
 	}
 }
