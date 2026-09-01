@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -467,6 +468,62 @@ func TestWebhookTurnAbortFailureLogCarriesDeliverySessionAndError(t *testing.T) 
 	requireTurnAttrs(t, rec)
 	if rec.attrs["error"] == nil {
 		t.Fatalf("abort failure record must carry the error; attrs=%v", rec.attrs)
+	}
+}
+
+func TestWebhookTurnAbortErrUnreachableTreatedAsClean(t *testing.T) {
+	handler := captureWebhookLogs(t)
+	client := newWebhookTurnClient(eventsWith(Event{Type: "error", Delta: "boom"}))
+	client.abortErr = fmt.Errorf("relay: %w: %v", ErrUnreachable, errors.New("dial tcp 127.0.0.1:4100: connect: connection refused"))
+
+	res, err := runWebhookTurn(t, client, context.Background())
+	if !errors.Is(err, ErrWebhookAgentResponse) {
+		t.Fatalf("expected ErrWebhookAgentResponse, got %v", err)
+	}
+	if !res.Aborted || !res.AbortOK {
+		t.Fatalf("unreachable agent abort must count as clean, got %+v", res)
+	}
+	if len(client.abortCalls) != 1 {
+		t.Fatalf("abort must still be attempted exactly once, got %v", client.abortCalls)
+	}
+
+	rec := findRecord(t, handler, "relay: webhook session abort skipped")
+	requireTurnAttrs(t, rec)
+	if rec.attrs["reason"] == nil {
+		t.Fatalf("abort skipped record must carry the reason; attrs=%v", rec.attrs)
+	}
+	for _, captured := range handler.snapshot() {
+		if captured.msg == "relay: webhook session abort failed" {
+			t.Fatalf("unreachable agent must not log abort failed: %v", handler.snapshot())
+		}
+	}
+}
+
+func TestWebhookTurnAbortErrNotFoundTreatedAsClean(t *testing.T) {
+	handler := captureWebhookLogs(t)
+	client := newWebhookTurnClient(eventsWith(Event{Type: "error", Delta: "boom"}))
+	client.abortErr = ErrNotFound
+
+	res, err := runWebhookTurn(t, client, context.Background())
+	if !errors.Is(err, ErrWebhookAgentResponse) {
+		t.Fatalf("expected ErrWebhookAgentResponse, got %v", err)
+	}
+	if !res.Aborted || !res.AbortOK {
+		t.Fatalf("not-found session abort must count as clean, got %+v", res)
+	}
+	if len(client.abortCalls) != 1 {
+		t.Fatalf("abort must still be attempted exactly once, got %v", client.abortCalls)
+	}
+
+	rec := findRecord(t, handler, "relay: webhook session abort skipped")
+	requireTurnAttrs(t, rec)
+	if rec.attrs["reason"] == nil {
+		t.Fatalf("abort skipped record must carry the reason; attrs=%v", rec.attrs)
+	}
+	for _, captured := range handler.snapshot() {
+		if captured.msg == "relay: webhook session abort failed" {
+			t.Fatalf("not-found session must not log abort failed: %v", handler.snapshot())
+		}
 	}
 }
 

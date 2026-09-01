@@ -122,6 +122,17 @@ func (t WebhookTurn) abort(sessionID string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), t.AbortTimeout)
 	defer cancel()
 	if err := t.Client.AbortSession(ctx, sessionID); err != nil {
+		// An unreachable agent or a session that is already gone means the
+		// abort's cleanup goal is already achieved — there is nothing left
+		// to stop. This is the normal cascade when occa restarts/shuts down
+		// mid-delivery: the agent dies with occa, the SSE stream breaks, and
+		// the deferred cleanup finds a dead agent. Treating that as a WARN +
+		// failed abort is misleading alert noise and reports a wrong
+		// session_abort_ok in delivery logs.
+		if errors.Is(err, ErrUnreachable) || errors.Is(err, ErrNotFound) {
+			slog.Info("relay: webhook session abort skipped", t.attrs(sessionID, "reason", err.Error())...)
+			return true
+		}
 		slog.Warn("relay: webhook session abort failed", t.attrs(sessionID, "error", err)...)
 		return false
 	}
