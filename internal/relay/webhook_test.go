@@ -28,6 +28,26 @@ type fakeWebhookTurnClient struct {
 	sendPanic bool
 	abortErr  error
 	sendGate  chan struct{}
+
+	// listMessages, when set, replaces the embedded nil Client for the
+	// success-path sanity gate; listMessagesErr simulates transport failure.
+	listMessages      func(sessionID string) []MessageInfo
+	listMessagesErr   error
+	listMessagesCalls []string
+}
+
+func (f *fakeWebhookTurnClient) ListMessages(_ context.Context, sessionID string) ([]MessageInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.listMessagesCalls = append(f.listMessagesCalls, sessionID)
+	f.order = append(f.order, "list:"+sessionID)
+	if f.listMessagesErr != nil {
+		return nil, f.listMessagesErr
+	}
+	if f.listMessages == nil {
+		return []MessageInfo{{ID: "msg-1", Role: "assistant", Completed: 1}}, nil
+	}
+	return f.listMessages(sessionID), nil
 }
 
 func (f *fakeWebhookTurnClient) record(op string) {
@@ -207,6 +227,7 @@ func TestWebhookTurnSubscribesBeforeSend(t *testing.T) {
 	}
 	close(client.sendGate)
 
+	shared <- Event{Type: "delta", Delta: "working"}
 	shared <- Event{Type: "done"}
 	res, err := <-done, <-errCh
 	if err != nil {
@@ -243,7 +264,7 @@ func TestWebhookTurnCompletesOnOwnedDoneEvent(t *testing.T) {
 }
 
 func TestWebhookTurnFreshSessionPerRun(t *testing.T) {
-	client := newWebhookTurnClient(eventsWith(Event{Type: "done"}))
+	client := newWebhookTurnClient(eventsWith(Event{Type: "delta", Delta: "out"}, Event{Type: "done"}))
 
 	ctx := context.Background()
 	first, err := runWebhookTurn(t, client, ctx)
@@ -267,7 +288,7 @@ func TestWebhookTurnFreshSessionPerRun(t *testing.T) {
 }
 
 func TestWebhookTurnNeverResumesOrLooksUpSessions(t *testing.T) {
-	client := newWebhookTurnClient(eventsWith(Event{Type: "done"}))
+	client := newWebhookTurnClient(eventsWith(Event{Type: "delta", Delta: "out"}, Event{Type: "done"}))
 
 	if _, err := runWebhookTurn(t, client, context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -416,7 +437,7 @@ func requireTurnAttrs(t *testing.T, rec capturedRecord) {
 
 func TestWebhookTurnSuccessLogCarriesDeliveryAndSession(t *testing.T) {
 	handler := captureWebhookLogs(t)
-	client := newWebhookTurnClient(eventsWith(Event{Type: "done"}))
+	client := newWebhookTurnClient(eventsWith(Event{Type: "delta", Delta: "out"}, Event{Type: "done"}))
 
 	res, err := runWebhookTurn(t, client, context.Background())
 	if err != nil {
@@ -496,6 +517,102 @@ func TestWebhookTurnAbortErrUnreachableTreatedAsClean(t *testing.T) {
 		if captured.msg == "relay: webhook session abort failed" {
 			t.Fatalf("unreachable agent must not log abort failed: %v", handler.snapshot())
 		}
+	}
+}
+
+// IMP-050 AC-03: a terminal event with a non-empty buffer and a completed
+// assistant message still returns success with the full buffered output.
+func TestWebhookTurnSanityGatePassKeepsSuccess(t *testing.T) {
+	handler := captureWebhookLogs(t)
+	client := newWebhookTurnClient(eventsWith(
+		Event{Type: "delta", Delta: "hello "},
+		Event{Type: "delta", Delta: "world"},
+		Event{Type: "done"},
+	))
+
+	res, err := runWebhookTurn(t, client, context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Output != "hello world" {
+		t.Fatalf("output = %q", res.Output)
+	}
+	if len(client.abortCalls) != 0 {
+		t.Fatalf("verified turn must not abort, got %v", client.abortCalls)
+	}
+	if client.calls("list") != 1 {
+		t.Fatalf("sanity gate must list messages exactly once, calls=%v", client.snapshot())
+	}
+	if rec := findRecord(t, handler, "relay: webhook session created"); rec.msg == "" {
+		t.Fatal("expected session created record")
+	}
+}
+
+// IMP-050 AC-04 (mode a): a terminal event with an empty buffer is an
+// incomplete response — the session aborts exactly once and no success is
+// reported.
+func TestWebhookTurnSanityGateRejectsEmptyOutput(t *testing.T) {
+	client := newWebhookTurnClient(eventsWith(Event{Type: "done"}))
+	client.listMessages = func(string) []MessageInfo {
+		return []MessageInfo{{ID: "msg-1", Role: "assistant", Completed: 1}}
+	}
+
+	res, err := runWebhookTurn(t, client, context.Background())
+	if !errors.Is(err, ErrWebhookResponseIncomplete) {
+		t.Fatalf("expected ErrWebhookResponseIncomplete, got %v", err)
+	}
+	if res.Output != "" {
+		t.Fatalf("output = %q, want empty", res.Output)
+	}
+	if len(client.abortCalls) != 1 || client.abortCalls[0] != "sess-1" {
+		t.Fatalf("expected exactly one abort of the owned session, got %v", client.abortCalls)
+	}
+	if client.calls("list") != 0 {
+		t.Fatalf("empty buffer must short-circuit before ListMessages, calls=%v", client.snapshot())
+	}
+}
+
+// IMP-050 AC-04 (mode b): a terminal event whose session shows no completed
+// assistant message is an incomplete response.
+func TestWebhookTurnSanityGateRejectsMissingCompletedMessage(t *testing.T) {
+	handler := captureWebhookLogs(t)
+	client := newWebhookTurnClient(eventsWith(Event{Type: "delta", Delta: "partial"}, Event{Type: "done"}))
+	client.listMessages = func(string) []MessageInfo {
+		return []MessageInfo{
+			{ID: "msg-u", Role: "user", Created: 1},
+			{ID: "msg-a", Role: "assistant", Created: 2, Completed: 0},
+		}
+	}
+
+	res, err := runWebhookTurn(t, client, context.Background())
+	if !errors.Is(err, ErrWebhookResponseIncomplete) {
+		t.Fatalf("expected ErrWebhookResponseIncomplete, got %v", err)
+	}
+	if res.Output != "partial" {
+		t.Fatalf("output = %q, want the buffered partial content", res.Output)
+	}
+	if len(client.abortCalls) != 1 {
+		t.Fatalf("expected exactly one abort, got %v", client.abortCalls)
+	}
+	for _, captured := range handler.snapshot() {
+		if strings.Contains(captured.msg, "aborted") && !strings.Contains(captured.msg, "abort") {
+			t.Fatalf("unexpected record: %+v", captured)
+		}
+	}
+}
+
+// IMP-050 AC-04: a ListMessages transport failure must not pass the sanity
+// gate — without message evidence the result is unverifiable.
+func TestWebhookTurnSanityGateRejectsListMessagesFailure(t *testing.T) {
+	client := newWebhookTurnClient(eventsWith(Event{Type: "delta", Delta: "out"}, Event{Type: "done"}))
+	client.listMessagesErr = errors.New("503 unavailable")
+
+	_, err := runWebhookTurn(t, client, context.Background())
+	if !errors.Is(err, ErrWebhookResponseIncomplete) {
+		t.Fatalf("expected ErrWebhookResponseIncomplete, got %v", err)
+	}
+	if len(client.abortCalls) != 1 {
+		t.Fatalf("expected exactly one abort, got %v", client.abortCalls)
 	}
 }
 

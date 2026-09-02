@@ -11,6 +11,11 @@ import (
 
 const defaultWebhookAbortTimeout = 5 * time.Second
 
+// verifyTimeout bounds the ListMessages call of the success sanity gate. It
+// runs after the terminal event already arrived, so a short deadline keeps a
+// hung agent read from stalling the delivery past its processing window.
+const verifyTimeout = 15 * time.Second
+
 var (
 	ErrWebhookSessionCreate      = errors.New("webhook session create failed")
 	ErrWebhookEventStream        = errors.New("webhook session event stream failed")
@@ -94,8 +99,14 @@ func (t WebhookTurn) Run(ctx context.Context) (res WebhookTurnResult, err error)
 			case "delta":
 				buf.WriteString(ev.Delta)
 			case "done":
-				completed = true
 				res.Output = buf.String()
+				if err := t.verify(res.SessionID, res.Output); err != nil {
+					// completed stays false: the failed gate is not a
+					// finished turn, so the deferred cleanup aborts the
+					// session exactly once.
+					return res, err
+				}
+				completed = true
 				return res, nil
 			case "stream_error":
 				return res, fmt.Errorf("%w: %v", ErrWebhookEventStream, ev.Err)
@@ -104,6 +115,32 @@ func (t WebhookTurn) Run(ctx context.Context) (res WebhookTurnResult, err error)
 			}
 		}
 	}
+}
+
+// verify is the sanity gate before a turn reports success: a terminal event
+// alone is not proof of a result. (a) the buffered output must be non-empty,
+// and (b) the agent must show at least one assistant message with
+// time.completed set (the same message-tail API the /status context read
+// uses). A stream that ended with an empty buffer or a still-in-flight
+// assistant message means the turn produced no verified result — surfaced as
+// ErrWebhookResponseIncomplete so the dispatcher can self-heal with one
+// retry. The deferred cleanup aborts the session exactly once as before.
+func (t WebhookTurn) verify(sessionID, output string) error {
+	if strings.TrimSpace(output) == "" {
+		return fmt.Errorf("%w: empty output buffer at terminal event", ErrWebhookResponseIncomplete)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), verifyTimeout)
+	defer cancel()
+	messages, err := t.Client.ListMessages(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("%w: list messages: %v", ErrWebhookResponseIncomplete, err)
+	}
+	for _, msg := range messages {
+		if msg.Role == "assistant" && msg.Completed > 0 {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: no completed assistant message for session", ErrWebhookResponseIncomplete)
 }
 
 func (t WebhookTurn) attrs(sessionID string, extra ...any) []any {

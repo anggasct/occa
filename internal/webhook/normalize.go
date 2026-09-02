@@ -30,6 +30,7 @@ func normalizeWebhook(body []byte, eventType, deliveryID string, skipped bool, s
 		"head_branch":     "",
 		"base_branch":     "",
 		"pr_author":       "",
+		"pr_state":        "",
 		"review_state":    "",
 		"review_user":     "",
 		"review_verdict":  "",
@@ -67,6 +68,13 @@ func normalizeWebhook(body []byte, eventType, deliveryID string, skipped bool, s
 			envelope["title"] = stringValue(issue["title"])
 			envelope["pr_url"] = stringValue(issuePR["html_url"])
 			envelope["comment_trigger"] = commentTrigger(stringValue(comment["body"]))
+			// GitHub sets issue.state to "closed" on both merged and plain
+			// closed PRs; "merged" disambiguates. Expose both so the gate can
+			// refuse re-review execution on a terminal PR.
+			envelope["pr_state"] = stringValue(issue["state"])
+			if boolValue(issuePR["merged"]) {
+				envelope["pr_state"] = "merged"
+			}
 		}
 		envelope["comment_body"] = stringValue(comment["body"])
 		envelope["review_user"] = userName(comment["user"])
@@ -90,6 +98,10 @@ func fillPullRequest(envelope WebhookEnvelope, pullRequest map[string]any) {
 	envelope["pr_author"] = userName(pullRequest["user"])
 	envelope["merged"] = boolValue(pullRequest["merged"])
 	envelope["merge_commit"] = stringValue(pullRequest["merge_commit_sha"])
+	envelope["pr_state"] = stringValue(pullRequest["state"])
+	if boolValue(pullRequest["merged"]) {
+		envelope["pr_state"] = "merged"
+	}
 	if envelope["repository"] == "" {
 		envelope["repository"] = repoName(mapValue(pullRequest, "base")["repo"])
 	}

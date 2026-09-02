@@ -45,6 +45,10 @@ type fakeExecutor struct {
 	calls []execCall
 	err   error
 	block chan struct{}
+	// errOnAttempt, when non-nil, overrides err per attempt (1-based). Used
+	// for the incomplete-response retry tests: first attempt fails with
+	// ErrWebhookResponseIncomplete, second succeeds.
+	errOnAttempt func(attempt int) error
 }
 
 type execCall struct {
@@ -62,7 +66,17 @@ func (f *fakeExecutor) exec(ctx context.Context, platform, channelID, prompt str
 			return ctx.Err()
 		}
 	}
+	if f.errOnAttempt != nil {
+		err := f.errOnAttempt(workCtx.Attempt)
+		f.mu.Lock()
+		f.calls = append(f.calls, execCall{platform, channelID, prompt, workCtx})
+		f.mu.Unlock()
+		return err
+	}
 	if f.err != nil {
+		f.mu.Lock()
+		f.calls = append(f.calls, execCall{platform, channelID, prompt, workCtx})
+		f.mu.Unlock()
 		return f.err
 	}
 	f.mu.Lock()
@@ -287,11 +301,10 @@ func TestWebhookTemplateRendering(t *testing.T) {
 			Prompt: `Analyze PR #{{.payload.number}} action={{.payload.action}}`},
 	})
 
-	srv.executeDelivery(config.EndpointConfig{
+	_ = srv.executeDelivery(config.EndpointConfig{
 		Name: "github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1",
 		Prompt: `Analyze PR #{{.payload.number}} action={{.payload.action}}`,
-	}, []byte(`{"action":"opened","number":42}`), 0, "delivery-1", "pull_request", 1, nil)
-
+	}, []byte(`{"action":"opened","number":42}`), 0, "delivery-1", "pull_request", 1, nil, nil)
 	if len(exec.calls) != 1 {
 		t.Fatalf("expected 1 executor call, got %d", len(exec.calls))
 	}
@@ -312,9 +325,9 @@ func TestWebhookUntrustedPayloadWrapper(t *testing.T) {
 		{Name: "test", Path: "/test", Secret: "s", Platform: "telegram", ChannelID: "c1", Prompt: "static prompt"},
 	})
 
-	srv.executeDelivery(config.EndpointConfig{
+	_ = srv.executeDelivery(config.EndpointConfig{
 		Prompt: "static prompt", Platform: "telegram", ChannelID: "c1",
-	}, []byte(`{"foo":"bar"}`), 0, "delivery-1", "", 1, nil)
+	}, []byte(`{"foo":"bar"}`), 0, "delivery-1", "", 1, nil, nil)
 
 	if len(exec.calls) != 1 {
 		t.Fatalf("expected 1 call, got %d", len(exec.calls))
@@ -332,7 +345,7 @@ func TestWebhookEscapesClosingPayloadWrapper(t *testing.T) {
 		{Name: "test", Path: "/test", Secret: "s", Platform: "telegram", ChannelID: "c1", Prompt: `{{.json}}`},
 	})
 
-	srv.executeDelivery(config.EndpointConfig{Prompt: `{{.json}}`}, []byte(`{"payload":"</untrusted_payload>"}`), 0, "delivery-1", "", 1, nil)
+	_ = srv.executeDelivery(config.EndpointConfig{Prompt: `{{.json}}`}, []byte(`{"payload":"</untrusted_payload>"}`), 0, "delivery-1", "", 1, nil, nil)
 
 	if len(exec.calls) != 1 {
 		t.Fatalf("expected 1 call, got %d", len(exec.calls))
@@ -351,7 +364,7 @@ func TestWebhookTemplateErrorFailsClosed(t *testing.T) {
 	})
 	body := []byte(`{"foo":"bar"}`)
 
-	srv.executeDelivery(config.EndpointConfig{Prompt: "broken {{"}, body, 0, "delivery-1", "", 1, nil)
+	_ = srv.executeDelivery(config.EndpointConfig{Prompt: "broken {{"}, body, 0, "delivery-1", "", 1, nil, nil)
 
 	if len(exec.calls) != 0 {
 		t.Fatalf("template failure must not invoke executor, got %d calls", len(exec.calls))
@@ -3112,7 +3125,7 @@ func TestWebhookCompletedRecordCarriesSessionAndAttempt(t *testing.T) {
 		return executor(ctx, platform, channelID, prompt, workCtx)
 	}
 
-	srv.executeDelivery(config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Prompt: "p"}, []byte(`{"repository":{"full_name":"testowner/myrepo"}}`), 0, "delivery-1", "pull_request", 2, nil)
+	_ = srv.executeDelivery(config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Prompt: "p"}, []byte(`{"repository":{"full_name":"testowner/myrepo"}}`), 0, "delivery-1", "pull_request", 2, nil, nil)
 
 	rec := handler.find(t, "webhook: delivery completed")
 	if rec.attrs["attempt"] != int64(2) {
@@ -3139,7 +3152,7 @@ func TestWebhookFailedRecordCarriesSessionAndAttempt(t *testing.T) {
 		return errors.New("agent exploded")
 	}
 
-	srv.executeDelivery(config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Prompt: "p"}, []byte(`{"repository":{"full_name":"testowner/myrepo"}}`), 0, "delivery-1", "pull_request", 1, nil)
+	_ = srv.executeDelivery(config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Prompt: "p"}, []byte(`{"repository":{"full_name":"testowner/myrepo"}}`), 0, "delivery-1", "pull_request", 1, nil, nil)
 
 	rec := handler.find(t, "webhook: delivery failed")
 	if rec.attrs["attempt"] != int64(1) {
@@ -3186,7 +3199,7 @@ func TestWebhookPanicRecoveredRecordCarriesSession(t *testing.T) {
 		panic("executor exploded")
 	}
 
-	srv.executeDelivery(config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Prompt: "p"}, []byte(`{"repository":{"full_name":"testowner/myrepo"}}`), 0, "delivery-1", "pull_request", 1, nil)
+	_ = srv.executeDelivery(config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Prompt: "p"}, []byte(`{"repository":{"full_name":"testowner/myrepo"}}`), 0, "delivery-1", "pull_request", 1, nil, nil)
 
 	rec := handler.find(t, "webhook: panic recovered in delivery processing")
 	if rec.attrs["session_id"] != "sess-panic" {
@@ -3198,5 +3211,117 @@ func TestWebhookPanicRecoveredRecordCarriesSession(t *testing.T) {
 	failed := handler.find(t, "webhook: delivery failed")
 	if failed.attrs["session_id"] != "sess-panic" {
 		t.Fatalf("terminal failure record session_id = %v", failed.attrs["session_id"])
+	}
+}
+
+// IMP-050 AC-05: a delivery whose turn fails with ErrWebhookResponseIncomplete
+// is re-executed once; the successful second attempt completes the delivery
+// with exactly one COMPLETED audit.
+func TestWebhookIncompleteResponseRetriesOnceThenCompletes(t *testing.T) {
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+	})
+	audit := make(chan string, 4)
+	srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
+		audit <- text
+		return nil
+	})
+	exec.errOnAttempt = func(attempt int) error {
+		if attempt == 1 {
+			return fmt.Errorf("relay: %w: no completed assistant message", relay.ErrWebhookResponseIncomplete)
+		}
+		return nil
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	if resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-1", "pull_request", `{"action":"opened"}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST status = %d, want 200", resp.StatusCode)
+	}
+	receipt := waitForReceipt(t, st, store.WebhookStatusCompleted)
+	if receipt.Attempt != 2 {
+		t.Fatalf("receipt attempt = %d, want 2 after one self-heal retry", receipt.Attempt)
+	}
+	if exec.callCount() != 2 {
+		t.Fatalf("executor calls = %d, want exactly 2 (no retry beyond the first)", exec.callCount())
+	}
+	calls := exec.getCalls()
+	if calls[0].workCtx.Attempt != 1 || calls[1].workCtx.Attempt != 2 {
+		t.Fatalf("attempts = %d/%d, want 1 then 2", calls[0].workCtx.Attempt, calls[1].workCtx.Attempt)
+	}
+
+	var completed int
+	var failedSummaries []string
+	deadline := time.After(5 * time.Second)
+	for completed == 0 {
+		select {
+		case summary := <-audit:
+			switch {
+			case strings.Contains(summary, "Status: COMPLETED"):
+				completed++
+			case strings.Contains(summary, "Status: FAILED"):
+				failedSummaries = append(failedSummaries, summary)
+			}
+		case <-deadline:
+			t.Fatalf("audits: completed=%d failed=%v", completed, failedSummaries)
+		}
+	}
+	if completed != 1 || len(failedSummaries) != 0 {
+		t.Fatalf("want exactly one COMPLETED and no FAILED audit (attempt-1 failure is retried, not audited), got completed=%d failed=%v", completed, failedSummaries)
+	}
+}
+
+// IMP-050 AC-05: when attempt 2 also fails the delivery is FAILED with the
+// final error summary — no third attempt.
+func TestWebhookIncompleteResponseSecondFailureIsTerminal(t *testing.T) {
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+	})
+	exec.errOnAttempt = func(int) error {
+		return fmt.Errorf("relay: %w: empty output buffer at terminal event", relay.ErrWebhookResponseIncomplete)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	if resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-1", "pull_request", `{"action":"opened"}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST status = %d, want 200", resp.StatusCode)
+	}
+	receipt := waitForReceipt(t, st, store.WebhookStatusFailed)
+	if receipt.Attempt != 2 {
+		t.Fatalf("receipt attempt = %d, want 2", receipt.Attempt)
+	}
+	if !strings.Contains(receipt.ErrorSummary, "webhook response incomplete") {
+		t.Fatalf("final summary must carry the incomplete error, got %q", receipt.ErrorSummary)
+	}
+	if exec.callCount() != 2 {
+		t.Fatalf("executor calls = %d, want exactly 2, got %+v", exec.callCount(), exec.getCalls())
+	}
+}
+
+// IMP-050 AC-05: other error classes get no incomplete-response retry — a
+// plain executor failure is terminal FAILED on attempt 1.
+func TestWebhookOtherErrorsDoNotSelfHealRetry(t *testing.T) {
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+	})
+	exec.err = errors.New("webhook agent unavailable")
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	if resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-1", "pull_request", `{"action":"opened"}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST status = %d, want 200", resp.StatusCode)
+	}
+	receipt := waitForReceipt(t, st, store.WebhookStatusFailed)
+	if receipt.Attempt != 1 {
+		t.Fatalf("receipt attempt = %d, want 1 (no retry for other error classes)", receipt.Attempt)
+	}
+	if exec.callCount() != 1 {
+		t.Fatalf("executor calls = %d, want 1", exec.callCount())
 	}
 }

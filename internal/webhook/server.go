@@ -56,6 +56,7 @@ type DeliveryStore interface {
 	Create(ctx context.Context, d store.WebhookDelivery) (bool, error)
 	Get(ctx context.Context, endpoint, deliveryID string) (*store.WebhookDelivery, error)
 	Transition(ctx context.Context, id int64, from []store.WebhookStatus, to store.WebhookStatus, summary string) (bool, error)
+	BumpAttempt(ctx context.Context, id int64) error
 	ClaimStale(ctx context.Context, id, cutoff int64) (bool, error)
 	Prune(ctx context.Context, cutoff int64, keep int) (int, error)
 	FailStale(ctx context.Context, cutoff int64, summary string) (int, error)
@@ -500,6 +501,7 @@ func (d *dispatcher) handle(item dispatchItem) {
 	if receipt == nil {
 		return
 	}
+	incompleteRetried := false
 	for attempt := 0; ; attempt++ {
 		if !s.acquireEvent(s.shutdownCtx) {
 			s.failAbandonedReceipt(receipt, "shutting down")
@@ -507,9 +509,23 @@ func (d *dispatcher) handle(item dispatchItem) {
 		}
 		lease, werr := s.resolveWorkspace(item)
 		if werr == nil {
-			s.executeDelivery(item.ep, item.body, receipt.ID, item.deliveryID, item.eventType, receipt.Attempt, lease)
+			// Self-heal grant: the one-shot decision is owned here so
+			// executeDelivery can leave the receipt in processing when the
+			// incomplete response should be retried. Attempt 2 gets a fresh
+			// session automatically — WebhookTurn is constructed per
+			// execution. Same lease shape as the workspace-retry loop.
+			allowRetry := func() bool { return !incompleteRetried }
+			execErr := s.executeDelivery(item.ep, item.body, receipt.ID, item.deliveryID, item.eventType, receipt.Attempt, lease, allowRetry)
 			s.releaseEvent()
 			s.pruneIfDue()
+			if execErr != nil && errors.Is(execErr, relay.ErrWebhookResponseIncomplete) && !incompleteRetried {
+				incompleteRetried = true
+				if tErr := s.deliveries.BumpAttempt(context.Background(), receipt.ID); tErr != nil {
+					slog.Error("webhook: self-heal retry bump failed", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "error", tErr)
+				}
+				receipt.Attempt++
+				continue
+			}
 			return
 		}
 		s.releaseEvent()
@@ -720,8 +736,13 @@ func (s *Server) failAbandonedReceipt(receipt *store.WebhookDelivery, reason str
 // executeDelivery runs the claimed delivery. It must be called with the event
 // slot held and only after beginExecution succeeded for this receipt. The
 // lease, when present, is released after the terminal transition so workspace
-// cleanup failure cannot change the delivery outcome.
-func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64, deliveryID, eventType string, attempt int, lease *WorkspaceLease) {
+// cleanup failure cannot change the delivery outcome. allowRetryIncomplete is
+// the dispatcher's one-shot self-heal decision: when an execution fails with
+// (a wrapped) ErrWebhookResponseIncomplete and the closure returns true, the
+// receipt is deliberately left processing and the dispatcher re-executes once.
+// The returned error is the executor's error, after the receipt's terminal
+// transition (or retry grant) is recorded.
+func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64, deliveryID, eventType string, attempt int, lease *WorkspaceLease, allowRetryIncomplete func() bool) error {
 	key := ExtractExecutionKey(body)
 
 	workCtx := &WebhookWorkContext{
@@ -756,22 +777,22 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 
 	if allowed, reason := workflowAllows(ep.Workflow, envelope); !allowed {
 		s.markSkipped(id, ep, envelope, reason)
-		return
+		return nil
 	}
 
 	if s.channels != nil {
 		ch, err := s.channels.Get(context.Background(), ep.Platform, ep.ChannelID)
 		if err != nil {
-			slog.Error("webhook: channel repo get failed", "endpoint", ep.Name, "platform", ep.Platform, "channel_id", ep.ChannelID, "error", err)
+			slog.Error("webhook: channel repo get failed", "endpoint", ep.Name, "channel_id", ep.ChannelID, "error", err)
 			s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary("channel configuration error: "+err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
-			return
+			return nil
 		}
 		if ch != nil && strings.TrimSpace(ch.Model) != "" {
 			ref, err := relay.ParseModelRef(strings.TrimSpace(ch.Model))
 			if err != nil {
 				slog.Error("webhook: malformed channel model", "endpoint", ep.Name, "platform", ep.Platform, "channel_id", ep.ChannelID)
 				s.failDelivery(ep, id, deliveryID, eventType, envelope, "invalid channel model", workCtx)
-				return
+				return nil
 			}
 			workCtx.Model = &ref
 			workCtx.ModelSource = "channel"
@@ -807,7 +828,7 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 	if err != nil {
 		slog.Error("webhook: template render failed", "endpoint", ep.Name, "delivery_id", deliveryID, "payload_bytes", len(body), "error", err)
 		s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary("template render failed: "+err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
-		return
+		return nil
 	}
 
 	rendered = strings.ReplaceAll(rendered, "</untrusted_payload>", "&lt;/untrusted_payload&gt;")
@@ -834,11 +855,31 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 				"execution_key", workCtx.Key.String(),
 				"worktree", workCtx.Worktree,
 			}, sessionLogAttrs(workCtx)...)...)
+		return nil
 	case errors.Is(err, context.DeadlineExceeded), ctx.Err() == context.DeadlineExceeded:
 		s.failDelivery(ep, id, deliveryID, eventType, envelope, "timed out after "+s.processingTimeout.String(), workCtx)
 	default:
+		// Self-heal coordination: an incomplete response is not written
+		// terminal yet. The dispatcher owns the one-shot decision; when it
+		// grants the retry the receipt stays processing and this attempt
+		// unwinds so the retry loop can re-execute with a fresh session.
+		if errors.Is(err, relay.ErrWebhookResponseIncomplete) && allowRetryIncomplete != nil && allowRetryIncomplete() {
+			summary := redactSummary(err.Error(), maxErrorSummaryRunes, ep.Secret)
+			slog.Warn("webhook: incomplete response, retrying once",
+				append([]any{
+					"endpoint", ep.Name,
+					"delivery_id", deliveryID,
+					"event_type", eventType,
+					"attempt", attempt,
+					"execution_key", workCtx.Key.String(),
+					"worktree", workCtx.Worktree,
+					"error_summary", summary,
+				}, sessionLogAttrs(workCtx)...)...)
+			return err
+		}
 		s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary(err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
 	}
+	return err
 }
 
 func (s *Server) failDelivery(ep config.EndpointConfig, id int64, deliveryID, eventType string, envelope WebhookEnvelope, summary string, workCtx *WebhookWorkContext) {

@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -116,6 +117,59 @@ func TestWebhookWorkflowGateMatrix(t *testing.T) {
 			allowed, _ := workflowAllows(tt.workflow, normalizeWebhook([]byte(tt.body), tt.event, "d", false, ""))
 			if allowed != tt.allowed {
 				t.Fatalf("workflowAllows = %v, want %v", allowed, tt.allowed)
+			}
+		})
+	}
+}
+
+// IMP-050 AC-06: a pull_request synchronize push produces no execution packet.
+func TestWebhookGateRejectsSynchronizeAction(t *testing.T) {
+	for _, workflow := range []string{"github_reviewer", "github_fix", "github_merge", "github_merged", ""} {
+		allowed, reason := workflowAllows(workflow, normalizeWebhook(
+			[]byte(`{"action":"synchronize","pull_request":{"number":9,"state":"open"}}`), "pull_request", "d", false, ""))
+		if workflow != "github_reviewer" {
+			continue // other workflows already reject every pull_request action
+		}
+		if allowed {
+			t.Fatalf("synchronize must never spawn execution (workflow=%s)", workflow)
+		}
+		if !strings.Contains(reason, "synchronize") {
+			t.Fatalf("skip reason must mention synchronize, got %q", reason)
+		}
+	}
+}
+
+// IMP-050 AC-07: an issue_comment re-review trigger on a closed or merged PR
+// produces no execution packet; an open PR still executes. All three PR
+// states are covered.
+func TestWebhookGateSkipsReReviewOnClosedOrMergedPR(t *testing.T) {
+	tests := []struct {
+		name    string
+		state   string
+		merged  bool
+		allowed bool
+	}{
+		{"open PR executes", "open", false, true},
+		{"closed PR skipped", "closed", false, false},
+		{"merged PR skipped", "closed", true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := fmt.Sprintf(`{"action":"created","issue":{"number":5,"state":%q,"pull_request":{"html_url":"https://example/pull/5","merged":%t}},"comment":{"body":"please re-review"}}`, tt.state, tt.merged)
+			envelope := normalizeWebhook([]byte(body), "issue_comment", "d", false, "")
+			wantState := tt.state
+			if tt.merged {
+				wantState = "merged" // merged flag wins over issue.state
+			}
+			if got := envelope["pr_state"]; got != wantState {
+				t.Fatalf("pr_state = %v, want %q", got, wantState)
+			}
+			allowed, reason := workflowAllows("github_reviewer", envelope)
+			if allowed != tt.allowed {
+				t.Fatalf("workflowAllows = %v, want %v (pr_state=%v)", allowed, tt.allowed, envelope["pr_state"])
+			}
+			if !allowed && !strings.Contains(reason, "no re-review execution") {
+				t.Fatalf("skip reason must name the terminal PR state, got %q", reason)
 			}
 		})
 	}

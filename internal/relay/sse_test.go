@@ -82,7 +82,7 @@ func TestReadSSEMidStreamFailureDeliversPriorEvents(t *testing.T) {
 
 func TestReadSSECleanEOFNoError(t *testing.T) {
 	ch := make(chan Event, 8)
-	if err := readSSE(context.Background(), strings.NewReader("event: done\n\n"), ch); err != nil {
+	if err := readSSE(context.Background(), strings.NewReader("data: {\"type\":\"session.idle\"}\n\n"), ch); err != nil {
 		t.Fatalf("clean EOF must not error: %v", err)
 	}
 	if ev := <-ch; ev.Type != "done" {
@@ -341,9 +341,14 @@ func TestParseLegacyEventsStillWork(t *testing.T) {
 	if !ok || ev.Type != "delta" || ev.Delta != "hello" {
 		t.Fatalf("legacy delta: %+v %v", ev, ok)
 	}
-	ev, ok = parseSSEEvent(newEventDecoder(), "done", "")
+	// IMP-050: the bare "done" event line was a substring-collision terminal;
+	// only the exact session.idle terminates a turn now.
+	ev, ok = parseSSEEvent(newEventDecoder(), "session.idle", "")
 	if !ok || ev.Type != "done" {
-		t.Fatalf("legacy done: %+v %v", ev, ok)
+		t.Fatalf("session.idle done: %+v %v", ev, ok)
+	}
+	if ev, ok := parseSSEEvent(newEventDecoder(), "done", ""); ok {
+		t.Fatalf("bare done line must be ignored, got %+v", ev)
 	}
 }
 
@@ -564,5 +569,58 @@ func TestDecoderSetsToolInput(t *testing.T) {
 	}
 	if len(ev.ToolInput) == 0 || !strings.Contains(string(ev.ToolInput), "0 9 * * 1-5") {
 		t.Fatalf("expected ToolInput to contain cron_expression, got: %s", string(ev.ToolInput))
+	}
+}
+
+// IMP-050 AC-01: an event line whose type merely contains "done"/"complete"
+// as a substring must never terminate a turn; only the exact session.idle is
+// terminal on the event:-line path.
+func TestSubstringDoneEventsAreNotTerminal(t *testing.T) {
+	decoder := newEventDecoder()
+	for _, eventType := range []string{
+		"message.part.completed",
+		"part.state.complete",
+		"session.done",
+		"step-finish: done-ish",
+		"completed",
+		"done",
+	} {
+		ev, ok := parseSSEEvent(decoder, eventType, `{"properties":{}}`)
+		if ok {
+			t.Fatalf("event type %q produced event %+v, want ignored", eventType, ev)
+		}
+		if ev.Type == "done" {
+			t.Fatalf("event type %q emitted a terminal done event", eventType)
+		}
+	}
+
+	// The exact terminal type still completes, including after the spurious
+	// lines above fed the same decoder.
+	ev, ok := parseSSEEvent(decoder, "session.idle", `{"properties":{}}`)
+	if !ok || ev.Type != "done" {
+		t.Fatalf("exact session.idle line: got (%+v, %v), want done", ev, ok)
+	}
+}
+
+// IMP-050 AC-02: the JSON decoder path keeps its exact session.idle → done
+// mapping, and part-state transitions never synthesize a terminal.
+func TestJSONPathTerminalUnchanged(t *testing.T) {
+	decoder := newEventDecoder()
+
+	// Part-state transition pending → completed emits no terminal.
+	stateEvents := []string{
+		`{"type":"message.part.updated","properties":{"part":{"id":"p1","type":"tool","tool":"bash","state":{"status":"pending"}}}}`,
+		`{"type":"message.part.updated","properties":{"part":{"id":"p1","type":"tool","tool":"bash","state":{"status":"completed"}}}}`,
+	}
+	for _, data := range stateEvents {
+		ev, ok := parseSSEEvent(decoder, "", data)
+		if ok && ev.Type == "done" {
+			t.Fatalf("part-state event emitted done: %s", data)
+		}
+	}
+
+	ev, ok := parseSSEEvent(decoder, "", `{"type":"session.idle","properties":{}}`)
+	if !ok || ev.Type != "done" {
+		t.Fatalf("JSON session.idle: got (%+v, %v), want done", ev, ok)
 	}
 }

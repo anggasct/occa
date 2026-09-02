@@ -192,6 +192,10 @@ type WebhookDeliveryRepo interface {
 	// Transition moves a receipt between statuses only when it currently holds
 	// one of the from statuses (compare-and-swap) and returns whether it moved.
 	Transition(ctx context.Context, id int64, from []WebhookStatus, to WebhookStatus, summary string) (bool, error)
+	// BumpAttempt increments the attempt counter of a processing receipt —
+	// used by the dispatcher's self-heal retry so the re-execution is
+	// observable as attempt 2 in the delivery log.
+	BumpAttempt(ctx context.Context, id int64) error
 	// ClaimStale atomically claims an old in-flight receipt for recovery.
 	ClaimStale(ctx context.Context, id, cutoff int64) (bool, error)
 	// List returns the most recent deliveries, newest first, capped at limit.
