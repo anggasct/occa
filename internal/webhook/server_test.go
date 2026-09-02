@@ -3214,8 +3214,8 @@ func TestWebhookPanicRecoveredRecordCarriesSession(t *testing.T) {
 	}
 }
 
-// IMP-050 AC-05: a delivery whose turn fails with ErrWebhookResponseIncomplete
-// is re-executed once; the successful second attempt completes the delivery
+// A delivery whose turn fails with ErrWebhookResponseIncomplete is
+// re-executed once; the successful second attempt completes the delivery
 // with exactly one COMPLETED audit.
 func TestWebhookIncompleteResponseRetriesOnceThenCompletes(t *testing.T) {
 	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{
@@ -3273,8 +3273,8 @@ func TestWebhookIncompleteResponseRetriesOnceThenCompletes(t *testing.T) {
 	}
 }
 
-// IMP-050 AC-05: when attempt 2 also fails the delivery is FAILED with the
-// final error summary — no third attempt.
+// When attempt 2 also fails the delivery is FAILED with the final error
+// summary — no third attempt.
 func TestWebhookIncompleteResponseSecondFailureIsTerminal(t *testing.T) {
 	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{
 		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
@@ -3302,8 +3302,8 @@ func TestWebhookIncompleteResponseSecondFailureIsTerminal(t *testing.T) {
 	}
 }
 
-// IMP-050 AC-05: other error classes get no incomplete-response retry — a
-// plain executor failure is terminal FAILED on attempt 1.
+// Other error classes get no incomplete-response retry — a plain executor
+// failure is terminal FAILED on attempt 1.
 func TestWebhookOtherErrorsDoNotSelfHealRetry(t *testing.T) {
 	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{
 		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},

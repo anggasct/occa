@@ -341,7 +341,7 @@ func TestParseLegacyEventsStillWork(t *testing.T) {
 	if !ok || ev.Type != "delta" || ev.Delta != "hello" {
 		t.Fatalf("legacy delta: %+v %v", ev, ok)
 	}
-	// IMP-050: the bare "done" event line was a substring-collision terminal;
+	// The bare "done" event line used to be a substring-collision terminal;
 	// only the exact session.idle terminates a turn now.
 	ev, ok = parseSSEEvent(newEventDecoder(), "session.idle", "")
 	if !ok || ev.Type != "done" {
@@ -572,9 +572,9 @@ func TestDecoderSetsToolInput(t *testing.T) {
 	}
 }
 
-// IMP-050 AC-01: an event line whose type merely contains "done"/"complete"
-// as a substring must never terminate a turn; only the exact session.idle is
-// terminal on the event:-line path.
+// An event line whose type merely contains "done"/"complete" as a substring
+// must never terminate a turn; only the exact session.idle is terminal on
+// the event:-line path.
 func TestSubstringDoneEventsAreNotTerminal(t *testing.T) {
 	decoder := newEventDecoder()
 	for _, eventType := range []string{
@@ -602,8 +602,8 @@ func TestSubstringDoneEventsAreNotTerminal(t *testing.T) {
 	}
 }
 
-// IMP-050 AC-02: the JSON decoder path keeps its exact session.idle → done
-// mapping, and part-state transitions never synthesize a terminal.
+// The JSON decoder path keeps its exact session.idle → done mapping, and
+// part-state transitions never synthesize a terminal.
 func TestJSONPathTerminalUnchanged(t *testing.T) {
 	decoder := newEventDecoder()
 

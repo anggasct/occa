@@ -520,8 +520,8 @@ func TestWebhookTurnAbortErrUnreachableTreatedAsClean(t *testing.T) {
 	}
 }
 
-// IMP-050 AC-03: a terminal event with a non-empty buffer and a completed
-// assistant message still returns success with the full buffered output.
+// A terminal event with a non-empty buffer and a completed assistant
+// message still returns success with the full buffered output.
 func TestWebhookTurnSanityGatePassKeepsSuccess(t *testing.T) {
 	handler := captureWebhookLogs(t)
 	client := newWebhookTurnClient(eventsWith(
@@ -548,9 +548,8 @@ func TestWebhookTurnSanityGatePassKeepsSuccess(t *testing.T) {
 	}
 }
 
-// IMP-050 AC-04 (mode a): a terminal event with an empty buffer is an
-// incomplete response — the session aborts exactly once and no success is
-// reported.
+// A terminal event with an empty buffer is an incomplete response — the
+// session aborts exactly once and no success is reported.
 func TestWebhookTurnSanityGateRejectsEmptyOutput(t *testing.T) {
 	client := newWebhookTurnClient(eventsWith(Event{Type: "done"}))
 	client.listMessages = func(string) []MessageInfo {
@@ -572,8 +571,8 @@ func TestWebhookTurnSanityGateRejectsEmptyOutput(t *testing.T) {
 	}
 }
 
-// IMP-050 AC-04 (mode b): a terminal event whose session shows no completed
-// assistant message is an incomplete response.
+// A terminal event whose session shows no completed assistant message is an
+// incomplete response.
 func TestWebhookTurnSanityGateRejectsMissingCompletedMessage(t *testing.T) {
 	handler := captureWebhookLogs(t)
 	client := newWebhookTurnClient(eventsWith(Event{Type: "delta", Delta: "partial"}, Event{Type: "done"}))
@@ -601,8 +600,8 @@ func TestWebhookTurnSanityGateRejectsMissingCompletedMessage(t *testing.T) {
 	}
 }
 
-// IMP-050 AC-04: a ListMessages transport failure must not pass the sanity
-// gate — without message evidence the result is unverifiable.
+// A ListMessages transport failure must not pass the sanity gate — without
+// message evidence the result is unverifiable.
 func TestWebhookTurnSanityGateRejectsListMessagesFailure(t *testing.T) {
 	client := newWebhookTurnClient(eventsWith(Event{Type: "delta", Delta: "out"}, Event{Type: "done"}))
 	client.listMessagesErr = errors.New("503 unavailable")

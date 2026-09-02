@@ -122,7 +122,7 @@ func TestWebhookWorkflowGateMatrix(t *testing.T) {
 	}
 }
 
-// IMP-050 AC-06: a pull_request synchronize push produces no execution packet.
+// A pull_request synchronize push produces no execution packet.
 func TestWebhookGateRejectsSynchronizeAction(t *testing.T) {
 	for _, workflow := range []string{"github_reviewer", "github_fix", "github_merge", "github_merged", ""} {
 		allowed, reason := workflowAllows(workflow, normalizeWebhook(
@@ -139,9 +139,9 @@ func TestWebhookGateRejectsSynchronizeAction(t *testing.T) {
 	}
 }
 
-// IMP-050 AC-07: an issue_comment re-review trigger on a closed or merged PR
-// produces no execution packet; an open PR still executes. All three PR
-// states are covered.
+// An issue_comment re-review trigger on a closed or merged PR produces no
+// execution packet; an open PR still executes. All three PR states are
+// covered.
 func TestWebhookGateSkipsReReviewOnClosedOrMergedPR(t *testing.T) {
 	tests := []struct {
 		name    string

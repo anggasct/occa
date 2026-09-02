@@ -26,9 +26,9 @@ func workflowAllows(workflow string, envelope WebhookEnvelope) (bool, string) {
 
 	switch workflow {
 	case "github_reviewer":
-		// IMP-050: pushes to an open PR's branch (synchronize) must never
-		// spawn an agent execution — every push during active work would
-		// otherwise start a parallel session racing the first one.
+		// Pushes to an open PR's branch (synchronize) must never spawn an
+		// agent execution — every push during active work would otherwise
+		// start a parallel session racing the first one.
 		if eventType == "pull_request" && action == "synchronize" {
 			return false, "skipped: pull_request synchronize (push while PR open spawns no execution)"
 		}
@@ -36,9 +36,9 @@ func workflowAllows(workflow string, envelope WebhookEnvelope) (bool, string) {
 			return true, ""
 		}
 		if eventType == "issue_comment" && action == "created" && prNumber != "" && stringValue(envelope["comment_trigger"]) == "please re-review" {
-			// IMP-050: re-review triggers on a merged/closed PR execute
-			// against code that is already integrated or rejected; refuse
-			// them at the gate so no session/worktree is ever spawned.
+			// Re-review triggers on a merged/closed PR execute against
+			// code that is already integrated or rejected; refuse them at
+			// the gate so no session/worktree is ever spawned.
 			if state := prState(envelope); state == "closed" || state == "merged" {
 				return false, fmt.Sprintf("skipped: PR #%s is %s; no re-review execution", prNumber, state)
 			}
