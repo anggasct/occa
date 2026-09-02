@@ -264,9 +264,10 @@ const (
 )
 
 type MessageInfo struct {
-	ID      string
-	Role    string
-	Created int64
+	ID        string
+	Role      string
+	Created   int64
+	Completed int64
 }
 
 type AgentInfo struct {
@@ -570,7 +571,8 @@ func (c *HTTPClient) ListMessages(ctx context.Context, sessionID string) ([]Mess
 			ID   string `json:"id"`
 			Role string `json:"role"`
 			Time struct {
-				Created int64 `json:"created"`
+				Created   int64 `json:"created"`
+				Completed int64 `json:"completed"`
 			} `json:"time"`
 		} `json:"info"`
 	}
@@ -581,9 +583,10 @@ func (c *HTTPClient) ListMessages(ctx context.Context, sessionID string) ([]Mess
 	messages := make([]MessageInfo, len(raw))
 	for i, r := range raw {
 		messages[i] = MessageInfo{
-			ID:      r.Info.ID,
-			Role:    r.Info.Role,
-			Created: r.Info.Time.Created,
+			ID:        r.Info.ID,
+			Role:      r.Info.Role,
+			Created:   r.Info.Time.Created,
+			Completed: r.Info.Time.Completed,
 		}
 	}
 	return messages, nil

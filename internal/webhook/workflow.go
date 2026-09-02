@@ -26,10 +26,22 @@ func workflowAllows(workflow string, envelope WebhookEnvelope) (bool, string) {
 
 	switch workflow {
 	case "github_reviewer":
-		if eventType == "pull_request" && containsString([]string{"opened", "synchronize", "reopened", "ready_for_review"}, action) {
+		// Pushes to an open PR's branch (synchronize) must never spawn an
+		// agent execution — every push during active work would otherwise
+		// start a parallel session racing the first one.
+		if eventType == "pull_request" && action == "synchronize" {
+			return false, "skipped: pull_request synchronize (push while PR open spawns no execution)"
+		}
+		if eventType == "pull_request" && containsString([]string{"opened", "reopened", "ready_for_review"}, action) {
 			return true, ""
 		}
 		if eventType == "issue_comment" && action == "created" && prNumber != "" && stringValue(envelope["comment_trigger"]) == "please re-review" {
+			// Re-review triggers on a merged/closed PR execute against
+			// code that is already integrated or rejected; refuse them at
+			// the gate so no session/worktree is ever spawned.
+			if state := prState(envelope); state == "closed" || state == "merged" {
+				return false, fmt.Sprintf("skipped: PR #%s is %s; no re-review execution", prNumber, state)
+			}
 			return true, ""
 		}
 	case "github_fix":
@@ -52,6 +64,14 @@ func workflowAllows(workflow string, envelope WebhookEnvelope) (bool, string) {
 		}
 	}
 	return false, fmt.Sprintf("workflow %s rejected %s.%s", workflow, eventType, action)
+}
+
+// prState returns the terminal state of the referenced PR, if known: "open",
+// "closed", or "merged". GitHub reports issue.state "closed" for both closed
+// and merged PRs; the merged flag disambiguates (normalize already folds that
+// into pr_state).
+func prState(envelope WebhookEnvelope) string {
+	return strings.ToLower(stringValue(envelope["pr_state"]))
 }
 
 func containsString(values []string, want string) bool {

@@ -107,6 +107,25 @@ func (r *sqliteWebhookDeliveryRepo) Transition(ctx context.Context, id int64, fr
 	return n > 0, nil
 }
 
+// BumpAttempt increments the attempt counter of an in-flight delivery. It is
+// used by the dispatcher's self-heal path so a re-executed delivery is
+// observable as attempt 2 in the receipt. The update only succeeds while the
+// delivery is still processing, so a delivery that raced to a terminal state
+// in between keeps its final attempt count.
+func (r *sqliteWebhookDeliveryRepo) BumpAttempt(ctx context.Context, id int64) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE webhook_delivery SET attempt = attempt + 1, updated_at = ? WHERE id = ? AND status = ?`,
+		time.Now().Unix(), id, string(WebhookStatusProcessing),
+	)
+	if err != nil {
+		return fmt.Errorf("store: webhook delivery bump attempt: %w", err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return fmt.Errorf("store: webhook delivery bump attempt: delivery %d not in processing", id)
+	}
+	return nil
+}
+
 func (r *sqliteWebhookDeliveryRepo) ClaimStale(ctx context.Context, id, cutoff int64) (bool, error) {
 	now := time.Now().Unix()
 	res, err := r.db.ExecContext(ctx,

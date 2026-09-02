@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"strings"
 )
 
@@ -83,12 +84,19 @@ func parseSSEEvent(decoder *eventDecoder, eventType, data string) (Event, bool) 
 		return parsePermissionEvent(data), true
 	case strings.Contains(eventType, "delta") || strings.Contains(eventType, "message.part.delta"):
 		return Event{Type: "delta", Delta: data}, true
-	case strings.Contains(eventType, "done") || strings.Contains(eventType, "complete"):
+	case eventType == "session.idle":
 		return Event{Type: "done"}, true
 	case strings.Contains(eventType, "error"):
 		return Event{Type: "error", Delta: data}, true
 	default:
-		return Event{Type: "delta", Delta: data}, true
+		// Anything else — including types that merely contain "done" or
+		// "complete" (e.g. a part/state line ending in "-complete") — is not
+		// terminal. Treating substring collisions as done ended turns while
+		// the agent was still working; only the exact session.idle may
+		// terminate a turn. Unknown lines are swallowed like unrecognized
+		// events so they never synthesize a terminal.
+		slog.Debug("relay: ignoring unknown sse event line", "event_type", eventType)
+		return Event{}, false
 	}
 }
 
