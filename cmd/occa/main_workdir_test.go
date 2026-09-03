@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/anggasct/occa/internal/store"
@@ -66,10 +69,21 @@ func TestResolveWebhookWorkdirFallsBackOnStoreError(t *testing.T) {
 func TestResolveWebhookWorkdirFallsBackWhenChannelWorkdirEmpty(t *testing.T) {
 	st := newChannelStore(t)
 
+	// Capture the default slog logger so the WARN on the empty-workdir
+	// fallback can be asserted.
+	var logBuf bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
 	got := resolveWebhookWorkdir(context.Background(), st.ChannelRepo(), "/home/ubuntu", "discord", "proceed-channel", "")
 
 	if got != "/home/ubuntu" {
 		t.Fatalf("resolved workdir = %q, want the default workdir", got)
+	}
+	if !strings.Contains(logBuf.String(), "level=WARN") ||
+		!strings.Contains(logBuf.String(), "webhook: channel workdir empty; using default workdir") {
+		t.Fatalf("expected WARN log for empty channel workdir, got log output: %q", logBuf.String())
 	}
 }
 

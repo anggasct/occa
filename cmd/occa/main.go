@@ -75,6 +75,9 @@ func resolveWebhookWorkdir(ctx context.Context, channels store.ChannelRepo, defa
 		slog.Info("webhook: resolved channel workdir",
 			"platform", platform, "channel_id", channelID, "workdir", chRow.Workdir)
 		return chRow.Workdir
+	default:
+		slog.Warn("webhook: channel workdir empty; using default workdir",
+			"platform", platform, "channel_id", channelID)
 	}
 	return defaultWorkdir
 }
