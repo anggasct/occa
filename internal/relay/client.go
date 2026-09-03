@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"strings"
@@ -712,7 +713,7 @@ func (c *HTTPClient) SwitchAgent(ctx context.Context, sessionID, name string) er
 	}{
 		Name: name,
 	}
-	resp, err := c.post(ctx, "/session/"+sessionID+"/agent", payload)
+	resp, err := c.post(ctx, "/api/session/"+sessionID+"/agent", payload)
 	if err != nil {
 		return fmt.Errorf("relay: switch agent: %w", err)
 	}
@@ -723,6 +724,18 @@ func (c *HTTPClient) SwitchAgent(ctx context.Context, sessionID, name string) er
 	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("relay: switch agent: unexpected status %d", resp.StatusCode)
+	}
+	mediaType, _, parseErr := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if parseErr != nil || mediaType != "application/json" {
+		return fmt.Errorf("relay: switch agent: unexpected content type %q", resp.Header.Get("Content-Type"))
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return fmt.Errorf("relay: switch agent: read response: %w", readErr)
+	}
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) || !json.Valid(trimmed) {
+		return errors.New("relay: switch agent: invalid JSON response")
 	}
 	return nil
 }

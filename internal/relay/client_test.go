@@ -1050,15 +1050,19 @@ func TestListAgents(t *testing.T) {
 
 func TestSwitchAgent(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
-		var gotBody map[string]string
+		var gotBody []byte
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPost || r.URL.Path != "/session/sess-1/agent" {
+			if r.Method != http.MethodPost || r.URL.Path != "/api/session/sess-1/agent" {
 				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			}
-			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
-				t.Fatalf("decode body: %v", err)
+			var err error
+			gotBody, err = io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read body: %v", err)
 			}
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("true"))
 		}))
 		defer srv.Close()
 
@@ -1066,8 +1070,8 @@ func TestSwitchAgent(t *testing.T) {
 		if err := c.SwitchAgent(context.Background(), "sess-1", "reviewer"); err != nil {
 			t.Fatalf("SwitchAgent: %v", err)
 		}
-		if gotBody["name"] != "reviewer" {
-			t.Fatalf("got body name %q, want reviewer", gotBody["name"])
+		if string(gotBody) != `{"name":"reviewer"}` {
+			t.Fatalf("got body %q, want {\"name\":\"reviewer\"}", gotBody)
 		}
 	})
 
@@ -1094,6 +1098,36 @@ func TestSwitchAgent(t *testing.T) {
 		err := c.SwitchAgent(context.Background(), "sess-1", "reviewer")
 		if err == nil || !strings.Contains(err.Error(), "unexpected status 500") {
 			t.Fatalf("expected error containing unexpected status 500, got %v", err)
+		}
+	})
+
+	t.Run("html fallback is rejected", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("<html>web ui</html>"))
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		err := c.SwitchAgent(context.Background(), "sess-1", "reviewer")
+		if err == nil || !strings.Contains(err.Error(), "unexpected content type") {
+			t.Fatalf("expected content type error, got %v", err)
+		}
+	})
+
+	t.Run("malformed json is rejected", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("{"))
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		err := c.SwitchAgent(context.Background(), "sess-1", "reviewer")
+		if err == nil || !strings.Contains(err.Error(), "invalid JSON response") {
+			t.Fatalf("expected invalid JSON error, got %v", err)
 		}
 	})
 }
