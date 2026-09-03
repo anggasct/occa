@@ -16,7 +16,7 @@ func TestReadSSELargeLineDelivered(t *testing.T) {
 	big := strings.Repeat("x", 1024*1024)
 	ch := make(chan Event, 8)
 	go func() {
-		_ = readSSE(context.Background(), strings.NewReader("event: message.part.delta\ndata: "+big+"\n\n"), ch)
+		_ = readSSE(context.Background(), strings.NewReader("event: message.part.delta\ndata: "+big+"\n\n"), ch, "")
 	}()
 
 	ev := <-ch
@@ -29,7 +29,7 @@ func TestReadSSELineOverLimitIsTypedError(t *testing.T) {
 	huge := strings.Repeat("y", MaxEventLineBytes+1)
 	ch := make(chan Event, 8)
 	done := make(chan error, 1)
-	go func() { done <- readSSE(context.Background(), strings.NewReader("data: "+huge+"\n\n"), ch) }()
+	go func() { done <- readSSE(context.Background(), strings.NewReader("data: "+huge+"\n\n"), ch, "") }()
 
 	err := <-done
 	if err == nil {
@@ -64,7 +64,7 @@ func TestReadSSEMidStreamFailureDeliversPriorEvents(t *testing.T) {
 	ch := make(chan Event, 8)
 	reader := &failingReader{}
 	done := make(chan error, 1)
-	go func() { done <- readSSE(context.Background(), reader, ch) }()
+	go func() { done <- readSSE(context.Background(), reader, ch, "") }()
 
 	ev := <-ch
 	if ev.Type != "delta" || ev.Delta != "partial" {
@@ -82,7 +82,7 @@ func TestReadSSEMidStreamFailureDeliversPriorEvents(t *testing.T) {
 
 func TestReadSSECleanEOFNoError(t *testing.T) {
 	ch := make(chan Event, 8)
-	if err := readSSE(context.Background(), strings.NewReader("data: {\"type\":\"session.idle\"}\n\n"), ch); err != nil {
+	if err := readSSE(context.Background(), strings.NewReader("data: {\"type\":\"session.idle\"}\n\n"), ch, ""); err != nil {
 		t.Fatalf("clean EOF must not error: %v", err)
 	}
 	if ev := <-ch; ev.Type != "done" {
@@ -96,7 +96,7 @@ func TestReadSSECancelIsNotReadFailure(t *testing.T) {
 	pr, pw := io.Pipe()
 
 	done := make(chan error, 1)
-	go func() { done <- readSSE(ctx, pr, ch) }()
+	go func() { done <- readSSE(ctx, pr, ch, "") }()
 
 	cancel()
 	_ = pw.Close() // unblock the pending read
@@ -622,5 +622,124 @@ func TestJSONPathTerminalUnchanged(t *testing.T) {
 	ev, ok := parseSSEEvent(decoder, "", `{"type":"session.idle","properties":{}}`)
 	if !ok || ev.Type != "done" {
 		t.Fatalf("JSON session.idle: got (%+v, %v), want done", ev, ok)
+	}
+}
+
+// The agent's /event stream is a global bus: it delivers every session's
+// events regardless of the session_id query param, with the owning session in
+// properties.sessionID (or properties.part.sessionID for
+// message.part.updated). A decoder scoped to one session must drop foreign
+// events — a concurrent session's session.idle must never complete this turn
+// (webhook deliveries run many sessions concurrently on the same agent) —
+// while payloads without session identity pass through unchanged.
+func TestSessionScopedDecoderDropsForeignEvents(t *testing.T) {
+	cases := []struct {
+		name      string
+		eventType string
+		data      string
+		want      Event
+		ok        bool
+	}{
+		{"own idle completes", "", `{"type":"session.idle","properties":{"sessionID":"ses-a"}}`, Event{Type: "done"}, true},
+		{"foreign idle dropped", "", `{"type":"session.idle","properties":{"sessionID":"ses-b"}}`, Event{}, false},
+		{"foreign delta dropped", "", `{"type":"message.part.delta","properties":{"sessionID":"ses-b","partID":"p1","field":"text","delta":"leak"}}`, Event{}, false},
+		{"foreign part.updated dropped", "", `{"type":"message.part.updated","properties":{"part":{"id":"p1","sessionID":"ses-b","type":"text"}}}`, Event{}, false},
+		{"foreign idle via event line dropped", "session.idle", `{"properties":{"sessionID":"ses-b"}}`, Event{}, false},
+		{"own idle via event line completes", "session.idle", `{"properties":{"sessionID":"ses-a"}}`, Event{Type: "done"}, true},
+		{"malformed payload passes through", "session.idle", `not-json`, Event{Type: "done"}, true},
+		{"empty properties pass through", "session.idle", `{"properties":{}}`, Event{Type: "done"}, true},
+		{"heartbeat without session passes", "", `{"type":"server.heartbeat","properties":{}}`, Event{}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := parseSSEEvent(newEventDecoderFor("ses-a"), c.eventType, c.data)
+			if ok != c.ok || got.Type != c.want.Type {
+				t.Fatalf("got (%+v, %v), want (%+v, %v)", got, ok, c.want, c.ok)
+			}
+		})
+	}
+}
+
+// The whole readSSE stream with a scoped decoder: a foreign session.idle
+// between text deltas is dropped, and only the own session's idle completes.
+func TestReadSSESessionScopedDropsForeignTerminal(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"type":"server.connected","properties":{}}`,
+		`data: {"type":"message.part.updated","properties":{"part":{"id":"p1","sessionID":"ses-own","type":"text"}}}`,
+		`data: {"type":"message.part.delta","properties":{"sessionID":"ses-own","partID":"p1","field":"text","delta":"hello"}}`,
+		`data: {"type":"session.idle","properties":{"sessionID":"ses-other"}}`,
+		`data: {"type":"session.idle","properties":{"sessionID":"ses-own"}}`,
+		``,
+	}, "\n\n")
+
+	ch := make(chan Event, 8)
+	done := make(chan error, 1)
+	go func() { done <- readSSE(context.Background(), strings.NewReader(stream), ch, "ses-own") }()
+
+	if err := <-done; err != nil {
+		t.Fatalf("readSSE: %v", err)
+	}
+
+	// readSSE does not close ch (that's the Events wrapper's job), so drain
+	// the expected count directly.
+	ev1 := <-ch
+	ev2 := <-ch
+	if ev1.Type != "delta" || ev1.Delta != "hello" {
+		t.Fatalf("first event = %+v, want delta hello", ev1)
+	}
+	if ev2.Type != "done" {
+		t.Fatalf("second event = %+v, want done (foreign idle must not complete)", ev2)
+	}
+}
+
+// A scoped decoder must not strand a turn on a malformed line: the
+// unparseable payload has no session identity so it is passed through
+// (producing the raw-text delta path), and the stream completes normally on
+// the own session's idle afterwards.
+func TestReadSSESessionScopedMalformedEventDoesNotStrand(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: not-json-at-all`,
+		`data: {"type":"message.part.updated","properties":{"part":{"id":"p1","sessionID":"ses-own","type":"text"}}}`,
+		`data: {"type":"message.part.delta","properties":{"sessionID":"ses-own","partID":"p1","field":"text","delta":"ok"}}`,
+		`data: {"type":"session.idle","properties":{"sessionID":"ses-own"}}`,
+		``,
+	}, "\n\n")
+
+	ch := make(chan Event, 8)
+	done := make(chan error, 1)
+	go func() { done <- readSSE(context.Background(), strings.NewReader(stream), ch, "ses-own") }()
+
+	if err := <-done; err != nil {
+		t.Fatalf("readSSE: %v", err)
+	}
+
+	// readSSE does not close ch (that's the Events wrapper's job), so drain
+	// the expected count directly.
+	ev1 := <-ch
+	ev2 := <-ch
+	ev3 := <-ch
+	if ev1.Type != "delta" || ev1.Delta != "not-json-at-all" {
+		t.Fatalf("first event = %+v, want raw delta passthrough", ev1)
+	}
+	if ev2.Type != "delta" || ev2.Delta != "ok" {
+		t.Fatalf("second event = %+v, want delta ok", ev2)
+	}
+	if ev3.Type != "done" {
+		t.Fatalf("third event = %+v, want done", ev3)
+	}
+}
+
+// An unscoped decoder ("" session — streams already scoped upstream) keeps
+// the pre-existing behavior: any session.idle line completes regardless of
+// payload session id.
+func TestUnscopedDecoderKeepsLegacyBehavior(t *testing.T) {
+	decoder := newEventDecoder()
+	ev, ok := parseSSEEvent(decoder, "session.idle", `{"properties":{"sessionID":"ses-any"}}`)
+	if !ok || ev.Type != "done" {
+		t.Fatalf("unscoped named idle: got (%+v, %v), want done", ev, ok)
+	}
+	ev, ok = parseSSEEvent(decoder, "", `{"type":"session.idle","properties":{"sessionID":"ses-any"}}`)
+	if !ok || ev.Type != "done" {
+		t.Fatalf("unscoped JSON idle: got (%+v, %v), want done", ev, ok)
 	}
 }

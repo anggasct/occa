@@ -885,7 +885,11 @@ func (c *HTTPClient) Events(ctx context.Context, sessionID string) (<-chan Event
 	go func() {
 		defer close(ch)
 		defer resp.Body.Close()
-		err := readSSE(ctx, resp.Body, ch)
+		// The agent's /event stream is a global bus: it delivers every
+		// session's events regardless of the session_id query param. The
+		// decoder filters by sessionID client-side so concurrent sessions
+		// cannot complete or pollute this turn.
+		err := readSSE(ctx, resp.Body, ch, sessionID)
 		if err != nil && ctx.Err() == nil {
 			slog.Warn("relay: event stream read failed", "session_id", sessionID, "error", err)
 		}

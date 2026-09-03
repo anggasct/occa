@@ -53,6 +53,35 @@ func (p agentProbe) Running(_ context.Context) (int, bool, error) {
 // version is overridden at build time via -ldflags "-X main.version=...".
 var version = "dev"
 
+// resolveWebhookWorkdir selects the agent instance workdir for a webhook
+// delivery: a worktree lease wins outright; without one the endpoint
+// channel's own workdir isolates different repositories' reviewer turns on
+// separate agent instances, and the agent default workdir is the last
+// fallback. A channel lookup that fails, misses, or carries no workdir
+// falls back to the default — never fails the delivery.
+func resolveWebhookWorkdir(ctx context.Context, channels store.ChannelRepo, defaultWorkdir, platform, channelID string, leaseWorkdir string) string {
+	if leaseWorkdir != "" {
+		return leaseWorkdir
+	}
+	chRow, err := channels.Get(ctx, platform, channelID)
+	switch {
+	case err != nil:
+		slog.Warn("webhook: channel workdir lookup failed; using default workdir",
+			"platform", platform, "channel_id", channelID, "error", err)
+	case chRow == nil:
+		slog.Warn("webhook: channel row not found; using default workdir",
+			"platform", platform, "channel_id", channelID)
+	case chRow.Workdir != "":
+		slog.Info("webhook: resolved channel workdir",
+			"platform", platform, "channel_id", channelID, "workdir", chRow.Workdir)
+		return chRow.Workdir
+	default:
+		slog.Warn("webhook: channel workdir empty; using default workdir",
+			"platform", platform, "channel_id", channelID)
+	}
+	return defaultWorkdir
+}
+
 func main() {
 	if len(os.Args) >= 2 && os.Args[1] == "db" {
 		os.Exit(runDBCommand(os.Args[2:]))
@@ -244,10 +273,7 @@ func main() {
 					sendWebhook := func(text string) { notifyWebhook(ch, channelID, text) }
 
 					sendWebhook("📨 Webhook: analyzing...")
-					workdir := cfg.Agent.DefaultWorkdir
-					if workCtx.Worktree != "" {
-						workdir = workCtx.Worktree
-					}
+					workdir := resolveWebhookWorkdir(ctx, db.ChannelRepo(), cfg.Agent.DefaultWorkdir, platform, channelID, workCtx.Worktree)
 
 					inst, err := manager.Instance(ctx, workdir)
 					if err != nil {

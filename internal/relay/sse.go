@@ -15,10 +15,10 @@ import (
 // bufio's 64 KB default.
 const MaxEventLineBytes = 1024*1024 + 64*1024
 
-func readSSE(ctx context.Context, r io.Reader, ch chan<- Event) error {
+func readSSE(ctx context.Context, r io.Reader, ch chan<- Event, sessionID string) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), MaxEventLineBytes+1)
-	decoder := newEventDecoder()
+	decoder := newEventDecoderFor(sessionID)
 	var eventType, data string
 	var hasFields bool
 
@@ -74,6 +74,9 @@ func readSSE(ctx context.Context, r io.Reader, ch chan<- Event) error {
 }
 
 func parseSSEEvent(decoder *eventDecoder, eventType, data string) (Event, bool) {
+	if !decoder.owns(data) {
+		return Event{}, false
+	}
 	if eventType == "" {
 		return decoder.parseJSON(data)
 	}
@@ -119,6 +122,16 @@ type toolSeen struct {
 type eventDecoder struct {
 	partKind   map[string]string
 	activeKind string
+	// sessionID scopes the decoder to one session when non-empty. The agent's
+	// /event stream is a global bus — it delivers every session's events
+	// regardless of the session_id query param — so each payload is matched
+	// against its owning session (properties.sessionID, or
+	// properties.part.sessionID for message.part.updated). Foreign-session
+	// events are dropped before they can synthesize deltas, tool bubbles,
+	// prompts, or a terminal event; payloads without session identity pass
+	// through so a malformed or global line cannot strand a turn. Empty
+	// disables the filter (streams already scoped upstream).
+	sessionID string
 	// toolContext tracks, per tool part id, the last tool context emitted so
 	// a single tool part that streams several message.part.updated events
 	// (pending → running → completed) only produces one tool notice. The
@@ -130,7 +143,53 @@ type eventDecoder struct {
 }
 
 func newEventDecoder() *eventDecoder {
-	return &eventDecoder{partKind: make(map[string]string), toolContext: make(map[string]toolSeen)}
+	return newEventDecoderFor("")
+}
+
+// newEventDecoderFor builds a decoder scoped to one session. Pass "" when the
+// upstream stream is already session-filtered or for decode tests that need
+// unfiltered behavior.
+func newEventDecoderFor(sessionID string) *eventDecoder {
+	return &eventDecoder{
+		partKind:    make(map[string]string),
+		sessionID:   sessionID,
+		toolContext: make(map[string]toolSeen),
+	}
+}
+
+// eventSessionID extracts the owning session id from an event payload, if the
+// payload carries one. Session-scoped payloads put the id either in
+// properties.sessionID (session.idle, message.part.delta, session.diff,
+// message.updated) or in properties.part.sessionID (message.part.updated).
+// Events without a session id (server.connected, server.heartbeat, malformed
+// lines) return "".
+func eventSessionID(data string) string {
+	var ev struct {
+		Properties struct {
+			SessionID string `json:"sessionID"`
+			Part      struct {
+				SessionID string `json:"sessionID"`
+			} `json:"part"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal([]byte(data), &ev); err != nil {
+		return ""
+	}
+	if ev.Properties.SessionID != "" {
+		return ev.Properties.SessionID
+	}
+	return ev.Properties.Part.SessionID
+}
+
+// owns reports whether an event payload belongs to this decoder's session.
+// Payloads without a session id are treated as own (global/malformed events);
+// payloads for a different session are foreign and must be dropped.
+func (d *eventDecoder) owns(data string) bool {
+	if d.sessionID == "" {
+		return true
+	}
+	sid := eventSessionID(data)
+	return sid == "" || sid == d.sessionID
 }
 
 func isStreamKind(kind string) bool {

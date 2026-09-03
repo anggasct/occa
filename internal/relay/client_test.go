@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -243,6 +244,81 @@ func TestEvents(t *testing.T) {
 	ev = <-ch
 	if ev.Type != "done" {
 		t.Fatalf("got event %+v, want done", ev)
+	}
+}
+
+// Two sessions multiplexed on one global /event stream: each subscriber must
+// see only its own session's deltas and complete only on its own session's
+// idle — the cross-contamination shape of the 2026-09-03 incident where
+// concurrent webhook turns glued each other's output and any idle terminated
+// every turn.
+func TestEventsConcurrentSessionsStayIsolated(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl := w.(http.Flusher)
+		fl.Flush()
+		events := []string{
+			`data: {"type":"message.part.updated","properties":{"part":{"id":"p1","sessionID":"ses-1","type":"text"}}}`,
+			`data: {"type":"message.part.updated","properties":{"part":{"id":"p2","sessionID":"ses-2","type":"text"}}}`,
+			`data: {"type":"message.part.delta","properties":{"sessionID":"ses-1","partID":"p1","field":"text","delta":"one-a "}}`,
+			`data: {"type":"message.part.delta","properties":{"sessionID":"ses-2","partID":"p2","field":"text","delta":"two-a "}}`,
+			`data: {"type":"message.part.delta","properties":{"sessionID":"ses-1","partID":"p1","field":"text","delta":"one-b "}}`,
+			`data: {"type":"message.part.delta","properties":{"sessionID":"ses-2","partID":"p2","field":"text","delta":"two-b "}}`,
+			`data: {"type":"session.idle","properties":{"sessionID":"ses-2"}}`,
+			`data: {"type":"message.part.delta","properties":{"sessionID":"ses-1","partID":"p1","field":"text","delta":"one-c"}}`,
+			`data: {"type":"session.idle","properties":{"sessionID":"ses-1"}}`,
+			``,
+		}
+		for _, line := range events {
+			_, _ = w.Write([]byte(line + "\n\n"))
+			fl.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	c := NewHTTPClient(srv.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ch1, err := c.Events(ctx, "ses-1")
+	if err != nil {
+		t.Fatalf("Events(ses-1): %v", err)
+	}
+	ch2, err := c.Events(ctx, "ses-2")
+	if err != nil {
+		t.Fatalf("Events(ses-2): %v", err)
+	}
+
+	drain := func(ch <-chan Event) string {
+		var out strings.Builder
+		for ev := range ch {
+			switch ev.Type {
+			case "delta":
+				out.WriteString(ev.Delta)
+			case "done":
+				return out.String()
+			default:
+				t.Fatalf("unexpected event %+v", ev)
+			}
+		}
+		t.Fatal("event stream closed before done")
+		return ""
+	}
+
+	var wg sync.WaitGroup
+	var out1, out2 string
+	wg.Add(2)
+	go func() { defer wg.Done(); out1 = drain(ch1) }()
+	go func() { defer wg.Done(); out2 = drain(ch2) }()
+	wg.Wait()
+
+	if want := "one-a one-b one-c"; out1 != want {
+		t.Fatalf("ses-1 output = %q, want %q", out1, want)
+	}
+	if want := "two-a two-b "; out2 != want {
+		t.Fatalf("ses-2 output = %q, want %q (its own idle arrives first and must complete it)", out2, want)
 	}
 }
 
