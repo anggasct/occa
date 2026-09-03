@@ -20,6 +20,7 @@ import (
 	"github.com/anggasct/occa/internal/config"
 	"github.com/anggasct/occa/internal/health"
 	"github.com/anggasct/occa/internal/logging"
+	"github.com/anggasct/occa/internal/loop"
 	"github.com/anggasct/occa/internal/mcpserver"
 	"github.com/anggasct/occa/internal/process"
 	"github.com/anggasct/occa/internal/relay"
@@ -222,6 +223,69 @@ func main() {
 		os.Exit(1)
 	}
 	defer func() { _ = sched.Stop() }()
+
+	loopExecutor := func(execCtx context.Context, conv loop.Conversation, prompt string) (string, error) {
+		var adapter channel.Channel
+		for _, ch := range channels {
+			if ch.Name() == conv.Platform {
+				adapter = ch
+				break
+			}
+		}
+		if adapter == nil {
+			return "", errors.New("channel adapter unavailable")
+		}
+		workdir := cfg.Agent.DefaultWorkdir
+		chRow, err := db.ChannelRepo().Get(execCtx, conv.Platform, conv.ChannelID)
+		if err == nil && chRow != nil && chRow.Workdir != "" {
+			workdir = chRow.Workdir
+		}
+		inst, err := manager.Instance(execCtx, workdir)
+		if err != nil {
+			return "", errors.New("agent unreachable")
+		}
+		defer inst.End()
+		resolver := relay.NewSessionResolver(db.SessionRepo(), inst.Client())
+		sessionID, err := resolver.Resolve(execCtx, conv.Platform, conv.ChannelID, conv.ThreadID, conv.UserID, inst.PID())
+		if err != nil {
+			return "", errors.New("session error")
+		}
+		if err := inst.Client().SendMessage(execCtx, sessionID, prompt, nil, nil); err != nil {
+			return "", errors.New("agent request error")
+		}
+		events, err := inst.Client().Events(execCtx, sessionID)
+		if err != nil {
+			return "", errors.New("events stream error")
+		}
+		var buf strings.Builder
+		for ev := range events {
+			switch ev.Type {
+			case "delta":
+				buf.WriteString(ev.Delta)
+			case "done":
+				return buf.String(), nil
+			case "error", "stream_error":
+				return "", errors.New("agent response error")
+			}
+		}
+		return "", errors.New("events stream error")
+	}
+	loopNotify := func(conv loop.Conversation, text string) {
+		target := conv.ChannelID
+		if conv.Platform == "discord" && conv.ThreadID != "" {
+			target = conv.ThreadID
+		}
+		for _, ch := range channels {
+			if ch.Name() == conv.Platform {
+				notify(ch, target, text)
+				return
+			}
+		}
+		slog.Warn("loop: no channel adapter", "platform", conv.Platform)
+	}
+	looper := loop.New(loopExecutor, loopNotify, rt.LoopBusy)
+	rt.SetLooper(looper)
+	defer looper.StopAll()
 
 	attrib := attribution.NewStore()
 	mcpSrv := mcpserver.New(sched, attrib)
