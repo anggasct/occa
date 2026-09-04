@@ -45,6 +45,9 @@ type fakeExecutor struct {
 	calls []execCall
 	err   error
 	block chan struct{}
+	// progress, when set, is copied into workCtx.Progress before the executor
+	// returns, simulating turn progress observed by the relay layer.
+	progress func() relay.TurnProgress
 	// errOnAttempt, when non-nil, overrides err per attempt (1-based). Used
 	// for the incomplete-response retry tests: first attempt fails with
 	// ErrWebhookResponseIncomplete, second succeeds.
@@ -65,6 +68,9 @@ func (f *fakeExecutor) exec(ctx context.Context, platform, channelID, prompt str
 		case <-ctx.Done():
 			return ctx.Err()
 		}
+	}
+	if f.progress != nil {
+		workCtx.Progress = f.progress()
 	}
 	if f.errOnAttempt != nil {
 		err := f.errOnAttempt(workCtx.Attempt)

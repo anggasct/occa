@@ -40,6 +40,7 @@ type WebhookWorkContext struct {
 	SessionAbortOK bool
 	Model          *relay.ModelRef
 	ModelSource    string
+	Progress       relay.TurnProgress
 }
 
 func ExtractExecutionKey(body []byte) WebhookExecutionKey {

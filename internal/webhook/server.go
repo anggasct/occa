@@ -857,7 +857,7 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 			}, sessionLogAttrs(workCtx)...)...)
 		return nil
 	case errors.Is(err, context.DeadlineExceeded), ctx.Err() == context.DeadlineExceeded:
-		s.failDelivery(ep, id, deliveryID, eventType, envelope, "timed out after "+s.processingTimeout.String(), workCtx)
+		s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary(timeoutSummary(s.processingTimeout, workCtx), maxErrorSummaryRunes, ep.Secret), workCtx)
 	default:
 		// Self-heal coordination: an incomplete response is not written
 		// terminal yet. The dispatcher owns the one-shot decision; when it

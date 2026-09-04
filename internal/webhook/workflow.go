@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/anggasct/occa/internal/config"
+	"github.com/anggasct/occa/internal/relay"
 	"github.com/anggasct/occa/internal/store"
 )
 
@@ -176,4 +178,19 @@ func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelo
 	if err := s.notifier(ctx, ep.Platform, ep.ChannelID, summary); err != nil {
 		slog.Warn("webhook: audit notification failed", "endpoint", ep.Name, "status", status, "error", err)
 	}
+}
+
+// timeoutSummary renders the timeout-path failure summary: the canned budget
+// line plus the observed-turn classification (stall before first token, stall
+// mid-turn, or long generation), so a FAILED notification names the cause.
+func timeoutSummary(budget time.Duration, workCtx *WebhookWorkContext) string {
+	summary := "timed out after " + budget.String()
+	if workCtx == nil {
+		return summary
+	}
+	model := ""
+	if workCtx.Model != nil {
+		model = workCtx.Model.String()
+	}
+	return summary + " — " + relay.ClassifyTimeoutFailure(workCtx.Progress, budget, model)
 }

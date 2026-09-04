@@ -296,6 +296,7 @@ func main() {
 					workCtx.SessionID = result.SessionID
 					workCtx.SessionAborted = result.Aborted
 					workCtx.SessionAbortOK = result.AbortOK
+					workCtx.Progress = result.Progress
 					if err != nil {
 						switch {
 						case errors.Is(err, relay.ErrWebhookSessionCreate):
