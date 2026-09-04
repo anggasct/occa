@@ -709,9 +709,9 @@ func (c *HTTPClient) ListAgents(ctx context.Context) ([]AgentInfo, error) {
 
 func (c *HTTPClient) SwitchAgent(ctx context.Context, sessionID, name string) error {
 	payload := struct {
-		Name string `json:"name"`
+		Agent string `json:"agent"`
 	}{
-		Name: name,
+		Agent: name,
 	}
 	resp, err := c.post(ctx, "/api/session/"+sessionID+"/agent", payload)
 	if err != nil {
@@ -722,19 +722,22 @@ func (c *HTTPClient) SwitchAgent(ctx context.Context, sessionID, name string) er
 	if resp.StatusCode == http.StatusNotFound {
 		return ErrNotFound
 	}
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= 300 {
 		return fmt.Errorf("relay: switch agent: unexpected status %d", resp.StatusCode)
-	}
-	mediaType, _, parseErr := mime.ParseMediaType(resp.Header.Get("Content-Type"))
-	if parseErr != nil || mediaType != "application/json" {
-		return fmt.Errorf("relay: switch agent: unexpected content type %q", resp.Header.Get("Content-Type"))
 	}
 	body, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
 		return fmt.Errorf("relay: switch agent: read response: %w", readErr)
 	}
 	trimmed := bytes.TrimSpace(body)
-	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) || !json.Valid(trimmed) {
+	if len(trimmed) == 0 {
+		return nil
+	}
+	mediaType, _, parseErr := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if parseErr != nil || mediaType != "application/json" {
+		return fmt.Errorf("relay: switch agent: unexpected content type %q", resp.Header.Get("Content-Type"))
+	}
+	if bytes.Equal(trimmed, []byte("null")) || !json.Valid(trimmed) {
 		return errors.New("relay: switch agent: invalid JSON response")
 	}
 	return nil
