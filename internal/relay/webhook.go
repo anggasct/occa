@@ -47,6 +47,7 @@ type WebhookTurnResult struct {
 	Output    string
 	Aborted   bool
 	AbortOK   bool
+	Progress  TurnProgress
 }
 
 func (t WebhookTurn) Run(ctx context.Context) (res WebhookTurnResult, err error) {
@@ -85,6 +86,7 @@ func (t WebhookTurn) Run(ctx context.Context) (res WebhookTurnResult, err error)
 	if err := t.Client.SendMessage(ctx, sessionID, t.Prompt, t.Model, nil); err != nil {
 		return res, fmt.Errorf("%w: %w", ErrWebhookPrompt, err)
 	}
+	res.Progress.PromptSentAt = time.Now()
 
 	var buf strings.Builder
 	for {
@@ -97,6 +99,12 @@ func (t WebhookTurn) Run(ctx context.Context) (res WebhookTurnResult, err error)
 			}
 			switch ev.Type {
 			case "delta":
+				now := time.Now()
+				if res.Progress.DeltaCount == 0 {
+					res.Progress.FirstDeltaAt = now
+				}
+				res.Progress.LastDeltaAt = now
+				res.Progress.DeltaCount++
 				buf.WriteString(ev.Delta)
 			case "done":
 				res.Output = buf.String()
