@@ -1125,7 +1125,7 @@ func TestListAgents(t *testing.T) {
 }
 
 func TestSwitchAgent(t *testing.T) {
-	t.Run("success", func(t *testing.T) {
+	t.Run("success with json body", func(t *testing.T) {
 		var gotBody []byte
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost || r.URL.Path != "/api/session/sess-1/agent" {
@@ -1146,8 +1146,32 @@ func TestSwitchAgent(t *testing.T) {
 		if err := c.SwitchAgent(context.Background(), "sess-1", "reviewer"); err != nil {
 			t.Fatalf("SwitchAgent: %v", err)
 		}
-		if string(gotBody) != `{"name":"reviewer"}` {
-			t.Fatalf("got body %q, want {\"name\":\"reviewer\"}", gotBody)
+		if string(gotBody) != `{"agent":"reviewer"}` {
+			t.Fatalf("got body %q, want {\"agent\":\"reviewer\"}", gotBody)
+		}
+	})
+
+	t.Run("success with 204 empty body", func(t *testing.T) {
+		var gotBody []byte
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost || r.URL.Path != "/api/session/sess-1/agent" {
+				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			}
+			var err error
+			gotBody, err = io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read body: %v", err)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		defer srv.Close()
+
+		c := NewHTTPClient(srv.URL)
+		if err := c.SwitchAgent(context.Background(), "sess-1", "reviewer"); err != nil {
+			t.Fatalf("SwitchAgent: %v", err)
+		}
+		if string(gotBody) != `{"agent":"reviewer"}` {
+			t.Fatalf("got body %q, want {\"agent\":\"reviewer\"}", gotBody)
 		}
 	})
 
