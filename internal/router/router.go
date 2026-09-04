@@ -12,6 +12,7 @@ import (
 	"github.com/anggasct/occa/internal/attribution"
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/health"
+	"github.com/anggasct/occa/internal/loop"
 	"github.com/anggasct/occa/internal/process"
 	"github.com/anggasct/occa/internal/relay"
 	"github.com/anggasct/occa/internal/render"
@@ -60,6 +61,8 @@ func (r *Router) MenuCommands() []channel.MenuCommand {
 		{Alias: "permissions", Description: "List / delete saved always-allow rules", HasArgs: true},
 		{Alias: "agent", Description: "Browse, switch, or delete custom agents", HasArgs: true},
 		{Alias: "schedules", Description: "View or delete scheduled tasks", HasArgs: true},
+		{Alias: "loop", Description: "Repeat a prompt on an interval", HasArgs: true},
+		{Alias: "loops", Description: "List active loops in this conversation"},
 		{Alias: "webhooks", Description: "Recent webhook delivery diagnostics (admin)"},
 	}
 }
@@ -85,6 +88,7 @@ type Router struct {
 	adminID                string
 	startedAt              time.Time
 	sched                  ScheduleStore
+	loops                  *loop.Looper
 	attrib                 *attribution.Store
 	responses              *responseCoordinator
 	permissions            *permissionBroker
@@ -634,6 +638,14 @@ func (r *Router) registerDefaults() {
 		Admin:   true,
 		Handler: r.handleSchedules,
 	}
+	r.commands["loop"] = Command{
+		Name:    "loop",
+		Handler: r.handleLoop,
+	}
+	r.commands["loops"] = Command{
+		Name:    "loops",
+		Handler: r.handleLoops,
+	}
 	r.commands["webhooks"] = Command{
 		Name:    "webhooks",
 		Admin:   true,
@@ -683,6 +695,8 @@ func (r *Router) helpText() string {
 		"• /variants [provider/model-id] — list and set model reasoning variants\n" +
 		"• /permissions [delete <id>|clear] — list or delete saved always-allow rules\n" +
 		"• /schedules [delete <id>] — view or delete scheduled tasks\n" +
+		"• /loop every <dur> x<n>|for <dur> <prompt> — repeat a prompt on an interval\n" +
+		"• /loops — list active loops in this conversation\n" +
 		"• /reset — clear current session and start fresh\n\n" +
 		"All other messages and /commands are forwarded to the agent."
 }
@@ -1185,6 +1199,7 @@ func (r *Router) handleReset(ctx context.Context, msg channel.IncomingMessage, _
 	key := responseKey{platform: msg.Platform, channelID: msg.ChannelID, threadID: threadID, userID: userID}
 	r.responses.cancelResponse(key)
 	r.responses.drain(key)
+	r.cancelLoops(msg)
 
 	inst, err := r.clientFor(ctx, msg)
 	if err != nil {
