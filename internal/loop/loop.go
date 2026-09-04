@@ -181,9 +181,17 @@ func (l *Looper) Create(conv Conversation, req Request) (Info, error) {
 	l.loops[e.id] = e
 	info := e.info()
 	go l.run(e.id)
-	slog.Info("loop started", "id", e.id, "interval", req.Interval, "channel", conv.ChannelID)
+	end := fmt.Sprintf("x%d", req.Count)
+	if req.Count == 0 {
+		end = "for " + req.Length.String()
+	}
+	slog.Info("loop started", "loop_id", e.id, "interval", req.Interval, "end", end, "conversation", fingerprint(conv))
 	l.mu.Unlock()
 	return info, nil
+}
+
+func fingerprint(conv Conversation) string {
+	return conv.Platform + ":" + conv.ChannelID + ":" + conv.ThreadID + ":" + conv.UserID
 }
 
 func check(req Request) error {
@@ -250,13 +258,13 @@ func (l *Looper) fire(id int64) {
 	}
 	if !now.Before(e.deadline) {
 		text := fmt.Sprintf("🏁 Loop %d finished: time elapsed.", e.id)
-		l.finishLocked(e)
+		l.terminateLocked(e, "deadline")
 		l.mu.Unlock()
 		l.note(e.conv, text)
 		return
 	}
 	if l.busy(e.conv) {
-		slog.Info("loop tick skipped, conversation busy", "id", e.id)
+		slog.Info("loop tick skipped, conversation busy", "loop_id", e.id, "iteration", e.executed+1)
 		l.mu.Unlock()
 		return
 	}
@@ -281,7 +289,7 @@ func (l *Looper) fire(id int64) {
 		texts = append(texts, fmt.Sprintf("⚠️ Loop %d run failed: %s", e.id, execErr.Error()))
 		if e.total > 0 && e.remaining == 0 {
 			texts = append(texts, fmt.Sprintf("🏁 Loop %d finished: all %d runs completed.", e.id, e.total))
-			l.finishLocked(e)
+			l.terminateLocked(e, "exhausted")
 		}
 		l.mu.Unlock()
 		for _, t := range texts {
@@ -303,10 +311,10 @@ func (l *Looper) fire(id int64) {
 	switch {
 	case done:
 		texts = append(texts, fmt.Sprintf("✅ Loop %d completed.", e.id))
-		l.finishLocked(e)
+		l.terminateLocked(e, "completed")
 	case e.total > 0 && e.remaining == 0:
 		texts = append(texts, fmt.Sprintf("🏁 Loop %d finished: all %d runs completed.", e.id, e.total))
-		l.finishLocked(e)
+		l.terminateLocked(e, "exhausted")
 	}
 	l.mu.Unlock()
 	for _, t := range texts {
@@ -318,6 +326,11 @@ func (l *Looper) finishLocked(e *entry) {
 	e.ended = true
 	delete(l.loops, e.id)
 	e.cancel()
+}
+
+func (l *Looper) terminateLocked(e *entry, reason string) {
+	l.finishLocked(e)
+	slog.Info("loop terminated", "loop_id", e.id, "reason", reason)
 }
 
 func (l *Looper) Stop(conv Conversation, id int64) bool {
@@ -333,7 +346,7 @@ func (l *Looper) Stop(conv Conversation, id int64) bool {
 	} else {
 		text = fmt.Sprintf("🛑 Loop %d stopped after %d runs.", e.id, e.executed)
 	}
-	l.finishLocked(e)
+	l.terminateLocked(e, "stopped")
 	l.mu.Unlock()
 	l.note(e.conv, text)
 	return true
@@ -369,7 +382,9 @@ func (l *Looper) CancelConversation(conv Conversation) int {
 			text = fmt.Sprintf("🛑 Loop %d stopped after %d runs.", e.id, e.executed)
 		}
 		target := e.conv
+		id := e.id
 		l.finishLocked(e)
+		slog.Info("loop terminated", "loop_id", id, "reason", "stopped")
 		stopped = append(stopped, pending{conv: target, text: text})
 	}
 	l.mu.Unlock()

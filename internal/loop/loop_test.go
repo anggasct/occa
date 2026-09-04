@@ -402,3 +402,59 @@ func TestConcurrentStopSingleTerminal(t *testing.T) {
 		t.Errorf("terminal messages = %d, want exactly 1", terms)
 	}
 }
+
+func TestGlobalLimitRejects21st(t *testing.T) {
+	h := newHarness()
+	for i := 0; i < MaxGlobal; i++ {
+		conv := Conversation{Platform: "telegram", ChannelID: "chat1", ThreadID: "", UserID: "limituser" + string(rune('a'+i/10)) + string(rune('0'+i%10))}
+		req, err := ParseRequest("every 1m x2 poll")
+		if err != nil {
+			t.Fatalf("ParseRequest: %v", err)
+		}
+		if _, err := h.looper.Create(conv, req); err != nil {
+			t.Fatalf("Create %d: %v", i, err)
+		}
+	}
+	req, _ := ParseRequest("every 1m x2 overflow")
+	if _, err := h.looper.Create(convA, req); !errors.Is(err, ErrGlobalLimit) {
+		t.Fatalf("21st create err = %v, want ErrGlobalLimit", err)
+	}
+}
+
+func TestRestartEmptiness(t *testing.T) {
+	h := newHarness()
+	h.create(t, convA, "every 1m x3 poll")
+	if got := len(h.looper.List(convA)); got != 1 {
+		t.Fatalf("list before restart = %d, want 1", got)
+	}
+	fresh := New(h.execute, h.notify, h.isBusy,
+		WithClock(func() time.Time { return h.now }),
+		WithTicker(func(time.Duration) Ticker {
+			return &manualTicker{ch: make(chan time.Time, 64)}
+		}),
+	)
+	if got := len(fresh.List(convA)); got != 0 {
+		t.Errorf("fresh looper list = %d, want 0 (no resume after restart)", got)
+	}
+	h.looper.StopAll()
+	if got := len(h.looper.List(convA)); got != 0 {
+		t.Errorf("list after StopAll = %d, want 0", got)
+	}
+}
+
+func TestCountLoopWallClockCap(t *testing.T) {
+	h := newHarness()
+	info := h.create(t, convA, "every 1m x60 long poll")
+	h.now = h.now.Add(maxWallAge + time.Minute)
+	h.tick(info.ID)
+	h.mu.Lock()
+	calls := h.execCalls
+	h.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("exec calls past 4h wall cap = %d, want 0", calls)
+	}
+	texts := h.texts()
+	if len(texts) != 1 || !strings.Contains(texts[0], "time elapsed") {
+		t.Errorf("terminal = %q, want single deadline notice", texts)
+	}
+}

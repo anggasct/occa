@@ -21,12 +21,12 @@ func TestParseRequestValid(t *testing.T) {
 	if req.Interval != 30*time.Second || req.Length != time.Hour || req.Prompt != "watch deploy" {
 		t.Errorf("parsed = %+v", req)
 	}
-	req, err = ParseRequest("every 2m x3 for 1h check")
+	req, err = ParseRequest("every 2m x3 for real check")
 	if err != nil {
-		t.Fatalf("prompt starting with for: %v", err)
+		t.Fatalf("prompt starting with non-duration for: %v", err)
 	}
-	if req.Count != 3 || req.Prompt != "for 1h check" {
-		t.Errorf("first end wins, rest is prompt: %+v", req)
+	if req.Count != 3 || req.Prompt != "for real check" {
+		t.Errorf("prompt with for-word kept: %+v", req)
 	}
 }
 
@@ -49,6 +49,9 @@ func TestParseRequestInvalid(t *testing.T) {
 		"every 2m x3":            "missing prompt",
 		"every 2m x3   ":         "blank prompt",
 		"every 2m x3 " + long:    "prompt too long",
+		"every 2m x3 for 1h hi":  "both ends (count then duration)",
+		"every 2m x3 for 1h":     "both ends, no prompt",
+		"every 2m for 1h x3 hi":  "both ends (duration then count)",
 	}
 	for args, name := range cases {
 		if _, err := ParseRequest(args); err == nil {

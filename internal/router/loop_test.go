@@ -128,6 +128,7 @@ func TestLoopUsageInputs(t *testing.T) {
 		"/loop every 5s x3 hi",
 		"/loop every 2m x1 hi",
 		"/loop every 2m check status",
+		"/loop every 2m x3 for 1h hi",
 		"/loop nonsense here",
 		"/loop stop",
 		"/loop stop abc",

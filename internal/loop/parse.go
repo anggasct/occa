@@ -31,6 +31,11 @@ func ParseRequest(args string) (Request, error) {
 		}
 		req.Count = n
 		rest = rest[1:]
+		if len(rest) >= 2 && rest[0] == "for" {
+			if _, derr := time.ParseDuration(rest[1]); derr == nil {
+				return req, fmt.Errorf("loop: need exactly one of x<n> or for <dur>")
+			}
+		}
 	case rest[0] == "for" && len(rest) >= 3:
 		length, err := time.ParseDuration(rest[1])
 		if err != nil {
@@ -38,6 +43,11 @@ func ParseRequest(args string) (Request, error) {
 		}
 		req.Length = length
 		rest = rest[2:]
+		if len(rest) >= 1 && strings.HasPrefix(rest[0], "x") {
+			if _, cerr := strconv.Atoi(strings.TrimPrefix(rest[0], "x")); cerr == nil {
+				return req, fmt.Errorf("loop: need exactly one of x<n> or for <dur>")
+			}
+		}
 	default:
 		return req, fmt.Errorf("loop: need x<n> or for <dur>")
 	}
