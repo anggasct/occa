@@ -624,3 +624,65 @@ func TestEndpointThreadAndProgressCardConfig(t *testing.T) {
 		t.Errorf("ep-threaded ProgressCard = false, want true")
 	}
 }
+
+func TestEndpointProgressCardAliasAndThreadID(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
+	yaml := `webhooks:
+  endpoints:
+    - name: ep-thread-alias
+      path: /thread-alias
+      secret: s
+      platform: telegram
+      channel_id: '-1001'
+      thread_id: '555'
+      prompt: p
+      thread: true
+      workspace:
+        type: none
+    - name: ep-explicit-progress-card-false
+      path: /explicit-false
+      secret: s
+      platform: telegram
+      channel_id: '-1002'
+      prompt: p
+      thread: true
+      progress_card: false
+      workspace:
+        type: none
+    - name: ep-explicit-progress-card-true
+      path: /explicit-true
+      secret: s
+      platform: telegram
+      channel_id: '-1003'
+      prompt: p
+      progress_card: true
+      workspace:
+        type: none
+`
+	path := writeConfig(t, t.TempDir(), yaml)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Webhooks.Endpoints) != 3 {
+		t.Fatalf("endpoints count = %d, want 3", len(cfg.Webhooks.Endpoints))
+	}
+
+	ep0 := cfg.Webhooks.Endpoints[0]
+	if !ep0.Thread || !ep0.ProgressCard {
+		t.Errorf("ep-thread-alias got Thread=%v ProgressCard=%v, want both true", ep0.Thread, ep0.ProgressCard)
+	}
+	if ep0.ThreadID != "555" {
+		t.Errorf("ep-thread-alias ThreadID = %q, want 555", ep0.ThreadID)
+	}
+
+	ep1 := cfg.Webhooks.Endpoints[1]
+	if !ep1.Thread || ep1.ProgressCard {
+		t.Errorf("ep-explicit-false got Thread=%v ProgressCard=%v, want Thread=true ProgressCard=false", ep1.Thread, ep1.ProgressCard)
+	}
+
+	ep2 := cfg.Webhooks.Endpoints[2]
+	if ep2.Thread || !ep2.ProgressCard {
+		t.Errorf("ep-explicit-true got Thread=%v ProgressCard=%v, want Thread=false ProgressCard=true", ep2.Thread, ep2.ProgressCard)
+	}
+}

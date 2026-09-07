@@ -454,6 +454,34 @@ func (a *Adapter) EditNotification(channelID, messageID, text string) error {
 	return nil
 }
 
+func (a *Adapter) ReplyNotification(channelID, replyToMessageID, text string) (string, error) {
+	if a.session == nil {
+		return "", errors.New("discord: session not ready")
+	}
+	chunks := render.Split(text, 2000)
+	if len(chunks) == 0 {
+		return "", nil
+	}
+	var firstID string
+	for _, chunk := range chunks {
+		msg, err := a.session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+			Content: chunk,
+			Reference: &discordgo.MessageReference{
+				MessageID: replyToMessageID,
+				ChannelID: channelID,
+			},
+			AllowedMentions: &discordgo.MessageAllowedMentions{},
+		})
+		if err != nil {
+			return "", fmt.Errorf("discord: reply notification: %w", err)
+		}
+		if firstID == "" {
+			firstID = msg.ID
+		}
+	}
+	return firstID, nil
+}
+
 func (a *Adapter) StartThread(channelID, messageID, name string) (string, error) {
 	if a.session == nil {
 		return "", errors.New("discord: session not ready")
@@ -868,6 +896,7 @@ var (
 	_ channel.MessageDeleter    = (*Adapter)(nil)
 	_ channel.MessageSender     = (*Adapter)(nil)
 	_ channel.MessageEditor     = (*Adapter)(nil)
+	_ channel.MessageReplier    = (*Adapter)(nil)
 	_ channel.ThreadStarter     = (*Adapter)(nil)
 	_ channel.ReplyContext      = (*replyContext)(nil)
 	_ channel.MessageRemover    = (*replyContext)(nil)

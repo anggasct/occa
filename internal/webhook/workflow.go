@@ -167,9 +167,9 @@ func FormatThreadName(envelope WebhookEnvelope, workflow string) string {
 	return clipRunes(workflow, 100)
 }
 
-func FormatRootCard(envelope WebhookEnvelope, workflow, status, reason, threadID string) string {
+func FormatRootCard(envelope WebhookEnvelope, workflow, status, reason, threadID, platform string) string {
 	card := formatAuditSummary(envelope, workflow, status, reason)
-	if threadID != "" {
+	if threadID != "" && platform == "discord" {
 		card += "\n➡️ Details in thread: <#" + threadID + ">"
 	}
 	return card
@@ -213,10 +213,25 @@ func (s *Server) markSkipped(id int64, ep config.EndpointConfig, envelope Webhoo
 	s.emitAudit(context.Background(), ep, envelope, "SKIP", reason)
 }
 
+func FormatProgressStatus(step int, tool, toolCtx string, elapsed time.Duration) string {
+	toolPart := relay.FormatToolLabel(tool, toolCtx, 1)
+	cleanTool := strings.TrimPrefix(toolPart, "⚙️ ")
+	dur := formatDuration(elapsed)
+	if step > 0 {
+		return fmt.Sprintf("⚙️ [Step %d] %s (%s)", step, cleanTool, dur)
+	}
+	return fmt.Sprintf("⚙️ %s (%s)", cleanTool, dur)
+}
+
 func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelope WebhookEnvelope, status, reason string, workCtx ...*WebhookWorkContext) {
 	var wCtx *WebhookWorkContext
 	if len(workCtx) > 0 {
 		wCtx = workCtx[0]
+	}
+
+	targetChannel := ep.ChannelID
+	if ep.Platform == "telegram" && wCtx != nil && wCtx.ThreadID != "" && !strings.Contains(targetChannel, ":") {
+		targetChannel = targetChannel + ":" + wCtx.ThreadID
 	}
 
 	if wCtx != nil && wCtx.RootMessageID != "" && s.editor != nil {
@@ -235,9 +250,9 @@ func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelo
 				statusText = "⚠️ FAILED"
 			}
 		}
-		card := FormatRootCard(envelope, ep.Workflow, statusText, reason, wCtx.ThreadID)
+		card := FormatRootCard(envelope, ep.Workflow, statusText, reason, wCtx.ThreadID, ep.Platform)
 		card = redactAuditSummary(card, ep.Secret)
-		if err := s.editor(ctx, ep.Platform, ep.ChannelID, wCtx.RootMessageID, card); err != nil {
+		if err := s.editor(ctx, ep.Platform, targetChannel, wCtx.RootMessageID, card); err != nil {
 			slog.Warn("webhook: failed to edit root card, falling back to notifier", "endpoint", ep.Name, "error", err)
 		} else {
 			return
@@ -249,7 +264,7 @@ func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelo
 		slog.Info("webhook: audit notification skipped", "endpoint", ep.Name, "status", status)
 		return
 	}
-	if err := s.notifier(ctx, ep.Platform, ep.ChannelID, summary); err != nil {
+	if err := s.notifier(ctx, ep.Platform, targetChannel, summary); err != nil {
 		slog.Warn("webhook: audit notification failed", "endpoint", ep.Name, "status", status, "error", err)
 	}
 }

@@ -479,6 +479,35 @@ func notifyEdit(ch channel.Channel, channelID, messageID, text string) error {
 	return errors.New("channel does not support editing")
 }
 
+func notifyReply(ch channel.Channel, channelID, replyToMessageID, text string) (string, error) {
+	chunks, err := outboundRenderer.Render(text, render.PlatformFor(ch.Name()))
+	if err != nil || len(chunks) == 0 {
+		chunks = []string{text}
+	}
+	if replier, ok := ch.(channel.MessageReplier); ok && replyToMessageID != "" {
+		var firstID string
+		for _, chunk := range chunks {
+			id, err := replier.ReplyNotification(channelID, replyToMessageID, chunk)
+			if err != nil {
+				slog.Warn("notification reply failed; falling back to notify", "platform", ch.Name(), "channel_id", channelID, "error", err)
+				break
+			}
+			if firstID == "" {
+				firstID = id
+			}
+		}
+		if firstID != "" {
+			return firstID, nil
+		}
+	}
+	for _, chunk := range chunks {
+		if err := ch.Notify(channelID, chunk); err != nil {
+			return "", err
+		}
+	}
+	return "", nil
+}
+
 type agentManager interface {
 	Instance(ctx context.Context, workdir string) (router.AgentInstance, error)
 }
@@ -493,13 +522,22 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 			if ch.Name() == platform {
 				targetChannelID := channelID
 				useThread := workCtx != nil && workCtx.Thread
+				useProgressCard := workCtx != nil && workCtx.ProgressCard
+
+				if platform == "telegram" && workCtx != nil && workCtx.ThreadID != "" {
+					if !strings.Contains(targetChannelID, ":") {
+						targetChannelID = targetChannelID + ":" + workCtx.ThreadID
+					}
+				}
 
 				sender, _ := ch.(channel.MessageSender)
 				editor, _ := ch.(channel.MessageEditor)
 				starter, _ := ch.(channel.ThreadStarter)
 
+				var progressUpdater *webhook.ProgressCardUpdater
+
 				if useThread && starter != nil && sender != nil {
-					rootCard := webhook.FormatRootCard(workCtx.Envelope, workCtx.Workflow, "RUNNING", "", "")
+					rootCard := webhook.FormatRootCard(workCtx.Envelope, workCtx.Workflow, "RUNNING", "", "", platform)
 					rootMsgID, err := notifySend(ch, channelID, webhook.FormatWebhookMessage(rootCard))
 					if err != nil {
 						slog.Warn("webhook: failed to send root card; falling back to channel", "channel_id", channelID, "error", err)
@@ -515,10 +553,21 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 							_, _ = notifySend(ch, targetChannelID, "🚀 Starting task: "+threadName)
 						}
 					}
+				} else if platform == "telegram" && useProgressCard && sender != nil && editor != nil {
+					rootCard := webhook.FormatRootCard(workCtx.Envelope, workCtx.Workflow, "⏳ Starting agent analysis...", "", workCtx.ThreadID, platform)
+					rootMsgID, err := notifySend(ch, targetChannelID, webhook.FormatWebhookMessage(rootCard))
+					if err != nil {
+						slog.Warn("webhook: failed to send telegram root card; falling back to channel", "channel_id", targetChannelID, "error", err)
+					} else {
+						workCtx.RootMessageID = rootMsgID
+						progressUpdater = webhook.NewProgressCardUpdater(targetChannelID, rootMsgID, workCtx.Envelope, workCtx.Workflow, workCtx.ThreadID, platform, func(ctx context.Context, chID, msgID, text string) error {
+							return notifyEdit(ch, chID, msgID, text)
+						})
+					}
 				}
 
-				if targetChannelID == channelID {
-					notifyWebhook(ch, channelID, "📨 Webhook: analyzing...")
+				if workCtx == nil || workCtx.RootMessageID == "" {
+					notifyWebhook(ch, targetChannelID, "📨 Webhook: analyzing...")
 				}
 
 				workdir := resolveWebhookWorkdir(ctx, channelRepo, defaultWorkdir, platform, channelID, workCtx.Worktree)
@@ -542,10 +591,16 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 				)
 
 				onEvent := func(ev relay.Event) {
-					if !useThread || workCtx.ThreadID == "" {
+					if ev.Type != relay.EventTool {
 						return
 					}
-					if ev.Type != relay.EventTool {
+
+					if progressUpdater != nil {
+						progressUpdater.OnTool(ev.Delta, ev.ToolContext, ev.ToolSamePart)
+						return
+					}
+
+					if platform != "discord" || !useThread || workCtx.ThreadID == "" {
 						return
 					}
 
@@ -612,6 +667,9 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 					OnEvent:      onEvent,
 				}
 				result, err := turn.Run(ctx)
+				if progressUpdater != nil {
+					progressUpdater.Stop()
+				}
 				eventMu.Lock()
 				if toolTimer != nil {
 					toolTimer.Stop()
@@ -626,19 +684,21 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 				workCtx.SessionAbortOK = result.AbortOK
 				workCtx.Progress = result.Progress
 				if err != nil {
-					switch {
-					case errors.Is(err, relay.ErrWebhookSessionCreate):
-						notifyWebhook(ch, targetChannelID, "⚠️ Webhook analysis failed: session error")
-					case errors.Is(err, relay.ErrWebhookPrompt):
-						notifyWebhook(ch, targetChannelID, "⚠️ Webhook analysis failed: agent request error")
-					case errors.Is(err, relay.ErrWebhookEventStream):
-						notifyWebhook(ch, targetChannelID, "⚠️ Webhook analysis failed: events error")
-					case errors.Is(err, relay.ErrWebhookAgentResponse):
-						notifyWebhook(ch, targetChannelID, "⚠️ Webhook analysis failed: agent response error")
-					case errors.Is(err, relay.ErrWebhookResponseIncomplete):
-						notifyWebhook(ch, targetChannelID, "⚠️ Webhook analysis failed: incomplete response")
-					default:
-						notifyWebhook(ch, targetChannelID, "⚠️ Webhook analysis failed: agent error")
+					if workCtx == nil || workCtx.RootMessageID == "" || (workCtx.ThreadID != "" && platform == "discord") {
+						switch {
+						case errors.Is(err, relay.ErrWebhookSessionCreate):
+							notifyWebhook(ch, targetChannelID, "⚠️ Webhook analysis failed: session error")
+						case errors.Is(err, relay.ErrWebhookPrompt):
+							notifyWebhook(ch, targetChannelID, "⚠️ Webhook analysis failed: agent request error")
+						case errors.Is(err, relay.ErrWebhookEventStream):
+							notifyWebhook(ch, targetChannelID, "⚠️ Webhook analysis failed: events error")
+						case errors.Is(err, relay.ErrWebhookAgentResponse):
+							notifyWebhook(ch, targetChannelID, "⚠️ Webhook analysis failed: agent response error")
+						case errors.Is(err, relay.ErrWebhookResponseIncomplete):
+							notifyWebhook(ch, targetChannelID, "⚠️ Webhook analysis failed: incomplete response")
+						default:
+							notifyWebhook(ch, targetChannelID, "⚠️ Webhook analysis failed: agent error")
+						}
 					}
 					return err
 				}
@@ -647,7 +707,11 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 				if output == "" {
 					output = "(no output)"
 				}
-				notify(ch, targetChannelID, output)
+				if platform == "telegram" && workCtx != nil && workCtx.RootMessageID != "" {
+					_, _ = notifyReply(ch, targetChannelID, workCtx.RootMessageID, output)
+				} else {
+					notify(ch, targetChannelID, output)
+				}
 				return nil
 			}
 		}
