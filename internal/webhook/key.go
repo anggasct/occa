@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/anggasct/occa/internal/relay"
 )
@@ -41,6 +42,12 @@ type WebhookWorkContext struct {
 	Model          *relay.ModelRef
 	ModelSource    string
 	Progress       relay.TurnProgress
+	Thread         bool
+	Workflow       string
+	Envelope       WebhookEnvelope
+	RootMessageID  string
+	ThreadID       string
+	StartTime      time.Time
 }
 
 func ExtractExecutionKey(body []byte) WebhookExecutionKey {

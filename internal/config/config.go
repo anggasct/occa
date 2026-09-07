@@ -55,18 +55,20 @@ type WebhookConfig struct {
 }
 
 type EndpointConfig struct {
-	Name       string            `yaml:"name"`
-	Path       string            `yaml:"path"`
-	Auth       string            `yaml:"auth,omitempty"`
-	Secret     string            `yaml:"secret"`
-	Workflow   string            `yaml:"workflow,omitempty"`
-	Platform   string            `yaml:"platform"`
-	ChannelID  string            `yaml:"channel_id"`
-	Prompt     string            `yaml:"prompt"`
-	PromptFile string            `yaml:"prompt_file,omitempty"`
-	SkipEvents []string          `yaml:"skip_events,omitempty"`
-	Repository string            `yaml:"repository,omitempty"`
-	Workspace  EndpointWorkspace `yaml:"workspace"`
+	Name         string            `yaml:"name"`
+	Path         string            `yaml:"path"`
+	Auth         string            `yaml:"auth,omitempty"`
+	Secret       string            `yaml:"secret"`
+	Workflow     string            `yaml:"workflow,omitempty"`
+	Platform     string            `yaml:"platform"`
+	ChannelID    string            `yaml:"channel_id"`
+	Prompt       string            `yaml:"prompt"`
+	PromptFile   string            `yaml:"prompt_file,omitempty"`
+	SkipEvents   []string          `yaml:"skip_events,omitempty"`
+	Repository   string            `yaml:"repository,omitempty"`
+	Workspace    EndpointWorkspace `yaml:"workspace"`
+	Thread       bool              `yaml:"thread,omitempty"`
+	ProgressCard bool              `yaml:"progress_card,omitempty"`
 }
 
 type EndpointWorkspace struct {

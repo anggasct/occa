@@ -70,12 +70,15 @@ type Executor func(ctx context.Context, platform, channelID, prompt string, work
 
 type Notifier func(ctx context.Context, platform, channelID, text string) error
 
+type Editor func(ctx context.Context, platform, channelID, messageID, text string) error
+
 type Server struct {
 	bind                  string
 	bindAddr              string
 	endpoints             map[string]config.EndpointConfig
 	executor              Executor
 	notifier              Notifier
+	editor                Editor
 	deliveries            DeliveryStore
 	channels              ChannelStore
 	workspaceResolver     WorkspaceResolver
@@ -145,6 +148,16 @@ func (s *Server) SetNotifier(n Notifier) {
 	}
 	s.notifier = func(ctx context.Context, platform, channelID, text string) error {
 		return n(ctx, platform, channelID, FormatWebhookMessage(text))
+	}
+}
+
+func (s *Server) SetEditor(e Editor) {
+	if e == nil {
+		s.editor = nil
+		return
+	}
+	s.editor = func(ctx context.Context, platform, channelID, messageID, text string) error {
+		return e(ctx, platform, channelID, messageID, FormatWebhookMessage(text))
 	}
 }
 
@@ -744,11 +757,16 @@ func (s *Server) failAbandonedReceipt(receipt *store.WebhookDelivery, reason str
 // transition (or retry grant) is recorded.
 func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64, deliveryID, eventType string, attempt int, lease *WorkspaceLease, allowRetryIncomplete func() bool) error {
 	key := ExtractExecutionKey(body)
+	envelope := normalizeWebhook(body, eventType, deliveryID, false, "")
 
 	workCtx := &WebhookWorkContext{
 		Key:        key,
 		DeliveryID: deliveryID,
 		Attempt:    attempt,
+		Thread:     ep.Thread,
+		Workflow:   ep.Workflow,
+		Envelope:   envelope,
+		StartTime:  time.Now(),
 	}
 	if lease != nil {
 		workCtx.Worktree = lease.Path
@@ -758,7 +776,6 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 			}
 		}()
 	}
-	envelope := normalizeWebhook(body, eventType, deliveryID, false, "")
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -844,7 +861,7 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		if tErr != nil {
 			slog.Error("webhook: completed transition failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", tErr)
 		} else if ok {
-			s.emitAudit(context.Background(), ep, envelope, "COMPLETED", "")
+			s.emitAudit(context.Background(), ep, envelope, "COMPLETED", "", workCtx)
 		}
 		slog.Info("webhook: delivery completed",
 			append([]any{
@@ -887,7 +904,7 @@ func (s *Server) failDelivery(ep config.EndpointConfig, id int64, deliveryID, ev
 	if err != nil {
 		slog.Error("webhook: failed transition", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
 	} else if ok {
-		s.emitAudit(context.Background(), ep, envelope, "FAILED", summary)
+		s.emitAudit(context.Background(), ep, envelope, "FAILED", summary, workCtx)
 	}
 	slog.Warn("webhook: delivery failed",
 		append([]any{

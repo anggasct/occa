@@ -706,3 +706,71 @@ func TestInteractionMessagesHaveNoSourceRef(t *testing.T) {
 		t.Fatalf("interaction message must not carry a source ref, got %+v", got.SourceRef)
 	}
 }
+
+func TestSendNotificationAndEditNotification(t *testing.T) {
+	var sentBody, editBody string
+	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/channels/chan-1/messages") {
+			b, _ := io.ReadAll(r.Body)
+			sentBody = string(b)
+			return []byte(`{"id":"msg-123","channel_id":"chan-1","content":"hello"}`), http.StatusOK
+		}
+		if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/channels/chan-1/messages/msg-123") {
+			b, _ := io.ReadAll(r.Body)
+			editBody = string(b)
+			return []byte(`{"id":"msg-123","channel_id":"chan-1","content":"updated"}`), http.StatusOK
+		}
+		return []byte(`{}`), http.StatusOK
+	})
+
+	a := &Adapter{session: session}
+	msgID, err := a.SendNotification("chan-1", "hello world")
+	if err != nil {
+		t.Fatalf("SendNotification failed: %v", err)
+	}
+	if msgID != "msg-123" {
+		t.Fatalf("msgID = %q, want msg-123", msgID)
+	}
+	if !strings.Contains(sentBody, "hello world") {
+		t.Fatalf("sentBody = %q, want containing hello world", sentBody)
+	}
+
+	if err := a.EditNotification("chan-1", "msg-123", "updated content"); err != nil {
+		t.Fatalf("EditNotification failed: %v", err)
+	}
+	if !strings.Contains(editBody, "updated content") {
+		t.Fatalf("editBody = %q, want containing updated content", editBody)
+	}
+}
+
+func TestStartThreadClampsNameAndTracksThread(t *testing.T) {
+	var threadPath, threadReqBody string
+	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/messages/msg-123/threads") {
+			threadPath = r.URL.Path
+			b, _ := io.ReadAll(r.Body)
+			threadReqBody = string(b)
+			return []byte(`{"id":"thread-456","name":"clamped","type":11}`), http.StatusOK
+		}
+		return []byte(`{}`), http.StatusOK
+	})
+
+	a := &Adapter{session: session}
+	longName := strings.Repeat("A", 120)
+	threadID, err := a.StartThread("chan-1", "msg-123", longName)
+	if err != nil {
+		t.Fatalf("StartThread failed: %v", err)
+	}
+	if threadID != "thread-456" {
+		t.Fatalf("threadID = %q, want thread-456", threadID)
+	}
+	if !a.isTrackedThread("thread-456") {
+		t.Fatalf("expected thread-456 to be tracked in adapter")
+	}
+	if !strings.Contains(threadPath, "/channels/chan-1/messages/msg-123/threads") {
+		t.Fatalf("threadPath = %q, want containing /channels/chan-1/messages/msg-123/threads", threadPath)
+	}
+	if strings.Contains(threadReqBody, strings.Repeat("A", 101)) {
+		t.Fatalf("threadReqBody was not clamped to 100 runes: %s", threadReqBody)
+	}
+}
