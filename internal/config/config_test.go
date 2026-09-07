@@ -579,3 +579,48 @@ func TestEndpointPathIngressPrefixRejected(t *testing.T) {
 		}
 	}
 }
+
+func TestEndpointThreadAndProgressCardConfig(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
+	yaml := `webhooks:
+  endpoints:
+    - name: ep-defaults
+      path: /defaults
+      secret: s
+      platform: discord
+      channel_id: c1
+      prompt: p
+      workspace:
+        type: none
+    - name: ep-threaded
+      path: /threaded
+      secret: s
+      platform: discord
+      channel_id: c2
+      prompt: p
+      thread: true
+      progress_card: true
+      workspace:
+        type: none
+`
+	path := writeConfig(t, t.TempDir(), yaml)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Webhooks.Endpoints) != 2 {
+		t.Fatalf("endpoints count = %d, want 2", len(cfg.Webhooks.Endpoints))
+	}
+	if cfg.Webhooks.Endpoints[0].Thread {
+		t.Errorf("ep-defaults Thread = true, want false by default")
+	}
+	if cfg.Webhooks.Endpoints[0].ProgressCard {
+		t.Errorf("ep-defaults ProgressCard = true, want false by default")
+	}
+	if !cfg.Webhooks.Endpoints[1].Thread {
+		t.Errorf("ep-threaded Thread = false, want true")
+	}
+	if !cfg.Webhooks.Endpoints[1].ProgressCard {
+		t.Errorf("ep-threaded ProgressCard = false, want true")
+	}
+}

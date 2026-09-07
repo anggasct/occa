@@ -141,6 +141,50 @@ func formatAuditSummary(envelope WebhookEnvelope, workflow string, statusAndReas
 	return strings.Join(lines, "\n")
 }
 
+func FormatThreadName(envelope WebhookEnvelope, workflow string) string {
+	workflow = strings.TrimSpace(workflow)
+	if workflow == "" {
+		workflow = "webhook"
+	}
+	pr := auditField(stringValue(envelope["pr_number"]))
+	branch := auditField(stringValue(envelope["head_branch"]))
+	if pr != "" && branch != "" {
+		return clipRunes(fmt.Sprintf("PR #%s: %s (%s)", pr, workflow, branch), 100)
+	}
+	if pr != "" {
+		return clipRunes(fmt.Sprintf("PR #%s: %s", pr, workflow), 100)
+	}
+	if branch != "" {
+		return clipRunes(fmt.Sprintf("%s: %s", workflow, branch), 100)
+	}
+	delivery := auditField(stringValue(envelope["delivery_id"]))
+	if len(delivery) > 8 {
+		delivery = delivery[:8]
+	}
+	if delivery != "" && delivery != "—" {
+		return clipRunes(fmt.Sprintf("%s (%s)", workflow, delivery), 100)
+	}
+	return clipRunes(workflow, 100)
+}
+
+func FormatRootCard(envelope WebhookEnvelope, workflow, status, reason, threadID string) string {
+	card := formatAuditSummary(envelope, workflow, status, reason)
+	if threadID != "" {
+		card += "\n➡️ Details in thread: <#" + threadID + ">"
+	}
+	return card
+}
+
+func formatDuration(d time.Duration) string {
+	d = d.Round(time.Second)
+	m := int(d / time.Minute)
+	s := int((d % time.Minute) / time.Second)
+	if m > 0 {
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
+}
+
 func auditField(value string) string {
 	value = strings.Join(strings.Fields(value), " ")
 	return strings.ReplaceAll(value, "<no value>", "")
@@ -169,7 +213,37 @@ func (s *Server) markSkipped(id int64, ep config.EndpointConfig, envelope Webhoo
 	s.emitAudit(context.Background(), ep, envelope, "SKIP", reason)
 }
 
-func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelope WebhookEnvelope, status, reason string) {
+func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelope WebhookEnvelope, status, reason string, workCtx ...*WebhookWorkContext) {
+	var wCtx *WebhookWorkContext
+	if len(workCtx) > 0 {
+		wCtx = workCtx[0]
+	}
+
+	if wCtx != nil && wCtx.RootMessageID != "" && s.editor != nil {
+		statusText := status
+		switch status {
+		case "COMPLETED":
+			if !wCtx.StartTime.IsZero() {
+				statusText = fmt.Sprintf("✅ COMPLETED (%s)", formatDuration(time.Since(wCtx.StartTime)))
+			} else {
+				statusText = "✅ COMPLETED"
+			}
+		case "FAILED":
+			if !wCtx.StartTime.IsZero() {
+				statusText = fmt.Sprintf("⚠️ FAILED (%s)", formatDuration(time.Since(wCtx.StartTime)))
+			} else {
+				statusText = "⚠️ FAILED"
+			}
+		}
+		card := FormatRootCard(envelope, ep.Workflow, statusText, reason, wCtx.ThreadID)
+		card = redactAuditSummary(card, ep.Secret)
+		if err := s.editor(ctx, ep.Platform, ep.ChannelID, wCtx.RootMessageID, card); err != nil {
+			slog.Warn("webhook: failed to edit root card, falling back to notifier", "endpoint", ep.Name, "error", err)
+		} else {
+			return
+		}
+	}
+
 	summary := redactAuditSummary(formatAuditSummary(envelope, ep.Workflow, status, reason), ep.Secret)
 	if s.notifier == nil {
 		slog.Info("webhook: audit notification skipped", "endpoint", ep.Name, "status", status)

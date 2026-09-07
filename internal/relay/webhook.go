@@ -40,6 +40,7 @@ type WebhookTurn struct {
 	ExecutionKey string
 	Attempt      int
 	AbortTimeout time.Duration
+	OnEvent      func(ev Event)
 }
 
 type WebhookTurnResult struct {
@@ -96,6 +97,9 @@ func (t WebhookTurn) Run(ctx context.Context) (res WebhookTurnResult, err error)
 		case ev, ok := <-events:
 			if !ok {
 				return res, fmt.Errorf("%w: event stream ended", ErrWebhookResponseIncomplete)
+			}
+			if t.OnEvent != nil {
+				t.OnEvent(ev)
 			}
 			switch ev.Type {
 			case "delta":

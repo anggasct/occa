@@ -82,6 +82,18 @@ type MessageRef interface {
 	ID() string
 }
 
+type MessageSender interface {
+	SendNotification(channelID string, text string) (string, error)
+}
+
+type MessageEditor interface {
+	EditNotification(channelID, messageID string, text string) error
+}
+
+type ThreadStarter interface {
+	StartThread(channelID, messageID, name string) (string, error)
+}
+
 type Channel interface {
 	Name() string
 	Start(ctx context.Context, handler func(IncomingMessage)) error

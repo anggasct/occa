@@ -2,6 +2,7 @@ package discord
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bwmarrin/discordgo"
 
@@ -403,15 +405,73 @@ func (a *Adapter) Stop() error {
 }
 
 func (a *Adapter) Notify(channelID string, text string) error {
-	for _, chunk := range render.Split(text, 2000) {
-		if _, err := a.session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+	_, err := a.SendNotification(channelID, text)
+	return err
+}
+
+func (a *Adapter) SendNotification(channelID, text string) (string, error) {
+	if a.session == nil {
+		return "", errors.New("discord: session not ready")
+	}
+	chunks := render.Split(text, 2000)
+	if len(chunks) == 0 {
+		return "", nil
+	}
+	var firstID string
+	for _, chunk := range chunks {
+		msg, err := a.session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
 			Content:         chunk,
 			AllowedMentions: &discordgo.MessageAllowedMentions{},
-		}); err != nil {
-			return fmt.Errorf("discord: notify: %w", err)
+		})
+		if err != nil {
+			return "", fmt.Errorf("discord: send notification: %w", err)
+		}
+		if firstID == "" {
+			firstID = msg.ID
 		}
 	}
+	return firstID, nil
+}
+
+func (a *Adapter) EditNotification(channelID, messageID, text string) error {
+	if a.session == nil {
+		return errors.New("discord: session not ready")
+	}
+	chunks := render.Split(text, 2000)
+	if len(chunks) == 0 {
+		return nil
+	}
+	content := chunks[0]
+	_, err := a.session.ChannelMessageEditComplex(&discordgo.MessageEdit{
+		Channel:         channelID,
+		ID:              messageID,
+		Content:         &content,
+		AllowedMentions: &discordgo.MessageAllowedMentions{},
+	})
+	if err != nil {
+		return fmt.Errorf("discord: edit notification: %w", err)
+	}
 	return nil
+}
+
+func (a *Adapter) StartThread(channelID, messageID, name string) (string, error) {
+	if a.session == nil {
+		return "", errors.New("discord: session not ready")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "thread"
+	}
+	if utf8.RuneCountInString(name) > 100 {
+		runes := []rune(name)
+		name = string(runes[:100])
+	}
+	thread, err := a.session.MessageThreadStart(channelID, messageID, name, 1440)
+	if err != nil {
+		return "", fmt.Errorf("discord: start thread: %w", err)
+	}
+	a.trackThread(thread.ID)
+	return thread.ID, nil
 }
 
 func (a *Adapter) DeleteMessage(channelID, messageID string) error {
@@ -806,6 +866,9 @@ func (rc *replyContext) Delete(ref channel.MessageRef) error {
 var (
 	_ channel.Channel           = (*Adapter)(nil)
 	_ channel.MessageDeleter    = (*Adapter)(nil)
+	_ channel.MessageSender     = (*Adapter)(nil)
+	_ channel.MessageEditor     = (*Adapter)(nil)
+	_ channel.ThreadStarter     = (*Adapter)(nil)
 	_ channel.ReplyContext      = (*replyContext)(nil)
 	_ channel.MessageRemover    = (*replyContext)(nil)
 	_ channel.ChatCommandSetter = (*replyContext)(nil)

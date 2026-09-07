@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -60,7 +61,7 @@ var version = "dev"
 // separate agent instances, and the agent default workdir is the last
 // fallback. A channel lookup that fails, misses, or carries no workdir
 // falls back to the default — never fails the delivery.
-func resolveWebhookWorkdir(ctx context.Context, channels store.ChannelRepo, defaultWorkdir, platform, channelID string, leaseWorkdir string) string {
+func resolveWebhookWorkdir(ctx context.Context, channels channelStore, defaultWorkdir, platform, channelID string, leaseWorkdir string) string {
 	if leaseWorkdir != "" {
 		return leaseWorkdir
 	}
@@ -330,66 +331,7 @@ func main() {
 
 	var webhookSrv *webhook.Server
 	if len(cfg.Webhooks.Endpoints) > 0 {
-		webhookExecutor := func(ctx context.Context, platform, channelID, prompt string, workCtx *webhook.WebhookWorkContext) error {
-			for _, ch := range channels {
-				if ch.Name() == platform {
-					send := func(text string) { notify(ch, channelID, text) }
-					sendWebhook := func(text string) { notifyWebhook(ch, channelID, text) }
-
-					sendWebhook("📨 Webhook: analyzing...")
-					workdir := resolveWebhookWorkdir(ctx, db.ChannelRepo(), cfg.Agent.DefaultWorkdir, platform, channelID, workCtx.Worktree)
-
-					inst, err := manager.Instance(ctx, workdir)
-					if err != nil {
-						sendWebhook("⚠️ Webhook analysis failed: agent unreachable")
-						return errors.New("webhook agent unavailable")
-					}
-					defer inst.End()
-
-					turn := relay.WebhookTurn{
-						Client:       inst.Client(),
-						Prompt:       prompt,
-						Model:        workCtx.Model,
-						Platform:     platform,
-						ChannelID:    channelID,
-						DeliveryID:   workCtx.DeliveryID,
-						ExecutionKey: workCtx.Key.String(),
-						Attempt:      workCtx.Attempt,
-					}
-					result, err := turn.Run(ctx)
-					workCtx.SessionID = result.SessionID
-					workCtx.SessionAborted = result.Aborted
-					workCtx.SessionAbortOK = result.AbortOK
-					workCtx.Progress = result.Progress
-					if err != nil {
-						switch {
-						case errors.Is(err, relay.ErrWebhookSessionCreate):
-							sendWebhook("⚠️ Webhook analysis failed: session error")
-						case errors.Is(err, relay.ErrWebhookPrompt):
-							sendWebhook("⚠️ Webhook analysis failed: agent request error")
-						case errors.Is(err, relay.ErrWebhookEventStream):
-							sendWebhook("⚠️ Webhook analysis failed: events error")
-						case errors.Is(err, relay.ErrWebhookAgentResponse):
-							sendWebhook("⚠️ Webhook analysis failed: agent response error")
-						case errors.Is(err, relay.ErrWebhookResponseIncomplete):
-							sendWebhook("⚠️ Webhook analysis failed: incomplete response")
-						default:
-							sendWebhook("⚠️ Webhook analysis failed: agent error")
-						}
-						return err
-					}
-
-					output := result.Output
-					if output == "" {
-						output = "(no output)"
-					}
-					send(output)
-					return nil
-				}
-			}
-			slog.Warn("webhook: no channel adapter", "platform", platform, "channel_id", channelID)
-			return errors.New("webhook channel adapter unavailable")
-		}
+		webhookExecutor := newWebhookExecutor(channels, managerProvider{m: manager}, db.ChannelRepo(), cfg.Agent.DefaultWorkdir)
 
 		webhookSrv = webhook.New(cfg.Webhooks, webhookExecutor, db.WebhookDeliveryRepo())
 		webhookSrv.SetChannelStore(db.ChannelRepo())
@@ -398,6 +340,14 @@ func main() {
 				if ch.Name() == platform {
 					notify(ch, channelID, text)
 					return nil
+				}
+			}
+			return errors.New("webhook channel adapter unavailable")
+		})
+		webhookSrv.SetEditor(func(ctx context.Context, platform, channelID, messageID, text string) error {
+			for _, ch := range channels {
+				if ch.Name() == platform {
+					return notifyEdit(ch, channelID, messageID, text)
 				}
 			}
 			return errors.New("webhook channel adapter unavailable")
@@ -502,6 +452,208 @@ func notify(ch channel.Channel, channelID, text string) {
 
 func notifyWebhook(ch channel.Channel, channelID, text string) {
 	notify(ch, channelID, webhook.FormatWebhookMessage(text))
+}
+
+func notifySend(ch channel.Channel, channelID, text string) (string, error) {
+	chunks, err := outboundRenderer.Render(text, render.PlatformFor(ch.Name()))
+	if err != nil || len(chunks) == 0 {
+		chunks = []string{text}
+	}
+	if sender, ok := ch.(channel.MessageSender); ok {
+		return sender.SendNotification(channelID, chunks[0])
+	}
+	if err := ch.Notify(channelID, chunks[0]); err != nil {
+		return "", err
+	}
+	return "", nil
+}
+
+func notifyEdit(ch channel.Channel, channelID, messageID, text string) error {
+	chunks, err := outboundRenderer.Render(text, render.PlatformFor(ch.Name()))
+	if err != nil || len(chunks) == 0 {
+		chunks = []string{text}
+	}
+	if editor, ok := ch.(channel.MessageEditor); ok {
+		return editor.EditNotification(channelID, messageID, chunks[0])
+	}
+	return errors.New("channel does not support editing")
+}
+
+type agentManager interface {
+	Instance(ctx context.Context, workdir string) (router.AgentInstance, error)
+}
+
+type channelStore interface {
+	Get(ctx context.Context, platform, channelID string) (*store.Channel, error)
+}
+
+func newWebhookExecutor(channels []channel.Channel, manager agentManager, channelRepo channelStore, defaultWorkdir string) webhook.Executor {
+	return func(ctx context.Context, platform, channelID, prompt string, workCtx *webhook.WebhookWorkContext) error {
+		for _, ch := range channels {
+			if ch.Name() == platform {
+				targetChannelID := channelID
+				useThread := workCtx != nil && workCtx.Thread
+
+				sender, _ := ch.(channel.MessageSender)
+				editor, _ := ch.(channel.MessageEditor)
+				starter, _ := ch.(channel.ThreadStarter)
+
+				if useThread && starter != nil && sender != nil {
+					rootCard := webhook.FormatRootCard(workCtx.Envelope, workCtx.Workflow, "RUNNING", "", "")
+					rootMsgID, err := notifySend(ch, channelID, webhook.FormatWebhookMessage(rootCard))
+					if err != nil {
+						slog.Warn("webhook: failed to send root card; falling back to channel", "channel_id", channelID, "error", err)
+					} else {
+						threadName := webhook.FormatThreadName(workCtx.Envelope, workCtx.Workflow)
+						threadID, err := starter.StartThread(channelID, rootMsgID, threadName)
+						if err != nil {
+							slog.Warn("webhook: thread creation failed; falling back to channel", "channel_id", channelID, "error", err)
+						} else {
+							workCtx.RootMessageID = rootMsgID
+							workCtx.ThreadID = threadID
+							targetChannelID = threadID
+							_, _ = notifySend(ch, targetChannelID, "🚀 Starting task: "+threadName)
+						}
+					}
+				}
+
+				if targetChannelID == channelID {
+					notifyWebhook(ch, channelID, "📨 Webhook: analyzing...")
+				}
+
+				workdir := resolveWebhookWorkdir(ctx, channelRepo, defaultWorkdir, platform, channelID, workCtx.Worktree)
+
+				inst, err := manager.Instance(ctx, workdir)
+				if err != nil {
+					notifyWebhook(ch, targetChannelID, "⚠️ Webhook analysis failed: agent unreachable")
+					return errors.New("webhook agent unavailable")
+				}
+				defer inst.End()
+
+				var (
+					eventMu     sync.Mutex
+					toolCount   int
+					lastMsgID   string
+					lastTool    string
+					lastCtx     string
+					toolTimer   *time.Timer
+					timerCtx    context.Context
+					timerCancel context.CancelFunc
+				)
+
+				onEvent := func(ev relay.Event) {
+					if !useThread || workCtx.ThreadID == "" {
+						return
+					}
+					if ev.Type != relay.EventTool {
+						return
+					}
+
+					eventMu.Lock()
+					defer eventMu.Unlock()
+
+					if ev.ToolSamePart {
+						if lastMsgID != "" && editor != nil && ev.ToolContext != "" && ev.ToolContext != lastCtx {
+							lastCtx = ev.ToolContext
+							label := relay.FormatToolLabel(lastTool, lastCtx, 1)
+							_ = notifyEdit(ch, targetChannelID, lastMsgID, label)
+						}
+						return
+					}
+
+					if toolTimer != nil {
+						toolTimer.Stop()
+						if timerCancel != nil {
+							timerCancel()
+						}
+					}
+
+					if toolCount >= 5 {
+						return
+					}
+
+					toolCount++
+					lastTool = ev.Delta
+					lastCtx = ev.ToolContext
+					label := relay.FormatToolLabel(lastTool, lastCtx, 1)
+					id, err := notifySend(ch, targetChannelID, label)
+					if err == nil {
+						lastMsgID = id
+						currentMsgID := id
+						currentTool := lastTool
+						currentCtx := lastCtx
+
+						timerCtx, timerCancel = context.WithCancel(ctx)
+						toolTimer = time.AfterFunc(60*time.Second, func() {
+							eventMu.Lock()
+							defer eventMu.Unlock()
+							if timerCtx.Err() != nil || currentMsgID != lastMsgID {
+								return
+							}
+							slowLabel := relay.FormatToolLabel(currentTool, currentCtx, 1) + " (still running, >60s elapsed)"
+							_ = notifyEdit(ch, targetChannelID, currentMsgID, slowLabel)
+						})
+					}
+
+					if toolCount == 5 {
+						_, _ = notifySend(ch, targetChannelID, "🔄 Working...")
+					}
+				}
+
+				turn := relay.WebhookTurn{
+					Client:       inst.Client(),
+					Prompt:       prompt,
+					Model:        workCtx.Model,
+					Platform:     platform,
+					ChannelID:    channelID,
+					DeliveryID:   workCtx.DeliveryID,
+					ExecutionKey: workCtx.Key.String(),
+					Attempt:      workCtx.Attempt,
+					OnEvent:      onEvent,
+				}
+				result, err := turn.Run(ctx)
+				eventMu.Lock()
+				if toolTimer != nil {
+					toolTimer.Stop()
+				}
+				if timerCancel != nil {
+					timerCancel()
+				}
+				eventMu.Unlock()
+
+				workCtx.SessionID = result.SessionID
+				workCtx.SessionAborted = result.Aborted
+				workCtx.SessionAbortOK = result.AbortOK
+				workCtx.Progress = result.Progress
+				if err != nil {
+					switch {
+					case errors.Is(err, relay.ErrWebhookSessionCreate):
+						notifyWebhook(ch, targetChannelID, "⚠️ Webhook analysis failed: session error")
+					case errors.Is(err, relay.ErrWebhookPrompt):
+						notifyWebhook(ch, targetChannelID, "⚠️ Webhook analysis failed: agent request error")
+					case errors.Is(err, relay.ErrWebhookEventStream):
+						notifyWebhook(ch, targetChannelID, "⚠️ Webhook analysis failed: events error")
+					case errors.Is(err, relay.ErrWebhookAgentResponse):
+						notifyWebhook(ch, targetChannelID, "⚠️ Webhook analysis failed: agent response error")
+					case errors.Is(err, relay.ErrWebhookResponseIncomplete):
+						notifyWebhook(ch, targetChannelID, "⚠️ Webhook analysis failed: incomplete response")
+					default:
+						notifyWebhook(ch, targetChannelID, "⚠️ Webhook analysis failed: agent error")
+					}
+					return err
+				}
+
+				output := result.Output
+				if output == "" {
+					output = "(no output)"
+				}
+				notify(ch, targetChannelID, output)
+				return nil
+			}
+		}
+		slog.Warn("webhook: no channel adapter", "platform", platform, "channel_id", channelID)
+		return errors.New("webhook channel adapter unavailable")
+	}
 }
 
 type messageRouter interface {

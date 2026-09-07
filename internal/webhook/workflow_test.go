@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -355,4 +356,198 @@ func TestWebhookWorkflowMismatchSkipsAndNotifiesWithoutExecutor(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFormatThreadName(t *testing.T) {
+	tests := []struct {
+		name     string
+		envelope WebhookEnvelope
+		workflow string
+		want     string
+	}{
+		{
+			name: "pr and branch",
+			envelope: WebhookEnvelope{
+				"pr_number":   "42",
+				"head_branch": "feat/my-branch",
+			},
+			workflow: "github_reviewer",
+			want:     "PR #42: github_reviewer (feat/my-branch)",
+		},
+		{
+			name: "pr only",
+			envelope: WebhookEnvelope{
+				"pr_number": "42",
+			},
+			workflow: "github_reviewer",
+			want:     "PR #42: github_reviewer",
+		},
+		{
+			name: "branch only",
+			envelope: WebhookEnvelope{
+				"head_branch": "main",
+			},
+			workflow: "github_fix",
+			want:     "github_fix: main",
+		},
+		{
+			name: "delivery id fallback",
+			envelope: WebhookEnvelope{
+				"delivery_id": "1234567890abcdef",
+			},
+			workflow: "github_merge",
+			want:     "github_merge (12345678)",
+		},
+		{
+			name:     "empty envelope",
+			envelope: WebhookEnvelope{},
+			workflow: "github_reviewer",
+			want:     "github_reviewer",
+		},
+		{
+			name: "clamped to 100 runes",
+			envelope: WebhookEnvelope{
+				"pr_number":   "999",
+				"head_branch": strings.Repeat("x", 120),
+			},
+			workflow: "long_workflow",
+			want:     clipRunes("PR #999: long_workflow ("+strings.Repeat("x", 120)+")", 100),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatThreadName(tt.envelope, tt.workflow)
+			if got != tt.want {
+				t.Errorf("FormatThreadName = %q, want %q", got, tt.want)
+			}
+			if len([]rune(got)) > 100 {
+				t.Errorf("FormatThreadName length = %d > 100", len([]rune(got)))
+			}
+		})
+	}
+}
+
+func TestFormatRootCard(t *testing.T) {
+	envelope := WebhookEnvelope{
+		"repository":  "anggasct/occa",
+		"pr_number":   "56",
+		"title":       "feat: test",
+		"event_type":  "pull_request",
+		"delivery_id": "del-1",
+	}
+
+	running := FormatRootCard(envelope, "github_reviewer", "RUNNING", "", "")
+	if !strings.Contains(running, "Status: RUNNING") {
+		t.Errorf("running root card missing Status: RUNNING: %s", running)
+	}
+	if strings.Contains(running, "➡️ Details in thread:") {
+		t.Errorf("running root card without threadID should not contain thread link: %s", running)
+	}
+
+	completed := FormatRootCard(envelope, "github_reviewer", "✅ COMPLETED (1m 45s)", "", "thread-789")
+	if !strings.Contains(completed, "Status: ✅ COMPLETED (1m 45s)") {
+		t.Errorf("completed root card missing status: %s", completed)
+	}
+	if !strings.Contains(completed, "➡️ Details in thread: <#thread-789>") {
+		t.Errorf("completed root card missing thread link: %s", completed)
+	}
+}
+
+func TestEmitAuditRootCardEditing(t *testing.T) {
+	envelope := WebhookEnvelope{
+		"repository":  "anggasct/occa",
+		"pr_number":   "56",
+		"title":       "feat: test",
+		"event_type":  "pull_request",
+		"delivery_id": "del-1",
+	}
+	ep := config.EndpointConfig{Platform: "discord", ChannelID: "chan-1", Workflow: "github_reviewer"}
+
+	t.Run("successful root card edit avoids notifier", func(t *testing.T) {
+		var editedChannel, editedMsgID, editedContent string
+		var notifierCalled bool
+
+		srv := &Server{}
+		srv.SetEditor(func(ctx context.Context, platform, channelID, messageID, text string) error {
+			editedChannel = channelID
+			editedMsgID = messageID
+			editedContent = text
+			return nil
+		})
+		srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
+			notifierCalled = true
+			return nil
+		})
+
+		workCtx := &WebhookWorkContext{
+			RootMessageID: "root-msg-123",
+			ThreadID:      "thread-456",
+			StartTime:     time.Now().Add(-105 * time.Second),
+		}
+
+		srv.emitAudit(context.Background(), ep, envelope, "COMPLETED", "", workCtx)
+
+		if notifierCalled {
+			t.Error("notifier was called when editor succeeded")
+		}
+		if editedChannel != "chan-1" || editedMsgID != "root-msg-123" {
+			t.Errorf("editedChannel=%q, editedMsgID=%q, want chan-1 / root-msg-123", editedChannel, editedMsgID)
+		}
+		if !strings.Contains(editedContent, "✅ COMPLETED (1m 45s)") {
+			t.Errorf("editedContent missing completed duration: %s", editedContent)
+		}
+		if !strings.Contains(editedContent, "➡️ Details in thread: <#thread-456>") {
+			t.Errorf("editedContent missing thread link: %s", editedContent)
+		}
+	})
+
+	t.Run("failed root card edit falls back to notifier", func(t *testing.T) {
+		var notifierContent string
+		srv := &Server{}
+		srv.SetEditor(func(ctx context.Context, platform, channelID, messageID, text string) error {
+			return errors.New("discord permission error")
+		})
+		srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
+			notifierContent = text
+			return nil
+		})
+
+		workCtx := &WebhookWorkContext{
+			RootMessageID: "root-msg-123",
+			ThreadID:      "thread-456",
+			StartTime:     time.Now().Add(-30 * time.Second),
+		}
+
+		srv.emitAudit(context.Background(), ep, envelope, "FAILED", "some error", workCtx)
+
+		if notifierContent == "" {
+			t.Fatal("notifier was not called on editor failure")
+		}
+		if !strings.Contains(notifierContent, "Status: FAILED") {
+			t.Errorf("fallback notification missing Status: FAILED: %s", notifierContent)
+		}
+	})
+
+	t.Run("empty root message id uses notifier directly", func(t *testing.T) {
+		var editorCalled, notifierCalled bool
+		srv := &Server{}
+		srv.SetEditor(func(ctx context.Context, platform, channelID, messageID, text string) error {
+			editorCalled = true
+			return nil
+		})
+		srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
+			notifierCalled = true
+			return nil
+		})
+
+		srv.emitAudit(context.Background(), ep, envelope, "COMPLETED", "")
+
+		if editorCalled {
+			t.Error("editor was called when RootMessageID was empty")
+		}
+		if !notifierCalled {
+			t.Error("notifier was not called when RootMessageID was empty")
+		}
+	})
 }

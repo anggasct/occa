@@ -549,8 +549,10 @@ func normalizeToolContext(raw string) string {
 	return s
 }
 
-// formatToolLabel renders one tool bubble, with its context and repeat count
-// when the contiguous run made more than one call.
+func FormatToolLabel(name, context string, count int) string {
+	return formatToolLabel(name, context, count)
+}
+
 func formatToolLabel(name, context string, count int) string {
 	ctx := normalizeToolContext(context)
 	if ctx != "" {
