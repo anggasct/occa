@@ -799,7 +799,18 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		return nil
 	}
 
-	if s.channels != nil {
+	if strings.TrimSpace(ep.Model) != "" {
+		ref, err := relay.ParseModelRef(strings.TrimSpace(ep.Model))
+		if err != nil {
+			slog.Error("webhook: malformed endpoint model", "endpoint", ep.Name, "platform", ep.Platform, "channel_id", ep.ChannelID)
+			s.failDelivery(ep, id, deliveryID, eventType, envelope, "invalid endpoint model", workCtx)
+			return nil
+		}
+		workCtx.Model = &ref
+		workCtx.ModelSource = "endpoint"
+		envelope["model"] = relay.FormatModelRef(ref)
+		envelope["model_source"] = "endpoint"
+	} else if s.channels != nil {
 		ch, err := s.channels.Get(context.Background(), ep.Platform, ep.ChannelID)
 		if err != nil {
 			slog.Error("webhook: channel repo get failed", "endpoint", ep.Name, "channel_id", ep.ChannelID, "error", err)
