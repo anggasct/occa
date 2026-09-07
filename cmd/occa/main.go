@@ -522,7 +522,7 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 			if ch.Name() == platform {
 				targetChannelID := channelID
 				useThread := workCtx != nil && workCtx.Thread
-				useProgressCard := workCtx != nil && (workCtx.ProgressCard || workCtx.Thread)
+				useProgressCard := workCtx != nil && workCtx.ProgressCard
 
 				if platform == "telegram" && workCtx != nil && workCtx.ThreadID != "" {
 					if !strings.Contains(targetChannelID, ":") {
@@ -566,8 +566,8 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 					}
 				}
 
-				if targetChannelID == channelID && (workCtx == nil || workCtx.RootMessageID == "") {
-					notifyWebhook(ch, channelID, "📨 Webhook: analyzing...")
+				if workCtx == nil || workCtx.RootMessageID == "" {
+					notifyWebhook(ch, targetChannelID, "📨 Webhook: analyzing...")
 				}
 
 				workdir := resolveWebhookWorkdir(ctx, channelRepo, defaultWorkdir, platform, channelID, workCtx.Worktree)
@@ -600,7 +600,7 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 						return
 					}
 
-					if !useThread || workCtx.ThreadID == "" {
+					if platform != "discord" || !useThread || workCtx.ThreadID == "" {
 						return
 					}
 

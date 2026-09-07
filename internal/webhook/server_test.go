@@ -3350,3 +3350,49 @@ func TestWebhookOtherErrorsDoNotSelfHealRetry(t *testing.T) {
 		t.Fatalf("executor calls = %d, want 1", exec.callCount())
 	}
 }
+
+func TestWebhookWorkContextHonorsExplicitFalseProgressCard(t *testing.T) {
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{
+		{
+			Name:         "github-no-card",
+			Path:         "/github-no-card",
+			Secret:       "s3cret",
+			Platform:     "telegram",
+			ChannelID:    "-10012345",
+			ThreadID:     "888",
+			Thread:       true,
+			ProgressCard: false,
+			Prompt:       "Analyze",
+		},
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	resp := post(t, ts.URL+"/github-no-card?secret=s3cret", "delivery-no-card-1", "pull_request", `{"action":"opened"}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST status = %d, want 200", resp.StatusCode)
+	}
+	waitForReceipt(t, st, store.WebhookStatusCompleted)
+	if exec.callCount() != 1 {
+		t.Fatalf("executor calls = %d, want 1", exec.callCount())
+	}
+	calls := exec.getCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	workCtx := calls[0].workCtx
+	if workCtx == nil {
+		t.Fatal("expected non-nil WebhookWorkContext")
+	}
+	if !workCtx.Thread {
+		t.Errorf("workCtx.Thread = %v, want true", workCtx.Thread)
+	}
+	if workCtx.ProgressCard {
+		t.Errorf("workCtx.ProgressCard = %v, want false (explicit progress_card: false should not be overridden)", workCtx.ProgressCard)
+	}
+	if workCtx.ThreadID != "888" {
+		t.Errorf("workCtx.ThreadID = %q, want 888", workCtx.ThreadID)
+	}
+}

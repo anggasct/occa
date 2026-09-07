@@ -741,3 +741,58 @@ func TestWebhookExecutorTelegramTopicDispatch(t *testing.T) {
 		t.Errorf("repliedMessage replyToMessageID = %q, want tg-topic-root-99", tgCh.repliedMessages[0].replyToMessageID)
 	}
 }
+
+func TestWebhookExecutorTelegramExplicitFalseProgressCard(t *testing.T) {
+	tgCh := &mockTelegramChannel{}
+
+	events := []relay.Event{
+		{Type: relay.EventTool, Delta: "bash", ToolContext: "git status"},
+		{Type: relay.EventDelta, Delta: "Plain topic analysis done."},
+	}
+
+	agentClient := &mockRelayClient{events: events}
+	manager := &mockAgentManager{client: agentClient}
+	exec := newWebhookExecutor([]channel.Channel{tgCh}, manager, mockChannelStore{}, "/tmp")
+
+	workCtx := &webhook.WebhookWorkContext{
+		Thread:       true,
+		ProgressCard: false,
+		ThreadID:     "888",
+		Workflow:     "github_reviewer",
+		Envelope:     webhook.WebhookEnvelope{"pr_number": "100"},
+		DeliveryID:   "del-explicit-false-1",
+	}
+
+	err := exec(context.Background(), "telegram", "-10088888", "prompt text", workCtx)
+	if err != nil {
+		t.Fatalf("executor error: %v", err)
+	}
+
+	if workCtx.RootMessageID != "" {
+		t.Errorf("expected no root card for explicit ProgressCard=false, got RootMessageID=%q", workCtx.RootMessageID)
+	}
+
+	if len(tgCh.editedMessages) != 0 {
+		t.Errorf("expected no edited messages, got %d", len(tgCh.editedMessages))
+	}
+
+	if len(tgCh.repliedMessages) != 0 {
+		t.Errorf("expected no replied messages, got %d", len(tgCh.repliedMessages))
+	}
+
+	wantTarget := "-10088888:888"
+	if len(tgCh.sentMessages) != 2 {
+		t.Fatalf("expected 2 sent messages (initial notice + output), got %d", len(tgCh.sentMessages))
+	}
+	for i, msg := range tgCh.sentMessages {
+		if msg.channelID != wantTarget {
+			t.Errorf("sent message %d channelID = %q, want %q", i, msg.channelID, wantTarget)
+		}
+	}
+	if !strings.Contains(tgCh.sentMessages[0].text, "📨 Webhook: analyzing...") {
+		t.Errorf("initial message text = %q, want analyzing notice", tgCh.sentMessages[0].text)
+	}
+	if !strings.Contains(tgCh.sentMessages[1].text, "Plain topic analysis done.") {
+		t.Errorf("final output text = %q, want plain output", tgCh.sentMessages[1].text)
+	}
+}

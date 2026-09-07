@@ -764,7 +764,7 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		DeliveryID:   deliveryID,
 		Attempt:      attempt,
 		Thread:       ep.Thread,
-		ProgressCard: ep.ProgressCard || ep.Thread,
+		ProgressCard: ep.ProgressCard,
 		ThreadID:     ep.ThreadID,
 		Workflow:     ep.Workflow,
 		Envelope:     envelope,
