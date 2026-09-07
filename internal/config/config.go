@@ -11,6 +11,8 @@ import (
 	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/anggasct/occa/internal/relay"
 )
 
 type Config struct {
@@ -70,6 +72,7 @@ type EndpointConfig struct {
 	Workspace    EndpointWorkspace `yaml:"workspace"`
 	Thread       bool              `yaml:"thread,omitempty"`
 	ProgressCard bool              `yaml:"progress_card,omitempty"`
+	Model        string            `yaml:"model,omitempty"`
 }
 
 func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
@@ -89,6 +92,7 @@ func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
 		Workspace    EndpointWorkspace `yaml:"workspace"`
 		Thread       bool              `yaml:"thread,omitempty"`
 		ProgressCard *bool             `yaml:"progress_card,omitempty"`
+		Model        string            `yaml:"model,omitempty"`
 	}
 	var raw rawEndpoint
 	if err := node.Decode(&raw); err != nil {
@@ -108,6 +112,7 @@ func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
 	e.Repository = raw.Repository
 	e.Workspace = raw.Workspace
 	e.Thread = raw.Thread
+	e.Model = strings.TrimSpace(raw.Model)
 	if raw.ProgressCard != nil {
 		e.ProgressCard = *raw.ProgressCard
 	} else {
@@ -399,6 +404,11 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 					return Config{}, fmt.Errorf("config: webhooks.endpoints[%d].prompt_file: %w", i, err)
 				}
 				endpoint.Prompt = prompt
+			}
+			if strings.TrimSpace(endpoint.Model) != "" {
+				if _, err := relay.ParseModelRef(strings.TrimSpace(endpoint.Model)); err != nil {
+					return Config{}, fmt.Errorf("config: webhooks.endpoints[%d].model is invalid: %w", i, err)
+				}
 			}
 			if _, exists := paths[endpoint.Path]; exists {
 				return Config{}, fmt.Errorf("config: webhooks.endpoints[%d].path duplicates %q", i, endpoint.Path)

@@ -2439,6 +2439,173 @@ func TestWebhookModelResolution_MalformedChannelModelFailsClosed(t *testing.T) {
 	}
 }
 
+func TestWebhookModelResolution_ExplicitEndpointModel(t *testing.T) {
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{{
+		Name:      "github",
+		Path:      "/github",
+		Secret:    "secret",
+		Platform:  "telegram",
+		ChannelID: "chat-ep-model",
+		Prompt:    "analyze",
+		Model:     "anthropic/claude-3-7-sonnet@high",
+	}})
+
+	audit := make(chan string, 2)
+	srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
+		audit <- text
+		return nil
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	body := `{"action":"opened","repository":{"full_name":"anggasct/occa"},"pull_request":{"number":150,"title":"Endpoint Model Test"}}`
+	if response := post(t, ts.URL+"/github?secret=secret", "delivery-ep-model-1", "pull_request", body); response.StatusCode != http.StatusOK {
+		t.Fatalf("POST status = %d, want 200", response.StatusCode)
+	}
+
+	waitForReceipt(t, st, store.WebhookStatusCompleted)
+
+	calls := exec.getCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 executor call, got %d", len(calls))
+	}
+	if calls[0].workCtx.Model == nil {
+		t.Fatal("expected non-nil workCtx.Model")
+	}
+	wantModel := relay.ModelRef{ProviderID: "anthropic", ID: "claude-3-7-sonnet", Variant: "high"}
+	if *calls[0].workCtx.Model != wantModel {
+		t.Fatalf("got model %+v, want %+v", *calls[0].workCtx.Model, wantModel)
+	}
+	if calls[0].workCtx.ModelSource != "endpoint" {
+		t.Fatalf("got ModelSource %q, want endpoint", calls[0].workCtx.ModelSource)
+	}
+
+	select {
+	case summary := <-audit:
+		if !strings.Contains(summary, "Model: anthropic/claude-3-7-sonnet@high") {
+			t.Fatalf("audit summary missing Model line: %q", summary)
+		}
+		if !strings.Contains(summary, "Model source: endpoint") {
+			t.Fatalf("audit summary missing Model source line: %q", summary)
+		}
+		if !strings.Contains(summary, "Status: COMPLETED") {
+			t.Fatalf("audit summary missing Status COMPLETED: %q", summary)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected audit summary notification")
+	}
+}
+
+func TestWebhookModelResolution_EndpointModelOverridesChannelModel(t *testing.T) {
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{{
+		Name:      "github",
+		Path:      "/github",
+		Secret:    "secret",
+		Platform:  "telegram",
+		ChannelID: "chat-ep-override",
+		Prompt:    "analyze",
+		Model:     "openai/o3-mini",
+	}})
+
+	if err := st.ChannelRepo().UpsertModel(context.Background(), "telegram", "chat-ep-override", "anthropic/claude-3"); err != nil {
+		t.Fatalf("upsert channel model: %v", err)
+	}
+
+	audit := make(chan string, 2)
+	srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
+		audit <- text
+		return nil
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	body := `{"action":"opened","repository":{"full_name":"anggasct/occa"},"pull_request":{"number":151,"title":"Override Test"}}`
+	if response := post(t, ts.URL+"/github?secret=secret", "delivery-ep-override-1", "pull_request", body); response.StatusCode != http.StatusOK {
+		t.Fatalf("POST status = %d, want 200", response.StatusCode)
+	}
+
+	waitForReceipt(t, st, store.WebhookStatusCompleted)
+
+	calls := exec.getCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 executor call, got %d", len(calls))
+	}
+	if calls[0].workCtx.Model == nil {
+		t.Fatal("expected non-nil workCtx.Model")
+	}
+	wantModel := relay.ModelRef{ProviderID: "openai", ID: "o3-mini"}
+	if *calls[0].workCtx.Model != wantModel {
+		t.Fatalf("got model %+v, want %+v", *calls[0].workCtx.Model, wantModel)
+	}
+	if calls[0].workCtx.ModelSource != "endpoint" {
+		t.Fatalf("got ModelSource %q, want endpoint", calls[0].workCtx.ModelSource)
+	}
+
+	select {
+	case summary := <-audit:
+		if !strings.Contains(summary, "Model: openai/o3-mini") {
+			t.Fatalf("audit summary missing Model line: %q", summary)
+		}
+		if !strings.Contains(summary, "Model source: endpoint") {
+			t.Fatalf("audit summary missing Model source line: %q", summary)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected audit summary notification")
+	}
+}
+
+func TestWebhookModelResolution_MalformedEndpointModelFailsClosed(t *testing.T) {
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{{
+		Name:      "github",
+		Path:      "/github",
+		Secret:    "secret",
+		Platform:  "telegram",
+		ChannelID: "chat-ep-malformed",
+		Prompt:    "analyze",
+		Model:     "invalid-model-reference-without-slash",
+	}})
+
+	audit := make(chan string, 2)
+	srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
+		audit <- text
+		return nil
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	body := `{"action":"opened","repository":{"full_name":"anggasct/occa"},"pull_request":{"number":152,"title":"Malformed Endpoint Model"}}`
+	if response := post(t, ts.URL+"/github?secret=secret", "delivery-ep-malformed-1", "pull_request", body); response.StatusCode != http.StatusOK {
+		t.Fatalf("POST status = %d, want 200", response.StatusCode)
+	}
+
+	waitForReceipt(t, st, store.WebhookStatusFailed)
+
+	if exec.callCount() != 0 {
+		t.Fatalf("executor was called %d times on malformed endpoint model, expected 0", exec.callCount())
+	}
+
+	select {
+	case summary := <-audit:
+		if !strings.Contains(summary, "Status: FAILED") {
+			t.Fatalf("audit summary missing Status FAILED: %q", summary)
+		}
+		if !strings.Contains(summary, "invalid endpoint model") {
+			t.Fatalf("audit summary missing 'invalid endpoint model': %q", summary)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected audit summary notification")
+	}
+}
+
 func waitForRowCount(t *testing.T, st *store.SQLiteStore, want int) []store.WebhookDelivery {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)

@@ -686,3 +686,99 @@ func TestEndpointProgressCardAliasAndThreadID(t *testing.T) {
 		t.Errorf("ep-explicit-true got Thread=%v ProgressCard=%v, want Thread=false ProgressCard=true", ep2.Thread, ep2.ProgressCard)
 	}
 }
+
+func TestWebhookEndpointModelValidation(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
+
+	tests := []struct {
+		name      string
+		model     string
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			name:    "valid standard model",
+			model:   "openai/gpt-4o",
+			wantErr: false,
+		},
+		{
+			name:    "valid model with variant",
+			model:   "anthropic/claude-3-7-sonnet@high",
+			wantErr: false,
+		},
+		{
+			name:    "valid model with slash in model id",
+			model:   "openrouter/deepseek/deepseek-r1@max",
+			wantErr: false,
+		},
+		{
+			name:    "empty model allowed",
+			model:   "",
+			wantErr: false,
+		},
+		{
+			name:      "missing slash separator",
+			model:     "gpt-4o",
+			wantErr:   true,
+			errSubstr: "webhooks.endpoints[0].model is invalid",
+		},
+		{
+			name:      "empty model part with variant",
+			model:     "openai/@high",
+			wantErr:   true,
+			errSubstr: "webhooks.endpoints[0].model is invalid",
+		},
+		{
+			name:      "empty variant after at sign",
+			model:     "openai/gpt-4o@",
+			wantErr:   true,
+			errSubstr: "webhooks.endpoints[0].model is invalid",
+		},
+		{
+			name:      "empty provider",
+			model:     "/gpt-4o",
+			wantErr:   true,
+			errSubstr: "webhooks.endpoints[0].model is invalid",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			modelLine := ""
+			if tt.model != "" {
+				modelLine = fmt.Sprintf("      model: %q\n", tt.model)
+			}
+			yaml := fmt.Sprintf(`webhooks:
+  endpoints:
+    - name: test
+      path: /test
+      secret: sec
+      platform: telegram
+      channel_id: c1
+%s      prompt: p
+      workspace:
+        type: none
+`, modelLine)
+			path := writeConfig(t, t.TempDir(), yaml)
+			cfg, err := Load(path)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for model %q, got nil", tt.model)
+				}
+				if !strings.Contains(err.Error(), tt.errSubstr) {
+					t.Fatalf("expected error containing %q, got %v", tt.errSubstr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(cfg.Webhooks.Endpoints) != 1 {
+				t.Fatalf("expected 1 endpoint, got %d", len(cfg.Webhooks.Endpoints))
+			}
+			if cfg.Webhooks.Endpoints[0].Model != tt.model {
+				t.Errorf("Model = %q, want %q", cfg.Webhooks.Endpoints[0].Model, tt.model)
+			}
+		})
+	}
+}
