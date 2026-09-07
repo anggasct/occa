@@ -43,6 +43,7 @@ type WebhookWorkContext struct {
 	ModelSource    string
 	Progress       relay.TurnProgress
 	Thread         bool
+	ProgressCard   bool
 	Workflow       string
 	Envelope       WebhookEnvelope
 	RootMessageID  string

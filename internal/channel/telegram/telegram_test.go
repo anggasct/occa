@@ -378,3 +378,116 @@ func TestInlineKeyboardChunksOversizedRows(t *testing.T) {
 		t.Fatalf("row sizes = %d/%d, want 8/2", len(rows[0]), len(rows[1]))
 	}
 }
+
+func TestParseChannelTarget(t *testing.T) {
+	cases := []struct {
+		input     string
+		wantChat  int64
+		wantTopic int64
+		wantErr   bool
+	}{
+		{"-1001234567890", -1001234567890, 0, false},
+		{"-1001234567890:555", -1001234567890, 555, false},
+		{"42", 42, 0, false},
+		{"42:101", 42, 101, false},
+		{"", 0, 0, true},
+		{"invalid", 0, 0, true},
+		{"42:invalid", 0, 0, true},
+	}
+	for _, tc := range cases {
+		cID, tID, err := parseChannelTarget(tc.input)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("parseChannelTarget(%q) err = %v, wantErr = %v", tc.input, err, tc.wantErr)
+		}
+		if cID != tc.wantChat || tID != tc.wantTopic {
+			t.Errorf("parseChannelTarget(%q) = (%d, %d), want (%d, %d)", tc.input, cID, tID, tc.wantChat, tc.wantTopic)
+		}
+	}
+}
+
+func TestAdapterSendAndReplyNotification(t *testing.T) {
+	var sentBodies []string
+	bot := fakeTelegramServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		sentBodies = append(sentBodies, string(body))
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":42}}`))
+	})
+
+	a := &Adapter{bot: bot}
+
+	// Plain send
+	msgID, err := a.SendNotification("-1001234", "hello world")
+	if err != nil {
+		t.Fatalf("SendNotification failed: %v", err)
+	}
+	if msgID != "42" {
+		t.Errorf("msgID = %q, want 42", msgID)
+	}
+
+	// Topic send
+	msgID, err = a.SendNotification("-1001234:777", "hello topic")
+	if err != nil {
+		t.Fatalf("SendNotification with topic failed: %v", err)
+	}
+	if msgID != "42" {
+		t.Errorf("msgID = %q, want 42", msgID)
+	}
+
+	// Reply in topic
+	msgID, err = a.ReplyNotification("-1001234:777", "42", "reply in topic")
+	if err != nil {
+		t.Fatalf("ReplyNotification failed: %v", err)
+	}
+	if msgID != "42" {
+		t.Errorf("msgID = %q, want 42", msgID)
+	}
+
+	if len(sentBodies) != 3 {
+		t.Fatalf("expected 3 requests, got %d", len(sentBodies))
+	}
+
+	// Verify request 1 (plain send): chat_id only
+	if !strings.Contains(sentBodies[0], "chat_id=-1001234") || strings.Contains(sentBodies[0], "message_thread_id") {
+		t.Errorf("unexpected body 0: %s", sentBodies[0])
+	}
+	// Verify request 2 (topic send): chat_id and message_thread_id
+	if !strings.Contains(sentBodies[1], "chat_id=-1001234") || !strings.Contains(sentBodies[1], "message_thread_id=777") {
+		t.Errorf("unexpected body 1: %s", sentBodies[1])
+	}
+	// Verify request 3 (reply in topic): chat_id, message_thread_id, reply_to_message_id
+	if !strings.Contains(sentBodies[2], "chat_id=-1001234") || !strings.Contains(sentBodies[2], "message_thread_id=777") || !strings.Contains(sentBodies[2], "reply_to_message_id=42") {
+		t.Errorf("unexpected body 2: %s", sentBodies[2])
+	}
+}
+
+func TestAdapterEditNotification(t *testing.T) {
+	var editBodies []string
+	simulateNotModified := false
+
+	bot := fakeTelegramServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		editBodies = append(editBodies, string(body))
+		if simulateNotModified {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"ok":false,"error_code":400,"description":"Bad Request: message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":42}}`))
+	})
+
+	a := &Adapter{bot: bot}
+
+	// Successful edit
+	if err := a.EditNotification("-1001234:777", "42", "updated text"); err != nil {
+		t.Fatalf("EditNotification failed: %v", err)
+	}
+	if len(editBodies) != 1 || !strings.Contains(editBodies[0], "message_id=42") {
+		t.Errorf("unexpected edit body: %v", editBodies)
+	}
+
+	// Edit with "message is not modified" returns nil
+	simulateNotModified = true
+	if err := a.EditNotification("-1001234", "42", "same text"); err != nil {
+		t.Fatalf("EditNotification with not modified should return nil, got: %v", err)
+	}
+}

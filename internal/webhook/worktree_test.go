@@ -547,24 +547,33 @@ func TestWorkspaceConcurrentMutableResolutionSingleLease(t *testing.T) {
 	m := NewWorkspaceManager()
 	key := WebhookExecutionKey{Repository: "testowner/myrepo", Branch: "main"}
 
-	var wg sync.WaitGroup
+	var startWg, resolveWg, finishWg sync.WaitGroup
+	startWg.Add(8)
+	resolveWg.Add(8)
+	finishWg.Add(8)
+	releaseCh := make(chan struct{})
 	results := make(chan error, 8)
 	for i := 0; i < 8; i++ {
-		wg.Add(1)
 		go func(i int) {
-			defer wg.Done()
+			defer finishWg.Done()
 			req := gitEndpointRequest(key, config.WorkspaceModeMutable)
 			req.Path = root
 			req.DeliveryID = "delivery-" + string(rune('a'+i))
+			startWg.Done()
+			startWg.Wait()
 			lease, err := m.ResolveWorkspace(context.Background(), req)
+			resolveWg.Done()
 			if err != nil {
 				results <- err
 				return
 			}
+			<-releaseCh
 			results <- lease.Release(context.Background())
 		}(i)
 	}
-	wg.Wait()
+	resolveWg.Wait()
+	close(releaseCh)
+	finishWg.Wait()
 	close(results)
 
 	leased, released := 0, 0

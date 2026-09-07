@@ -293,6 +293,58 @@ func (m *mockDiscordChannel) StartThread(channelID, messageID, name string) (str
 	return "thread-999", nil
 }
 
+type mockTelegramChannel struct {
+	mu              sync.Mutex
+	sentMessages    []mockMessage
+	editedMessages  []mockEdit
+	repliedMessages []mockReply
+	nextMsgID       string
+}
+
+type mockReply struct {
+	channelID        string
+	replyToMessageID string
+	text             string
+}
+
+func (m *mockTelegramChannel) Name() string                                               { return "telegram" }
+func (m *mockTelegramChannel) Start(context.Context, func(channel.IncomingMessage)) error { return nil }
+func (m *mockTelegramChannel) Stop() error                                                { return nil }
+func (m *mockTelegramChannel) Notify(channelID, text string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sentMessages = append(m.sentMessages, mockMessage{channelID, text})
+	return nil
+}
+func (m *mockTelegramChannel) SendNotification(channelID, text string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sentMessages = append(m.sentMessages, mockMessage{channelID, text})
+	if m.nextMsgID != "" {
+		return m.nextMsgID, nil
+	}
+	return fmt.Sprintf("msg-%d", len(m.sentMessages)), nil
+}
+func (m *mockTelegramChannel) EditNotification(channelID, messageID, text string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.editedMessages = append(m.editedMessages, mockEdit{channelID, messageID, text})
+	return nil
+}
+func (m *mockTelegramChannel) ReplyNotification(channelID, replyToMessageID, text string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.repliedMessages = append(m.repliedMessages, mockReply{channelID, replyToMessageID, text})
+	return "reply-1", nil
+}
+
+var (
+	_ channel.Channel        = (*mockTelegramChannel)(nil)
+	_ channel.MessageSender  = (*mockTelegramChannel)(nil)
+	_ channel.MessageEditor  = (*mockTelegramChannel)(nil)
+	_ channel.MessageReplier = (*mockTelegramChannel)(nil)
+)
+
 type mockAgentManager struct {
 	client relay.Client
 }
@@ -568,5 +620,124 @@ func TestWebhookExecutorWithoutThread(t *testing.T) {
 	}
 	if !foundOutput {
 		t.Error("missing output for non-thread execution")
+	}
+}
+
+func TestWebhookExecutorTelegramProgressCard(t *testing.T) {
+	tgCh := &mockTelegramChannel{
+		nextMsgID: "tg-root-42",
+	}
+
+	events := []relay.Event{
+		{Type: relay.EventTool, Delta: "bash", ToolContext: "git status"},
+		{Type: relay.EventTool, Delta: "read_file", ToolContext: "main.go"},
+		{Type: relay.EventDelta, Delta: "Analysis report output."},
+	}
+
+	agentClient := &mockRelayClient{events: events}
+	manager := &mockAgentManager{client: agentClient}
+	exec := newWebhookExecutor([]channel.Channel{tgCh}, manager, mockChannelStore{}, "/tmp")
+
+	workCtx := &webhook.WebhookWorkContext{
+		ProgressCard: true,
+		Workflow:     "github_reviewer",
+		Envelope:     webhook.WebhookEnvelope{"pr_number": "56", "head_branch": "feat/tg-card"},
+		DeliveryID:   "del-tg-1",
+	}
+
+	err := exec(context.Background(), "telegram", "-10012345", "prompt text", workCtx)
+	if err != nil {
+		t.Fatalf("executor error: %v", err)
+	}
+
+	if workCtx.RootMessageID != "tg-root-42" {
+		t.Errorf("workCtx.RootMessageID = %q, want tg-root-42", workCtx.RootMessageID)
+	}
+
+	if len(tgCh.sentMessages) < 1 {
+		t.Fatalf("expected at least 1 sent message (root card), got %d", len(tgCh.sentMessages))
+	}
+	initialMsg := tgCh.sentMessages[0]
+	if initialMsg.channelID != "-10012345" {
+		t.Errorf("initial message channelID = %q, want -10012345", initialMsg.channelID)
+	}
+	if !strings.Contains(initialMsg.text, "github_reviewer") || !strings.Contains(initialMsg.text, "Status:") {
+		t.Errorf("initial message not a root card: %s", initialMsg.text)
+	}
+
+	if len(tgCh.editedMessages) < 1 {
+		t.Fatalf("expected at least 1 in-place edit during execution, got %d", len(tgCh.editedMessages))
+	}
+	firstEdit := tgCh.editedMessages[0]
+	if firstEdit.channelID != "-10012345" || firstEdit.messageID != "tg-root-42" {
+		t.Errorf("unexpected edit target: %+v", firstEdit)
+	}
+	if !strings.Contains(firstEdit.text, "bash: git status") {
+		t.Errorf("edit text missing tool info: %s", firstEdit.text)
+	}
+
+	if len(tgCh.repliedMessages) != 1 {
+		t.Fatalf("expected 1 replied message for final output, got %d", len(tgCh.repliedMessages))
+	}
+	reply := tgCh.repliedMessages[0]
+	if reply.channelID != "-10012345" || reply.replyToMessageID != "tg-root-42" {
+		t.Errorf("unexpected reply target: %+v", reply)
+	}
+	if !strings.Contains(reply.text, "Analysis report output.") {
+		t.Errorf("reply text missing output: %s", reply.text)
+	}
+}
+
+func TestWebhookExecutorTelegramTopicDispatch(t *testing.T) {
+	tgCh := &mockTelegramChannel{
+		nextMsgID: "tg-topic-root-99",
+	}
+
+	events := []relay.Event{
+		{Type: relay.EventTool, Delta: "bash", ToolContext: "make test"},
+		{Type: relay.EventDelta, Delta: "Topic analysis done."},
+	}
+
+	agentClient := &mockRelayClient{events: events}
+	manager := &mockAgentManager{client: agentClient}
+	exec := newWebhookExecutor([]channel.Channel{tgCh}, manager, mockChannelStore{}, "/tmp")
+
+	workCtx := &webhook.WebhookWorkContext{
+		ProgressCard: true,
+		ThreadID:     "777",
+		Workflow:     "github_reviewer",
+		Envelope:     webhook.WebhookEnvelope{"pr_number": "99", "head_branch": "feat/topic"},
+		DeliveryID:   "del-topic-1",
+	}
+
+	err := exec(context.Background(), "telegram", "-10099999", "prompt text", workCtx)
+	if err != nil {
+		t.Fatalf("executor error: %v", err)
+	}
+
+	wantTarget := "-10099999:777"
+
+	if len(tgCh.sentMessages) < 1 {
+		t.Fatalf("expected root card sent, got %d messages", len(tgCh.sentMessages))
+	}
+	if tgCh.sentMessages[0].channelID != wantTarget {
+		t.Errorf("sentMessage channelID = %q, want %q", tgCh.sentMessages[0].channelID, wantTarget)
+	}
+
+	if len(tgCh.editedMessages) < 1 {
+		t.Fatalf("expected edits in topic, got %d", len(tgCh.editedMessages))
+	}
+	if tgCh.editedMessages[0].channelID != wantTarget {
+		t.Errorf("editedMessage channelID = %q, want %q", tgCh.editedMessages[0].channelID, wantTarget)
+	}
+
+	if len(tgCh.repliedMessages) != 1 {
+		t.Fatalf("expected 1 reply in topic, got %d", len(tgCh.repliedMessages))
+	}
+	if tgCh.repliedMessages[0].channelID != wantTarget {
+		t.Errorf("repliedMessage channelID = %q, want %q", tgCh.repliedMessages[0].channelID, wantTarget)
+	}
+	if tgCh.repliedMessages[0].replyToMessageID != "tg-topic-root-99" {
+		t.Errorf("repliedMessage replyToMessageID = %q, want tg-topic-root-99", tgCh.repliedMessages[0].replyToMessageID)
 	}
 }

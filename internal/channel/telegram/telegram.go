@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -208,30 +209,176 @@ func (a *Adapter) Stop() error {
 	return nil
 }
 
+func parseChannelTarget(channelID string) (chatID int64, threadID int64, err error) {
+	channelID = strings.TrimSpace(channelID)
+	if channelID == "" {
+		return 0, 0, errors.New("telegram: empty channel id")
+	}
+	if before, after, ok := strings.Cut(channelID, ":"); ok {
+		cID, err := strconv.ParseInt(before, 10, 64)
+		if err != nil {
+			return 0, 0, fmt.Errorf("telegram: parse chat id %q: %w", before, err)
+		}
+		tID, err := strconv.ParseInt(after, 10, 64)
+		if err != nil {
+			return 0, 0, fmt.Errorf("telegram: parse thread id %q: %w", after, err)
+		}
+		return cID, tID, nil
+	}
+	cID, err := strconv.ParseInt(channelID, 10, 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("telegram: parse chat id %q: %w", channelID, err)
+	}
+	return cID, 0, nil
+}
+
+func (a *Adapter) sendMessage(chatID, threadID int64, replyToID int, text string) (tgbotapi.Message, error) {
+	params := tgbotapi.Params{
+		"chat_id":                  strconv.FormatInt(chatID, 10),
+		"text":                     text,
+		"parse_mode":               "HTML",
+		"disable_web_page_preview": "true",
+	}
+	if threadID != 0 {
+		params["message_thread_id"] = strconv.FormatInt(threadID, 10)
+	}
+	if replyToID != 0 {
+		params["reply_to_message_id"] = strconv.Itoa(replyToID)
+	}
+	resp, err := a.bot.MakeRequest("sendMessage", params)
+	if err != nil {
+		return tgbotapi.Message{}, err
+	}
+	var msg tgbotapi.Message
+	if err := json.Unmarshal(resp.Result, &msg); err != nil {
+		return msg, fmt.Errorf("telegram: decode message: %w", err)
+	}
+	return msg, nil
+}
+
+func (a *Adapter) editMessage(chatID int64, messageID int, text string) error {
+	params := tgbotapi.Params{
+		"chat_id":                  strconv.FormatInt(chatID, 10),
+		"message_id":               strconv.Itoa(messageID),
+		"text":                     text,
+		"parse_mode":               "HTML",
+		"disable_web_page_preview": "true",
+	}
+	_, err := a.bot.MakeRequest("editMessageText", params)
+	if err != nil {
+		if apiErr, ok := err.(*tgbotapi.Error); ok && strings.Contains(apiErr.Message, "message is not modified") {
+			return nil
+		}
+		if strings.Contains(err.Error(), "message is not modified") {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
 func (a *Adapter) Notify(channelID string, text string) error {
-	var chatID int64
-	fmt.Sscanf(channelID, "%d", &chatID)
+	if a.bot == nil {
+		return errors.New("telegram: bot not ready")
+	}
+	chatID, threadID, err := parseChannelTarget(channelID)
+	if err != nil {
+		return err
+	}
 	for _, chunk := range render.Split(text, 4096) {
-		msg := tgbotapi.NewMessage(chatID, chunk)
-		msg.ParseMode = "HTML"
-		msg.DisableWebPagePreview = true
-		if _, err := a.bot.Send(msg); err != nil {
+		if _, err := a.sendMessage(chatID, threadID, 0, chunk); err != nil {
 			return fmt.Errorf("telegram: notify: %w", err)
 		}
 	}
 	return nil
 }
 
+func (a *Adapter) SendNotification(channelID, text string) (string, error) {
+	if a.bot == nil {
+		return "", errors.New("telegram: bot not ready")
+	}
+	chatID, threadID, err := parseChannelTarget(channelID)
+	if err != nil {
+		return "", err
+	}
+	chunks := render.Split(text, 4096)
+	if len(chunks) == 0 {
+		return "", nil
+	}
+	var firstID string
+	for _, chunk := range chunks {
+		sent, err := a.sendMessage(chatID, threadID, 0, chunk)
+		if err != nil {
+			return "", fmt.Errorf("telegram: send notification: %w", err)
+		}
+		if firstID == "" {
+			firstID = strconv.Itoa(sent.MessageID)
+		}
+	}
+	return firstID, nil
+}
+
+func (a *Adapter) EditNotification(channelID, messageID, text string) error {
+	if a.bot == nil {
+		return errors.New("telegram: bot not ready")
+	}
+	chatID, _, err := parseChannelTarget(channelID)
+	if err != nil {
+		return err
+	}
+	msgID, err := strconv.Atoi(messageID)
+	if err != nil {
+		return fmt.Errorf("telegram: parse message id %q: %w", messageID, err)
+	}
+	chunks := render.Split(text, 4096)
+	if len(chunks) == 0 {
+		return nil
+	}
+	if err := a.editMessage(chatID, msgID, chunks[0]); err != nil {
+		return fmt.Errorf("telegram: edit notification: %w", err)
+	}
+	return nil
+}
+
+func (a *Adapter) ReplyNotification(channelID, replyToMessageID, text string) (string, error) {
+	if a.bot == nil {
+		return "", errors.New("telegram: bot not ready")
+	}
+	chatID, threadID, err := parseChannelTarget(channelID)
+	if err != nil {
+		return "", err
+	}
+	replyID, err := strconv.Atoi(replyToMessageID)
+	if err != nil {
+		return "", fmt.Errorf("telegram: parse reply to message id %q: %w", replyToMessageID, err)
+	}
+	chunks := render.Split(text, 4096)
+	if len(chunks) == 0 {
+		return "", nil
+	}
+	var firstID string
+	for _, chunk := range chunks {
+		sent, err := a.sendMessage(chatID, threadID, replyID, chunk)
+		if err != nil {
+			return "", fmt.Errorf("telegram: reply notification: %w", err)
+		}
+		if firstID == "" {
+			firstID = strconv.Itoa(sent.MessageID)
+		}
+	}
+	return firstID, nil
+}
+
 func (a *Adapter) DeleteMessage(channelID, messageID string) error {
 	if a.bot == nil {
 		return fmt.Errorf("telegram: delete message: bot not ready")
 	}
-	var chatID int64
-	if _, err := fmt.Sscanf(channelID, "%d", &chatID); err != nil {
-		return fmt.Errorf("telegram: parse chat id %q: %w", channelID, err)
+	chatID, _, err := parseChannelTarget(channelID)
+	if err != nil {
+		return err
 	}
-	msgID := 0
-	if _, err := fmt.Sscanf(messageID, "%d", &msgID); err != nil {
+	msgID, err := strconv.Atoi(messageID)
+	if err != nil {
 		return fmt.Errorf("telegram: parse message id %q: %w", messageID, err)
 	}
 
@@ -239,7 +386,7 @@ func (a *Adapter) DeleteMessage(channelID, messageID string) error {
 		"chat_id":    strconv.FormatInt(chatID, 10),
 		"message_id": strconv.Itoa(msgID),
 	}
-	_, err := a.bot.MakeRequest("deleteMessage", params)
+	_, err = a.bot.MakeRequest("deleteMessage", params)
 	if apiErr, ok := err.(*tgbotapi.Error); ok && strings.Contains(apiErr.Message, "not found") {
 		return channel.ErrMessageNotFound
 	}
@@ -593,6 +740,9 @@ func (rc *replyContext) Delete(ref channel.MessageRef) error {
 var (
 	_ channel.Channel           = (*Adapter)(nil)
 	_ channel.MessageDeleter    = (*Adapter)(nil)
+	_ channel.MessageSender     = (*Adapter)(nil)
+	_ channel.MessageEditor     = (*Adapter)(nil)
+	_ channel.MessageReplier    = (*Adapter)(nil)
 	_ channel.ReplyContext      = (*replyContext)(nil)
 	_ channel.MessageRemover    = (*replyContext)(nil)
 	_ channel.ChatCommandSetter = (*replyContext)(nil)

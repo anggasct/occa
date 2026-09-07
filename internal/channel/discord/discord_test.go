@@ -741,6 +741,17 @@ func TestSendNotificationAndEditNotification(t *testing.T) {
 	if !strings.Contains(editBody, "updated content") {
 		t.Fatalf("editBody = %q, want containing updated content", editBody)
 	}
+
+	replyID, err := a.ReplyNotification("chan-1", "msg-123", "reply text")
+	if err != nil {
+		t.Fatalf("ReplyNotification failed: %v", err)
+	}
+	if replyID != "msg-123" {
+		t.Fatalf("replyID = %q, want msg-123", replyID)
+	}
+	if !strings.Contains(sentBody, "reply text") || !strings.Contains(sentBody, "msg-123") {
+		t.Fatalf("sentBody = %q, want containing reply text and msg-123 reference", sentBody)
+	}
 }
 
 func TestStartThreadClampsNameAndTracksThread(t *testing.T) {

@@ -760,13 +760,15 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 	envelope := normalizeWebhook(body, eventType, deliveryID, false, "")
 
 	workCtx := &WebhookWorkContext{
-		Key:        key,
-		DeliveryID: deliveryID,
-		Attempt:    attempt,
-		Thread:     ep.Thread,
-		Workflow:   ep.Workflow,
-		Envelope:   envelope,
-		StartTime:  time.Now(),
+		Key:          key,
+		DeliveryID:   deliveryID,
+		Attempt:      attempt,
+		Thread:       ep.Thread,
+		ProgressCard: ep.ProgressCard || ep.Thread,
+		ThreadID:     ep.ThreadID,
+		Workflow:     ep.Workflow,
+		Envelope:     envelope,
+		StartTime:    time.Now(),
 	}
 	if lease != nil {
 		workCtx.Worktree = lease.Path

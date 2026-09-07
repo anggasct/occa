@@ -62,6 +62,7 @@ type EndpointConfig struct {
 	Workflow     string            `yaml:"workflow,omitempty"`
 	Platform     string            `yaml:"platform"`
 	ChannelID    string            `yaml:"channel_id"`
+	ThreadID     string            `yaml:"thread_id,omitempty"`
 	Prompt       string            `yaml:"prompt"`
 	PromptFile   string            `yaml:"prompt_file,omitempty"`
 	SkipEvents   []string          `yaml:"skip_events,omitempty"`
@@ -69,6 +70,50 @@ type EndpointConfig struct {
 	Workspace    EndpointWorkspace `yaml:"workspace"`
 	Thread       bool              `yaml:"thread,omitempty"`
 	ProgressCard bool              `yaml:"progress_card,omitempty"`
+}
+
+func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
+	type rawEndpoint struct {
+		Name         string            `yaml:"name"`
+		Path         string            `yaml:"path"`
+		Auth         string            `yaml:"auth,omitempty"`
+		Secret       string            `yaml:"secret"`
+		Workflow     string            `yaml:"workflow,omitempty"`
+		Platform     string            `yaml:"platform"`
+		ChannelID    string            `yaml:"channel_id"`
+		ThreadID     string            `yaml:"thread_id,omitempty"`
+		Prompt       string            `yaml:"prompt"`
+		PromptFile   string            `yaml:"prompt_file,omitempty"`
+		SkipEvents   []string          `yaml:"skip_events,omitempty"`
+		Repository   string            `yaml:"repository,omitempty"`
+		Workspace    EndpointWorkspace `yaml:"workspace"`
+		Thread       bool              `yaml:"thread,omitempty"`
+		ProgressCard *bool             `yaml:"progress_card,omitempty"`
+	}
+	var raw rawEndpoint
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	e.Name = raw.Name
+	e.Path = raw.Path
+	e.Auth = raw.Auth
+	e.Secret = raw.Secret
+	e.Workflow = raw.Workflow
+	e.Platform = raw.Platform
+	e.ChannelID = raw.ChannelID
+	e.ThreadID = raw.ThreadID
+	e.Prompt = raw.Prompt
+	e.PromptFile = raw.PromptFile
+	e.SkipEvents = raw.SkipEvents
+	e.Repository = raw.Repository
+	e.Workspace = raw.Workspace
+	e.Thread = raw.Thread
+	if raw.ProgressCard != nil {
+		e.ProgressCard = *raw.ProgressCard
+	} else {
+		e.ProgressCard = raw.Thread
+	}
+	return nil
 }
 
 type EndpointWorkspace struct {

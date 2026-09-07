@@ -592,6 +592,25 @@ func waitForReceipt(t *testing.T, st *store.SQLiteStore, status store.WebhookSta
 	return nil
 }
 
+func waitForReceiptDeliveryID(t *testing.T, st *store.SQLiteStore, deliveryID string, status store.WebhookStatus) *store.WebhookDelivery {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		deliveries, err := st.WebhookDeliveryRepo().List(context.Background(), 20)
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		for i := range deliveries {
+			if deliveries[i].DeliveryID == deliveryID && deliveries[i].Status == status {
+				return &deliveries[i]
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("delivery %s never reached %s: %+v", deliveryID, status, mustList(t, st))
+	return nil
+}
+
 func mustList(t *testing.T, st *store.SQLiteStore) []store.WebhookDelivery {
 	t.Helper()
 	deliveries, err := st.WebhookDeliveryRepo().List(context.Background(), 50)
@@ -2273,7 +2292,7 @@ func TestWebhookModelResolution_DynamicChannelModelChange(t *testing.T) {
 	if response := post(t, ts.URL+"/github?secret=secret", "delivery-dyn-1", "pull_request", body); response.StatusCode != http.StatusOK {
 		t.Fatalf("POST status = %d, want 200", response.StatusCode)
 	}
-	waitForReceipt(t, st, store.WebhookStatusCompleted)
+	waitForReceiptDeliveryID(t, st, "delivery-dyn-1", store.WebhookStatusCompleted)
 
 	calls := exec.getCalls()
 	if len(calls) != 1 {
@@ -2291,7 +2310,7 @@ func TestWebhookModelResolution_DynamicChannelModelChange(t *testing.T) {
 	if response := post(t, ts.URL+"/github?secret=secret", "delivery-dyn-2", "pull_request", body); response.StatusCode != http.StatusOK {
 		t.Fatalf("POST status = %d, want 200", response.StatusCode)
 	}
-	waitForReceipt(t, st, store.WebhookStatusCompleted)
+	waitForReceiptDeliveryID(t, st, "delivery-dyn-2", store.WebhookStatusCompleted)
 
 	calls = exec.getCalls()
 	if len(calls) != 2 {
