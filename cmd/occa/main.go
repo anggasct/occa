@@ -537,7 +537,7 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 				var progressUpdater *webhook.ProgressCardUpdater
 
 				if useThread && starter != nil && sender != nil {
-					rootCard := webhook.FormatRootCard(workCtx.Envelope, workCtx.Workflow, "RUNNING", "", "")
+					rootCard := webhook.FormatRootCard(workCtx.Envelope, workCtx.Workflow, "RUNNING", "", "", platform)
 					rootMsgID, err := notifySend(ch, channelID, webhook.FormatWebhookMessage(rootCard))
 					if err != nil {
 						slog.Warn("webhook: failed to send root card; falling back to channel", "channel_id", channelID, "error", err)
@@ -554,13 +554,13 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 						}
 					}
 				} else if platform == "telegram" && useProgressCard && sender != nil && editor != nil {
-					rootCard := webhook.FormatRootCard(workCtx.Envelope, workCtx.Workflow, "⏳ Starting agent analysis...", "", workCtx.ThreadID)
+					rootCard := webhook.FormatRootCard(workCtx.Envelope, workCtx.Workflow, "⏳ Starting agent analysis...", "", workCtx.ThreadID, platform)
 					rootMsgID, err := notifySend(ch, targetChannelID, webhook.FormatWebhookMessage(rootCard))
 					if err != nil {
 						slog.Warn("webhook: failed to send telegram root card; falling back to channel", "channel_id", targetChannelID, "error", err)
 					} else {
 						workCtx.RootMessageID = rootMsgID
-						progressUpdater = webhook.NewProgressCardUpdater(targetChannelID, rootMsgID, workCtx.Envelope, workCtx.Workflow, workCtx.ThreadID, func(ctx context.Context, chID, msgID, text string) error {
+						progressUpdater = webhook.NewProgressCardUpdater(targetChannelID, rootMsgID, workCtx.Envelope, workCtx.Workflow, workCtx.ThreadID, platform, func(ctx context.Context, chID, msgID, text string) error {
 							return notifyEdit(ch, chID, msgID, text)
 						})
 					}

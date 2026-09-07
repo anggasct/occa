@@ -437,7 +437,7 @@ func TestFormatRootCard(t *testing.T) {
 		"delivery_id": "del-1",
 	}
 
-	running := FormatRootCard(envelope, "github_reviewer", "RUNNING", "", "")
+	running := FormatRootCard(envelope, "github_reviewer", "RUNNING", "", "", "discord")
 	if !strings.Contains(running, "Status: RUNNING") {
 		t.Errorf("running root card missing Status: RUNNING: %s", running)
 	}
@@ -445,12 +445,17 @@ func TestFormatRootCard(t *testing.T) {
 		t.Errorf("running root card without threadID should not contain thread link: %s", running)
 	}
 
-	completed := FormatRootCard(envelope, "github_reviewer", "✅ COMPLETED (1m 45s)", "", "thread-789")
+	completed := FormatRootCard(envelope, "github_reviewer", "✅ COMPLETED (1m 45s)", "", "thread-789", "discord")
 	if !strings.Contains(completed, "Status: ✅ COMPLETED (1m 45s)") {
 		t.Errorf("completed root card missing status: %s", completed)
 	}
 	if !strings.Contains(completed, "➡️ Details in thread: <#thread-789>") {
 		t.Errorf("completed root card missing thread link: %s", completed)
+	}
+
+	telegramCard := FormatRootCard(envelope, "github_reviewer", "⏳ Starting agent analysis...", "", "777", "telegram")
+	if strings.Contains(telegramCard, "Details in thread:") || strings.Contains(telegramCard, "<#") {
+		t.Errorf("telegram root card must not contain discord thread link: %s", telegramCard)
 	}
 }
 
@@ -499,6 +504,37 @@ func TestEmitAuditRootCardEditing(t *testing.T) {
 		}
 		if !strings.Contains(editedContent, "➡️ Details in thread: <#thread-456>") {
 			t.Errorf("editedContent missing thread link: %s", editedContent)
+		}
+	})
+
+	t.Run("telegram topic card omits discord thread link", func(t *testing.T) {
+		var editedChannel, editedContent string
+		tgEp := config.EndpointConfig{Platform: "telegram", ChannelID: "-10012345", Workflow: "github_reviewer"}
+
+		srv := &Server{}
+		srv.SetEditor(func(ctx context.Context, platform, channelID, messageID, text string) error {
+			editedChannel = channelID
+			editedContent = text
+			return nil
+		})
+		srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
+			t.Error("notifier should not be called when editor succeeds")
+			return nil
+		})
+
+		workCtx := &WebhookWorkContext{
+			RootMessageID: "tg-root-1",
+			ThreadID:      "777",
+			StartTime:     time.Now().Add(-30 * time.Second),
+		}
+
+		srv.emitAudit(context.Background(), tgEp, envelope, "COMPLETED", "", workCtx)
+
+		if editedChannel != "-10012345:777" {
+			t.Errorf("editedChannel = %q, want -10012345:777", editedChannel)
+		}
+		if strings.Contains(editedContent, "Details in thread:") || strings.Contains(editedContent, "<#") {
+			t.Errorf("telegram card must not contain discord thread link: %s", editedContent)
 		}
 	})
 

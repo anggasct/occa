@@ -664,6 +664,9 @@ func TestWebhookExecutorTelegramProgressCard(t *testing.T) {
 	if !strings.Contains(initialMsg.text, "github_reviewer") || !strings.Contains(initialMsg.text, "Status:") {
 		t.Errorf("initial message not a root card: %s", initialMsg.text)
 	}
+	if strings.Contains(initialMsg.text, "Details in thread:") || strings.Contains(initialMsg.text, "<#") {
+		t.Errorf("telegram root card must not contain discord thread link: %s", initialMsg.text)
+	}
 
 	if len(tgCh.editedMessages) < 1 {
 		t.Fatalf("expected at least 1 in-place edit during execution, got %d", len(tgCh.editedMessages))
@@ -674,6 +677,9 @@ func TestWebhookExecutorTelegramProgressCard(t *testing.T) {
 	}
 	if !strings.Contains(firstEdit.text, "bash: git status") {
 		t.Errorf("edit text missing tool info: %s", firstEdit.text)
+	}
+	if strings.Contains(firstEdit.text, "Details in thread:") || strings.Contains(firstEdit.text, "<#") {
+		t.Errorf("telegram progress edit must not contain discord thread link: %s", firstEdit.text)
 	}
 
 	if len(tgCh.repliedMessages) != 1 {
@@ -723,12 +729,18 @@ func TestWebhookExecutorTelegramTopicDispatch(t *testing.T) {
 	if tgCh.sentMessages[0].channelID != wantTarget {
 		t.Errorf("sentMessage channelID = %q, want %q", tgCh.sentMessages[0].channelID, wantTarget)
 	}
+	if strings.Contains(tgCh.sentMessages[0].text, "Details in thread:") || strings.Contains(tgCh.sentMessages[0].text, "<#") {
+		t.Errorf("telegram topic root card must not contain discord thread link: %s", tgCh.sentMessages[0].text)
+	}
 
 	if len(tgCh.editedMessages) < 1 {
 		t.Fatalf("expected edits in topic, got %d", len(tgCh.editedMessages))
 	}
 	if tgCh.editedMessages[0].channelID != wantTarget {
 		t.Errorf("editedMessage channelID = %q, want %q", tgCh.editedMessages[0].channelID, wantTarget)
+	}
+	if strings.Contains(tgCh.editedMessages[0].text, "Details in thread:") || strings.Contains(tgCh.editedMessages[0].text, "<#") {
+		t.Errorf("telegram topic progress edit must not contain discord thread link: %s", tgCh.editedMessages[0].text)
 	}
 
 	if len(tgCh.repliedMessages) != 1 {

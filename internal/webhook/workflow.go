@@ -167,9 +167,9 @@ func FormatThreadName(envelope WebhookEnvelope, workflow string) string {
 	return clipRunes(workflow, 100)
 }
 
-func FormatRootCard(envelope WebhookEnvelope, workflow, status, reason, threadID string) string {
+func FormatRootCard(envelope WebhookEnvelope, workflow, status, reason, threadID, platform string) string {
 	card := formatAuditSummary(envelope, workflow, status, reason)
-	if threadID != "" {
+	if threadID != "" && platform == "discord" {
 		card += "\n➡️ Details in thread: <#" + threadID + ">"
 	}
 	return card
@@ -250,7 +250,7 @@ func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelo
 				statusText = "⚠️ FAILED"
 			}
 		}
-		card := FormatRootCard(envelope, ep.Workflow, statusText, reason, wCtx.ThreadID)
+		card := FormatRootCard(envelope, ep.Workflow, statusText, reason, wCtx.ThreadID, ep.Platform)
 		card = redactAuditSummary(card, ep.Secret)
 		if err := s.editor(ctx, ep.Platform, targetChannel, wCtx.RootMessageID, card); err != nil {
 			slog.Warn("webhook: failed to edit root card, falling back to notifier", "endpoint", ep.Name, "error", err)

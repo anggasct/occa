@@ -15,6 +15,7 @@ type ProgressCardUpdater struct {
 	envelope    WebhookEnvelope
 	workflow    string
 	threadID    string
+	platform    string
 	minInterval time.Duration
 	editFn      ProgressEditorFunc
 
@@ -31,13 +32,14 @@ type ProgressCardUpdater struct {
 	closed       bool
 }
 
-func NewProgressCardUpdater(channelID, messageID string, envelope WebhookEnvelope, workflow, threadID string, editFn ProgressEditorFunc) *ProgressCardUpdater {
+func NewProgressCardUpdater(channelID, messageID string, envelope WebhookEnvelope, workflow, threadID, platform string, editFn ProgressEditorFunc) *ProgressCardUpdater {
 	u := &ProgressCardUpdater{
 		channelID:   channelID,
 		messageID:   messageID,
 		envelope:    envelope,
 		workflow:    workflow,
 		threadID:    threadID,
+		platform:    platform,
 		minInterval: 2500 * time.Millisecond,
 		editFn:      editFn,
 		tickerStop:  make(chan struct{}),
@@ -67,7 +69,7 @@ func (u *ProgressCardUpdater) startTicker(interval time.Duration) {
 				}
 				if now.Sub(u.lastEditTime) >= u.minInterval && u.pendingTimer == nil {
 					status := FormatProgressStatus(u.step, u.activeTool, u.activeCtx, now.Sub(u.toolStart))
-					card := FormatRootCard(u.envelope, u.workflow, status, "", u.threadID)
+					card := FormatRootCard(u.envelope, u.workflow, status, "", u.threadID, u.platform)
 					text := FormatWebhookMessage(card)
 					if text != u.lastText {
 						u.applyEditLocked(text, now)
@@ -106,7 +108,7 @@ func (u *ProgressCardUpdater) scheduleLocked(now time.Time) {
 	}
 
 	status := FormatProgressStatus(u.step, u.activeTool, u.activeCtx, now.Sub(u.toolStart))
-	card := FormatRootCard(u.envelope, u.workflow, status, "", u.threadID)
+	card := FormatRootCard(u.envelope, u.workflow, status, "", u.threadID, u.platform)
 	text := FormatWebhookMessage(card)
 
 	if text == u.lastText {
@@ -137,7 +139,7 @@ func (u *ProgressCardUpdater) scheduleLocked(now time.Time) {
 		u.pendingTimer = nil
 		curNow := time.Now()
 		curStatus := FormatProgressStatus(u.step, u.activeTool, u.activeCtx, curNow.Sub(u.toolStart))
-		curCard := FormatRootCard(u.envelope, u.workflow, curStatus, "", u.threadID)
+		curCard := FormatRootCard(u.envelope, u.workflow, curStatus, "", u.threadID, u.platform)
 		curText := FormatWebhookMessage(curCard)
 		if curText != u.lastText {
 			u.applyEditLocked(curText, curNow)

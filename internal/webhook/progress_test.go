@@ -27,7 +27,7 @@ func TestProgressCardUpdaterDebounceAndLastTextGuard(t *testing.T) {
 		return nil
 	}
 
-	updater := NewProgressCardUpdater("chan-1", "msg-1", envelope, "github_reviewer", "", editFn)
+	updater := NewProgressCardUpdater("chan-1", "msg-1", envelope, "github_reviewer", "", "discord", editFn)
 	defer updater.Stop()
 
 	// Configure small interval for test speed
@@ -115,7 +115,7 @@ func TestProgressCardUpdaterSamePartContextUpdate(t *testing.T) {
 		return nil
 	}
 
-	updater := NewProgressCardUpdater("chan-1", "msg-1", envelope, "github_reviewer", "", editFn)
+	updater := NewProgressCardUpdater("chan-1", "msg-1", envelope, "github_reviewer", "", "discord", editFn)
 	defer updater.Stop()
 
 	interval := 30 * time.Millisecond
@@ -139,5 +139,41 @@ func TestProgressCardUpdaterSamePartContextUpdate(t *testing.T) {
 	lastEdit := edits[len(edits)-1]
 	if !strings.Contains(lastEdit, "bash: git status") {
 		t.Errorf("expected context to be updated to 'git status', got %s", lastEdit)
+	}
+}
+
+func TestProgressCardUpdaterTelegramOmitsThreadLink(t *testing.T) {
+	var mu sync.Mutex
+	var edits []string
+
+	envelope := WebhookEnvelope{
+		"repository":  "org/repo",
+		"pr_number":   "99",
+		"delivery_id": "del-topic",
+	}
+
+	editFn := func(ctx context.Context, channelID, messageID, text string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		edits = append(edits, text)
+		return nil
+	}
+
+	updater := NewProgressCardUpdater("-10099999:777", "msg-1", envelope, "github_reviewer", "777", "telegram", editFn)
+	defer updater.Stop()
+	updater.SetMinInterval(10 * time.Millisecond)
+
+	updater.OnTool("bash", "make test", false)
+	time.Sleep(50 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(edits) == 0 {
+		t.Fatal("expected at least 1 edit")
+	}
+	for _, e := range edits {
+		if strings.Contains(e, "Details in thread:") || strings.Contains(e, "<#") {
+			t.Errorf("telegram progress edit must not contain discord thread link: %s", e)
+		}
 	}
 }
