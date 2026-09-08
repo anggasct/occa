@@ -14,6 +14,7 @@ import (
 
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/relay"
+	"github.com/anggasct/occa/internal/render"
 )
 
 const (
@@ -36,10 +37,12 @@ type questionAction uint8
 
 const (
 	questionActionAnswer questionAction = iota
-	questionActionSkipAll
 	questionActionSkipOne
 	questionActionCancel
+	questionActionLegacySkip
 )
+
+const questionActionSkipAll = questionActionLegacySkip
 
 type questionRecord struct {
 	token         string
@@ -51,6 +54,7 @@ type questionRecord struct {
 	questions     []relay.QuestionInfo
 	answers       [][]string
 	currentIdx    int
+	renderText    func(string) []string
 	reply         channel.ReplyContext
 	origin        channel.MessageRef
 	state         questionState
@@ -92,18 +96,19 @@ func (h *questionPromptHandler) Prompt(ctx context.Context, request relay.Questi
 		sessionID = h.sessionID
 	}
 	record := &questionRecord{
-		token:     token,
-		client:    h.client,
-		platform:  h.platform,
-		channelID: h.channelID,
-		sessionID: sessionID,
-		requestID: request.ID,
-		questions: request.Questions,
-		answers:   make([][]string, len(request.Questions)),
-		reply:     h.reply,
-		state:     questionPending,
-		createdAt: time.Now(),
-		expiresAt: time.Now().Add(questionTombstoneTTL),
+		token:      token,
+		client:     h.client,
+		platform:   h.platform,
+		channelID:  h.channelID,
+		sessionID:  sessionID,
+		requestID:  request.ID,
+		questions:  request.Questions,
+		answers:    make([][]string, len(request.Questions)),
+		renderText: h.renderText,
+		reply:      h.reply,
+		state:      questionPending,
+		createdAt:  time.Now(),
+		expiresAt:  time.Now().Add(questionTombstoneTTL),
 	}
 
 	h.broker.mu.Lock()
@@ -116,7 +121,15 @@ func (h *questionPromptHandler) Prompt(ctx context.Context, request relay.Questi
 	var buttons []channel.Button
 	if len(request.Questions) > 1 {
 		mode = "wizard"
-		textChunks = h.renderText(questionStepText(request.Questions, 0))
+		rawText := questionStepText(request.Questions, 0)
+		textChunks = h.renderText(rawText)
+		if len(textChunks) > 1 {
+			limit := render.DiscordLimit
+			if h.platform == "telegram" {
+				limit = render.TelegramLimit
+			}
+			textChunks = []string{render.Clamp(textChunks[0], limit)}
+		}
 		buttons = questionStepButtons(token, request.Questions, 0)
 	} else {
 		textChunks = h.renderText(questionPromptText(request.Questions))
@@ -286,16 +299,17 @@ func (b *questionBroker) handleWizardCallback(ctx context.Context, record *quest
 		return nil
 	}
 
+	if qIdx != idx {
+		b.resetPending(record)
+		return nil
+	}
+
 	if action == questionActionSkipOne {
 		b.stageAnswer(record, idx, []string{})
 		b.logWizardStep(record, idx, total, "skip")
 		return b.advanceOrSubmit(ctx, record, reply, idx)
 	}
 
-	if qIdx != idx {
-		b.resetPending(record)
-		return nil
-	}
 	if qIdx >= total || optIdx >= len(questions[qIdx].Options) {
 		b.resetPending(record)
 		return b.retry(record, nil)
@@ -316,7 +330,7 @@ func (b *questionBroker) advanceOrSubmit(ctx context.Context, record *questionRe
 
 	if idx < total-1 {
 		next := idx + 1
-		text := questionStepText(questions, next)
+		text := b.renderStepText(record, next)
 		buttons := questionStepButtons(token, questions, next)
 		if reply != nil && origin != nil {
 			if err := reply.EditWithButtons(origin, text, buttons); err != nil {
@@ -347,11 +361,39 @@ func (b *questionBroker) advanceOrSubmit(ctx context.Context, record *questionRe
 	slog.Info("question wizard submitted", "platform", record.platform, "channel_id", record.channelID, "answered", answered, "skipped", total-answered)
 	b.resolve(record)
 	if reply != nil && origin != nil {
-		if err := reply.EditWithButtons(origin, questionSummaryText(questions, answers), nil); err != nil {
+		summaryText := questionSummaryText(questions, answers)
+		limit := render.DiscordLimit
+		if record.platform == "telegram" {
+			limit = render.TelegramLimit
+		}
+		if record.renderText != nil {
+			chunks := record.renderText(summaryText)
+			if len(chunks) > 0 {
+				summaryText = render.Clamp(chunks[0], limit)
+			}
+		} else {
+			summaryText = render.Clamp(summaryText, limit)
+		}
+		if err := reply.EditWithButtons(origin, summaryText, nil); err != nil {
 			slog.Warn("question: terminal view failed", "platform", record.platform, "channel_id", record.channelID, "error", err)
 		}
 	}
 	return nil
+}
+
+func (b *questionBroker) renderStepText(record *questionRecord, idx int) string {
+	rawText := questionStepText(record.questions, idx)
+	limit := render.DiscordLimit
+	if record.platform == "telegram" {
+		limit = render.TelegramLimit
+	}
+	if record.renderText != nil {
+		chunks := record.renderText(rawText)
+		if len(chunks) > 0 {
+			return render.Clamp(chunks[0], limit)
+		}
+	}
+	return render.Clamp(rawText, limit)
 }
 
 func (b *questionBroker) stageAnswer(record *questionRecord, idx int, answer []string) {
@@ -582,15 +624,32 @@ func questionButtons(token string, questions []relay.QuestionInfo) []channel.But
 
 func questionStepButtons(token string, questions []relay.QuestionInfo, idx int) []channel.Button {
 	var buttons []channel.Button
-	buttonIndex := 0
+	numOpts := len(questions[idx].Options)
 	for optIdx := range questions[idx].Options {
 		value := "question:" + token + ":" + strconv.Itoa(idx) + ":" + strconv.Itoa(optIdx)
-		buttons = append(buttons, channel.Button{Label: strconv.Itoa(optIdx + 1), Value: value, Row: buttonIndex/5 + 1})
-		buttonIndex++
+		buttons = append(buttons, channel.Button{
+			Label: strconv.Itoa(optIdx + 1),
+			Value: value,
+			Row:   optIdx/5 + 1,
+		})
 	}
-	buttons = append(buttons, channel.Button{Label: "⏭ Skip question", Value: "question:" + token + ":skipone", Row: buttonIndex/5 + 1})
-	buttonIndex++
-	buttons = append(buttons, channel.Button{Label: "❌ Cancel", Value: "question:" + token + ":cancel", Row: buttonIndex/5 + 1})
+	actionRow := (numOpts-1)/5 + 2
+	if numOpts == 0 {
+		actionRow = 1
+	}
+	if actionRow > 5 {
+		actionRow = 5
+	}
+	buttons = append(buttons, channel.Button{
+		Label: "⏭ Skip question",
+		Value: "question:" + token + ":" + strconv.Itoa(idx) + ":skipone",
+		Row:   actionRow,
+	})
+	buttons = append(buttons, channel.Button{
+		Label: "❌ Cancel",
+		Value: "question:" + token + ":cancel",
+		Row:   actionRow,
+	})
 	return buttons
 }
 
@@ -602,7 +661,7 @@ func parseQuestionCallback(data string) (token string, qIdx, optIdx int, action 
 	if len(parts) == 3 {
 		switch parts[2] {
 		case "skip":
-			return parts[1], 0, 0, questionActionSkipAll, true
+			return parts[1], 0, 0, questionActionLegacySkip, true
 		case "skipone":
 			return parts[1], 0, 0, questionActionSkipOne, true
 		case "cancel":
@@ -612,6 +671,13 @@ func parseQuestionCallback(data string) (token string, qIdx, optIdx int, action 
 	}
 	if len(parts) != 4 {
 		return "", 0, 0, questionActionAnswer, false
+	}
+	if parts[3] == "skipone" {
+		q, errQ := strconv.Atoi(parts[2])
+		if errQ != nil {
+			return "", 0, 0, questionActionAnswer, false
+		}
+		return parts[1], q, 0, questionActionSkipOne, true
 	}
 	q, errQ := strconv.Atoi(parts[2])
 	o, errO := strconv.Atoi(parts[3])

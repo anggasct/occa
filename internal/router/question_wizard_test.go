@@ -3,12 +3,14 @@ package router
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/relay"
+	"github.com/anggasct/occa/internal/render"
 )
 
 func threeQuestionRequest() relay.QuestionRequest {
@@ -135,11 +137,17 @@ func TestQuestionWizardPromptShowsOnlyFirstQuestion(t *testing.T) {
 	if sent.buttons[0].Value != "question:"+token+":0:0" || sent.buttons[1].Value != "question:"+token+":0:1" {
 		t.Fatalf("option buttons must address question 0: %+v", sent.buttons)
 	}
-	if sent.buttons[2].Value != "question:"+token+":skipone" {
-		t.Fatalf("skip button = %q, want skipone verb", sent.buttons[2].Value)
+	if sent.buttons[2].Value != "question:"+token+":0:skipone" {
+		t.Fatalf("skip button = %q, want skipone verb with qIdx", sent.buttons[2].Value)
 	}
 	if sent.buttons[3].Value != "question:"+token+":cancel" {
 		t.Fatalf("cancel button = %q, want cancel verb", sent.buttons[3].Value)
+	}
+	if sent.buttons[0].Row != 1 || sent.buttons[1].Row != 1 {
+		t.Fatalf("option buttons must be on row 1: %+v", sent.buttons)
+	}
+	if sent.buttons[2].Row != 2 || sent.buttons[3].Row != 2 {
+		t.Fatalf("action buttons must be on dedicated row 2: %+v", sent.buttons)
 	}
 }
 
@@ -218,7 +226,7 @@ func TestQuestionWizardMixedAnswerSkipSubmitsPerIndexValues(t *testing.T) {
 	origin := reply.sends[0].ref
 
 	tapQuestion(t, h, reply, origin, "question:"+token+":0:1")
-	tapQuestion(t, h, reply, origin, "question:"+token+":skipone")
+	tapQuestion(t, h, reply, origin, "question:"+token+":1:skipone")
 	tapQuestion(t, h, reply, origin, "question:"+token+":2:0")
 
 	if answeredCount(client) != 1 {
@@ -523,7 +531,11 @@ func TestParseQuestionCallbackWizardVerbs(t *testing.T) {
 	}
 	token, _, _, action, ok = parseQuestionCallback("question:tok:skipone")
 	if !ok || token != "tok" || action != questionActionSkipOne {
-		t.Fatalf("skipone verb = %q,%v,%v", token, action, ok)
+		t.Fatalf("legacy 3-part skipone verb = %q,%v,%v", token, action, ok)
+	}
+	token, qIdx, _, action, ok = parseQuestionCallback("question:tok:2:skipone")
+	if !ok || token != "tok" || qIdx != 2 || action != questionActionSkipOne {
+		t.Fatalf("4-part skipone verb = %q,%d,%v,%v", token, qIdx, action, ok)
 	}
 	token, _, _, action, ok = parseQuestionCallback("question:tok:cancel")
 	if !ok || token != "tok" || action != questionActionCancel {
@@ -542,5 +554,212 @@ func TestQuestionSummaryTextCountsAnswered(t *testing.T) {
 	want := "✅ Answered (2/3):\n1. Go\n2. skipped\n3. Jakarta"
 	if got != want {
 		t.Fatalf("summary = %q, want %q", got, want)
+	}
+}
+
+func TestQuestionWizardStaleSkiponeDropped(t *testing.T) {
+	client := &questionClient{}
+	reply := &questionReply{}
+	h := newQuestionTestHandler(client, reply)
+
+	if err := h.Prompt(context.Background(), twoQuestionRequest()); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	token := questionToken(t, reply.sends[0].buttons[0].Value)
+	origin := reply.sends[0].ref
+
+	// Advance to question 1
+	tapQuestion(t, h, reply, origin, "question:"+token+":0:1")
+	editsAfterAdvance := len(reply.edits)
+	if got := wizardRecord(t, h, token).currentIdx; got != 1 {
+		t.Fatalf("currentIdx = %d, want 1", got)
+	}
+
+	// Tapping stale skipone for question 0 should be dropped silently
+	tapQuestion(t, h, reply, origin, "question:"+token+":0:skipone")
+	if len(reply.edits) != editsAfterAdvance {
+		t.Fatal("stale skipone tap must not advance or render")
+	}
+	if answeredCount(client) != 0 {
+		t.Fatal("stale skipone tap must not submit")
+	}
+	if got := wizardRecord(t, h, token).currentIdx; got != 1 {
+		t.Fatalf("currentIdx = %d, want 1 (unchanged)", got)
+	}
+
+	// Tapping valid skipone for question 1 advances to submission
+	tapQuestion(t, h, reply, origin, "question:"+token+":1:skipone")
+	if answeredCount(client) != 1 {
+		t.Fatalf("expected one submit, got %d", answeredCount(client))
+	}
+	answers := lastWizardAnswers(client)
+	if len(answers) != 2 || answers[0][0] != "Python" || len(answers[1]) != 0 {
+		t.Fatalf("answers = %v, want [[Python], []]", answers)
+	}
+}
+
+func TestQuestionWizardButtonRowPacking(t *testing.T) {
+	// Test question with 2 options (row 1, actions row 2)
+	q2 := []relay.QuestionInfo{
+		{
+			Question: "Q1",
+			Options:  []relay.QuestionOption{{Label: "O1"}, {Label: "O2"}},
+		},
+	}
+	btns2 := questionStepButtons("tok", q2, 0)
+	if len(btns2) != 4 {
+		t.Fatalf("expected 4 buttons, got %d", len(btns2))
+	}
+	if btns2[0].Row != 1 || btns2[1].Row != 1 {
+		t.Fatalf("options must be on row 1: %+v", btns2)
+	}
+	if btns2[2].Row != 2 || btns2[3].Row != 2 {
+		t.Fatalf("actions must be on row 2: %+v", btns2)
+	}
+
+	// Test question with 7 options (options on rows 1 and 2, actions on row 3)
+	opts7 := make([]relay.QuestionOption, 7)
+	for i := range opts7 {
+		opts7[i] = relay.QuestionOption{Label: strconv.Itoa(i + 1)}
+	}
+	q7 := []relay.QuestionInfo{{Question: "Q7", Options: opts7}}
+	btns7 := questionStepButtons("tok", q7, 0)
+	for i := 0; i < 5; i++ {
+		if btns7[i].Row != 1 {
+			t.Fatalf("first 5 options must be on row 1: %+v", btns7[i])
+		}
+	}
+	for i := 5; i < 7; i++ {
+		if btns7[i].Row != 2 {
+			t.Fatalf("options 6 and 7 must be on row 2: %+v", btns7[i])
+		}
+	}
+	if btns7[7].Row != 3 || btns7[8].Row != 3 {
+		t.Fatalf("actions must be on row 3: %+v", btns7[7:])
+	}
+
+	// Test question with 25 options (actions clamped to row 5)
+	opts25 := make([]relay.QuestionOption, 25)
+	for i := range opts25 {
+		opts25[i] = relay.QuestionOption{Label: strconv.Itoa(i + 1)}
+	}
+	q25 := []relay.QuestionInfo{{Question: "Q25", Options: opts25}}
+	btns25 := questionStepButtons("tok", q25, 0)
+	skipBtn := btns25[len(btns25)-2]
+	cancelBtn := btns25[len(btns25)-1]
+	if skipBtn.Row != 5 || cancelBtn.Row != 5 {
+		t.Fatalf("actions must be clamped to row 5: skip=%d, cancel=%d", skipBtn.Row, cancelBtn.Row)
+	}
+}
+
+func TestQuestionWizardPlatformRenderingOnAdvance(t *testing.T) {
+	rnd := render.New()
+	client := &questionClient{}
+	reply := &questionReply{}
+	h := &questionPromptHandler{
+		broker: newQuestionBroker(),
+		split: func(text string) []string {
+			chunks, _ := rnd.Render(text, render.Telegram)
+			return chunks
+		},
+		client:    client,
+		platform:  "telegram",
+		channelID: "chat-1",
+		sessionID: "ses-1",
+		reply:     reply,
+	}
+
+	req := relay.QuestionRequest{
+		ID:        "que-tg",
+		SessionID: "ses-1",
+		Questions: []relay.QuestionInfo{
+			{
+				Question: "Choose <foo> & bar?",
+				Options:  []relay.QuestionOption{{Label: "A & B"}},
+			},
+			{
+				Question: "Second question **bold**?",
+				Options:  []relay.QuestionOption{{Label: "C"}},
+			},
+		},
+	}
+
+	if err := h.Prompt(context.Background(), req); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	sent := reply.sends[0]
+	if !strings.Contains(sent.text, "&lt;foo&gt;") || !strings.Contains(sent.text, "&amp;") {
+		t.Fatalf("initial prompt text must be HTML escaped for telegram: %q", sent.text)
+	}
+
+	token := questionToken(t, sent.buttons[0].Value)
+	origin := sent.ref
+
+	tapQuestion(t, h, reply, origin, "question:"+token+":0:0")
+	if len(reply.edits) != 1 {
+		t.Fatalf("expected 1 edit on advance, got %d", len(reply.edits))
+	}
+	edit := reply.edits[0]
+	if !strings.Contains(edit.text, "<b>") || strings.Contains(edit.text, "**") {
+		t.Fatalf("advance edit must be rendered as Telegram HTML, got %q", edit.text)
+	}
+}
+
+func TestQuestionWizardPromptClampedToSingleMessage(t *testing.T) {
+	client := &questionClient{}
+	reply := &questionReply{}
+	h := &questionPromptHandler{
+		broker: newQuestionBroker(),
+		split: func(text string) []string {
+			limit := 200
+			var chunks []string
+			for len(text) > limit {
+				chunks = append(chunks, text[:limit])
+				text = text[limit:]
+			}
+			if len(text) > 0 {
+				chunks = append(chunks, text)
+			}
+			return chunks
+		},
+		client:    client,
+		platform:  "discord",
+		channelID: "chat-1",
+		sessionID: "ses-1",
+		reply:     reply,
+	}
+
+	longDesc := strings.Repeat("Very long description text. ", 100)
+	req := relay.QuestionRequest{
+		ID:        "que-long",
+		SessionID: "ses-1",
+		Questions: []relay.QuestionInfo{
+			{
+				Question: "Question 1",
+				Options:  []relay.QuestionOption{{Label: "Opt1", Description: longDesc}},
+			},
+			{
+				Question: "Question 2",
+				Options:  []relay.QuestionOption{{Label: "Opt2", Description: longDesc}},
+			},
+		},
+	}
+
+	if err := h.Prompt(context.Background(), req); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	if len(reply.sends) != 1 {
+		t.Fatalf("wizard prompt must be clamped to exactly 1 send, got %d", len(reply.sends))
+	}
+
+	token := questionToken(t, reply.sends[0].buttons[0].Value)
+	origin := reply.sends[0].ref
+
+	tapQuestion(t, h, reply, origin, "question:"+token+":0:0")
+	if len(reply.edits) != 1 {
+		t.Fatalf("expected 1 edit, got %d", len(reply.edits))
+	}
+	if len(reply.edits[0].text) > render.DiscordLimit {
+		t.Fatalf("advance edit text length %d exceeds DiscordLimit %d", len(reply.edits[0].text), render.DiscordLimit)
 	}
 }
