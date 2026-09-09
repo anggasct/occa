@@ -14,13 +14,15 @@ import (
 )
 
 type fakeReplyContext struct {
-	mu       sync.Mutex
-	sends    []string
-	sent     map[string]string
-	edits    map[string][]string
-	deleted  map[string]bool
-	refCount int
-	typings  int
+	mu          sync.Mutex
+	sends       []string
+	sent        map[string]string
+	edits       map[string][]string
+	deleted     map[string]bool
+	refCount    int
+	typings     int
+	sentButtons map[string][]channel.Button
+	editButtons map[string][][]channel.Button
 }
 
 type fakeRef struct{ id string }
@@ -29,9 +31,11 @@ func (f fakeRef) ID() string { return f.id }
 
 func newFakeReplyContext() *fakeReplyContext {
 	return &fakeReplyContext{
-		sent:    make(map[string]string),
-		edits:   make(map[string][]string),
-		deleted: make(map[string]bool),
+		sent:        make(map[string]string),
+		edits:       make(map[string][]string),
+		deleted:     make(map[string]bool),
+		sentButtons: make(map[string][]channel.Button),
+		editButtons: make(map[string][][]channel.Button),
 	}
 }
 
@@ -60,16 +64,20 @@ func (f *fakeReplyContext) Edit(ref channel.MessageRef, text string) error {
 }
 
 func (f *fakeReplyContext) EditWithButtons(ref channel.MessageRef, text string, buttons []channel.Button) error {
+	f.mu.Lock()
+	f.editButtons[ref.ID()] = append(f.editButtons[ref.ID()], buttons)
+	f.mu.Unlock()
 	return f.Edit(ref, text)
 }
 
 func (f *fakeReplyContext) SendWithButtons(text string, buttons []channel.Button) (channel.MessageRef, error) {
+	ref, err := f.Send(text)
+	if err != nil {
+		return ref, err
+	}
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.sends = append(f.sends, text)
-	f.refCount++
-	ref := fakeRef{id: fmt.Sprintf("msg-%d", f.refCount)}
-	f.sent[ref.id] = text
+	f.sentButtons[ref.ID()] = buttons
+	f.mu.Unlock()
 	return ref, nil
 }
 

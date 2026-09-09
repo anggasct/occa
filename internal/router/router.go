@@ -1230,10 +1230,14 @@ func (r *Router) handleStop(ctx context.Context, msg channel.IncomingMessage, _ 
 	threadID, userID := conversationKey(msg)
 	key := responseKey{platform: msg.Platform, channelID: msg.ChannelID, threadID: threadID, userID: userID}
 	r.responses.cancelResponse(key)
+	r.responses.cancelMatching(msg.Platform, msg.ChannelID, threadID)
 
 	sessionID, err := r.resolveActiveSession(ctx, msg)
 	if err != nil {
 		return "", fmt.Errorf("stop: %w", err)
+	}
+	if sessionID == "" && strings.HasPrefix(msg.CallbackData, "stop:") {
+		sessionID = strings.TrimPrefix(msg.CallbackData, "stop:")
 	}
 	if sessionID == "" {
 		return "✅ Nothing running to stop (no active session).", nil
@@ -1253,6 +1257,21 @@ func (r *Router) handleStop(ctx context.Context, msg channel.IncomingMessage, _ 
 		return "", fmt.Errorf("stop abort: %w", err)
 	}
 	return "✅ Stopped. Your conversation is kept — send a message to continue.", nil
+}
+
+func (r *Router) handleStopCallback(ctx context.Context, msg channel.IncomingMessage) error {
+	replyText, err := r.handleStop(ctx, msg, "")
+	if err != nil {
+		slog.Warn("stop callback failed", "error", err)
+	}
+	if replyText == "" {
+		replyText = "✅ Stopped. Your conversation is kept — send a message to continue."
+	}
+	if msg.ReplyCtx != nil && msg.CallbackRef != nil {
+		return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, replyText, nil)
+	}
+	r.reply(msg, replyText)
+	return nil
 }
 
 func (r *Router) handleSteer(ctx context.Context, msg channel.IncomingMessage, args string) (string, error) {

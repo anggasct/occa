@@ -176,10 +176,13 @@ func TestReasoningPartDeltaNeverSurfacesAsText(t *testing.T) {
 	textUpdated := `{"type":"message.part.updated","properties":{"part":{"id":"prt-text","type":"text"}}}`
 	textDelta := `{"type":"message.part.delta","properties":{"partID":"prt-text","field":"text","delta":"the actual reply"}}`
 
-	for _, data := range []string{reasoningUpdated, reasoningDelta} {
-		if _, ok := parseSSEEvent(decoder, "", data); ok {
-			t.Fatalf("reasoning-part event must never surface, got event for %q", data)
-		}
+	ev, ok := parseSSEEvent(decoder, "", reasoningUpdated)
+	if !ok || ev.Type != EventReasoning {
+		t.Fatalf("expected EventReasoning on reasoning part update, got (%+v, %v)", ev, ok)
+	}
+
+	if ev, ok := parseSSEEvent(decoder, "", reasoningDelta); ok && ev.Type == EventDelta {
+		t.Fatalf("reasoning delta must never surface as text delta, got: %+v", ev)
 	}
 
 	parseSSEEvent(decoder, "", textUpdated)
@@ -208,14 +211,14 @@ func TestDecoderPartTransitions(t *testing.T) {
 			want:     []Event{{Type: EventTool}},
 		},
 		{
-			name:     "text to reasoning emits segment",
+			name:     "text to reasoning emits reasoning",
 			sequence: []string{updated("p1", "text"), updated("p2", "reasoning")},
-			want:     []Event{{Type: EventSegment}},
+			want:     []Event{{Type: EventReasoning}},
 		},
 		{
 			name:     "reasoning to text emits segment",
 			sequence: []string{updated("p1", "reasoning"), updated("p2", "text")},
-			want:     []Event{{Type: EventSegment}},
+			want:     []Event{{Type: EventReasoning}, {Type: EventSegment}},
 		},
 		{
 			name:     "tool to text emits segment after the tool event",
@@ -228,9 +231,9 @@ func TestDecoderPartTransitions(t *testing.T) {
 			want:     []Event{{Type: EventTool}, {Type: EventTool}},
 		},
 		{
-			name:     "reasoning between tools breaks no run",
+			name:     "reasoning between tools emits reasoning",
 			sequence: []string{updated("p1", "tool"), updated("p2", "reasoning"), updated("p3", "tool")},
-			want:     []Event{{Type: EventTool}, {Type: EventTool}},
+			want:     []Event{{Type: EventTool}, {Type: EventReasoning}, {Type: EventTool}},
 		},
 		{
 			name:     "same kind emits nothing",

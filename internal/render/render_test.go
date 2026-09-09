@@ -467,6 +467,44 @@ func TestBlockquote(t *testing.T) {
 	}
 }
 
+func TestExpandableBlockquote(t *testing.T) {
+	r := New()
+	raw := "Header\n\n<blockquote expandable>\n• tool1 ×2\n• tool2 ×1\n</blockquote>"
+
+	tg, err := r.Render(raw, Telegram)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if !strings.Contains(tg[0], "<blockquote expandable>") || !strings.Contains(tg[0], "</blockquote>") {
+		t.Fatalf("telegram output missing expandable blockquote: %q", tg[0])
+	}
+
+	dc, err := r.Render(raw, Discord)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if strings.Contains(dc[0], "<blockquote expandable>") || strings.Contains(dc[0], "</blockquote>") {
+		t.Fatalf("discord output leaked HTML blockquote tags: %q", dc[0])
+	}
+	if !strings.Contains(dc[0], "• tool1 ×2") {
+		t.Fatalf("discord output missing tool text: %q", dc[0])
+	}
+}
+
+func TestSplitExpandableBlockquote(t *testing.T) {
+	inner := strings.Repeat("• tool ×1\n", 50)
+	input := "<blockquote expandable>\n" + inner + "</blockquote>"
+	chunks := Split(input, 200)
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(chunks))
+	}
+	for i, c := range chunks {
+		if !htmlBalanced(c) {
+			t.Fatalf("chunk %d not balanced: %q", i, c)
+		}
+	}
+}
+
 func TestThematicBreak(t *testing.T) {
 	r := New()
 	md := "Before\n\n---\n\nAfter"

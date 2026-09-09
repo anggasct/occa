@@ -423,6 +423,11 @@ func (a *Adapter) normalize(update tgbotapi.Update, threadID int64) channel.Inco
 		threadIDStr = fmt.Sprintf("%d", threadID)
 	}
 
+	var sourceRef channel.MessageRef
+	if msg.MessageID != 0 {
+		sourceRef = messageRef{id: fmt.Sprintf("%d", msg.MessageID)}
+	}
+
 	return channel.IncomingMessage{
 		Platform:    "telegram",
 		ChannelID:   chatID,
@@ -431,6 +436,7 @@ func (a *Adapter) normalize(update tgbotapi.Update, threadID int64) channel.Inco
 		Text:        text,
 		IsMention:   isMention,
 		IsThread:    threadID != 0,
+		SourceRef:   sourceRef,
 		Attachments: a.downloadAttachments(msg),
 		ReplyCtx:    &replyContext{bot: a.bot, chatID: msg.Chat.ID, threadID: threadID},
 	}
@@ -737,6 +743,41 @@ func (rc *replyContext) Delete(ref channel.MessageRef) error {
 	return rc.requestSilent("deleteMessage", params)
 }
 
+func (rc *replyContext) SetReaction(ref channel.MessageRef, state channel.ReactionState) error {
+	msgID := 0
+	refID := ref.ID()
+	if _, err := fmt.Sscanf(refID, "%d", &msgID); err != nil {
+		return fmt.Errorf("telegram: parse message id %q: %w", refID, err)
+	}
+
+	emoji := reactionEmoji(state)
+	var reactionJSON string
+	if emoji != "" {
+		reactionJSON = fmt.Sprintf(`[{"type":"emoji","emoji":%q}]`, emoji)
+	} else {
+		reactionJSON = "[]"
+	}
+
+	params := tgbotapi.Params{
+		"chat_id":    strconv.FormatInt(rc.chatID, 10),
+		"message_id": strconv.Itoa(msgID),
+		"reaction":   reactionJSON,
+	}
+	return rc.requestSilent("setMessageReaction", params)
+}
+
+func reactionEmoji(state channel.ReactionState) string {
+	switch state {
+	case channel.ReactionProcessing:
+		return "👀"
+	case channel.ReactionSuccess:
+		return "✅"
+	case channel.ReactionError:
+		return "❌"
+	}
+	return ""
+}
+
 var (
 	_ channel.Channel           = (*Adapter)(nil)
 	_ channel.MessageDeleter    = (*Adapter)(nil)
@@ -746,5 +787,6 @@ var (
 	_ channel.ReplyContext      = (*replyContext)(nil)
 	_ channel.MessageRemover    = (*replyContext)(nil)
 	_ channel.ChatCommandSetter = (*replyContext)(nil)
+	_ channel.ReactionSetter    = (*replyContext)(nil)
 	_ channel.MessageRef        = messageRef{}
 )

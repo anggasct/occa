@@ -289,6 +289,68 @@ func TestNormalizeCarriesTopicThreadID(t *testing.T) {
 	}
 }
 
+func TestNormalizeSetsSourceRef(t *testing.T) {
+	bot := fakeTelegramServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"result":{}}`))
+	})
+	a := &Adapter{bot: bot}
+
+	update := tgbotapi.Update{
+		Message: &tgbotapi.Message{
+			MessageID: 12345,
+			Chat:      &tgbotapi.Chat{ID: 1001},
+			From:      &tgbotapi.User{ID: 42},
+			Text:      "hello",
+		},
+	}
+	got := a.normalize(update, 0)
+	if got.SourceRef == nil || got.SourceRef.ID() != "12345" {
+		t.Fatalf("SourceRef = %v, want 12345", got.SourceRef)
+	}
+}
+
+func TestTelegramSetReaction(t *testing.T) {
+	var requestedURLs []string
+	var requestBodies []string
+	bot := fakeTelegramServer(t, func(w http.ResponseWriter, r *http.Request) {
+		requestedURLs = append(requestedURLs, r.URL.Path)
+		body, _ := io.ReadAll(r.Body)
+		requestBodies = append(requestBodies, string(body))
+		_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+	})
+
+	rc := &replyContext{bot: bot, chatID: 1001}
+	ref := messageRef{id: "999"}
+
+	if err := rc.SetReaction(ref, channel.ReactionProcessing); err != nil {
+		t.Fatalf("SetReaction processing: %v", err)
+	}
+	if err := rc.SetReaction(ref, channel.ReactionSuccess); err != nil {
+		t.Fatalf("SetReaction success: %v", err)
+	}
+	if err := rc.SetReaction(ref, channel.ReactionError); err != nil {
+		t.Fatalf("SetReaction error: %v", err)
+	}
+
+	if len(requestedURLs) != 3 {
+		t.Fatalf("expected 3 requests, got %d", len(requestedURLs))
+	}
+	for _, u := range requestedURLs {
+		if !strings.Contains(u, "setMessageReaction") {
+			t.Fatalf("expected setMessageReaction URL, got %q", u)
+		}
+	}
+	if !strings.Contains(requestBodies[0], "%F0%9F%91%80") && !strings.Contains(requestBodies[0], "👀") {
+		t.Fatalf("expected processing emoji in body: %q", requestBodies[0])
+	}
+	if !strings.Contains(requestBodies[1], "%E2%9C%85") && !strings.Contains(requestBodies[1], "✅") {
+		t.Fatalf("expected success emoji in body: %q", requestBodies[1])
+	}
+	if !strings.Contains(requestBodies[2], "%E2%9D%8C") && !strings.Contains(requestBodies[2], "❌") {
+		t.Fatalf("expected error emoji in body: %q", requestBodies[2])
+	}
+}
+
 func TestReplyContextSendsIntoTopic(t *testing.T) {
 	var sentBodies []string
 	bot := fakeTelegramServer(t, func(w http.ResponseWriter, r *http.Request) {
