@@ -24,6 +24,7 @@ type Channel struct {
 	ChannelID  string
 	Platform   string
 	Model      string
+	Agent      string
 	ListenMode string
 	Workdir    string
 	AutoThread bool
@@ -38,6 +39,7 @@ type UserOverride struct {
 	UserID    string
 	Role      string
 	Model     string
+	Agent     string
 	CreatedAt int64
 	UpdatedAt int64
 }
@@ -148,6 +150,7 @@ type SessionRepo interface {
 type ChannelRepo interface {
 	Get(ctx context.Context, platform, channelID string) (*Channel, error)
 	UpsertModel(ctx context.Context, platform, channelID, model string) error
+	UpsertAgent(ctx context.Context, platform, channelID, agent string) error
 	UpsertListenMode(ctx context.Context, platform, channelID, listenMode string) error
 	UpsertWorkdir(ctx context.Context, platform, channelID, workdir string) error
 }
@@ -156,6 +159,7 @@ type OverrideRepo interface {
 	Get(ctx context.Context, platform, channelID, userID string) (*UserOverride, error)
 	UpsertRole(ctx context.Context, platform, channelID, userID, role string) error
 	UpsertModel(ctx context.Context, platform, channelID, userID, model string) error
+	UpsertAgent(ctx context.Context, platform, channelID, userID, agent string) error
 	Delete(ctx context.Context, platform, channelID, userID string) error
 	ListByChannel(ctx context.Context, platform, channelID string) ([]UserOverride, error)
 }

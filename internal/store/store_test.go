@@ -593,6 +593,12 @@ func TestProgressNoticeMigrationFromV4(t *testing.T) {
 	if _, err := s1.db.Exec("ALTER TABLE session DROP COLUMN model"); err != nil {
 		t.Fatalf("drop session model column: %v", err)
 	}
+	if _, err := s1.db.Exec("ALTER TABLE channel DROP COLUMN agent"); err != nil {
+		t.Fatalf("drop channel agent column: %v", err)
+	}
+	if _, err := s1.db.Exec("ALTER TABLE user_override DROP COLUMN agent"); err != nil {
+		t.Fatalf("drop override agent column: %v", err)
+	}
 	if _, err := s1.db.Exec("PRAGMA user_version=4"); err != nil {
 		t.Fatalf("stamp user_version=4: %v", err)
 	}
@@ -762,6 +768,12 @@ func TestSessionModelMigrationFromV5(t *testing.T) {
 	if _, err := s1.db.Exec("ALTER TABLE session DROP COLUMN model"); err != nil {
 		t.Fatalf("drop model column: %v", err)
 	}
+	if _, err := s1.db.Exec("ALTER TABLE channel DROP COLUMN agent"); err != nil {
+		t.Fatalf("drop channel agent column: %v", err)
+	}
+	if _, err := s1.db.Exec("ALTER TABLE user_override DROP COLUMN agent"); err != nil {
+		t.Fatalf("drop override agent column: %v", err)
+	}
 	if _, err := s1.db.Exec("PRAGMA user_version=5"); err != nil {
 		t.Fatalf("stamp user_version=5: %v", err)
 	}
@@ -839,6 +851,12 @@ func TestThreadConfigMigrationBackfillsOwnedThreads(t *testing.T) {
 	}
 	if _, err := s1.db.Exec("DROP TABLE thread_config"); err != nil {
 		t.Fatalf("drop thread_config: %v", err)
+	}
+	if _, err := s1.db.Exec("ALTER TABLE channel DROP COLUMN agent"); err != nil {
+		t.Fatalf("drop channel agent column: %v", err)
+	}
+	if _, err := s1.db.Exec("ALTER TABLE user_override DROP COLUMN agent"); err != nil {
+		t.Fatalf("drop override agent column: %v", err)
 	}
 	if _, err := s1.db.Exec("PRAGMA user_version=6"); err != nil {
 		t.Fatalf("stamp user_version=6: %v", err)

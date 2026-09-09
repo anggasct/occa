@@ -328,7 +328,11 @@ func (r *Router) buildAgentPickerPage(ctx context.Context, msg channel.IncomingM
 		return "", nil, fmt.Errorf("agent picker: %w", err)
 	}
 	if activeSession == nil {
-		return "No active session yet. Send a message first to start a conversation, then use /agent to switch agents.", nil, nil
+		view, err := r.agentDefaultView(ctx, msg)
+		if err != nil {
+			return "", nil, err
+		}
+		return view, nil, nil
 	}
 
 	fp := agentOwnerFingerprint(msg)
@@ -559,7 +563,7 @@ func (r *Router) switchAgent(ctx context.Context, msg channel.IncomingMessage, t
 		return "", fmt.Errorf("switch agent: %w", err)
 	}
 	if activeSession == nil {
-		return "No active session yet. Send a message first to start a conversation, then use /agent to switch agents.", nil
+		return r.handleAgentNoSession(ctx, msg, target, inst)
 	}
 
 	allAgents, err := inst.Client().ListAgents(ctx)

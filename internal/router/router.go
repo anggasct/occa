@@ -490,6 +490,7 @@ func (r *Router) executePassthrough(taskCtx context.Context, cancel context.Canc
 	}
 
 	if preResolveActiveID == "" {
+		r.applyAgentDefault(ctx, msg, inst, sessionID)
 		title := strings.Join(strings.Fields(msg.Text), " ")
 		title = truncateRunes(title, 60)
 		if title != "" {
@@ -1111,6 +1112,7 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 		if err != nil {
 			return "⚠️ Agent unreachable", nil
 		}
+		r.applyAgentDefault(ctx, msg, inst, sessionID)
 		if err := r.store.SessionRepo().SetActive(ctx, msg.Platform, msg.ChannelID, threadID, userID, sessionID, inst.PID()); err != nil {
 			return "", fmt.Errorf("session new: %w", err)
 		}
@@ -1211,6 +1213,7 @@ func (r *Router) handleReset(ctx context.Context, msg channel.IncomingMessage, _
 	if err != nil {
 		return "⚠️ Agent unreachable", nil
 	}
+	r.applyAgentDefault(ctx, msg, inst, sessionID)
 	if err := r.store.SessionRepo().SetActive(ctx, msg.Platform, msg.ChannelID, threadID, userID, sessionID, inst.PID()); err != nil {
 		return "", fmt.Errorf("reset: %w", err)
 	}
