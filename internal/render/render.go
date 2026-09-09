@@ -744,14 +744,16 @@ func renderDiscord(doc ast.Node, source []byte) string {
 			}
 		case *ast.HTMLBlock:
 			if entering {
+				var block bytes.Buffer
 				for i := 0; i < node.Lines().Len(); i++ {
 					line := node.Lines().At(i)
-					buf.Write(sanitizeDiscordHTML(line.Value(source)))
+					block.Write(line.Value(source))
 				}
 				if node.HasClosure() {
 					closure := node.ClosureLine
-					buf.Write(sanitizeDiscordHTML(closure.Value(source)))
+					block.Write(closure.Value(source))
 				}
+				buf.Write(sanitizeDiscordHTML(block.Bytes()))
 			}
 		case *ast.Paragraph:
 			if !entering {
@@ -855,7 +857,39 @@ func escapeTelegramHTML(b []byte) []byte {
 
 func sanitizeDiscordHTML(b []byte) []byte {
 	s := string(b)
-	s = strings.ReplaceAll(s, "<blockquote expandable>", "")
+	for {
+		openIdx := strings.Index(s, "<blockquote")
+		if openIdx == -1 {
+			break
+		}
+		openEnd := strings.Index(s[openIdx:], ">")
+		if openEnd == -1 {
+			s = s[:openIdx] + s[openIdx+len("<blockquote"):]
+			continue
+		}
+		openEnd += openIdx + 1
+
+		closeIdx := strings.Index(s[openEnd:], "</blockquote>")
+		if closeIdx == -1 {
+			s = s[:openIdx] + s[openEnd:]
+			continue
+		}
+		closeStart := openEnd + closeIdx
+		closeEnd := closeStart + len("</blockquote>")
+
+		inner := strings.Trim(s[openEnd:closeStart], "\r\n")
+		var quoted string
+		if inner != "" {
+			lines := strings.Split(inner, "\n")
+			for i, line := range lines {
+				line = strings.TrimRight(line, "\r")
+				lines[i] = "> " + line
+			}
+			quoted = strings.Join(lines, "\n") + "\n"
+		}
+
+		s = s[:openIdx] + quoted + s[closeEnd:]
+	}
 	s = strings.ReplaceAll(s, "</blockquote>", "")
 	return []byte(s)
 }

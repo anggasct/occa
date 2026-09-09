@@ -48,6 +48,7 @@ type Streamer struct {
 	reactionTarget             channel.MessageRef
 	firstRef                   channel.MessageRef
 	lastWorkingRef             channel.MessageRef
+	lastWorkingRendered        string
 	noEventTimeout             time.Duration
 	typingInterval             time.Duration
 	permissionPendingFunc      func() bool
@@ -212,9 +213,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 		select {
 		case <-ctx.Done():
 			s.flushWorking(&phase.working)
-			if s.stopCallbackData != "" && phase.working.ref != nil {
-				_ = s.reply.EditWithButtons(phase.working.ref, phase.working.rendered, nil)
-			}
+			s.clearWorkingStopButton(&phase.working)
 			return ctx.Err()
 
 		case <-typingTicker.C:
@@ -224,6 +223,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 
 		case <-timeoutTimer.C:
 			s.flushWorking(&phase.working)
+			s.clearWorkingStopButton(&phase.working)
 			msg := taskTimeoutMessage
 			if s.permissionPendingFunc != nil && s.permissionPendingFunc() {
 				msg = taskTimeoutPermissionMessage
@@ -235,6 +235,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 		case ev, ok := <-events:
 			if !ok {
 				s.flushWorking(&phase.working)
+				s.clearWorkingStopButton(&phase.working)
 				syncErr := s.finalSync(&refs, &lastChunks, buf.String())
 				s.notice(incompleteStreamMessage)
 				s.setReaction(channel.ReactionError)
@@ -506,6 +507,7 @@ func (s *Streamer) updateWorking(working *workingState) {
 		working.lastEditAt = s.currentTime()
 		working.hasLastEditAt = true
 		s.lastWorkingRef = ref
+		s.lastWorkingRendered = rendered
 		s.trackFirstRef(ref)
 		return
 	}
@@ -549,6 +551,7 @@ func (s *Streamer) maybeEditWorking(working *workingState) {
 	working.pending = ""
 	working.lastEditAt = now
 	working.hasLastEditAt = true
+	s.lastWorkingRendered = working.rendered
 }
 
 func (s *Streamer) flushWorking(working *workingState) {
@@ -570,6 +573,7 @@ func (s *Streamer) flushWorking(working *workingState) {
 	working.pending = ""
 	working.lastEditAt = s.currentTime()
 	working.hasLastEditAt = true
+	s.lastWorkingRendered = working.rendered
 }
 
 func (s *Streamer) resetToolPhase(phase *toolPhaseState) {
@@ -605,6 +609,23 @@ func (s *Streamer) resolveWorking(working *workingState, success bool, total int
 	}
 	working.rendered = text
 	working.pending = ""
+	s.lastWorkingRendered = text
+}
+
+func (s *Streamer) clearWorkingStopButton(working *workingState) {
+	if s.stopCallbackData == "" {
+		return
+	}
+	ref := working.ref
+	text := working.rendered
+	if ref == nil {
+		ref = s.lastWorkingRef
+		text = s.lastWorkingRendered
+	}
+	if ref == nil || text == "" {
+		return
+	}
+	_ = s.reply.EditWithButtons(ref, text, nil)
 }
 
 const maxRollupTypes = 8

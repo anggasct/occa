@@ -1230,7 +1230,7 @@ func (r *Router) handleStop(ctx context.Context, msg channel.IncomingMessage, _ 
 	threadID, userID := conversationKey(msg)
 	key := responseKey{platform: msg.Platform, channelID: msg.ChannelID, threadID: threadID, userID: userID}
 	r.responses.cancelResponse(key)
-	r.responses.cancelMatching(msg.Platform, msg.ChannelID, threadID)
+	r.responses.cancelMatching(msg.Platform, msg.ChannelID, threadID, userID)
 
 	sessionID, err := r.resolveActiveSession(ctx, msg)
 	if err != nil {

@@ -483,11 +483,11 @@ func TestExpandableBlockquote(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	if strings.Contains(dc[0], "<blockquote expandable>") || strings.Contains(dc[0], "</blockquote>") {
+	if strings.Contains(dc[0], "<blockquote") || strings.Contains(dc[0], "</blockquote>") {
 		t.Fatalf("discord output leaked HTML blockquote tags: %q", dc[0])
 	}
-	if !strings.Contains(dc[0], "• tool1 ×2") {
-		t.Fatalf("discord output missing tool text: %q", dc[0])
+	if !strings.Contains(dc[0], "> • tool1 ×2") || !strings.Contains(dc[0], "> • tool2 ×1") {
+		t.Fatalf("discord output missing quoted tool text: %q", dc[0])
 	}
 }
 
