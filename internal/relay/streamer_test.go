@@ -371,7 +371,7 @@ func TestStreamerSegmentsAroundTool(t *testing.T) {
 	var textMsgs []string
 	toolNotices := 0
 	for _, m := range msgs {
-		if m == "⚙️ Tool call" {
+		if strings.HasPrefix(m, "⚙️ ") || strings.HasPrefix(m, "✅ 1 tool call") {
 			toolNotices++
 		} else {
 			textMsgs = append(textMsgs, m)
@@ -403,8 +403,8 @@ func TestStreamerToolOnlyReplySendsNoEmptyMessage(t *testing.T) {
 	}
 
 	msgs := reply.finalMessages()
-	want := []string{"⚙️ Tool call", "✅ Task completed"}
-	if len(msgs) != len(want) || msgs[0] != want[0] || msgs[1] != want[1] {
+	want := []string{"✅ 1 tool call · Tool call ×1"}
+	if len(msgs) != len(want) || msgs[0] != want[0] {
 		t.Fatalf("messages = %v, want %v", msgs, want)
 	}
 }
