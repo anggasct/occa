@@ -1092,3 +1092,55 @@ func TestResponseTimeoutPermissionCopy(t *testing.T) {
 	}
 	waitForResponse(t, r)
 }
+
+func TestCoordinatorCancelMatchingIsolation(t *testing.T) {
+	c := newResponseCoordinator()
+
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	ctx3, cancel3 := context.WithCancel(context.Background())
+
+	k1 := responseKey{platform: "telegram", channelID: "chat1", threadID: "", userID: "user1"}
+	k2 := responseKey{platform: "telegram", channelID: "chat1", threadID: "", userID: "user2"}
+	k3 := responseKey{platform: "telegram", channelID: "chat1", threadID: "thread1", userID: ""}
+
+	if !c.acquire(k1, cancel1) || !c.acquire(k2, cancel2) || !c.acquire(k3, cancel3) {
+		t.Fatal("failed to acquire all response keys")
+	}
+
+	c.cancelMatching("telegram", "chat1", "", "user1")
+
+	if ctx1.Err() == nil {
+		t.Fatal("expected user1 context to be cancelled")
+	}
+	if ctx2.Err() != nil {
+		t.Fatal("user2 context should not be cancelled")
+	}
+	if ctx3.Err() != nil {
+		t.Fatal("thread1 context should not be cancelled")
+	}
+
+	if c.busy(k1) {
+		t.Fatal("k1 should no longer be busy")
+	}
+	if !c.busy(k2) {
+		t.Fatal("k2 should still be busy")
+	}
+	if !c.busy(k3) {
+		t.Fatal("k3 should still be busy")
+	}
+
+	c.cancelMatching("telegram", "chat1", "thread1", "")
+	if ctx3.Err() == nil {
+		t.Fatal("expected thread1 context to be cancelled")
+	}
+	if ctx2.Err() != nil {
+		t.Fatal("user2 context should still not be cancelled")
+	}
+	if c.busy(k3) {
+		t.Fatal("k3 should no longer be busy")
+	}
+	if !c.busy(k2) {
+		t.Fatal("k2 should still be busy")
+	}
+}

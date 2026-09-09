@@ -114,13 +114,23 @@ func (c *responseCoordinator) cancelResponse(key responseKey) {
 	}
 }
 
-func (c *responseCoordinator) cancelMatching(platform, channelID, threadID string) {
+func (c *responseCoordinator) cancelMatching(platform, channelID, threadID, userID string) {
 	c.mu.Lock()
 	var toCancel []context.CancelFunc
 	for k, cancel := range c.active {
-		if k.platform == platform && k.channelID == channelID && (threadID == "" || k.threadID == threadID) {
-			toCancel = append(toCancel, cancel)
-			delete(c.active, k)
+		if k.platform != platform || k.channelID != channelID {
+			continue
+		}
+		if threadID != "" {
+			if k.threadID == threadID {
+				toCancel = append(toCancel, cancel)
+				delete(c.active, k)
+			}
+		} else {
+			if k.threadID == "" && k.userID == userID {
+				toCancel = append(toCancel, cancel)
+				delete(c.active, k)
+			}
 		}
 	}
 	c.mu.Unlock()

@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -133,5 +134,61 @@ func TestStreamerStopButtonOmittedWhenNotConfigured(t *testing.T) {
 
 	if len(reply.sentButtons["msg-1"]) != 0 {
 		t.Fatalf("sentButtons must be empty when stopCallbackData is unset, got %+v", reply.sentButtons["msg-1"])
+	}
+}
+
+func TestStreamerStopButtonClearedOnTimeout(t *testing.T) {
+	reply := newFakeReplyContext()
+	s := NewStreamer(reply, render.New(), render.Telegram)
+	s.SetStopCallbackData("stop:sess-timeout")
+	s.workingEditInterval = -1
+	s.noEventTimeout = 30 * time.Millisecond
+
+	events := make(chan Event, 5)
+	events <- Event{Type: EventTool, Delta: "bash"}
+
+	err := s.Run(context.Background(), events)
+	if err == nil || !errors.Is(err, ErrTimeout) {
+		t.Fatalf("expected ErrTimeout, got %v", err)
+	}
+
+	reply.mu.Lock()
+	defer reply.mu.Unlock()
+
+	edits := reply.editButtons["msg-1"]
+	if len(edits) == 0 {
+		t.Fatalf("expected edit buttons on timeout, got none")
+	}
+	lastBtns := edits[len(edits)-1]
+	if len(lastBtns) != 0 {
+		t.Fatalf("timeout edit buttons = %+v, want empty/cleared", lastBtns)
+	}
+}
+
+func TestStreamerStopButtonClearedOnClosedChannel(t *testing.T) {
+	reply := newFakeReplyContext()
+	s := NewStreamer(reply, render.New(), render.Telegram)
+	s.SetStopCallbackData("stop:sess-closed")
+	s.workingEditInterval = -1
+
+	events := make(chan Event, 5)
+	events <- Event{Type: EventTool, Delta: "bash"}
+	close(events)
+
+	err := s.Run(context.Background(), events)
+	if err == nil || !errors.Is(err, ErrIncompleteStream) {
+		t.Fatalf("expected ErrIncompleteStream, got %v", err)
+	}
+
+	reply.mu.Lock()
+	defer reply.mu.Unlock()
+
+	edits := reply.editButtons["msg-1"]
+	if len(edits) == 0 {
+		t.Fatalf("expected edit buttons on closed channel, got none")
+	}
+	lastBtns := edits[len(edits)-1]
+	if len(lastBtns) != 0 {
+		t.Fatalf("closed channel edit buttons = %+v, want empty/cleared", lastBtns)
 	}
 }
