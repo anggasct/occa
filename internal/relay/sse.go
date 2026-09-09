@@ -272,6 +272,11 @@ func (d *eventDecoder) parseJSON(data string) (Event, bool) {
 			// "⚙️ bash: <cmd>" for one tool call).
 			samePart := partID != "" && seen
 			return Event{Type: EventTool, Delta: ev.Properties.Part.Tool, ToolContext: toolCtx, ToolInput: ev.Properties.Part.State.Input, ToolSamePart: samePart}, true
+		case kind == "reasoning":
+			if prev == "reasoning" {
+				return Event{}, false
+			}
+			return Event{Type: EventReasoning}, true
 		case prev == "" || kind == prev:
 			return Event{}, false
 		case prev == "text" || kind == "text":
@@ -279,11 +284,22 @@ func (d *eventDecoder) parseJSON(data string) (Event, bool) {
 		default:
 			return Event{}, false
 		}
-	case ev.Type == "message.part.delta" && ev.Properties.Field == "text" && d.partKind[ev.Properties.PartID] == "text":
-		if ev.Properties.Delta == "" {
+	case ev.Type == "message.part.delta" && ev.Properties.Field == "text":
+		partKind := d.partKind[ev.Properties.PartID]
+		if partKind == "reasoning" {
+			if d.activeKind != "reasoning" {
+				d.activeKind = "reasoning"
+				return Event{Type: EventReasoning}, true
+			}
 			return Event{}, false
 		}
-		return Event{Type: EventDelta, Delta: ev.Properties.Delta}, true
+		if partKind == "text" {
+			if ev.Properties.Delta == "" {
+				return Event{}, false
+			}
+			return Event{Type: EventDelta, Delta: ev.Properties.Delta}, true
+		}
+		return Event{}, false
 	case ev.Type == "session.idle":
 		return Event{Type: EventDone}, true
 	case strings.Contains(ev.Type, "error"):

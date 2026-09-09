@@ -79,7 +79,7 @@ func TestToolBubbleDistinctTools(t *testing.T) {
 		t.Fatalf("sends = %v, want exactly 1 progress card message", reply.sends)
 	}
 	got := toolNoticesOf(reply.finalMessages())
-	want := []string{"✅ 2 tool calls · glob ×1 · grep ×1"}
+	want := []string{"✅ 2 tool calls\n\n<blockquote expandable>\n• glob ×1\n• grep ×1\n</blockquote>"}
 	if len(got) != 1 || got[0] != want[0] {
 		t.Fatalf("notices = %v, want %v", got, want)
 	}
@@ -100,7 +100,7 @@ func TestToolBubbleSingleProgressCard(t *testing.T) {
 	if len(reply.sends) != 1 {
 		t.Fatalf("sends = %v, want exactly 1 progress card message", reply.sends)
 	}
-	want := "✅ 8 tool calls · a ×1 · b ×1 · c ×1 · d ×1 · e ×1 · f ×1 · g ×1 · h ×1"
+	want := "✅ 8 tool calls\n\n<blockquote expandable>\n• a ×1\n• b ×1\n• c ×1\n• d ×1\n• e ×1\n• f ×1\n• g ×1\n• h ×1\n</blockquote>"
 	edits := reply.edits["msg-1"]
 	if len(edits) == 0 || edits[len(edits)-1] != want {
 		t.Fatalf("final edit = %v, want %q", edits, want)
@@ -132,7 +132,7 @@ func TestToolBubbleShortTextResetsBudget(t *testing.T) {
 		Event{Type: EventSegment},
 		Event{Type: EventTool, Delta: "f"},
 	)
-	want := []string{"⚙️ [Step 2] b", "✅ 3 tool calls · a ×1 · b ×1 · f ×1"}
+	want := []string{"⚙️ [Step 2] b", "✅ 3 tool calls\n\n<blockquote expandable>\n• a ×1\n• b ×1\n• f ×1\n</blockquote>"}
 	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("notices = %v, want %v", got, want)
 	}
@@ -280,7 +280,7 @@ func TestToolBubbleContiguousRunGrouping(t *testing.T) {
 	if len(reply.sends) != 1 {
 		t.Fatalf("sends = %v, want 1 progress card", reply.sends)
 	}
-	want := "✅ 4 tool calls · bash ×2 · grep ×1 · read ×1"
+	want := "✅ 4 tool calls\n\n<blockquote expandable>\n• bash ×2\n• grep ×1\n• read ×1\n</blockquote>"
 	edits := reply.edits["msg-1"]
 	if len(edits) == 0 || edits[len(edits)-1] != want {
 		t.Fatalf("rollup = %v, want last %q", edits, want)
@@ -305,8 +305,9 @@ func TestTerminalRollupResolvesWorkingBubble(t *testing.T) {
 	if len(reply.sends) != 1 {
 		t.Fatalf("sends = %v, want 1 progress card", reply.sends)
 	}
+	want := "✅ 6 tool calls\n\n<blockquote expandable>\n• a ×1\n• b ×1\n• c ×1\n• d ×1\n• e ×1\n• f ×1\n</blockquote>"
 	edits := reply.edits["msg-1"]
-	if len(edits) == 0 || edits[len(edits)-1] != "✅ 6 tool calls · a ×1 · b ×1 · c ×1 · d ×1 · e ×1 · f ×1" {
+	if len(edits) == 0 || edits[len(edits)-1] != want {
 		t.Fatalf("terminal rollup = %v", edits)
 	}
 	for _, m := range reply.finalMessages() {
@@ -335,7 +336,7 @@ func TestTerminalRollupErrorPrefixAndCountOrdering(t *testing.T) {
 		t.Fatalf("sends = %v, want 2 (progress card + agent error notice)", reply.sends)
 	}
 	edits := reply.edits["msg-1"]
-	want := "⚠️ 7 tool calls · bash ×2 · deploy ×1 · edit ×1 · grep ×1 · read ×1 · write ×1"
+	want := "⚠️ 7 tool calls\n\n<blockquote expandable>\n• bash ×2\n• deploy ×1\n• edit ×1\n• grep ×1\n• read ×1\n• write ×1\n</blockquote>"
 	if len(edits) == 0 || edits[len(edits)-1] != want {
 		t.Fatalf("error rollup = %v, want last %q", edits, want)
 	}
@@ -360,7 +361,7 @@ func TestTerminalRollupOverflowListsEightTypes(t *testing.T) {
 		t.Fatalf("sends = %v, want 1 progress card", reply.sends)
 	}
 	edits := reply.edits["msg-1"]
-	want := "✅ 9 tool calls · a ×1 · b ×1 · c ×1 · d ×1 · e ×1 · f ×1 · g ×1 · h ×1 · +1 more"
+	want := "✅ 9 tool calls\n\n<blockquote expandable>\n• a ×1\n• b ×1\n• c ×1\n• d ×1\n• e ×1\n• f ×1\n• g ×1\n• h ×1\n• +1 more\n</blockquote>"
 	if len(edits) == 0 || edits[len(edits)-1] != want {
 		t.Fatalf("overflow rollup = %v, want last %q", edits, want)
 	}
@@ -385,7 +386,7 @@ func TestTerminalRollupCountsAcrossPhases(t *testing.T) {
 	}
 
 	edits := reply.edits["msg-3"]
-	wantRollup := "✅ 7 tool calls · a ×1 · b ×1 · bash ×1 · c ×1 · d ×1 · e ×1 · f ×1"
+	wantRollup := "✅ 7 tool calls\n\n<blockquote expandable>\n• a ×1\n• b ×1\n• bash ×1\n• c ×1\n• d ×1\n• e ×1\n• f ×1\n</blockquote>"
 	if len(edits) == 0 || edits[len(edits)-1] != wantRollup {
 		t.Fatalf("cross-phase rollup = %v, want last %q", edits, wantRollup)
 	}
@@ -407,7 +408,7 @@ func TestSingleProgressCardResolvesRollup(t *testing.T) {
 	if len(reply.sends) != 1 {
 		t.Fatalf("sends = %v, want 1 progress card message", reply.sends)
 	}
-	want := "✅ 2 tool calls · glob ×1 · grep ×1"
+	want := "✅ 2 tool calls\n\n<blockquote expandable>\n• glob ×1\n• grep ×1\n</blockquote>"
 	edits := reply.edits["msg-1"]
 	if len(edits) == 0 || edits[len(edits)-1] != want {
 		t.Fatalf("terminal rollup = %v, want %q", edits, want)
@@ -451,7 +452,7 @@ func TestWorkingBubbleSingleMessageAndPendingFlush(t *testing.T) {
 	if reply.sends[0] != "⚙️ [Step 1] a" {
 		t.Fatalf("initial send = %q, want '⚙️ [Step 1] a'", reply.sends[0])
 	}
-	wantRollup := "✅ 8 tool calls · a ×1 · b ×1 · c ×1 · d ×1 · e ×1 · f ×1 · g ×1 · h ×1"
+	wantRollup := "✅ 8 tool calls\n\n<blockquote expandable>\n• a ×1\n• b ×1\n• c ×1\n• d ×1\n• e ×1\n• f ×1\n• g ×1\n• h ×1\n</blockquote>"
 	edits := reply.edits["msg-1"]
 	if len(edits) == 0 || edits[len(edits)-1] != wantRollup {
 		t.Fatalf("Working rollup = %v, want %q", edits, wantRollup)
@@ -510,7 +511,7 @@ func TestWorkingRemovalStartsFreshPhase(t *testing.T) {
 	}
 
 	edits := reply.edits["msg-3"]
-	wantRollup := "✅ 12 tool calls · a ×1 · b ×1 · c ×1 · d ×1 · e ×1 · f ×1 · g ×1 · h ×1 · +4 more"
+	wantRollup := "✅ 12 tool calls\n\n<blockquote expandable>\n• a ×1\n• b ×1\n• c ×1\n• d ×1\n• e ×1\n• f ×1\n• g ×1\n• h ×1\n• +4 more\n</blockquote>"
 	if len(edits) == 0 || edits[len(edits)-1] != wantRollup {
 		t.Fatalf("second phase Working rollup = %v, want last %q", edits, wantRollup)
 	}
@@ -518,7 +519,7 @@ func TestWorkingRemovalStartsFreshPhase(t *testing.T) {
 
 func TestWorkingFlushesOnTerminalEvents(t *testing.T) {
 	rollup := func(icon string) string {
-		return icon + " 7 tool calls · a ×1 · b ×1 · c ×1 · d ×1 · e ×1 · f ×1 · g ×1"
+		return icon + " 7 tool calls\n\n<blockquote expandable>\n• a ×1\n• b ×1\n• c ×1\n• d ×1\n• e ×1\n• f ×1\n• g ×1\n</blockquote>"
 	}
 	tests := []struct {
 		name         string

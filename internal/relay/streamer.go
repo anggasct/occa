@@ -53,6 +53,7 @@ type Streamer struct {
 	permissionPendingFunc      func() bool
 	now                        func() time.Time
 	workingEditInterval        time.Duration
+	stopCallbackData           string
 }
 
 type toolPhaseState struct {
@@ -61,17 +62,20 @@ type toolPhaseState struct {
 }
 
 type workingState struct {
-	ref           channel.MessageRef
-	total         int
-	step          int
-	latestName    string
-	latestContext string
-	latestCount   int
-	toolStart     time.Time
-	rendered      string
-	pending       string
-	lastEditAt    time.Time
-	hasLastEditAt bool
+	ref               channel.MessageRef
+	total             int
+	step              int
+	latestName        string
+	latestContext     string
+	latestCount       int
+	toolStart         time.Time
+	reasoningActive   bool
+	reasoningStart    time.Time
+	reasoningDuration time.Duration
+	rendered          string
+	pending           string
+	lastEditAt        time.Time
+	hasLastEditAt     bool
 }
 
 type PermissionPromptHandler interface {
@@ -131,6 +135,17 @@ func (s *Streamer) SetPermissionPendingFunc(fn func() bool) {
 	s.permissionPendingFunc = fn
 }
 
+func (s *Streamer) SetStopCallbackData(data string) {
+	s.stopCallbackData = data
+}
+
+func (s *Streamer) activeButtons() []channel.Button {
+	if s.stopCallbackData == "" {
+		return nil
+	}
+	return []channel.Button{{Label: "🛑 Stop", Value: s.stopCallbackData}}
+}
+
 // setReaction drives the status reaction, targeting the source message
 // (read-receipt) when a target is set, else the first reply. Failures are
 // logged and never fail the stream; a missing setter is a silent no-op.
@@ -168,6 +183,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 	var phase toolPhaseState
 	respTotal := 0
 	respTypes := make(map[string]int)
+	var respReasoning time.Duration
 
 	typingTicker := time.NewTicker(s.typingInterval)
 	defer typingTicker.Stop()
@@ -196,6 +212,9 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 		select {
 		case <-ctx.Done():
 			s.flushWorking(&phase.working)
+			if s.stopCallbackData != "" && phase.working.ref != nil {
+				_ = s.reply.EditWithButtons(phase.working.ref, phase.working.rendered, nil)
+			}
 			return ctx.Err()
 
 		case <-typingTicker.C:
@@ -228,11 +247,40 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 			timeoutTimer.Reset(s.noEventTimeout)
 
 			switch ev.Type {
+			case EventReasoning:
+				if buf.Len() > 0 {
+					s.finalizeSegment(&refs, &lastChunks, buf.String())
+					buf.Reset()
+				}
+				if !phase.working.reasoningActive {
+					phase.working.reasoningActive = true
+					phase.working.reasoningStart = s.currentTime()
+					s.queueWorking(&phase.working)
+				}
 			case EventDelta:
+				if phase.working.reasoningActive {
+					phase.working.reasoningActive = false
+					if !phase.working.reasoningStart.IsZero() {
+						elapsed := s.currentTime().Sub(phase.working.reasoningStart)
+						phase.working.reasoningDuration += elapsed
+						respReasoning += elapsed
+					}
+					if phase.working.step == 0 && phase.working.ref != nil {
+						s.resolveWorking(&phase.working, true, respTotal, respTypes, respReasoning)
+					}
+				}
 				buf.WriteString(ev.Delta)
 				dirty = true
 			case EventDone:
-				s.resolveWorking(&phase.working, true, respTotal, respTypes)
+				if phase.working.reasoningActive {
+					phase.working.reasoningActive = false
+					if !phase.working.reasoningStart.IsZero() {
+						elapsed := s.currentTime().Sub(phase.working.reasoningStart)
+						phase.working.reasoningDuration += elapsed
+						respReasoning += elapsed
+					}
+				}
+				s.resolveWorking(&phase.working, true, respTotal, respTypes, respReasoning)
 				if buf.Len() == 0 {
 					s.completedNotice(&refs)
 					s.setReaction(channel.ReactionSuccess)
@@ -246,11 +294,27 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				s.setReaction(channel.ReactionSuccess)
 				return nil
 			case EventError:
-				s.resolveWorking(&phase.working, false, respTotal, respTypes)
+				if phase.working.reasoningActive {
+					phase.working.reasoningActive = false
+					if !phase.working.reasoningStart.IsZero() {
+						elapsed := s.currentTime().Sub(phase.working.reasoningStart)
+						phase.working.reasoningDuration += elapsed
+						respReasoning += elapsed
+					}
+				}
+				s.resolveWorking(&phase.working, false, respTotal, respTypes, respReasoning)
 				s.notice("⚠️ Agent error: " + ev.Delta)
 				s.setReaction(channel.ReactionError)
 				return fmt.Errorf("%w: %s", ErrStreamFailed, ev.Delta)
 			case EventSegment:
+				if phase.working.reasoningActive {
+					phase.working.reasoningActive = false
+					if !phase.working.reasoningStart.IsZero() {
+						elapsed := s.currentTime().Sub(phase.working.reasoningStart)
+						phase.working.reasoningDuration += elapsed
+						respReasoning += elapsed
+					}
+				}
 				s.resetToolPhase(&phase)
 				if buf.Len() > 0 {
 					slog.Debug("streaming: segment break", "finalized_len", buf.Len())
@@ -258,6 +322,14 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 					buf.Reset()
 				}
 			case EventTool:
+				if phase.working.reasoningActive {
+					phase.working.reasoningActive = false
+					if !phase.working.reasoningStart.IsZero() {
+						elapsed := s.currentTime().Sub(phase.working.reasoningStart)
+						phase.working.reasoningDuration += elapsed
+						respReasoning += elapsed
+					}
+				}
 				if buf.Len() > 0 {
 					s.finalizeSegment(&refs, &lastChunks, buf.String())
 					buf.Reset()
@@ -350,6 +422,41 @@ func (s *Streamer) currentTime() time.Time {
 }
 
 func (s *Streamer) workingText(working *workingState) string {
+	if working.step == 0 {
+		if working.reasoningActive {
+			var elapsed time.Duration
+			if !working.reasoningStart.IsZero() {
+				elapsed = s.currentTime().Sub(working.reasoningStart)
+			}
+			dur := formatDuration(elapsed)
+			if dur != "" {
+				return fmt.Sprintf("🧠 Thinking… (%s)", dur)
+			}
+			return "🧠 Thinking…"
+		}
+		if td := formatDuration(working.reasoningDuration); td != "" {
+			return "🧠 Thought for " + td
+		}
+		if working.reasoningDuration > 0 || !working.reasoningStart.IsZero() {
+			return "🧠 Thought"
+		}
+		return ""
+	}
+
+	if working.reasoningActive {
+		var elapsed time.Duration
+		if !working.reasoningStart.IsZero() {
+			elapsed = s.currentTime().Sub(working.reasoningStart)
+		}
+		dur := formatDuration(elapsed)
+		toolPart := formatToolLabel(working.latestName, working.latestContext, working.latestCount)
+		cleanTool := strings.TrimPrefix(toolPart, "⚙️ ")
+		if dur != "" {
+			return fmt.Sprintf("🧠 Thinking… (%s) · [Step %d] %s", dur, working.step, cleanTool)
+		}
+		return fmt.Sprintf("🧠 Thinking… · [Step %d] %s", working.step, cleanTool)
+	}
+
 	toolPart := formatToolLabel(working.latestName, working.latestContext, working.latestCount)
 	cleanTool := strings.TrimPrefix(toolPart, "⚙️ ")
 	step := working.step
@@ -361,10 +468,16 @@ func (s *Streamer) workingText(working *workingState) string {
 		elapsed = s.currentTime().Sub(working.toolStart)
 	}
 	dur := formatDuration(elapsed)
-	if dur != "" {
-		return fmt.Sprintf("⚙️ [Step %d] %s (%s)", step, cleanTool, dur)
+
+	thoughtSuffix := ""
+	if td := formatDuration(working.reasoningDuration); td != "" {
+		thoughtSuffix = " · 🧠 Thought for " + td
 	}
-	return fmt.Sprintf("⚙️ [Step %d] %s", step, cleanTool)
+
+	if dur != "" {
+		return fmt.Sprintf("⚙️ [Step %d] %s (%s)%s", step, cleanTool, dur, thoughtSuffix)
+	}
+	return fmt.Sprintf("⚙️ [Step %d] %s%s", step, cleanTool, thoughtSuffix)
 }
 
 func formatDuration(d time.Duration) string {
@@ -382,7 +495,7 @@ func formatDuration(d time.Duration) string {
 
 func (s *Streamer) updateWorking(working *workingState) {
 	if working.ref == nil {
-		ref, rendered, err := s.sendSingle(working.pending)
+		ref, rendered, err := s.sendWorking(working.pending)
 		if err != nil {
 			slog.Warn("streaming: working notice send failed", "error", err)
 			return
@@ -421,7 +534,14 @@ func (s *Streamer) maybeEditWorking(working *workingState) {
 	if interval > 0 && working.hasLastEditAt && now.Sub(working.lastEditAt) < interval {
 		return
 	}
-	if err := s.reply.Edit(working.ref, working.pending); err != nil {
+	var err error
+	buttons := s.activeButtons()
+	if len(buttons) > 0 {
+		err = s.reply.EditWithButtons(working.ref, working.pending, buttons)
+	} else {
+		err = s.reply.Edit(working.ref, working.pending)
+	}
+	if err != nil {
 		slog.Warn("streaming: working notice edit failed", "error", err)
 		return
 	}
@@ -435,7 +555,14 @@ func (s *Streamer) flushWorking(working *workingState) {
 	if working.ref == nil || working.pending == "" || working.pending == working.rendered {
 		return
 	}
-	if err := s.reply.Edit(working.ref, working.pending); err != nil {
+	var err error
+	buttons := s.activeButtons()
+	if len(buttons) > 0 {
+		err = s.reply.EditWithButtons(working.ref, working.pending, buttons)
+	} else {
+		err = s.reply.Edit(working.ref, working.pending)
+	}
+	if err != nil {
 		slog.Warn("streaming: working notice flush failed", "error", err)
 		return
 	}
@@ -450,9 +577,7 @@ func (s *Streamer) resetToolPhase(phase *toolPhaseState) {
 	*phase = toolPhaseState{}
 }
 
-// resolveWorking replaces a visible Working notice with a final response-wide
-// rollup on done/error.
-func (s *Streamer) resolveWorking(working *workingState, success bool, total int, types map[string]int) {
+func (s *Streamer) resolveWorking(working *workingState, success bool, total int, types map[string]int, reasoning time.Duration) {
 	ref := working.ref
 	if ref == nil {
 		ref = s.lastWorkingRef
@@ -464,11 +589,17 @@ func (s *Streamer) resolveWorking(working *workingState, success bool, total int
 	if success {
 		icon = "✅"
 	}
-	text := s.renderedSingle(rollupText(icon, total, types))
-	if text == "" || text == working.rendered {
+	text := s.renderedSingle(s.rollupText(icon, total, types, reasoning))
+	if text == "" {
 		return
 	}
-	if err := s.reply.Edit(ref, text); err != nil {
+	var err error
+	if s.stopCallbackData != "" {
+		err = s.reply.EditWithButtons(ref, text, nil)
+	} else {
+		err = s.reply.Edit(ref, text)
+	}
+	if err != nil {
 		slog.Warn("streaming: working rollup failed", "error", err)
 		return
 	}
@@ -476,11 +607,23 @@ func (s *Streamer) resolveWorking(working *workingState, success bool, total int
 	working.pending = ""
 }
 
-// maxRollupTypes bounds how many per-type entries the final rollup lists;
-// the remainder collapses into a "+N more" suffix.
 const maxRollupTypes = 8
 
-func rollupText(icon string, total int, types map[string]int) string {
+func (s *Streamer) rollupText(icon string, total int, types map[string]int, reasoning time.Duration) string {
+	thoughtSuffix := ""
+	if dur := formatDuration(reasoning); dur != "" {
+		thoughtSuffix = " · 🧠 Thought for " + dur
+	} else if reasoning > 0 {
+		thoughtSuffix = " · 🧠 Thought"
+	}
+
+	if total == 0 {
+		if thoughtSuffix != "" {
+			return strings.TrimPrefix(thoughtSuffix, " · ")
+		}
+		return ""
+	}
+
 	names := make([]string, 0, len(types))
 	for name := range types {
 		names = append(names, name)
@@ -497,17 +640,51 @@ func rollupText(icon string, total int, types map[string]int) string {
 	} else {
 		fmt.Fprintf(&b, "%s %d tool calls", icon, total)
 	}
+
 	listed := len(names)
 	if listed > maxRollupTypes {
 		listed = maxRollupTypes
 	}
-	for _, name := range names[:listed] {
-		fmt.Fprintf(&b, " · %s ×%d", name, types[name])
-	}
-	if rest := len(names) - listed; rest > 0 {
-		fmt.Fprintf(&b, " · +%d more", rest)
+
+	if s.platform == render.Telegram && listed > 1 {
+		b.WriteString(thoughtSuffix)
+		b.WriteString("\n<blockquote expandable>\n")
+		for _, name := range names[:listed] {
+			fmt.Fprintf(&b, "• %s ×%d\n", name, types[name])
+		}
+		if rest := len(names) - listed; rest > 0 {
+			fmt.Fprintf(&b, "• +%d more\n", rest)
+		}
+		b.WriteString("</blockquote>")
+	} else {
+		for _, name := range names[:listed] {
+			fmt.Fprintf(&b, " · %s ×%d", name, types[name])
+		}
+		if rest := len(names) - listed; rest > 0 {
+			fmt.Fprintf(&b, " · +%d more", rest)
+		}
+		b.WriteString(thoughtSuffix)
 	}
 	return b.String()
+}
+
+func (s *Streamer) sendWorking(raw string) (channel.MessageRef, string, error) {
+	rendered := s.renderedSingle(raw)
+	if rendered == "" {
+		return nil, "", errors.New("rendered status message is empty")
+	}
+	var ref channel.MessageRef
+	var err error
+	buttons := s.activeButtons()
+	if len(buttons) > 0 {
+		ref, err = s.reply.SendWithButtons(rendered, buttons)
+	} else {
+		ref, err = s.reply.Send(rendered)
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	return ref, rendered, nil
 }
 
 func (s *Streamer) sendSingle(raw string) (channel.MessageRef, string, error) {

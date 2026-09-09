@@ -213,11 +213,12 @@ type SessionInfo struct {
 }
 
 const (
-	EventDelta   = "delta"
-	EventDone    = "done"
-	EventError   = "error"
-	EventSegment = "segment"
-	EventTool    = "tool"
+	EventDelta     = "delta"
+	EventDone      = "done"
+	EventError     = "error"
+	EventSegment   = "segment"
+	EventTool      = "tool"
+	EventReasoning = "reasoning"
 )
 
 type Event struct {

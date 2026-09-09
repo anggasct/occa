@@ -114,6 +114,23 @@ func (c *responseCoordinator) cancelResponse(key responseKey) {
 	}
 }
 
+func (c *responseCoordinator) cancelMatching(platform, channelID, threadID string) {
+	c.mu.Lock()
+	var toCancel []context.CancelFunc
+	for k, cancel := range c.active {
+		if k.platform == platform && k.channelID == channelID && (threadID == "" || k.threadID == threadID) {
+			toCancel = append(toCancel, cancel)
+			delete(c.active, k)
+		}
+	}
+	c.mu.Unlock()
+	for _, cancel := range toCancel {
+		if cancel != nil {
+			cancel()
+		}
+	}
+}
+
 func (r *Router) runResponse(
 	ctx context.Context,
 	cancel context.CancelFunc,
@@ -228,6 +245,11 @@ func (r *Router) runResponse(
 		}
 		if msg.SourceRef != nil {
 			streamer.SetReactionTarget(msg.SourceRef)
+		}
+		if sessionID != "" {
+			streamer.SetStopCallbackData("stop:" + sessionID)
+		} else {
+			streamer.SetStopCallbackData("stop")
 		}
 		streamDone <- streamer.Run(ctx, observedEvents)
 	}()

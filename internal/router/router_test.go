@@ -2531,6 +2531,41 @@ func TestHandleStopNoActiveSession(t *testing.T) {
 	}
 }
 
+func TestHandleStopCallback(t *testing.T) {
+	r, client, reply := newTestRouter()
+	ctx := context.Background()
+
+	err := r.store.SessionRepo().SetActive(ctx, "telegram", "chat1", "", "user1", "sess-active", 0)
+	if err != nil {
+		t.Fatalf("SetActive: %v", err)
+	}
+
+	cbMsg := channel.IncomingMessage{
+		Platform:     "telegram",
+		ChannelID:    "chat1",
+		UserID:       "user1",
+		IsCallback:   true,
+		CallbackData: "stop:sess-active",
+		CallbackRef:  fakeRef{id: "msg-1"},
+		ReplyCtx:     reply,
+	}
+
+	err = r.Route(ctx, cbMsg)
+	if err != nil {
+		t.Fatalf("Route stop callback: %v", err)
+	}
+
+	if len(reply.edits) == 0 || !strings.Contains(reply.edits[0], "Stopped. Your conversation is kept") {
+		t.Fatalf("expected stopped message edit, got: %v", reply.edits)
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.abortCalls) != 1 || client.abortCalls[0] != "sess-active" {
+		t.Fatalf("expected AbortSession call for sess-active, got: %v", client.abortCalls)
+	}
+}
+
 func TestHandleSteerWithActiveSession(t *testing.T) {
 	r, client, reply := newTestRouter()
 	ctx := context.Background()

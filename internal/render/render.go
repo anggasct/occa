@@ -390,7 +390,12 @@ var (
 
 const aOpenPrefix = `<a href="`
 
+const expandableBlockquoteOpen = "<blockquote expandable>"
+
 func matchOpenTag(s string) (tag openTag, length int, ok bool) {
+	if strings.HasPrefix(s, expandableBlockquoteOpen) {
+		return openTag{name: "blockquote", text: expandableBlockquoteOpen}, len(expandableBlockquoteOpen), true
+	}
 	for _, t := range openTagTokens {
 		if strings.HasPrefix(s, t) {
 			return openTag{name: tagName(t), text: t}, len(t), true
@@ -554,18 +559,18 @@ func renderTelegramHTML(doc ast.Node, source []byte) string {
 			if entering {
 				for i := 0; i < node.Segments.Len(); i++ {
 					seg := node.Segments.At(i)
-					buf.Write(escapeHTML(seg.Value(source)))
+					buf.Write(escapeTelegramHTML(seg.Value(source)))
 				}
 			}
 		case *ast.HTMLBlock:
 			if entering {
 				for i := 0; i < node.Lines().Len(); i++ {
 					line := node.Lines().At(i)
-					buf.Write(escapeHTML(line.Value(source)))
+					buf.Write(escapeTelegramHTML(line.Value(source)))
 				}
 				if node.HasClosure() {
 					closure := node.ClosureLine
-					buf.Write(escapeHTML(closure.Value(source)))
+					buf.Write(escapeTelegramHTML(closure.Value(source)))
 				}
 			}
 		case *ast.Paragraph:
@@ -734,18 +739,18 @@ func renderDiscord(doc ast.Node, source []byte) string {
 			if entering {
 				for i := 0; i < node.Segments.Len(); i++ {
 					seg := node.Segments.At(i)
-					buf.Write(seg.Value(source))
+					buf.Write(sanitizeDiscordHTML(seg.Value(source)))
 				}
 			}
 		case *ast.HTMLBlock:
 			if entering {
 				for i := 0; i < node.Lines().Len(); i++ {
 					line := node.Lines().At(i)
-					buf.Write(line.Value(source))
+					buf.Write(sanitizeDiscordHTML(line.Value(source)))
 				}
 				if node.HasClosure() {
 					closure := node.ClosureLine
-					buf.Write(closure.Value(source))
+					buf.Write(sanitizeDiscordHTML(closure.Value(source)))
 				}
 			}
 		case *ast.Paragraph:
@@ -839,6 +844,20 @@ func escapeHTML(b []byte) []byte {
 
 func escapeHTMLAttr(b []byte) []byte {
 	return []byte(strings.ReplaceAll(string(escapeHTML(b)), `"`, "&quot;"))
+}
+
+func escapeTelegramHTML(b []byte) []byte {
+	s := string(escapeHTML(b))
+	s = strings.ReplaceAll(s, "&lt;blockquote expandable&gt;", "<blockquote expandable>")
+	s = strings.ReplaceAll(s, "&lt;/blockquote&gt;", "</blockquote>")
+	return []byte(s)
+}
+
+func sanitizeDiscordHTML(b []byte) []byte {
+	s := string(b)
+	s = strings.ReplaceAll(s, "<blockquote expandable>", "")
+	s = strings.ReplaceAll(s, "</blockquote>", "")
+	return []byte(s)
 }
 
 var _ Renderer = (*GoldmarkRenderer)(nil)

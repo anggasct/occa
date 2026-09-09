@@ -33,6 +33,9 @@ func (r *Router) handleCallback(ctx context.Context, msg channel.IncomingMessage
 	if strings.HasPrefix(msg.CallbackData, agentCallbackPrefix) {
 		return r.handleAgentCallback(ctx, msg)
 	}
+	if strings.HasPrefix(msg.CallbackData, "stop:") || msg.CallbackData == "stop" {
+		return r.handleStopCallback(ctx, msg)
+	}
 	if !strings.HasPrefix(msg.CallbackData, "permission:") {
 		return nil
 	}
