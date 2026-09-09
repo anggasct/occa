@@ -47,6 +47,7 @@ type Streamer struct {
 	reactionSetter             channel.ReactionSetter
 	reactionTarget             channel.MessageRef
 	firstRef                   channel.MessageRef
+	lastWorkingRef             channel.MessageRef
 	noEventTimeout             time.Duration
 	typingInterval             time.Duration
 	permissionPendingFunc      func() bool
@@ -54,19 +55,7 @@ type Streamer struct {
 	workingEditInterval        time.Duration
 }
 
-type toolBubble struct {
-	ref     channel.MessageRef
-	name    string
-	count   int
-	context string
-}
-
-// toolPhaseState tracks one contiguous phase of tool activity: the run still
-// accepting same-type continuations, how many bubbles it has spent, and its
-// live Working notice. Every agent text segment starts a fresh phase.
 type toolPhaseState struct {
-	run     *toolBubble
-	bubbles int
 	calls   int
 	working workingState
 }
@@ -74,8 +63,11 @@ type toolPhaseState struct {
 type workingState struct {
 	ref           channel.MessageRef
 	total         int
+	step          int
 	latestName    string
 	latestContext string
+	latestCount   int
+	toolStart     time.Time
 	rendered      string
 	pending       string
 	lastEditAt    time.Time
@@ -284,13 +276,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				}
 				ctxStr := normalizeToolContext(ev.ToolContext)
 				if ev.ToolSamePart {
-					switch {
-					case phase.run != nil && phase.run.name == name && ctxStr != "" && ctxStr != phase.run.context:
-						phase.run.context = ctxStr
-						if err := s.reply.Edit(phase.run.ref, formatToolLabel(name, phase.run.context, phase.run.count)); err != nil {
-							slog.Warn("streaming: tool notice context edit failed", "tool", name, "error", err)
-						}
-					case phase.working.ref != nil && phase.working.latestName == name && ctxStr != "" && ctxStr != phase.working.latestContext:
+					if phase.working.ref != nil && phase.working.latestName == name && ctxStr != "" && ctxStr != phase.working.latestContext {
 						phase.working.latestContext = ctxStr
 						s.queueWorking(&phase.working)
 					}
@@ -299,31 +285,22 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				respTotal++
 				respTypes[name]++
 				phase.calls++
-				if phase.run != nil && phase.run.name == name {
-					phase.run.count++
+				if phase.working.step > 0 && phase.working.latestName == name {
+					phase.working.latestCount++
+					phase.working.total = respTotal
 					if ctxStr != "" {
-						phase.run.context = ctxStr
+						phase.working.latestContext = ctxStr
 					}
-					if err := s.reply.Edit(phase.run.ref, formatToolLabel(name, phase.run.context, phase.run.count)); err != nil {
-						slog.Warn("streaming: tool notice edit failed", "tool", name, "error", err)
-					}
-					break
+					s.queueWorking(&phase.working)
+				} else {
+					phase.working.step++
+					phase.working.latestName = name
+					phase.working.latestContext = ctxStr
+					phase.working.latestCount = 1
+					phase.working.total = respTotal
+					phase.working.toolStart = s.currentTime()
+					s.queueWorking(&phase.working)
 				}
-				if phase.bubbles < maxToolBubbles {
-					ref, err := s.reply.Send(formatToolLabel(name, ctxStr, 1))
-					if err != nil {
-						slog.Warn("streaming: tool notice send failed", "tool", name, "error", err)
-						break
-					}
-					phase.run = &toolBubble{ref: ref, name: name, count: 1, context: ctxStr}
-					phase.bubbles++
-					s.trackFirstRef(ref)
-					break
-				}
-				phase.working.total = phase.calls
-				phase.working.latestName = name
-				phase.working.latestContext = ctxStr
-				s.queueWorking(&phase.working)
 			case "permission_asked":
 				if ev.Permission != nil {
 					if s.permissionHandler != nil {
@@ -351,6 +328,9 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				dirty = false
 				s.syncMessages(&refs, &lastChunks, buf.String())
 			}
+			if phase.working.ref != nil {
+				s.queueWorking(&phase.working)
+			}
 
 			if intervalIdx < len(intervals)-1 {
 				intervalIdx++
@@ -359,12 +339,6 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 		}
 	}
 }
-
-// maxToolBubbles bounds the tool-run bubbles in one phase before the Working
-// indicator takes over.
-const maxToolBubbles = 5
-
-const workingIndicator = "🔄 Working…"
 
 const maxToolContextRunes = 40
 
@@ -376,11 +350,34 @@ func (s *Streamer) currentTime() time.Time {
 }
 
 func (s *Streamer) workingText(working *workingState) string {
-	latest := working.latestName
-	if working.latestContext != "" {
-		latest += ": " + working.latestContext
+	toolPart := formatToolLabel(working.latestName, working.latestContext, working.latestCount)
+	cleanTool := strings.TrimPrefix(toolPart, "⚙️ ")
+	step := working.step
+	if step <= 0 {
+		step = 1
 	}
-	return fmt.Sprintf("%s · %d tool calls · latest: %s", workingIndicator, working.total, latest)
+	var elapsed time.Duration
+	if !working.toolStart.IsZero() {
+		elapsed = s.currentTime().Sub(working.toolStart)
+	}
+	dur := formatDuration(elapsed)
+	if dur != "" {
+		return fmt.Sprintf("⚙️ [Step %d] %s (%s)", step, cleanTool, dur)
+	}
+	return fmt.Sprintf("⚙️ [Step %d] %s", step, cleanTool)
+}
+
+func formatDuration(d time.Duration) string {
+	d = d.Round(time.Second)
+	if d < time.Second {
+		return ""
+	}
+	m := int(d / time.Minute)
+	s := int((d % time.Minute) / time.Second)
+	if m > 0 {
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
 }
 
 func (s *Streamer) updateWorking(working *workingState) {
@@ -395,6 +392,7 @@ func (s *Streamer) updateWorking(working *workingState) {
 		working.pending = ""
 		working.lastEditAt = s.currentTime()
 		working.hasLastEditAt = true
+		s.lastWorkingRef = ref
 		s.trackFirstRef(ref)
 		return
 	}
@@ -416,11 +414,11 @@ func (s *Streamer) maybeEditWorking(working *workingState) {
 		return
 	}
 	interval := s.workingEditInterval
-	if interval <= 0 {
+	if interval == 0 {
 		interval = 2 * time.Second
 	}
 	now := s.currentTime()
-	if working.hasLastEditAt && now.Sub(working.lastEditAt) < interval {
+	if interval > 0 && working.hasLastEditAt && now.Sub(working.lastEditAt) < interval {
 		return
 	}
 	if err := s.reply.Edit(working.ref, working.pending); err != nil {
@@ -449,22 +447,17 @@ func (s *Streamer) flushWorking(working *workingState) {
 
 func (s *Streamer) resetToolPhase(phase *toolPhaseState) {
 	s.flushWorking(&phase.working)
-	if phase.working.ref != nil {
-		if remover, ok := s.reply.(channel.MessageRemover); ok {
-			if err := remover.Delete(phase.working.ref); err != nil {
-				slog.Warn("streaming: working notice removal failed", "error", err)
-			}
-		}
-	}
 	*phase = toolPhaseState{}
 }
 
 // resolveWorking replaces a visible Working notice with a final response-wide
-// rollup on done/error. With no Working bubble on screen it does nothing: all
-// tool activity is already visible as persisted bubbles. The edit bypasses
-// the live throttle because it is the bubble's terminal state.
+// rollup on done/error.
 func (s *Streamer) resolveWorking(working *workingState, success bool, total int, types map[string]int) {
-	if working.ref == nil {
+	ref := working.ref
+	if ref == nil {
+		ref = s.lastWorkingRef
+	}
+	if ref == nil {
 		return
 	}
 	icon := "⚠️"
@@ -475,7 +468,7 @@ func (s *Streamer) resolveWorking(working *workingState, success bool, total int
 	if text == "" || text == working.rendered {
 		return
 	}
-	if err := s.reply.Edit(working.ref, text); err != nil {
+	if err := s.reply.Edit(ref, text); err != nil {
 		slog.Warn("streaming: working rollup failed", "error", err)
 		return
 	}
@@ -499,7 +492,11 @@ func rollupText(icon string, total int, types map[string]int) string {
 		return names[i] < names[j]
 	})
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s %d tool calls", icon, total)
+	if total == 1 {
+		fmt.Fprintf(&b, "%s 1 tool call", icon)
+	} else {
+		fmt.Fprintf(&b, "%s %d tool calls", icon, total)
+	}
 	listed := len(names)
 	if listed > maxRollupTypes {
 		listed = maxRollupTypes
@@ -637,9 +634,9 @@ func (s *Streamer) syncMessages(refs *[]channel.MessageRef, lastChunks *[]string
 }
 
 // completedNotice sends a fallback confirmation when the agent finished
-// without delivering any text content.
+// without delivering any text content and without any tool progress card.
 func (s *Streamer) completedNotice(refs *[]channel.MessageRef) {
-	if len(*refs) == 0 {
+	if len(*refs) == 0 && s.lastWorkingRef == nil {
 		s.notice("✅ Task completed")
 	}
 }

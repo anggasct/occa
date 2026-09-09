@@ -11,6 +11,7 @@ func TestStreamerToolSamePartSkipsIdenticalEdit(t *testing.T) {
 	reply := newFakeReplyContext()
 	renderer := render.New()
 	s := NewStreamer(reply, renderer, render.Telegram)
+	s.workingEditInterval = -1
 
 	events := make(chan Event, 10)
 	events <- Event{Type: EventTool, Delta: "read"}                                             // bubble ⚙️ read
@@ -25,13 +26,16 @@ func TestStreamerToolSamePartSkipsIdenticalEdit(t *testing.T) {
 	}
 
 	edits := reply.edits["msg-1"]
-	if len(edits) != 2 {
-		t.Fatalf("edits on msg-1 = %d (%v), want 2 (context foo.txt, then bar.txt)", len(edits), edits)
+	if len(edits) != 3 {
+		t.Fatalf("edits on msg-1 = %d (%v), want 3 (context foo.txt, then bar.txt, then terminal rollup)", len(edits), edits)
 	}
-	if edits[0] != "⚙️ read: foo.txt" {
-		t.Fatalf("edit[0] = %q, want %q", edits[0], "⚙️ read: foo.txt")
+	if edits[0] != "⚙️ [Step 1] read: foo.txt" {
+		t.Fatalf("edit[0] = %q, want %q", edits[0], "⚙️ [Step 1] read: foo.txt")
 	}
-	if edits[1] != "⚙️ read: bar.txt" {
-		t.Fatalf("edit[1] = %q, want %q", edits[1], "⚙️ read: bar.txt")
+	if edits[1] != "⚙️ [Step 1] read: bar.txt" {
+		t.Fatalf("edit[1] = %q, want %q", edits[1], "⚙️ [Step 1] read: bar.txt")
+	}
+	if edits[2] != "✅ 1 tool call · read ×1" {
+		t.Fatalf("edit[2] = %q, want %q", edits[2], "✅ 1 tool call · read ×1")
 	}
 }
