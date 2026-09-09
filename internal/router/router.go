@@ -100,6 +100,7 @@ type Router struct {
 	recoveryBudget         time.Duration
 	renderer               render.Renderer
 	streamerNoEventTimeout time.Duration
+	threadParentOf         func(threadID string) (string, error)
 }
 
 type ScheduleStore interface {
@@ -146,6 +147,21 @@ func (r *Router) Route(ctx context.Context, msg channel.IncomingMessage) error {
 	}
 	isOcca := r.isOccaCommand(msg.Text)
 	inputKind := r.routeInputKind(msg, isOcca)
+	originalChannelID := msg.ChannelID
+	parent, source, err := r.resolveThreadParent(ctx, msg)
+	if err != nil {
+		if !errors.Is(err, ErrDenied) {
+			slog.Warn("thread parent lookup failed", "platform", msg.Platform, "thread_id", msg.ThreadID, "error", err)
+			r.reply(msg, accessVerifyMessage)
+			return nil
+		}
+	} else if parent != "" && originalChannelID == msg.ThreadID && msg.ParentChannelID == "" {
+		slog.Info("thread parent resolved", "platform", msg.Platform, "thread_id", msg.ThreadID, "parent", parent, "source", source)
+		msg.ParentChannelID = parent
+		msg.ChannelScopeUnresolved = false
+	} else if parent != "" && originalChannelID == msg.ThreadID {
+		slog.Info("thread parent resolved", "platform", msg.Platform, "thread_id", msg.ThreadID, "parent", parent, "source", source)
+	}
 	if err := r.authorize(ctx, msg); err != nil {
 		if errors.Is(err, ErrDenied) {
 			slog.Info("access denied", "platform", msg.Platform, "channel_id", msg.ChannelID, "thread_id", msg.ThreadID, "user_id", msg.UserID, "input_kind", inputKind, "outcome", "denied")
@@ -160,6 +176,10 @@ func (r *Router) Route(ctx context.Context, msg channel.IncomingMessage) error {
 
 	if isOwnedThreadMessage(msg) {
 		if err := r.ensureThreadConfig(ctx, msg); err != nil {
+			slog.Warn("router: materialize thread config failed", "platform", msg.Platform, "thread_id", msg.ThreadID, "error", err)
+		}
+	} else if msg.Platform == "discord" && msg.IsThread && msg.ThreadID != "" && msg.ParentChannelID != "" && msg.ParentChannelID != msg.ChannelID {
+		if err := r.store.ThreadConfigRepo().SnapshotFromChannel(ctx, msg.Platform, msg.ParentChannelID, msg.ThreadID, r.defaultWorkdir); err != nil {
 			slog.Warn("router: materialize thread config failed", "platform", msg.Platform, "thread_id", msg.ThreadID, "error", err)
 		}
 	}
@@ -279,10 +299,19 @@ func (r *Router) authorize(ctx context.Context, msg channel.IncomingMessage) err
 	if err != nil {
 		return fmt.Errorf("authorize: %w", err)
 	}
-	if o == nil || (o.Role != "allow" && o.Role != "admin") {
-		return ErrDenied
+	if o != nil && (o.Role == "allow" || o.Role == "admin") {
+		return nil
 	}
-	return nil
+	if msg.Platform == "discord" && msg.IsThread && msg.ParentChannelID != "" && msg.ParentChannelID != msg.ChannelID {
+		po, err := r.store.OverrideRepo().Get(ctx, msg.Platform, msg.ParentChannelID, msg.UserID)
+		if err != nil {
+			return fmt.Errorf("authorize: %w", err)
+		}
+		if po != nil && (po.Role == "allow" || po.Role == "admin") {
+			return nil
+		}
+	}
+	return ErrDenied
 }
 
 func (r *Router) isAdmin(ctx context.Context, msg channel.IncomingMessage) bool {
@@ -290,10 +319,16 @@ func (r *Router) isAdmin(ctx context.Context, msg channel.IncomingMessage) bool 
 		return true
 	}
 	o, err := r.store.OverrideRepo().Get(ctx, msg.Platform, msg.ChannelID, msg.UserID)
-	if err != nil || o == nil {
-		return false
+	if err == nil && o != nil && o.Role == "admin" {
+		return true
 	}
-	return o.Role == "admin"
+	if msg.Platform == "discord" && msg.IsThread && msg.ParentChannelID != "" && msg.ParentChannelID != msg.ChannelID {
+		po, err := r.store.OverrideRepo().Get(ctx, msg.Platform, msg.ParentChannelID, msg.UserID)
+		if err == nil && po != nil && po.Role == "admin" {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Router) handleCommand(ctx context.Context, msg channel.IncomingMessage) error {

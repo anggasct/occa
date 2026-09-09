@@ -5,7 +5,15 @@ import (
 	"errors"
 )
 
-var ErrMessageNotFound = errors.New("channel: message not found")
+var (
+	ErrMessageNotFound             = errors.New("channel: message not found")
+	ErrThreadNotFound              = errors.New("channel: thread not found")
+	ErrParentResolutionUnsupported = errors.New("channel: parent resolution unsupported")
+)
+
+type ThreadParentResolver interface {
+	ParentChannelOf(threadID string) (string, error)
+}
 
 type Attachment struct {
 	Filename string

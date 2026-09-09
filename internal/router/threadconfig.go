@@ -36,16 +36,24 @@ func (r *Router) ensureThreadConfig(ctx context.Context, msg channel.IncomingMes
 // falling back to the parent channel (which would cross the isolation
 // boundary: once a thread_config row exists, the channel is never consulted).
 func (r *Router) threadRow(ctx context.Context, msg channel.IncomingMessage) (*store.ThreadConfig, error) {
-	if !isOwnedThreadMessage(msg) {
-		return nil, nil
+	if isOwnedThreadMessage(msg) {
+		channelID := threadScopeChannelID(msg)
+		row, err := r.store.ThreadConfigRepo().Get(ctx, msg.Platform, channelID, msg.ThreadID)
+		if err != nil {
+			slog.Warn("router: read thread config failed", "platform", msg.Platform, "channel_id", channelID, "thread_id", msg.ThreadID, "error", err)
+			return nil, fmt.Errorf("router: read thread config: %w", err)
+		}
+		return row, nil
 	}
-	channelID := threadScopeChannelID(msg)
-	row, err := r.store.ThreadConfigRepo().Get(ctx, msg.Platform, channelID, msg.ThreadID)
-	if err != nil {
-		slog.Warn("router: read thread config failed", "platform", msg.Platform, "channel_id", channelID, "thread_id", msg.ThreadID, "error", err)
-		return nil, fmt.Errorf("router: read thread config: %w", err)
+	if msg.Platform == "discord" && msg.IsThread && msg.ThreadID != "" && msg.ParentChannelID != "" && msg.ParentChannelID != msg.ChannelID {
+		row, err := r.store.ThreadConfigRepo().Get(ctx, msg.Platform, msg.ParentChannelID, msg.ThreadID)
+		if err != nil {
+			slog.Warn("router: read thread config failed", "platform", msg.Platform, "channel_id", msg.ParentChannelID, "thread_id", msg.ThreadID, "error", err)
+			return nil, fmt.Errorf("router: read thread config: %w", err)
+		}
+		return row, nil
 	}
-	return row, nil
+	return nil, nil
 }
 
 // effectiveWorkdir resolves the working directory for a message. Channel
@@ -66,6 +74,12 @@ func (r *Router) effectiveWorkdir(ctx context.Context, msg channel.IncomingMessa
 	ch, err := r.store.ChannelRepo().Get(ctx, msg.Platform, msg.ChannelID)
 	if err == nil && ch != nil && ch.Workdir != "" {
 		return ch.Workdir, nil
+	}
+	if msg.Platform == "discord" && msg.IsThread && msg.ParentChannelID != "" && msg.ParentChannelID != msg.ChannelID {
+		pch, perr := r.store.ChannelRepo().Get(ctx, msg.Platform, msg.ParentChannelID)
+		if perr == nil && pch != nil && pch.Workdir != "" {
+			return pch.Workdir, nil
+		}
 	}
 	return r.defaultWorkdir, nil
 }

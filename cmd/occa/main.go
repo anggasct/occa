@@ -176,6 +176,7 @@ func main() {
 			}
 			return channelID != "" && channelID != threadID, nil
 		})
+		rt.SetThreadParentResolver(da.ParentChannelOf)
 		channels = append(channels, da)
 	}
 
