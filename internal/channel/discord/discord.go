@@ -54,8 +54,9 @@ type Adapter struct {
 	ownedThread    OwnedThreadCheck
 	connected      atomic.Bool
 
-	threadsMu sync.Mutex
-	threads   map[string]struct{}
+	threadsMu   sync.Mutex
+	threads     map[string]struct{}
+	parentCache map[string]string
 }
 
 const defaultDownloadTimeout = 60 * time.Second
@@ -131,6 +132,56 @@ func (a *Adapter) isOwnedThread(threadID string) bool {
 		return false
 	}
 	return owned
+}
+
+func (a *Adapter) ParentChannelOf(threadID string) (string, error) {
+	if threadID == "" {
+		return "", nil
+	}
+	a.threadsMu.Lock()
+	if a.parentCache != nil {
+		if parent, ok := a.parentCache[threadID]; ok {
+			a.threadsMu.Unlock()
+			if parent == "" {
+				return "", channel.ErrThreadNotFound
+			}
+			return parent, nil
+		}
+	}
+	a.threadsMu.Unlock()
+	if a.channelLookup == nil && a.session == nil {
+		return "", errors.New("discord: session not ready")
+	}
+	ch, err := a.lookupChannel(threadID)
+	if err != nil {
+		var restErr *discordgo.RESTError
+		if errors.As(err, &restErr) && restErr.Response != nil && restErr.Response.StatusCode == http.StatusNotFound {
+			a.threadsMu.Lock()
+			if a.parentCache == nil {
+				a.parentCache = make(map[string]string)
+			}
+			a.parentCache[threadID] = ""
+			a.threadsMu.Unlock()
+			return "", channel.ErrThreadNotFound
+		}
+		return "", err
+	}
+	if ch == nil || ch.ParentID == "" {
+		a.threadsMu.Lock()
+		if a.parentCache == nil {
+			a.parentCache = make(map[string]string)
+		}
+		a.parentCache[threadID] = ""
+		a.threadsMu.Unlock()
+		return "", channel.ErrThreadNotFound
+	}
+	a.threadsMu.Lock()
+	if a.parentCache == nil {
+		a.parentCache = make(map[string]string)
+	}
+	a.parentCache[threadID] = ch.ParentID
+	a.threadsMu.Unlock()
+	return ch.ParentID, nil
 }
 
 func (a *Adapter) setBotID(id string) { a.botID.Store(id) }
@@ -892,15 +943,16 @@ func (rc *replyContext) Delete(ref channel.MessageRef) error {
 }
 
 var (
-	_ channel.Channel           = (*Adapter)(nil)
-	_ channel.MessageDeleter    = (*Adapter)(nil)
-	_ channel.MessageSender     = (*Adapter)(nil)
-	_ channel.MessageEditor     = (*Adapter)(nil)
-	_ channel.MessageReplier    = (*Adapter)(nil)
-	_ channel.ThreadStarter     = (*Adapter)(nil)
-	_ channel.ReplyContext      = (*replyContext)(nil)
-	_ channel.MessageRemover    = (*replyContext)(nil)
-	_ channel.ChatCommandSetter = (*replyContext)(nil)
-	_ channel.ReactionSetter    = (*replyContext)(nil)
-	_ channel.MessageRef        = messageRef{}
+	_ channel.Channel              = (*Adapter)(nil)
+	_ channel.MessageDeleter       = (*Adapter)(nil)
+	_ channel.MessageSender        = (*Adapter)(nil)
+	_ channel.MessageEditor        = (*Adapter)(nil)
+	_ channel.MessageReplier       = (*Adapter)(nil)
+	_ channel.ThreadStarter        = (*Adapter)(nil)
+	_ channel.ThreadParentResolver = (*Adapter)(nil)
+	_ channel.ReplyContext         = (*replyContext)(nil)
+	_ channel.MessageRemover       = (*replyContext)(nil)
+	_ channel.ChatCommandSetter    = (*replyContext)(nil)
+	_ channel.ReactionSetter       = (*replyContext)(nil)
+	_ channel.MessageRef           = messageRef{}
 )
