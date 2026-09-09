@@ -13,19 +13,19 @@ type sqliteChannelRepo struct {
 
 func (r *sqliteChannelRepo) Get(ctx context.Context, platform, channelID string) (*Channel, error) {
 	var ch Channel
-	var model, workdir sql.NullString
+	var model, agent, workdir sql.NullString
 	var autoThread int
 	err := r.db.QueryRowContext(ctx,
-		`SELECT channel_id, platform, model, listen_mode, workdir, auto_thread, created_at, updated_at FROM channel WHERE platform = ? AND channel_id = ?`,
+		`SELECT channel_id, platform, model, agent, listen_mode, workdir, auto_thread, created_at, updated_at FROM channel WHERE platform = ? AND channel_id = ?`,
 		platform, channelID,
-	).Scan(&ch.ChannelID, &ch.Platform, &model, &ch.ListenMode, &workdir, &autoThread, &ch.CreatedAt, &ch.UpdatedAt)
+	).Scan(&ch.ChannelID, &ch.Platform, &model, &agent, &ch.ListenMode, &workdir, &autoThread, &ch.CreatedAt, &ch.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("store: channel get: %w", err)
 	}
-	ch.Model, ch.Workdir = model.String, workdir.String
+	ch.Model, ch.Agent, ch.Workdir = model.String, agent.String, workdir.String
 	ch.AutoThread = autoThread == 1
 	return &ch, nil
 }
@@ -40,6 +40,20 @@ func (r *sqliteChannelRepo) UpsertModel(ctx context.Context, platform, channelID
 	)
 	if err != nil {
 		return fmt.Errorf("store: channel upsert model: %w", err)
+	}
+	return nil
+}
+
+func (r *sqliteChannelRepo) UpsertAgent(ctx context.Context, platform, channelID, agent string) error {
+	now := time.Now().Unix()
+	_, err := r.db.ExecContext(ctx,
+		`INSERT INTO channel (channel_id, platform, agent, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT (channel_id, platform) DO UPDATE SET agent = excluded.agent, updated_at = excluded.updated_at`,
+		channelID, platform, agent, now, now,
+	)
+	if err != nil {
+		return fmt.Errorf("store: channel upsert agent: %w", err)
 	}
 	return nil
 }

@@ -209,6 +209,12 @@ func TestPermissionRuleMigrationFromV7PreservesRows(t *testing.T) {
 	if _, err := s1.db.Exec("DROP TABLE permission_rule"); err != nil {
 		t.Fatalf("drop permission_rule: %v", err)
 	}
+	if _, err := s1.db.Exec("ALTER TABLE channel DROP COLUMN agent"); err != nil {
+		t.Fatalf("drop channel agent column: %v", err)
+	}
+	if _, err := s1.db.Exec("ALTER TABLE user_override DROP COLUMN agent"); err != nil {
+		t.Fatalf("drop override agent column: %v", err)
+	}
 	if _, err := s1.db.Exec("PRAGMA user_version=7"); err != nil {
 		t.Fatalf("stamp user_version=7: %v", err)
 	}
@@ -273,6 +279,12 @@ func TestPermissionRuleMigrationRemovesOnlyLegacyCallIDsAndIsIdempotent(t *testi
 		owner.Platform, owner.ChannelID, owner.ThreadID, owner.UserID, "call_123", "/tmp/call", owner.Platform, owner.ChannelID, owner.ThreadID, owner.UserID, "call_456", "/tmp/call2", owner.Platform, owner.ChannelID, owner.ThreadID, owner.UserID, "callable", "/tmp/stable",
 	); err != nil {
 		t.Fatalf("Add legacy rows: %v", err)
+	}
+	if _, err := s1.db.Exec("ALTER TABLE channel DROP COLUMN agent"); err != nil {
+		t.Fatalf("drop channel agent column: %v", err)
+	}
+	if _, err := s1.db.Exec("ALTER TABLE user_override DROP COLUMN agent"); err != nil {
+		t.Fatalf("drop override agent column: %v", err)
 	}
 	if _, err := s1.db.Exec("PRAGMA user_version=10"); err != nil {
 		t.Fatalf("stamp version 10: %v", err)

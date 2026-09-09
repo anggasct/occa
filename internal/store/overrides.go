@@ -13,11 +13,11 @@ type sqliteOverrideRepo struct {
 
 func (r *sqliteOverrideRepo) Get(ctx context.Context, platform, channelID, userID string) (*UserOverride, error) {
 	var o UserOverride
-	var model sql.NullString
+	var model, agent sql.NullString
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, channel_id, platform, user_id, role, model, created_at, updated_at FROM user_override WHERE platform = ? AND channel_id = ? AND user_id = ?`,
+		`SELECT id, channel_id, platform, user_id, role, model, agent, created_at, updated_at FROM user_override WHERE platform = ? AND channel_id = ? AND user_id = ?`,
 		platform, channelID, userID,
-	).Scan(&o.ID, &o.ChannelID, &o.Platform, &o.UserID, &o.Role, &model, &o.CreatedAt, &o.UpdatedAt)
+	).Scan(&o.ID, &o.ChannelID, &o.Platform, &o.UserID, &o.Role, &model, &agent, &o.CreatedAt, &o.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -25,6 +25,7 @@ func (r *sqliteOverrideRepo) Get(ctx context.Context, platform, channelID, userI
 		return nil, fmt.Errorf("store: override get: %w", err)
 	}
 	o.Model = model.String
+	o.Agent = agent.String
 	return &o, nil
 }
 
@@ -56,6 +57,20 @@ func (r *sqliteOverrideRepo) UpsertModel(ctx context.Context, platform, channelI
 	return nil
 }
 
+func (r *sqliteOverrideRepo) UpsertAgent(ctx context.Context, platform, channelID, userID, agent string) error {
+	now := time.Now().Unix()
+	_, err := r.db.ExecContext(ctx,
+		`INSERT INTO user_override (channel_id, platform, user_id, role, agent, created_at, updated_at)
+		 VALUES (?, ?, ?, 'deny', ?, ?, ?)
+		 ON CONFLICT (platform, channel_id, user_id) DO UPDATE SET agent = excluded.agent, updated_at = excluded.updated_at`,
+		channelID, platform, userID, agent, now, now,
+	)
+	if err != nil {
+		return fmt.Errorf("store: override upsert agent: %w", err)
+	}
+	return nil
+}
+
 func (r *sqliteOverrideRepo) Delete(ctx context.Context, platform, channelID, userID string) error {
 	_, err := r.db.ExecContext(ctx,
 		`DELETE FROM user_override WHERE platform = ? AND channel_id = ? AND user_id = ?`,
@@ -69,7 +84,7 @@ func (r *sqliteOverrideRepo) Delete(ctx context.Context, platform, channelID, us
 
 func (r *sqliteOverrideRepo) ListByChannel(ctx context.Context, platform, channelID string) ([]UserOverride, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, channel_id, platform, user_id, role, model, created_at, updated_at FROM user_override WHERE platform = ? AND channel_id = ? ORDER BY created_at`,
+		`SELECT id, channel_id, platform, user_id, role, model, agent, created_at, updated_at FROM user_override WHERE platform = ? AND channel_id = ? ORDER BY created_at`,
 		platform, channelID,
 	)
 	if err != nil {
@@ -80,11 +95,12 @@ func (r *sqliteOverrideRepo) ListByChannel(ctx context.Context, platform, channe
 	var overrides []UserOverride
 	for rows.Next() {
 		var o UserOverride
-		var model sql.NullString
-		if err := rows.Scan(&o.ID, &o.ChannelID, &o.Platform, &o.UserID, &o.Role, &model, &o.CreatedAt, &o.UpdatedAt); err != nil {
+		var model, agent sql.NullString
+		if err := rows.Scan(&o.ID, &o.ChannelID, &o.Platform, &o.UserID, &o.Role, &model, &agent, &o.CreatedAt, &o.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("store: override list: scan: %w", err)
 		}
 		o.Model = model.String
+		o.Agent = agent.String
 		overrides = append(overrides, o)
 	}
 	return overrides, rows.Err()

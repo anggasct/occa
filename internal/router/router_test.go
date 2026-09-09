@@ -361,6 +361,17 @@ func (f *fakeOverrideRepo) UpsertModel(_ context.Context, platform, channelID, u
 	return nil
 }
 
+func (f *fakeOverrideRepo) UpsertAgent(_ context.Context, platform, channelID, userID, agent string) error {
+	k := f.key(platform, channelID, userID)
+	o, ok := f.overrides[k]
+	if !ok {
+		o = &store.UserOverride{ChannelID: channelID, Platform: platform, UserID: userID, Role: "deny"}
+		f.overrides[k] = o
+	}
+	o.Agent = agent
+	return nil
+}
+
 func (f *fakeOverrideRepo) Delete(_ context.Context, platform, channelID, userID string) error {
 	delete(f.overrides, f.key(platform, channelID, userID))
 	return nil
@@ -408,6 +419,11 @@ func (f *fakeChannelRepo) channel(platform, channelID string) *store.Channel {
 
 func (f *fakeChannelRepo) UpsertModel(_ context.Context, platform, channelID, model string) error {
 	f.channel(platform, channelID).Model = model
+	return nil
+}
+
+func (f *fakeChannelRepo) UpsertAgent(_ context.Context, platform, channelID, agent string) error {
+	f.channel(platform, channelID).Agent = agent
 	return nil
 }
 

@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	schemaVersion    = 12
+	schemaVersion    = 13
 	SchemaVersion    = schemaVersion
 	busyTimeoutMilli = 5000
 )
@@ -29,6 +29,17 @@ var migrations = []func(s *SQLiteStore, tx *sql.Tx) error{
 	ensureUsageAndWebhookTables,
 	cleanupLegacyPermissionRules,
 	addRecoveryEvents,
+	addAgentDefaults,
+}
+
+func addAgentDefaults(_ *SQLiteStore, tx *sql.Tx) error {
+	if _, err := tx.Exec(`ALTER TABLE channel ADD COLUMN agent TEXT;`); err != nil {
+		return fmt.Errorf("store: migrate channel agent: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE user_override ADD COLUMN agent TEXT;`); err != nil {
+		return fmt.Errorf("store: migrate override agent: %w", err)
+	}
+	return nil
 }
 
 func addRecoveryEvents(_ *SQLiteStore, tx *sql.Tx) error {
