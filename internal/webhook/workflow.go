@@ -214,13 +214,15 @@ func (s *Server) markSkipped(id int64, ep config.EndpointConfig, envelope Webhoo
 }
 
 func FormatProgressStatus(step int, tool, toolCtx string, elapsed time.Duration) string {
-	toolPart := relay.FormatToolLabel(tool, toolCtx, 1)
-	cleanTool := strings.TrimPrefix(toolPart, "⚙️ ")
-	dur := formatDuration(elapsed)
-	if step > 0 {
-		return fmt.Sprintf("⚙️ [Step %d] %s (%s)", step, cleanTool, dur)
-	}
-	return fmt.Sprintf("⚙️ %s (%s)", cleanTool, dur)
+	now := time.Now()
+	return relay.FormatWorkingText(relay.WorkingTextParams{
+		Step:        step,
+		Tool:        tool,
+		ToolContext: toolCtx,
+		ToolCount:   1,
+		ToolStart:   now.Add(-elapsed),
+		Now:         now,
+	})
 }
 
 func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelope WebhookEnvelope, status, reason string, workCtx ...*WebhookWorkContext) {
