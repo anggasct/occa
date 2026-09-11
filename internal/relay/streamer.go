@@ -423,62 +423,17 @@ func (s *Streamer) currentTime() time.Time {
 }
 
 func (s *Streamer) workingText(working *workingState) string {
-	if working.step == 0 {
-		if working.reasoningActive {
-			var elapsed time.Duration
-			if !working.reasoningStart.IsZero() {
-				elapsed = s.currentTime().Sub(working.reasoningStart)
-			}
-			dur := formatDuration(elapsed)
-			if dur != "" {
-				return fmt.Sprintf("🧠 Thinking… (%s)", dur)
-			}
-			return "🧠 Thinking…"
-		}
-		if td := formatDuration(working.reasoningDuration); td != "" {
-			return "🧠 Thought for " + td
-		}
-		if working.reasoningDuration > 0 || !working.reasoningStart.IsZero() {
-			return "🧠 Thought"
-		}
-		return ""
-	}
-
-	if working.reasoningActive {
-		var elapsed time.Duration
-		if !working.reasoningStart.IsZero() {
-			elapsed = s.currentTime().Sub(working.reasoningStart)
-		}
-		dur := formatDuration(elapsed)
-		toolPart := formatToolLabel(working.latestName, working.latestContext, working.latestCount)
-		cleanTool := strings.TrimPrefix(toolPart, "⚙️ ")
-		if dur != "" {
-			return fmt.Sprintf("🧠 Thinking… (%s) · [Step %d] %s", dur, working.step, cleanTool)
-		}
-		return fmt.Sprintf("🧠 Thinking… · [Step %d] %s", working.step, cleanTool)
-	}
-
-	toolPart := formatToolLabel(working.latestName, working.latestContext, working.latestCount)
-	cleanTool := strings.TrimPrefix(toolPart, "⚙️ ")
-	step := working.step
-	if step <= 0 {
-		step = 1
-	}
-	var elapsed time.Duration
-	if !working.toolStart.IsZero() {
-		elapsed = s.currentTime().Sub(working.toolStart)
-	}
-	dur := formatDuration(elapsed)
-
-	thoughtSuffix := ""
-	if td := formatDuration(working.reasoningDuration); td != "" {
-		thoughtSuffix = " · 🧠 Thought for " + td
-	}
-
-	if dur != "" {
-		return fmt.Sprintf("⚙️ [Step %d] %s (%s)%s", step, cleanTool, dur, thoughtSuffix)
-	}
-	return fmt.Sprintf("⚙️ [Step %d] %s%s", step, cleanTool, thoughtSuffix)
+	return FormatWorkingText(WorkingTextParams{
+		Step:              working.step,
+		Tool:              working.latestName,
+		ToolContext:       working.latestContext,
+		ToolCount:         working.latestCount,
+		ToolStart:         working.toolStart,
+		ReasoningActive:   working.reasoningActive,
+		ReasoningStart:    working.reasoningStart,
+		ReasoningDuration: working.reasoningDuration,
+		Now:               s.currentTime(),
+	})
 }
 
 func formatDuration(d time.Duration) string {

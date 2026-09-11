@@ -72,8 +72,10 @@ func TestProgressCardUpdaterDebounceAndLastTextGuard(t *testing.T) {
 	secondEdit := edits[1]
 	mu.Unlock()
 
-	// Second edit should reflect the latest tool (Step 3: read: file.go)
-	if !strings.Contains(secondEdit, "[Step 3]") || !strings.Contains(secondEdit, "read: file.go") {
+	// Second edit should reflect the latest tool. The repeated bash call
+	// consolidates onto Step 1 (streamer ×N semantics), so read lands on
+	// Step 2.
+	if !strings.Contains(secondEdit, "[Step 2]") || !strings.Contains(secondEdit, "read: file.go") {
 		t.Errorf("second edit missing latest tool info: %s", secondEdit)
 	}
 

@@ -592,12 +592,12 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 				)
 
 				onEvent := func(ev relay.Event) {
-					if ev.Type != relay.EventTool {
+					if progressUpdater != nil {
+						progressUpdater.OnEvent(ev)
 						return
 					}
 
-					if progressUpdater != nil {
-						progressUpdater.OnTool(ev.Delta, ev.ToolContext, ev.ToolSamePart)
+					if ev.Type != relay.EventTool {
 						return
 					}
 
