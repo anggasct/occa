@@ -496,43 +496,33 @@ func TestWebhookExecutorWithThread(t *testing.T) {
 		t.Fatalf("mainMsgs = %+v, want single RUNNING root card", mainMsgs)
 	}
 
-	var foundGreeting, foundWorking, foundOutput bool
-	var toolBubbleCount int
+	var foundToolBubble, foundOutput, foundTerminalCard bool
 	for _, text := range threadMsgs {
-		if strings.Contains(text, "🚀 Starting task:") {
-			foundGreeting = true
-		}
 		if strings.Contains(text, "⚙️") {
-			toolBubbleCount++
-		}
-		if strings.Contains(text, "🔄 Working...") {
-			foundWorking = true
+			foundToolBubble = true
 		}
 		if strings.Contains(text, "Analysis output line.") {
 			foundOutput = true
 		}
-		if strings.Contains(text, "echo suppressed") {
-			t.Errorf("found 6th tool bubble that should have been suppressed: %q", text)
+		if strings.Contains(text, "Status: ✅ COMPLETED") {
+			foundTerminalCard = true
 		}
 	}
 
-	if !foundGreeting {
-		t.Error("missing greeting message in thread")
-	}
-	if toolBubbleCount != 5 {
-		t.Errorf("toolBubbleCount = %d, want 5", toolBubbleCount)
-	}
-	if !foundWorking {
-		t.Error("missing 🔄 Working... message on 5th tool bubble")
+	if !foundToolBubble {
+		t.Error("missing tool notice bubble in thread")
 	}
 	if !foundOutput {
 		t.Error("missing final agent output in thread")
 	}
+	if !foundTerminalCard {
+		t.Error("missing terminal status card in thread")
+	}
 
 	if len(discordCh.editedMessages) == 0 {
-		t.Error("expected ToolSamePart to edit previous tool message with updated context")
-	} else if !strings.Contains(discordCh.editedMessages[0].text, "git status -s") {
-		t.Errorf("edited message does not contain updated context: %+v", discordCh.editedMessages[0])
+		t.Error("expected Streamer to edit working message with tool rollup")
+	} else if !strings.Contains(discordCh.editedMessages[0].text, "6 tool calls") {
+		t.Errorf("edited message does not contain tool rollup: %+v", discordCh.editedMessages[0])
 	}
 }
 
@@ -654,43 +644,39 @@ func TestWebhookExecutorTelegramProgressCard(t *testing.T) {
 		t.Errorf("workCtx.RootMessageID = %q, want tg-root-42", workCtx.RootMessageID)
 	}
 
-	if len(tgCh.sentMessages) < 1 {
-		t.Fatalf("expected at least 1 sent message (root card), got %d", len(tgCh.sentMessages))
+	if len(tgCh.sentMessages) < 2 {
+		t.Fatalf("expected at least 2 sent messages, got %d", len(tgCh.sentMessages))
 	}
 	initialMsg := tgCh.sentMessages[0]
 	if initialMsg.channelID != "-10012345" {
 		t.Errorf("initial message channelID = %q, want -10012345", initialMsg.channelID)
 	}
-	if !strings.Contains(initialMsg.text, "github_reviewer") || !strings.Contains(initialMsg.text, "Status:") {
+	if !strings.Contains(initialMsg.text, "github_reviewer") || !strings.Contains(initialMsg.text, "Status: RUNNING") {
 		t.Errorf("initial message not a root card: %s", initialMsg.text)
 	}
 	if strings.Contains(initialMsg.text, "Details in thread:") || strings.Contains(initialMsg.text, "<#") {
 		t.Errorf("telegram root card must not contain discord thread link: %s", initialMsg.text)
 	}
 
-	if len(tgCh.editedMessages) < 1 {
-		t.Fatalf("expected at least 1 in-place edit during execution, got %d", len(tgCh.editedMessages))
-	}
-	firstEdit := tgCh.editedMessages[0]
-	if firstEdit.channelID != "-10012345" || firstEdit.messageID != "tg-root-42" {
-		t.Errorf("unexpected edit target: %+v", firstEdit)
-	}
-	if !strings.Contains(firstEdit.text, "bash: git status") {
-		t.Errorf("edit text missing tool info: %s", firstEdit.text)
-	}
-	if strings.Contains(firstEdit.text, "Details in thread:") || strings.Contains(firstEdit.text, "<#") {
-		t.Errorf("telegram progress edit must not contain discord thread link: %s", firstEdit.text)
+	terminalMsg := tgCh.sentMessages[len(tgCh.sentMessages)-1]
+	if !strings.Contains(terminalMsg.text, "Status: ✅ COMPLETED") {
+		t.Errorf("final message not a terminal card: %s", terminalMsg.text)
 	}
 
-	if len(tgCh.repliedMessages) != 1 {
-		t.Fatalf("expected 1 replied message for final output, got %d", len(tgCh.repliedMessages))
+	var foundToolNotice, foundOutput bool
+	for _, m := range tgCh.sentMessages {
+		if strings.Contains(m.text, "⚙️") {
+			foundToolNotice = true
+		}
+		if strings.Contains(m.text, "Analysis report output.") {
+			foundOutput = true
+		}
 	}
-	reply := tgCh.repliedMessages[0]
-	if reply.channelID != "-10012345" || reply.replyToMessageID != "tg-root-42" {
-		t.Errorf("unexpected reply target: %+v", reply)
+	if !foundToolNotice {
+		t.Error("missing tool notice bubble in sent messages")
 	}
-	if !strings.Contains(reply.text, "Analysis report output.") {
-		t.Errorf("reply text missing output: %s", reply.text)
+	if !foundOutput {
+		t.Error("missing streamed output in sent messages")
 	}
 }
 
@@ -723,8 +709,8 @@ func TestWebhookExecutorTelegramTopicDispatch(t *testing.T) {
 
 	wantTarget := "-10099999:777"
 
-	if len(tgCh.sentMessages) < 1 {
-		t.Fatalf("expected root card sent, got %d messages", len(tgCh.sentMessages))
+	if len(tgCh.sentMessages) < 2 {
+		t.Fatalf("expected at least 2 messages in topic, got %d", len(tgCh.sentMessages))
 	}
 	if tgCh.sentMessages[0].channelID != wantTarget {
 		t.Errorf("sentMessage channelID = %q, want %q", tgCh.sentMessages[0].channelID, wantTarget)
@@ -733,24 +719,12 @@ func TestWebhookExecutorTelegramTopicDispatch(t *testing.T) {
 		t.Errorf("telegram topic root card must not contain discord thread link: %s", tgCh.sentMessages[0].text)
 	}
 
-	if len(tgCh.editedMessages) < 1 {
-		t.Fatalf("expected edits in topic, got %d", len(tgCh.editedMessages))
+	terminalMsg := tgCh.sentMessages[len(tgCh.sentMessages)-1]
+	if terminalMsg.channelID != wantTarget {
+		t.Errorf("terminalMsg channelID = %q, want %q", terminalMsg.channelID, wantTarget)
 	}
-	if tgCh.editedMessages[0].channelID != wantTarget {
-		t.Errorf("editedMessage channelID = %q, want %q", tgCh.editedMessages[0].channelID, wantTarget)
-	}
-	if strings.Contains(tgCh.editedMessages[0].text, "Details in thread:") || strings.Contains(tgCh.editedMessages[0].text, "<#") {
-		t.Errorf("telegram topic progress edit must not contain discord thread link: %s", tgCh.editedMessages[0].text)
-	}
-
-	if len(tgCh.repliedMessages) != 1 {
-		t.Fatalf("expected 1 reply in topic, got %d", len(tgCh.repliedMessages))
-	}
-	if tgCh.repliedMessages[0].channelID != wantTarget {
-		t.Errorf("repliedMessage channelID = %q, want %q", tgCh.repliedMessages[0].channelID, wantTarget)
-	}
-	if tgCh.repliedMessages[0].replyToMessageID != "tg-topic-root-99" {
-		t.Errorf("repliedMessage replyToMessageID = %q, want tg-topic-root-99", tgCh.repliedMessages[0].replyToMessageID)
+	if !strings.Contains(terminalMsg.text, "Status: ✅ COMPLETED") {
+		t.Errorf("terminalMsg missing COMPLETED status: %s", terminalMsg.text)
 	}
 }
 

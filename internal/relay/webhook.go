@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -41,6 +42,7 @@ type WebhookTurn struct {
 	Attempt      int
 	AbortTimeout time.Duration
 	OnEvent      func(ev Event)
+	Streamer     *Streamer
 }
 
 type WebhookTurnResult struct {
@@ -90,16 +92,48 @@ func (t WebhookTurn) Run(ctx context.Context) (res WebhookTurnResult, err error)
 	res.Progress.PromptSentAt = time.Now()
 
 	var buf strings.Builder
+	var (
+		streamerEvents chan Event
+		streamerErrCh  chan error
+		streamerOnce   sync.Once
+	)
+	if t.Streamer != nil {
+		streamerEvents = make(chan Event, 64)
+		streamerErrCh = make(chan error, 1)
+		go func() {
+			streamerErrCh <- t.Streamer.Run(ctx, streamerEvents)
+		}()
+	}
+	closeStreamer := func() {
+		if streamerEvents != nil {
+			streamerOnce.Do(func() {
+				close(streamerEvents)
+				<-streamerErrCh
+			})
+		}
+	}
+	defer closeStreamer()
+
 	for {
 		select {
 		case <-ctx.Done():
+			closeStreamer()
 			return res, fmt.Errorf("relay: webhook turn: %w", ctx.Err())
 		case ev, ok := <-events:
 			if !ok {
+				closeStreamer()
 				return res, fmt.Errorf("%w: event stream ended", ErrWebhookResponseIncomplete)
 			}
 			if t.OnEvent != nil {
 				t.OnEvent(ev)
+			}
+			if streamerEvents != nil {
+				select {
+				case streamerEvents <- ev:
+				case <-ctx.Done():
+					closeStreamer()
+					return res, fmt.Errorf("relay: webhook turn: %w", ctx.Err())
+				}
 			}
 			switch ev.Type {
 			case "delta":
@@ -112,6 +146,7 @@ func (t WebhookTurn) Run(ctx context.Context) (res WebhookTurnResult, err error)
 				buf.WriteString(ev.Delta)
 			case "done":
 				res.Output = buf.String()
+				closeStreamer()
 				if err := t.verify(res.SessionID, res.Output); err != nil {
 					// completed stays false: the failed gate is not a
 					// finished turn, so the deferred cleanup aborts the
@@ -121,8 +156,10 @@ func (t WebhookTurn) Run(ctx context.Context) (res WebhookTurnResult, err error)
 				completed = true
 				return res, nil
 			case "stream_error":
+				closeStreamer()
 				return res, fmt.Errorf("%w: %v", ErrWebhookEventStream, ev.Err)
 			case "error":
+				closeStreamer()
 				return res, ErrWebhookAgentResponse
 			}
 		}

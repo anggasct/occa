@@ -38,7 +38,7 @@ const (
 )
 
 type Streamer struct {
-	reply                      channel.ReplyContext
+	sink                       Sink
 	renderer                   render.Renderer
 	platform                   render.Platform
 	permissionHandler          PermissionPromptHandler
@@ -48,6 +48,7 @@ type Streamer struct {
 	reactionTarget             channel.MessageRef
 	firstRef                   channel.MessageRef
 	lastWorkingRef             channel.MessageRef
+	lastWorkingHandle          EditHandle
 	lastWorkingRendered        string
 	noEventTimeout             time.Duration
 	typingInterval             time.Duration
@@ -64,6 +65,7 @@ type toolPhaseState struct {
 
 type workingState struct {
 	ref               channel.MessageRef
+	handle            EditHandle
 	total             int
 	step              int
 	latestName        string
@@ -88,8 +90,12 @@ type QuestionPromptHandler interface {
 }
 
 func NewStreamer(reply channel.ReplyContext, renderer render.Renderer, platform render.Platform) *Streamer {
+	return NewStreamerWithSink(NewChannelSink(reply), renderer, platform)
+}
+
+func NewStreamerWithSink(sink Sink, renderer render.Renderer, platform render.Platform) *Streamer {
 	return &Streamer{
-		reply:               reply,
+		sink:                sink,
 		renderer:            renderer,
 		platform:            platform,
 		noEventTimeout:      noEventTimeout,
@@ -115,10 +121,6 @@ func (s *Streamer) SetReactionSetter(setter channel.ReactionSetter) {
 	s.reactionSetter = setter
 }
 
-// SetReactionTarget redirects the 👀/✅/❌ lifecycle reactions onto the
-// triggering source message (a genuine read-receipt) instead of occa's own
-// first reply. When set, setReaction targets it; otherwise it falls back to
-// the first reply ref.
 func (s *Streamer) SetReactionTarget(ref channel.MessageRef) {
 	s.reactionTarget = ref
 }
@@ -129,15 +131,20 @@ func (s *Streamer) SetNoEventTimeout(d time.Duration) {
 	}
 }
 
-// SetPermissionPendingFunc wires a live check consulted when the no-event
-// timeout fires, so the notice can say the stall was caused by a still-pending
-// permission approval instead of the generic copy.
 func (s *Streamer) SetPermissionPendingFunc(fn func() bool) {
 	s.permissionPendingFunc = fn
 }
 
 func (s *Streamer) SetStopCallbackData(data string) {
 	s.stopCallbackData = data
+}
+
+func (s *Streamer) SetNowFunc(fn func() time.Time) {
+	s.now = fn
+}
+
+func (s *Streamer) SetWorkingEditInterval(d time.Duration) {
+	s.workingEditInterval = d
 }
 
 func (s *Streamer) activeButtons() []channel.Button {
@@ -147,9 +154,6 @@ func (s *Streamer) activeButtons() []channel.Button {
 	return []channel.Button{{Label: "🛑 Stop", Value: s.stopCallbackData}}
 }
 
-// setReaction drives the status reaction, targeting the source message
-// (read-receipt) when a target is set, else the first reply. Failures are
-// logged and never fail the stream; a missing setter is a silent no-op.
 func (s *Streamer) setReaction(state channel.ReactionState) {
 	if s.reactionSetter == nil {
 		return
@@ -166,8 +170,6 @@ func (s *Streamer) setReaction(state channel.ReactionState) {
 	}
 }
 
-// trackFirstRef records the first reply message once it exists so status
-// reactions can attach to it when no source target is set.
 func (s *Streamer) trackFirstRef(ref channel.MessageRef) {
 	if s.firstRef == nil && ref != nil {
 		s.firstRef = ref
@@ -177,9 +179,25 @@ func (s *Streamer) trackFirstRef(ref channel.MessageRef) {
 	}
 }
 
+func (s *Streamer) workingHandle(working *workingState) EditHandle {
+	if working == nil {
+		return nil
+	}
+	if working.handle != nil {
+		return working.handle
+	}
+	if working.ref != nil {
+		if p, ok := s.sink.(RefHandleProvider); ok {
+			working.handle = p.HandleFromRef(working.ref)
+			return working.handle
+		}
+	}
+	return nil
+}
+
 func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 	var buf strings.Builder
-	var refs []channel.MessageRef
+	var handles []EditHandle
 	var lastChunks []string
 	var phase toolPhaseState
 	respTotal := 0
@@ -188,8 +206,10 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 
 	typingTicker := time.NewTicker(s.typingInterval)
 	defer typingTicker.Stop()
-	if err := s.reply.SendTyping(); err != nil {
-		slog.Debug("streaming: initial typing indicator failed", "error", err)
+	if s.sink != nil {
+		if err := s.sink.SendTyping(ctx); err != nil {
+			slog.Debug("streaming: initial typing indicator failed", "error", err)
+		}
 	}
 
 	intervals := []time.Duration{500 * time.Millisecond, 1 * time.Second, 2 * time.Second, 3 * time.Second}
@@ -203,8 +223,6 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 
 	dirty := false
 
-	// A read-receipt: when a source message target is set, signal "received,
-	// processing" (👀) on it before the first reply is emitted.
 	if s.reactionTarget != nil {
 		s.setReaction(channel.ReactionProcessing)
 	}
@@ -217,8 +235,10 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 			return ctx.Err()
 
 		case <-typingTicker.C:
-			if err := s.reply.SendTyping(); err != nil {
-				slog.Debug("streaming: typing indicator failed", "error", err)
+			if s.sink != nil {
+				if err := s.sink.SendTyping(ctx); err != nil {
+					slog.Debug("streaming: typing indicator failed", "error", err)
+				}
 			}
 
 		case <-timeoutTimer.C:
@@ -236,7 +256,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 			if !ok {
 				s.flushWorking(&phase.working)
 				s.clearWorkingStopButton(&phase.working)
-				syncErr := s.finalSync(&refs, &lastChunks, buf.String())
+				syncErr := s.finalSync(&handles, &lastChunks, buf.String())
 				s.notice(incompleteStreamMessage)
 				s.setReaction(channel.ReactionError)
 				if syncErr != nil {
@@ -250,7 +270,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 			switch ev.Type {
 			case EventReasoning:
 				if buf.Len() > 0 {
-					s.finalizeSegment(&refs, &lastChunks, buf.String())
+					s.finalizeSegment(&handles, &lastChunks, buf.String())
 					buf.Reset()
 				}
 				if !phase.working.reasoningActive {
@@ -266,7 +286,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 						phase.working.reasoningDuration += elapsed
 						respReasoning += elapsed
 					}
-					if phase.working.step == 0 && phase.working.ref != nil {
+					if phase.working.step == 0 && (phase.working.handle != nil || phase.working.ref != nil) {
 						s.resolveWorking(&phase.working, true, respTotal, respTypes, respReasoning)
 					}
 				}
@@ -283,15 +303,15 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				}
 				s.resolveWorking(&phase.working, true, respTotal, respTypes, respReasoning)
 				if buf.Len() == 0 {
-					s.completedNotice(&refs)
+					s.completedNotice(&handles)
 					s.setReaction(channel.ReactionSuccess)
 					return nil
 				}
-				if err := s.finalSync(&refs, &lastChunks, buf.String()); err != nil {
+				if err := s.finalSync(&handles, &lastChunks, buf.String()); err != nil {
 					s.setReaction(channel.ReactionError)
 					return err
 				}
-				s.completedNotice(&refs)
+				s.completedNotice(&handles)
 				s.setReaction(channel.ReactionSuccess)
 				return nil
 			case EventError:
@@ -319,7 +339,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				s.resetToolPhase(&phase)
 				if buf.Len() > 0 {
 					slog.Debug("streaming: segment break", "finalized_len", buf.Len())
-					s.finalizeSegment(&refs, &lastChunks, buf.String())
+					s.finalizeSegment(&handles, &lastChunks, buf.String())
 					buf.Reset()
 				}
 			case EventTool:
@@ -332,7 +352,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 					}
 				}
 				if buf.Len() > 0 {
-					s.finalizeSegment(&refs, &lastChunks, buf.String())
+					s.finalizeSegment(&handles, &lastChunks, buf.String())
 					buf.Reset()
 				}
 				name := ev.Delta
@@ -349,7 +369,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				}
 				ctxStr := normalizeToolContext(ev.ToolContext)
 				if ev.ToolSamePart {
-					if phase.working.ref != nil && phase.working.latestName == name && ctxStr != "" && ctxStr != phase.working.latestContext {
+					if (phase.working.handle != nil || phase.working.ref != nil) && phase.working.latestName == name && ctxStr != "" && ctxStr != phase.working.latestContext {
 						phase.working.latestContext = ctxStr
 						s.queueWorking(&phase.working)
 					}
@@ -399,9 +419,9 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 		case <-timer.C:
 			if dirty {
 				dirty = false
-				s.syncMessages(&refs, &lastChunks, buf.String())
+				s.syncMessages(&handles, &lastChunks, buf.String())
 			}
-			if phase.working.ref != nil {
+			if phase.working.handle != nil || phase.working.ref != nil {
 				s.queueWorking(&phase.working)
 			}
 
@@ -450,20 +470,22 @@ func formatDuration(d time.Duration) string {
 }
 
 func (s *Streamer) updateWorking(working *workingState) {
-	if working.ref == nil {
-		ref, rendered, err := s.sendWorking(working.pending)
+	if working.handle == nil && working.ref == nil {
+		handle, rendered, err := s.sendWorking(working.pending)
 		if err != nil {
 			slog.Warn("streaming: working notice send failed", "error", err)
 			return
 		}
-		working.ref = ref
+		working.handle = handle
+		working.ref = handle.Ref()
 		working.rendered = rendered
 		working.pending = ""
 		working.lastEditAt = s.currentTime()
 		working.hasLastEditAt = true
-		s.lastWorkingRef = ref
+		s.lastWorkingHandle = handle
+		s.lastWorkingRef = handle.Ref()
 		s.lastWorkingRendered = rendered
-		s.trackFirstRef(ref)
+		s.trackFirstRef(handle.Ref())
 		return
 	}
 	s.maybeEditWorking(working)
@@ -471,7 +493,7 @@ func (s *Streamer) updateWorking(working *workingState) {
 
 func (s *Streamer) queueWorking(working *workingState) {
 	text := s.workingText(working)
-	if working.ref != nil {
+	if working.handle != nil || working.ref != nil {
 		working.pending = s.renderedSingle(text)
 	} else {
 		working.pending = text
@@ -480,7 +502,8 @@ func (s *Streamer) queueWorking(working *workingState) {
 }
 
 func (s *Streamer) maybeEditWorking(working *workingState) {
-	if working.ref == nil || working.pending == "" || working.pending == working.rendered {
+	handle := s.workingHandle(working)
+	if handle == nil || working.pending == "" || working.pending == working.rendered {
 		return
 	}
 	interval := s.workingEditInterval
@@ -494,9 +517,9 @@ func (s *Streamer) maybeEditWorking(working *workingState) {
 	var err error
 	buttons := s.activeButtons()
 	if len(buttons) > 0 {
-		err = s.reply.EditWithButtons(working.ref, working.pending, buttons)
+		err = handle.EditWithButtons(context.Background(), working.pending, buttons)
 	} else {
-		err = s.reply.Edit(working.ref, working.pending)
+		err = handle.Edit(context.Background(), working.pending)
 	}
 	if err != nil {
 		slog.Warn("streaming: working notice edit failed", "error", err)
@@ -510,15 +533,16 @@ func (s *Streamer) maybeEditWorking(working *workingState) {
 }
 
 func (s *Streamer) flushWorking(working *workingState) {
-	if working.ref == nil || working.pending == "" || working.pending == working.rendered {
+	handle := s.workingHandle(working)
+	if handle == nil || working.pending == "" || working.pending == working.rendered {
 		return
 	}
 	var err error
 	buttons := s.activeButtons()
 	if len(buttons) > 0 {
-		err = s.reply.EditWithButtons(working.ref, working.pending, buttons)
+		err = handle.EditWithButtons(context.Background(), working.pending, buttons)
 	} else {
-		err = s.reply.Edit(working.ref, working.pending)
+		err = handle.Edit(context.Background(), working.pending)
 	}
 	if err != nil {
 		slog.Warn("streaming: working notice flush failed", "error", err)
@@ -537,11 +561,11 @@ func (s *Streamer) resetToolPhase(phase *toolPhaseState) {
 }
 
 func (s *Streamer) resolveWorking(working *workingState, success bool, total int, types map[string]int, reasoning time.Duration) {
-	ref := working.ref
-	if ref == nil {
-		ref = s.lastWorkingRef
+	handle := s.workingHandle(working)
+	if handle == nil {
+		handle = s.lastWorkingHandle
 	}
-	if ref == nil {
+	if handle == nil {
 		return
 	}
 	icon := "⚠️"
@@ -554,9 +578,9 @@ func (s *Streamer) resolveWorking(working *workingState, success bool, total int
 	}
 	var err error
 	if s.stopCallbackData != "" {
-		err = s.reply.EditWithButtons(ref, text, nil)
+		err = handle.EditWithButtons(context.Background(), text, nil)
 	} else {
-		err = s.reply.Edit(ref, text)
+		err = handle.Edit(context.Background(), text)
 	}
 	if err != nil {
 		slog.Warn("streaming: working rollup failed", "error", err)
@@ -571,16 +595,16 @@ func (s *Streamer) clearWorkingStopButton(working *workingState) {
 	if s.stopCallbackData == "" {
 		return
 	}
-	ref := working.ref
+	handle := s.workingHandle(working)
 	text := working.rendered
-	if ref == nil {
-		ref = s.lastWorkingRef
+	if handle == nil {
+		handle = s.lastWorkingHandle
 		text = s.lastWorkingRendered
 	}
-	if ref == nil || text == "" {
+	if handle == nil || text == "" {
 		return
 	}
-	_ = s.reply.EditWithButtons(ref, text, nil)
+	_ = handle.EditWithButtons(context.Background(), text, nil)
 }
 
 const maxRollupTypes = 8
@@ -644,35 +668,26 @@ func (s *Streamer) rollupText(icon string, total int, types map[string]int, reas
 	return b.String()
 }
 
-func (s *Streamer) sendWorking(raw string) (channel.MessageRef, string, error) {
+func (s *Streamer) sendWorking(raw string) (EditHandle, string, error) {
+	if s.sink == nil {
+		return nil, "", errors.New("streaming: nil sink")
+	}
 	rendered := s.renderedSingle(raw)
 	if rendered == "" {
 		return nil, "", errors.New("rendered status message is empty")
 	}
-	var ref channel.MessageRef
+	var handle EditHandle
 	var err error
 	buttons := s.activeButtons()
 	if len(buttons) > 0 {
-		ref, err = s.reply.SendWithButtons(rendered, buttons)
+		handle, err = s.sink.SendWithButtons(context.Background(), rendered, buttons)
 	} else {
-		ref, err = s.reply.Send(rendered)
+		handle, err = s.sink.Send(context.Background(), rendered)
 	}
 	if err != nil {
 		return nil, "", err
 	}
-	return ref, rendered, nil
-}
-
-func (s *Streamer) sendSingle(raw string) (channel.MessageRef, string, error) {
-	rendered := s.renderedSingle(raw)
-	if rendered == "" {
-		return nil, "", errors.New("rendered status message is empty")
-	}
-	ref, err := s.reply.Send(rendered)
-	if err != nil {
-		return nil, "", err
-	}
-	return ref, rendered, nil
+	return handle, rendered, nil
 }
 
 func (s *Streamer) renderedSingle(raw string) string {
@@ -717,12 +732,12 @@ func formatToolLabel(name, context string, count int) string {
 	return "⚙️ " + name
 }
 
-// notice sends a status line that did not come from the response buffer. It
-// goes through the renderer like everything else so agent-supplied error text
-// cannot break the platform's parser.
 func (s *Streamer) notice(text string) {
+	if s.sink == nil {
+		return
+	}
 	for _, chunk := range s.renderChunks(text) {
-		if _, err := s.reply.Send(chunk); err != nil {
+		if _, err := s.sink.Send(context.Background(), chunk); err != nil {
 			slog.Warn("streaming: notice failed", "error", err)
 			return
 		}
@@ -755,7 +770,10 @@ func (s *Streamer) renderChunks(raw string) []string {
 	return chunks
 }
 
-func (s *Streamer) syncMessages(refs *[]channel.MessageRef, lastChunks *[]string, raw string) {
+func (s *Streamer) syncMessages(handles *[]EditHandle, lastChunks *[]string, raw string) {
+	if s.sink == nil {
+		return
+	}
 	chunks := s.renderChunks(raw)
 	chunks = nonEmptyChunks(chunks)
 
@@ -764,38 +782,34 @@ func (s *Streamer) syncMessages(refs *[]channel.MessageRef, lastChunks *[]string
 	}
 
 	for i, chunk := range chunks {
-		if i < len(*refs) {
+		if i < len(*handles) {
 			if i == len(chunks)-1 {
 				if i >= len(*lastChunks) || (*lastChunks)[i] != chunk {
-					if err := s.reply.Edit((*refs)[i], chunk); err != nil {
+					if err := (*handles)[i].Edit(context.Background(), chunk); err != nil {
 						slog.Warn("streaming: edit failed", "error", err, "chunk", i)
 					}
 				}
 			}
 		} else {
-			ref, err := s.reply.Send(chunk)
+			handle, err := s.sink.Send(context.Background(), chunk)
 			if err != nil {
 				slog.Warn("streaming: send failed", "error", err, "chunk", i)
 				break
 			}
-			*refs = append(*refs, ref)
-			s.trackFirstRef(ref)
+			*handles = append(*handles, handle)
+			s.trackFirstRef(handle.Ref())
 		}
 	}
 
 	*lastChunks = chunks
 }
 
-// completedNotice sends a fallback confirmation when the agent finished
-// without delivering any text content and without any tool progress card.
-func (s *Streamer) completedNotice(refs *[]channel.MessageRef) {
-	if len(*refs) == 0 && s.lastWorkingRef == nil {
+func (s *Streamer) completedNotice(handles *[]EditHandle) {
+	if len(*handles) == 0 && s.lastWorkingHandle == nil {
 		s.notice("✅ Task completed")
 	}
 }
 
-// nonEmptyChunks drops chunks that render to nothing (whitespace-only or
-// markup that produces no text) so platforms never reject an empty message.
 func nonEmptyChunks(chunks []string) []string {
 	out := make([]string, 0, len(chunks))
 	for _, c := range chunks {
@@ -806,33 +820,34 @@ func nonEmptyChunks(chunks []string) []string {
 	return out
 }
 
-// finalizeSegment seals the current message as a permanent reply and resets
-// the streamer's bookkeeping so the next delta starts a fresh message.
-func (s *Streamer) finalizeSegment(refs *[]channel.MessageRef, lastChunks *[]string, raw string) {
-	if err := s.finalSync(refs, lastChunks, raw); err != nil {
+func (s *Streamer) finalizeSegment(handles *[]EditHandle, lastChunks *[]string, raw string) {
+	if err := s.finalSync(handles, lastChunks, raw); err != nil {
 		slog.Warn("streaming: segment finalize failed", "error", err)
 	}
-	*refs = nil
+	*handles = nil
 	*lastChunks = nil
 }
 
-func (s *Streamer) finalSync(refs *[]channel.MessageRef, lastChunks *[]string, raw string) error {
+func (s *Streamer) finalSync(handles *[]EditHandle, lastChunks *[]string, raw string) error {
+	if s.sink == nil {
+		return errors.New("streaming: nil sink")
+	}
 	chunks := nonEmptyChunks(s.renderChunks(raw))
 
 	for i, chunk := range chunks {
-		if i < len(*refs) {
+		if i < len(*handles) {
 			if i >= len(*lastChunks) || (*lastChunks)[i] != chunk {
-				if err := s.reply.Edit((*refs)[i], chunk); err != nil {
+				if err := (*handles)[i].Edit(context.Background(), chunk); err != nil {
 					return err
 				}
 			}
 		} else {
-			ref, err := s.reply.Send(chunk)
+			handle, err := s.sink.Send(context.Background(), chunk)
 			if err != nil {
 				return err
 			}
-			*refs = append(*refs, ref)
-			s.trackFirstRef(ref)
+			*handles = append(*handles, handle)
+			s.trackFirstRef(handle.Ref())
 		}
 	}
 

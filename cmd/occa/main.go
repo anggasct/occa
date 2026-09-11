@@ -10,7 +10,6 @@ import (
 	"os/signal"
 	"runtime/debug"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -519,13 +518,16 @@ type channelStore interface {
 
 func newWebhookExecutor(channels []channel.Channel, manager agentManager, channelRepo channelStore, defaultWorkdir string) webhook.Executor {
 	return func(ctx context.Context, platform, channelID, prompt string, workCtx *webhook.WebhookWorkContext) error {
+		if workCtx == nil {
+			workCtx = &webhook.WebhookWorkContext{}
+		}
 		for _, ch := range channels {
 			if ch.Name() == platform {
 				targetChannelID := channelID
-				useThread := workCtx != nil && workCtx.Thread
-				useProgressCard := workCtx != nil && workCtx.ProgressCard
+				useThread := workCtx.Thread
+				useProgressCard := workCtx.ProgressCard
 
-				if platform == "telegram" && workCtx != nil && workCtx.ThreadID != "" {
+				if platform == "telegram" && workCtx.ThreadID != "" {
 					if !strings.Contains(targetChannelID, ":") {
 						targetChannelID = targetChannelID + ":" + workCtx.ThreadID
 					}
@@ -534,8 +536,6 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 				sender, _ := ch.(channel.MessageSender)
 				editor, _ := ch.(channel.MessageEditor)
 				starter, _ := ch.(channel.ThreadStarter)
-
-				var progressUpdater *webhook.ProgressCardUpdater
 
 				if useThread && starter != nil && sender != nil {
 					rootCard := webhook.FormatRootCard(workCtx.Envelope, workCtx.Workflow, "RUNNING", "", "", platform)
@@ -551,23 +551,19 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 							workCtx.RootMessageID = rootMsgID
 							workCtx.ThreadID = threadID
 							targetChannelID = threadID
-							_, _ = notifySend(ch, targetChannelID, "🚀 Starting task: "+threadName)
 						}
 					}
-				} else if platform == "telegram" && useProgressCard && sender != nil && editor != nil {
-					rootCard := webhook.FormatRootCard(workCtx.Envelope, workCtx.Workflow, "⏳ Starting agent analysis...", "", workCtx.ThreadID, platform)
+				} else if platform == "telegram" && useProgressCard && sender != nil {
+					rootCard := webhook.FormatRootCard(workCtx.Envelope, workCtx.Workflow, "RUNNING", "", workCtx.ThreadID, platform)
 					rootMsgID, err := notifySend(ch, targetChannelID, webhook.FormatWebhookMessage(rootCard))
 					if err != nil {
 						slog.Warn("webhook: failed to send telegram root card; falling back to channel", "channel_id", targetChannelID, "error", err)
 					} else {
 						workCtx.RootMessageID = rootMsgID
-						progressUpdater = webhook.NewProgressCardUpdater(targetChannelID, rootMsgID, workCtx.Envelope, workCtx.Workflow, workCtx.ThreadID, platform, func(ctx context.Context, chID, msgID, text string) error {
-							return notifyEdit(ch, chID, msgID, text)
-						})
 					}
 				}
 
-				if workCtx == nil || workCtx.RootMessageID == "" {
+				if workCtx.RootMessageID == "" {
 					notifyWebhook(ch, targetChannelID, "📨 Webhook: analyzing...")
 				}
 
@@ -580,80 +576,17 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 				}
 				defer inst.End()
 
-				var (
-					eventMu     sync.Mutex
-					toolCount   int
-					lastMsgID   string
-					lastTool    string
-					lastCtx     string
-					toolTimer   *time.Timer
-					timerCtx    context.Context
-					timerCancel context.CancelFunc
-				)
-
-				onEvent := func(ev relay.Event) {
-					if progressUpdater != nil {
-						progressUpdater.OnEvent(ev)
-						return
-					}
-
-					if ev.Type != relay.EventTool {
-						return
-					}
-
-					if platform != "discord" || !useThread || workCtx.ThreadID == "" {
-						return
-					}
-
-					eventMu.Lock()
-					defer eventMu.Unlock()
-
-					if ev.ToolSamePart {
-						if lastMsgID != "" && editor != nil && ev.ToolContext != "" && ev.ToolContext != lastCtx {
-							lastCtx = ev.ToolContext
-							label := relay.FormatToolLabel(lastTool, lastCtx, 1)
-							_ = notifyEdit(ch, targetChannelID, lastMsgID, label)
-						}
-						return
-					}
-
-					if toolTimer != nil {
-						toolTimer.Stop()
-						if timerCancel != nil {
-							timerCancel()
-						}
-					}
-
-					if toolCount >= 5 {
-						return
-					}
-
-					toolCount++
-					lastTool = ev.Delta
-					lastCtx = ev.ToolContext
-					label := relay.FormatToolLabel(lastTool, lastCtx, 1)
-					id, err := notifySend(ch, targetChannelID, label)
-					if err == nil {
-						lastMsgID = id
-						currentMsgID := id
-						currentTool := lastTool
-						currentCtx := lastCtx
-
-						timerCtx, timerCancel = context.WithCancel(ctx)
-						toolTimer = time.AfterFunc(60*time.Second, func() {
-							eventMu.Lock()
-							defer eventMu.Unlock()
-							if timerCtx.Err() != nil || currentMsgID != lastMsgID {
-								return
-							}
-							slowLabel := relay.FormatToolLabel(currentTool, currentCtx, 1) + " (still running, >60s elapsed)"
-							_ = notifyEdit(ch, targetChannelID, currentMsgID, slowLabel)
-						})
-					}
-
-					if toolCount == 5 {
-						_, _ = notifySend(ch, targetChannelID, "🔄 Working...")
-					}
+				var streamer *relay.Streamer
+				if workCtx.RootMessageID != "" && sender != nil && editor != nil {
+					sink := webhook.NewWebhookSink(targetChannelID, platform,
+						func(ctx context.Context, chID, text string) (string, error) {
+							return notifySend(ch, chID, text)
+						},
+						func(ctx context.Context, chID, msgID, text string) error {
+							return notifyEdit(ch, chID, msgID, text)
+						},
+					)
+					streamer = relay.NewStreamerWithSink(sink, outboundRenderer, render.PlatformFor(platform))
 				}
 
 				turn := relay.WebhookTurn{
@@ -665,27 +598,25 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 					DeliveryID:   workCtx.DeliveryID,
 					ExecutionKey: workCtx.Key.String(),
 					Attempt:      workCtx.Attempt,
-					OnEvent:      onEvent,
+					Streamer:     streamer,
 				}
 				result, err := turn.Run(ctx)
-				if progressUpdater != nil {
-					progressUpdater.Stop()
-				}
-				eventMu.Lock()
-				if toolTimer != nil {
-					toolTimer.Stop()
-				}
-				if timerCancel != nil {
-					timerCancel()
-				}
-				eventMu.Unlock()
 
 				workCtx.SessionID = result.SessionID
 				workCtx.SessionAborted = result.Aborted
 				workCtx.SessionAbortOK = result.AbortOK
 				workCtx.Progress = result.Progress
+
+				elapsed := time.Duration(0)
+				if !workCtx.StartTime.IsZero() {
+					elapsed = time.Since(workCtx.StartTime)
+				}
+
 				if err != nil {
-					if workCtx == nil || workCtx.RootMessageID == "" || (workCtx.ThreadID != "" && platform == "discord") {
+					if workCtx.RootMessageID != "" {
+						terminalCard := webhook.FormatTerminalCard(workCtx.Envelope, workCtx.Workflow, "FAILED", err.Error(), workCtx.ThreadID, platform, elapsed)
+						_, _ = notifySend(ch, targetChannelID, webhook.FormatWebhookMessage(terminalCard))
+					} else {
 						switch {
 						case errors.Is(err, relay.ErrWebhookSessionCreate):
 							notifyWebhook(ch, targetChannelID, "⚠️ Webhook analysis failed: session error")
@@ -704,13 +635,14 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 					return err
 				}
 
-				output := result.Output
-				if output == "" {
-					output = "(no output)"
-				}
-				if platform == "telegram" && workCtx != nil && workCtx.RootMessageID != "" {
-					_, _ = notifyReply(ch, targetChannelID, workCtx.RootMessageID, output)
+				if workCtx.RootMessageID != "" {
+					terminalCard := webhook.FormatTerminalCard(workCtx.Envelope, workCtx.Workflow, "COMPLETED", "", workCtx.ThreadID, platform, elapsed)
+					_, _ = notifySend(ch, targetChannelID, webhook.FormatWebhookMessage(terminalCard))
 				} else {
+					output := result.Output
+					if output == "" {
+						output = "(no output)"
+					}
 					notify(ch, targetChannelID, output)
 				}
 				return nil
