@@ -2,11 +2,13 @@ package webhook
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/anggasct/occa/internal/config"
+	"github.com/anggasct/occa/internal/store"
 )
 
 func takeoverTestEndpoint() config.EndpointConfig {
@@ -136,22 +138,101 @@ func TestFailDeliveryPostsContinuationBanner(t *testing.T) {
 	})
 }
 
-func TestExecuteDeliverySuccessClearsTakeover(t *testing.T) {
-	srv, _, st := newTestServerFull(t, []config.EndpointConfig{takeoverTestEndpoint()})
+func newTakeoverServer(t *testing.T, exec Executor, st *store.SQLiteStore) *Server {
+	t.Helper()
+	cfg := config.WebhookConfig{
+		Bind:      "127.0.0.1:0",
+		Endpoints: []config.EndpointConfig{takeoverTestEndpoint()},
+	}
+	srv := New(cfg, exec, st.WebhookDeliveryRepo())
+	srv.SetChannelStore(st.ChannelRepo())
 	srv.SetSessionStore(st.SessionRepo())
 	srv.processingTimeout = time.Minute
+	return srv
+}
+
+func TestExecuteDeliveryCompletedMarksTakeover(t *testing.T) {
 	ctx := context.Background()
 
-	if err := st.SessionRepo().MarkTakeoverEligible(ctx, "discord", "chan-1", "thread-1", "failed-old", 100, "seed"); err != nil {
-		t.Fatalf("mark: %v", err)
+	t.Run("completed delivery marks its session", func(t *testing.T) {
+		st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
+		if err != nil {
+			t.Fatalf("open store: %v", err)
+		}
+		defer func() { _ = st.Close() }()
+		exec := func(context.Context, string, string, string, *WebhookWorkContext) error { return nil }
+		srv := newTakeoverServer(t, exec, st)
+		srv.executor = func(_ context.Context, _ string, _ string, _ string, workCtx *WebhookWorkContext) error {
+			workCtx.SessionID = "completed-sess"
+			workCtx.AgentPID = 4242
+			return nil
+		}
+		ep := takeoverTestEndpoint()
+		ep.Workflow = ""
+		if err := srv.executeDelivery(ep, []byte(`{"x":1}`), 0, "del-9", "pull_request_review", 1, nil, nil); err != nil {
+			t.Fatalf("executeDelivery: %v", err)
+		}
+		candidate, err := st.SessionRepo().TakeoverCandidate(ctx, "discord", "chan-1", "thread-1")
+		if err != nil {
+			t.Fatalf("TakeoverCandidate: %v", err)
+		}
+		if candidate == nil || candidate.SessionID != "completed-sess" || candidate.AgentPID != 4242 {
+			t.Fatalf("candidate = %+v, want completed-sess/4242", candidate)
+		}
+		for _, want := range []string{"COMPLETED", "del-9"} {
+			if !strings.Contains(candidate.Seed, want) {
+				t.Fatalf("seed missing %q: %q", want, candidate.Seed)
+			}
+		}
+	})
+
+	t.Run("completed attempt replaces a stale failed mark", func(t *testing.T) {
+		st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
+		if err != nil {
+			t.Fatalf("open store: %v", err)
+		}
+		defer func() { _ = st.Close() }()
+		exec := func(context.Context, string, string, string, *WebhookWorkContext) error { return nil }
+		srv := newTakeoverServer(t, exec, st)
+		srv.executor = func(_ context.Context, _ string, _ string, _ string, workCtx *WebhookWorkContext) error {
+			workCtx.SessionID = "retry-completed-sess"
+			workCtx.AgentPID = 500
+			return nil
+		}
+		if err := st.SessionRepo().MarkTakeoverEligible(ctx, "discord", "chan-1", "thread-1", "failed-old", 100, "seed-old"); err != nil {
+			t.Fatalf("seed stale mark: %v", err)
+		}
+
+		ep := takeoverTestEndpoint()
+		ep.Workflow = ""
+		if err := srv.executeDelivery(ep, []byte(`{"x":1}`), 0, "del-9", "pull_request_review", 2, nil, nil); err != nil {
+			t.Fatalf("executeDelivery: %v", err)
+		}
+		candidate, _ := st.SessionRepo().TakeoverCandidate(ctx, "discord", "chan-1", "thread-1")
+		if candidate == nil || candidate.SessionID != "retry-completed-sess" {
+			t.Fatalf("candidate = %+v, want the latest terminal attempt retry-completed-sess", candidate)
+		}
+	})
+}
+
+func TestCompletedTerminalCardCarriesHint(t *testing.T) {
+	envelope := WebhookEnvelope{"delivery_id": "del-1", "repository": "o/r", "pr_number": "7"}
+
+	completed := FormatTerminalCard(envelope, "github_fix", "COMPLETED", "", "thread-1", "discord", 90*time.Second)
+	if strings.Count(completed, "Chat di thread ini untuk lanjut konteks.") != 1 {
+		t.Fatalf("completed card must carry exactly one continuation hint: %q", completed)
 	}
 
-	ep := takeoverTestEndpoint()
-	ep.Workflow = ""
-	if err := srv.executeDelivery(ep, []byte(`{"x":1}`), 0, "del-9", "pull_request_review", 1, nil, nil); err != nil {
-		t.Fatalf("executeDelivery: %v", err)
+	withReason := FormatTerminalCard(envelope, "github_fix", "COMPLETED", "custom reason", "", "telegram", 0)
+	if !strings.Contains(withReason, "Reason: custom reason") || strings.Count(withReason, "Chat di thread ini") != 1 {
+		t.Fatalf("completed card with reason malformed: %q", withReason)
 	}
-	if c, _ := st.SessionRepo().TakeoverCandidate(ctx, "discord", "chan-1", "thread-1"); c != nil {
-		t.Fatalf("completed delivery left a stale mark: %+v", c)
+
+	failed := FormatTerminalCard(envelope, "github_fix", "FAILED", "boom", "thread-1", "discord", 30*time.Second)
+	if strings.Contains(failed, "Chat di thread ini untuk lanjut konteks.") {
+		t.Fatalf("failed card must not gain the hint line: %q", failed)
+	}
+	if !strings.Contains(failed, "Reason: boom") {
+		t.Fatalf("failed card lost its reason: %q", failed)
 	}
 }

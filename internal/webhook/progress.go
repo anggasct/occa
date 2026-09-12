@@ -23,5 +23,9 @@ func FormatTerminalCard(envelope WebhookEnvelope, workflow, status, reason, thre
 			statusText = "⚠️ FAILED"
 		}
 	}
-	return FormatRootCard(envelope, workflow, statusText, reason, threadID, platform)
+	card := FormatRootCard(envelope, workflow, statusText, reason, threadID, platform)
+	if status == "COMPLETED" {
+		card += "\n💬 Chat di thread ini untuk lanjut konteks."
+	}
+	return card
 }

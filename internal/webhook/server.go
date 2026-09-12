@@ -895,9 +895,10 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 				"execution_key", workCtx.Key.String(),
 				"worktree", workCtx.Worktree,
 			}, sessionLogAttrs(workCtx)...)...)
-		if s.sessions != nil && workCtx.ThreadID != "" {
-			if err := s.sessions.ClearTakeoverEligible(context.Background(), ep.Platform, ep.ChannelID, workCtx.ThreadID); err != nil {
-				slog.Warn("webhook: takeover clear failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
+		if s.sessions != nil && workCtx.ThreadID != "" && workCtx.SessionID != "" {
+			seed := redactAuditSummary(formatAuditSummary(envelope, ep.Workflow, "COMPLETED", ""), ep.Secret)
+			if err := s.sessions.MarkTakeoverEligible(context.Background(), ep.Platform, ep.ChannelID, workCtx.ThreadID, workCtx.SessionID, workCtx.AgentPID, seed); err != nil {
+				slog.Warn("webhook: takeover mark failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
 			}
 		}
 		return nil
