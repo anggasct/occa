@@ -353,6 +353,7 @@ func main() {
 			return errors.New("webhook channel adapter unavailable")
 		})
 		webhookSrv.SetWorkspaceResolver(webhook.NewWorkspaceManager())
+		webhookSrv.SetSessionStore(db.SessionRepo())
 		if err := webhookSrv.Start(ctx); err != nil {
 			slog.Error("failed to start webhook server", "error", err)
 		}
@@ -605,6 +606,7 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 				workCtx.SessionID = result.SessionID
 				workCtx.SessionAborted = result.Aborted
 				workCtx.SessionAbortOK = result.AbortOK
+				workCtx.AgentPID = inst.PID()
 				workCtx.Progress = result.Progress
 
 				elapsed := time.Duration(0)

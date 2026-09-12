@@ -599,6 +599,15 @@ func TestProgressNoticeMigrationFromV4(t *testing.T) {
 	if _, err := s1.db.Exec("ALTER TABLE user_override DROP COLUMN agent"); err != nil {
 		t.Fatalf("drop override agent column: %v", err)
 	}
+	if _, err := s1.db.Exec("DROP INDEX IF EXISTS idx_session_takeover"); err != nil {
+		t.Fatalf("drop takeover index: %v", err)
+	}
+	if _, err := s1.db.Exec("ALTER TABLE session DROP COLUMN continuable"); err != nil {
+		t.Fatalf("drop continuable: %v", err)
+	}
+	if _, err := s1.db.Exec("ALTER TABLE session DROP COLUMN takeover_seed"); err != nil {
+		t.Fatalf("drop takeover_seed: %v", err)
+	}
 	if _, err := s1.db.Exec("PRAGMA user_version=4"); err != nil {
 		t.Fatalf("stamp user_version=4: %v", err)
 	}
@@ -774,6 +783,15 @@ func TestSessionModelMigrationFromV5(t *testing.T) {
 	if _, err := s1.db.Exec("ALTER TABLE user_override DROP COLUMN agent"); err != nil {
 		t.Fatalf("drop override agent column: %v", err)
 	}
+	if _, err := s1.db.Exec("DROP INDEX IF EXISTS idx_session_takeover"); err != nil {
+		t.Fatalf("drop takeover index: %v", err)
+	}
+	if _, err := s1.db.Exec("ALTER TABLE session DROP COLUMN continuable"); err != nil {
+		t.Fatalf("drop continuable: %v", err)
+	}
+	if _, err := s1.db.Exec("ALTER TABLE session DROP COLUMN takeover_seed"); err != nil {
+		t.Fatalf("drop takeover_seed: %v", err)
+	}
 	if _, err := s1.db.Exec("PRAGMA user_version=5"); err != nil {
 		t.Fatalf("stamp user_version=5: %v", err)
 	}
@@ -857,6 +875,15 @@ func TestThreadConfigMigrationBackfillsOwnedThreads(t *testing.T) {
 	}
 	if _, err := s1.db.Exec("ALTER TABLE user_override DROP COLUMN agent"); err != nil {
 		t.Fatalf("drop override agent column: %v", err)
+	}
+	if _, err := s1.db.Exec("DROP INDEX IF EXISTS idx_session_takeover"); err != nil {
+		t.Fatalf("drop takeover index: %v", err)
+	}
+	if _, err := s1.db.Exec("ALTER TABLE session DROP COLUMN continuable"); err != nil {
+		t.Fatalf("drop continuable: %v", err)
+	}
+	if _, err := s1.db.Exec("ALTER TABLE session DROP COLUMN takeover_seed"); err != nil {
+		t.Fatalf("drop takeover_seed: %v", err)
 	}
 	if _, err := s1.db.Exec("PRAGMA user_version=6"); err != nil {
 		t.Fatalf("stamp user_version=6: %v", err)

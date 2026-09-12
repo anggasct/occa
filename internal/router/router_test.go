@@ -758,6 +758,52 @@ type fakeSessionRepo struct {
 	titles   map[string]string
 	sessions []store.Session
 	models   map[string]string
+	takeover map[string]takeoverMark
+}
+
+type takeoverMark struct {
+	sessionID string
+	pid       int
+	seed      string
+}
+
+func (f *fakeSessionRepo) takeoverKey(platform, channelID, threadID string) string {
+	return platform + ":" + channelID + ":" + threadID
+}
+
+func (f *fakeSessionRepo) MarkTakeoverEligible(_ context.Context, platform, channelID, threadID, sessionID string, agentPID int, seed string) error {
+	key := f.sessionKey(platform, channelID, threadID, "")
+	tkey := f.takeoverKey(platform, channelID, threadID)
+	if _, owned := f.activeBy[key]; owned {
+		if _, marked := f.takeover[tkey]; !marked {
+			return nil
+		}
+	}
+	if f.takeover == nil {
+		f.takeover = make(map[string]takeoverMark)
+	}
+	f.takeover[tkey] = takeoverMark{sessionID: sessionID, pid: agentPID, seed: seed}
+	if f.activeBy == nil {
+		f.activeBy = make(map[string]string)
+	}
+	f.activeBy[key] = sessionID
+	return nil
+}
+
+func (f *fakeSessionRepo) ClearTakeoverEligible(_ context.Context, platform, channelID, threadID string) error {
+	delete(f.takeover, f.takeoverKey(platform, channelID, threadID))
+	return nil
+}
+
+func (f *fakeSessionRepo) TakeoverCandidate(_ context.Context, platform, channelID, threadID string) (*store.TakeoverCandidate, error) {
+	mark, ok := f.takeover[f.takeoverKey(platform, channelID, threadID)]
+	if !ok {
+		return nil, nil
+	}
+	if f.activeBy[f.sessionKey(platform, channelID, threadID, "")] != mark.sessionID {
+		return nil, nil
+	}
+	return &store.TakeoverCandidate{SessionID: mark.sessionID, AgentPID: mark.pid, Seed: mark.seed}, nil
 }
 
 func (f *fakeSessionRepo) sessionKey(platform, channelID, threadID, userID string) string {

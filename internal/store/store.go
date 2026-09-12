@@ -134,6 +134,12 @@ type RecoveryEvent struct {
 	CreatedAt     int64
 }
 
+type TakeoverCandidate struct {
+	SessionID string
+	AgentPID  int
+	Seed      string
+}
+
 type SessionRepo interface {
 	Active(ctx context.Context, platform, channelID, threadID, userID string) (sessionID string, agentPID int, err error)
 	SetActive(ctx context.Context, platform, channelID, threadID, userID, sessionID string, agentPID int) error
@@ -145,6 +151,9 @@ type SessionRepo interface {
 	ListConversation(ctx context.Context, platform, channelID, threadID, userID string) ([]Session, error)
 	ThreadChannel(ctx context.Context, platform, threadID string) (string, error)
 	Delete(ctx context.Context, id int64) error
+	MarkTakeoverEligible(ctx context.Context, platform, channelID, threadID, sessionID string, agentPID int, seed string) error
+	ClearTakeoverEligible(ctx context.Context, platform, channelID, threadID string) error
+	TakeoverCandidate(ctx context.Context, platform, channelID, threadID string) (*TakeoverCandidate, error)
 }
 
 type ChannelRepo interface {

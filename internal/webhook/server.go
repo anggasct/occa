@@ -66,6 +66,11 @@ type ChannelStore interface {
 	Get(ctx context.Context, platform, channelID string) (*store.Channel, error)
 }
 
+type TakeoverStore interface {
+	MarkTakeoverEligible(ctx context.Context, platform, channelID, threadID, sessionID string, agentPID int, seed string) error
+	ClearTakeoverEligible(ctx context.Context, platform, channelID, threadID string) error
+}
+
 type Executor func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error
 
 type Notifier func(ctx context.Context, platform, channelID, text string) error
@@ -81,6 +86,7 @@ type Server struct {
 	editor                Editor
 	deliveries            DeliveryStore
 	channels              ChannelStore
+	sessions              TakeoverStore
 	workspaceResolver     WorkspaceResolver
 	httpSrv               *http.Server
 	listener              net.Listener
@@ -139,6 +145,10 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 
 func (s *Server) SetWorkspaceResolver(r WorkspaceResolver) {
 	s.workspaceResolver = r
+}
+
+func (s *Server) SetSessionStore(st TakeoverStore) {
+	s.sessions = st
 }
 
 func (s *Server) SetNotifier(n Notifier) {
@@ -885,6 +895,11 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 				"execution_key", workCtx.Key.String(),
 				"worktree", workCtx.Worktree,
 			}, sessionLogAttrs(workCtx)...)...)
+		if s.sessions != nil && workCtx.ThreadID != "" {
+			if err := s.sessions.ClearTakeoverEligible(context.Background(), ep.Platform, ep.ChannelID, workCtx.ThreadID); err != nil {
+				slog.Warn("webhook: takeover clear failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
+			}
+		}
 		return nil
 	case errors.Is(err, context.DeadlineExceeded), ctx.Err() == context.DeadlineExceeded:
 		s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary(timeoutSummary(s.processingTimeout, workCtx), maxErrorSummaryRunes, ep.Secret), workCtx)
@@ -918,6 +933,12 @@ func (s *Server) failDelivery(ep config.EndpointConfig, id int64, deliveryID, ev
 		slog.Error("webhook: failed transition", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
 	} else if ok {
 		s.emitAudit(context.Background(), ep, envelope, "FAILED", summary, workCtx)
+	}
+	if s.sessions != nil && workCtx != nil && workCtx.SessionID != "" && workCtx.ThreadID != "" {
+		seed := redactAuditSummary(formatAuditSummary(envelope, ep.Workflow, "FAILED", summary), ep.Secret)
+		if err := s.sessions.MarkTakeoverEligible(context.Background(), ep.Platform, ep.ChannelID, workCtx.ThreadID, workCtx.SessionID, workCtx.AgentPID, seed); err != nil {
+			slog.Warn("webhook: takeover mark failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
+		}
 	}
 	slog.Warn("webhook: delivery failed",
 		append([]any{
