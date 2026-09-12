@@ -46,6 +46,31 @@ func liveStopButtonCount(reply *fakeReplyContext) int {
 	return count
 }
 
+type auditingReply struct {
+	*fakeReplyContext
+	maxLive int
+}
+
+func (a *auditingReply) SendWithButtons(text string, buttons []channel.Button) (channel.MessageRef, error) {
+	ref, err := a.fakeReplyContext.SendWithButtons(text, buttons)
+	a.audit()
+	return ref, err
+}
+
+func (a *auditingReply) EditWithButtons(ref channel.MessageRef, text string, buttons []channel.Button) error {
+	err := a.fakeReplyContext.EditWithButtons(ref, text, buttons)
+	a.audit()
+	return err
+}
+
+func (a *auditingReply) audit() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if n := liveStopButtonCount(a.fakeReplyContext); n > a.maxLive {
+		a.maxLive = n
+	}
+}
+
 type flakyCardSink struct {
 	reply     *fakeReplyContext
 	failSends int
@@ -76,9 +101,10 @@ func (f *flakyCardSink) SendTyping(ctx context.Context) error {
 	return f.reply.SendTyping()
 }
 
-func TestStreamerOneCardPerTurnAcrossSegments(t *testing.T) {
-	reply := newFakeReplyContext()
+func TestStreamerPerPhaseCardsStepCarry(t *testing.T) {
+	reply := &auditingReply{fakeReplyContext: newFakeReplyContext()}
 	s := NewStreamer(reply, render.New(), render.Telegram)
+	s.SetStopCallbackData("stop:turn-1")
 	s.workingEditInterval = -1
 
 	events := make(chan Event, 8)
@@ -96,28 +122,49 @@ func TestStreamerOneCardPerTurnAcrossSegments(t *testing.T) {
 	reply.mu.Lock()
 	defer reply.mu.Unlock()
 
-	if got := progressCardSendCount(reply); got != 1 {
-		t.Fatalf("progress card sends = %d, want 1 (sends: %v)", got, reply.sends)
+	wantSends := []string{"⚙️ [Step 1] bash", "narration between tools", "⚙️ [Step 2] read"}
+	if len(reply.sends) != len(wantSends) {
+		t.Fatalf("sends = %v, want chronological %v", reply.sends, wantSends)
 	}
-	if reply.sent["msg-2"] != "narration between tools" {
-		t.Fatalf("narration bubble = %q, want the finalized segment text", reply.sent["msg-2"])
+	for i, want := range wantSends {
+		if reply.sends[i] != want {
+			t.Fatalf("send %d = %q, want %q (all sends: %v)", i, reply.sends[i], want, reply.sends)
+		}
 	}
-	edits := reply.edits["msg-1"]
-	if !editsContain(edits, "⚙️ [Step 2] read") {
-		t.Fatalf("card never reached [Step 2] after the segment: %v", edits)
+
+	frozenEdits := reply.editButtons["msg-1"]
+	if len(frozenEdits) == 0 || frozenEdits[len(frozenEdits)-1] != nil {
+		t.Fatalf("previous card not stripped of buttons when the new card was sent: %v", frozenEdits)
+	}
+	if reply.edits["msg-1"] != nil && !editsContain(reply.edits["msg-1"], "⚙️ [Step 1] bash") {
+		t.Fatalf("frozen card text drift: %v", reply.edits["msg-1"])
+	}
+
+	terminalEdits := reply.editButtons["msg-3"]
+	if len(terminalEdits) == 0 || len(terminalEdits[len(terminalEdits)-1]) != 0 {
+		t.Fatalf("terminal card buttons not cleared: %v", terminalEdits)
 	}
 	wantRollup := "✅ 2 tool calls\n\n<blockquote expandable>\n• bash ×1\n• read ×1\n</blockquote>"
-	if len(edits) == 0 || edits[len(edits)-1] != wantRollup {
-		t.Fatalf("rollup = %v, want last %q", edits, wantRollup)
+	cardEdits := reply.edits["msg-3"]
+	if len(cardEdits) == 0 || cardEdits[len(cardEdits)-1] != wantRollup {
+		t.Fatalf("rollup = %v, want last %q", cardEdits, wantRollup)
+	}
+
+	if got := liveStopButtonCount(reply.fakeReplyContext); got != 0 {
+		t.Fatalf("live stop buttons at turn end = %d, want 0", got)
+	}
+	if reply.maxLive > 1 {
+		t.Fatalf("max live stop buttons during turn = %d, want at most 1", reply.maxLive)
 	}
 }
 
-func TestStreamerStepMonotonicAcrossSegments(t *testing.T) {
+func TestStreamerStepMonotonicAcrossPhases(t *testing.T) {
 	reply := newFakeReplyContext()
 	s := NewStreamer(reply, render.New(), render.Telegram)
 	s.workingEditInterval = -1
 
 	events := make(chan Event, 12)
+	events <- Event{Type: EventTool, Delta: "bash"}
 	events <- Event{Type: EventTool, Delta: "bash"}
 	events <- Event{Type: EventDelta, Delta: "one"}
 	events <- Event{Type: EventSegment}
@@ -135,22 +182,34 @@ func TestStreamerStepMonotonicAcrossSegments(t *testing.T) {
 	reply.mu.Lock()
 	defer reply.mu.Unlock()
 
-	if got := progressCardSendCount(reply); got != 1 {
-		t.Fatalf("progress card sends = %d, want 1 (sends: %v)", got, reply.sends)
+	wantSends := []string{
+		"⚙️ [Step 1] bash",
+		"one",
+		"⚙️ [Step 2] bash",
+		"two",
+		"⚙️ [Step 3] read",
 	}
-	edits := reply.edits["msg-1"]
-	if !editsContain(edits, "⚙️ [Step 1] bash ×2") {
-		t.Fatalf("recurring tool did not consolidate across the segment: %v", edits)
+	if len(reply.sends) != len(wantSends) {
+		t.Fatalf("sends = %v, want chronological %v", reply.sends, wantSends)
 	}
-	if !editsContain(edits, "⚙️ [Step 2] read") {
-		t.Fatalf("card never reached [Step 2]: %v", edits)
-	}
-	for _, e := range edits {
-		if strings.HasPrefix(e, "⚙️ [Step 1]") && e != "⚙️ [Step 1] bash" && e != "⚙️ [Step 1] bash ×2" {
-			t.Fatalf("unexpected [Step 1] recurrence: %v", edits)
+	for i, want := range wantSends {
+		if reply.sends[i] != want {
+			t.Fatalf("send %d = %q, want %q (all sends: %v)", i, reply.sends[i], want, reply.sends)
 		}
 	}
-	wantRollup := "✅ 3 tool calls\n\n<blockquote expandable>\n• bash ×2\n• read ×1\n</blockquote>"
+
+	for msgID, want := range map[string]string{
+		"msg-1": "⚙️ [Step 1] bash ×2",
+		"msg-3": "⚙️ [Step 2] bash",
+		"msg-5": "⚙️ [Step 3] read",
+	} {
+		if !editsContain(reply.edits[msgID], want) && reply.sent[msgID] != want {
+			t.Fatalf("card %s never showed %q: sent %q edits %v", msgID, want, reply.sent[msgID], reply.edits[msgID])
+		}
+	}
+
+	wantRollup := "✅ 4 tool calls\n\n<blockquote expandable>\n• bash ×3\n• read ×1\n</blockquote>"
+	edits := reply.edits["msg-5"]
 	if len(edits) == 0 || edits[len(edits)-1] != wantRollup {
 		t.Fatalf("rollup = %v, want last %q", edits, wantRollup)
 	}
@@ -160,7 +219,7 @@ func TestStreamerSupersededCardStripsStopButton(t *testing.T) {
 	reply := newFakeReplyContext()
 	sink := &flakyCardSink{reply: reply, failSends: 1}
 	s := NewStreamerWithSink(sink, render.New(), render.Telegram)
-	s.SetStopCallbackData("stop:turn-1")
+	s.SetStopCallbackData("stop:turn-2")
 	s.workingEditInterval = -1
 
 	events := make(chan Event, 8)
@@ -179,7 +238,7 @@ func TestStreamerSupersededCardStripsStopButton(t *testing.T) {
 	defer reply.mu.Unlock()
 
 	ghostBtns := reply.sentButtons["msg-1"]
-	if len(ghostBtns) != 1 || ghostBtns[0].Value != "stop:turn-1" {
+	if len(ghostBtns) != 1 || ghostBtns[0].Value != "stop:turn-2" {
 		t.Fatalf("ghost card buttons = %+v, want the stop button at send time", ghostBtns)
 	}
 	ghostEdits := reply.editButtons["msg-1"]
@@ -187,7 +246,7 @@ func TestStreamerSupersededCardStripsStopButton(t *testing.T) {
 		t.Fatalf("ghost card buttons not stripped: %v", ghostEdits)
 	}
 	replacementBtns := reply.sentButtons["msg-3"]
-	if len(replacementBtns) != 1 || replacementBtns[0].Value != "stop:turn-1" {
+	if len(replacementBtns) != 1 || replacementBtns[0].Value != "stop:turn-2" {
 		t.Fatalf("replacement card buttons = %+v, want the stop button", replacementBtns)
 	}
 	replacementEdits := reply.editButtons["msg-3"]
@@ -203,7 +262,7 @@ func TestStreamerStreamEndStripsAllTurnCards(t *testing.T) {
 	reply := newFakeReplyContext()
 	sink := &flakyCardSink{reply: reply, failSends: 1}
 	s := NewStreamerWithSink(sink, render.New(), render.Telegram)
-	s.SetStopCallbackData("stop:turn-2")
+	s.SetStopCallbackData("stop:turn-3")
 	s.workingEditInterval = -1
 
 	events := make(chan Event, 4)
@@ -230,7 +289,7 @@ func TestStreamerStreamEndStripsAllTurnCards(t *testing.T) {
 	}
 }
 
-func TestStreamerReasoningContinuityAcrossSegments(t *testing.T) {
+func TestStreamerReasoningFreezesOnPhaseCard(t *testing.T) {
 	reply := newFakeReplyContext()
 	s := NewStreamer(reply, render.New(), render.Telegram)
 	s.workingEditInterval = -1
@@ -251,17 +310,6 @@ func TestStreamerReasoningContinuityAcrossSegments(t *testing.T) {
 			}
 			time.Sleep(time.Millisecond)
 		}
-		events <- Event{Type: EventDelta, Delta: "narration"}
-		events <- Event{Type: EventSegment}
-		for {
-			reply.mu.Lock()
-			n := len(reply.sends)
-			reply.mu.Unlock()
-			if n > 1 {
-				break
-			}
-			time.Sleep(time.Millisecond)
-		}
 		now.Store(102)
 		events <- Event{Type: EventReasoning}
 		for {
@@ -273,13 +321,25 @@ func TestStreamerReasoningContinuityAcrossSegments(t *testing.T) {
 			}
 			time.Sleep(time.Millisecond)
 		}
-		now.Store(105)
+		now.Store(104)
+		events <- Event{Type: EventDelta, Delta: "narration"}
+		events <- Event{Type: EventSegment}
+		for {
+			reply.mu.Lock()
+			n := len(reply.sends)
+			reply.mu.Unlock()
+			if n > 1 {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		now.Store(106)
 		events <- Event{Type: EventTool, Delta: "read"}
 		for {
 			reply.mu.Lock()
-			n := len(reply.edits["msg-1"])
+			n := len(reply.sends)
 			reply.mu.Unlock()
-			if n > 1 {
+			if n > 2 {
 				break
 			}
 			time.Sleep(time.Millisecond)
@@ -295,19 +355,20 @@ func TestStreamerReasoningContinuityAcrossSegments(t *testing.T) {
 	reply.mu.Lock()
 	defer reply.mu.Unlock()
 
-	if got := progressCardSendCount(reply); got != 1 {
-		t.Fatalf("progress card sends = %d, want 1 (sends: %v)", got, reply.sends)
+	if got := progressCardSendCount(reply); got != 2 {
+		t.Fatalf("progress card sends = %d, want 2 (sends: %v)", got, reply.sends)
 	}
-	edits := reply.edits["msg-1"]
-	if !editsContain(edits, "🧠 Thinking… · [Step 1] bash") {
-		t.Fatalf("reasoning did not attach to the existing card: %v", edits)
+	frozen := reply.edits["msg-1"]
+	if len(frozen) == 0 || frozen[len(frozen)-1] != "⚙️ [Step 1] bash (4s) · 🧠 Thought for 2s" {
+		t.Fatalf("phase 1 card did not freeze with its reasoning suffix: %v", frozen)
 	}
-	if !editsContain(edits, "⚙️ [Step 2] read · 🧠 Thought for 3s") {
-		t.Fatalf("reasoning duration did not carry across the segment: %v", edits)
+	if reply.sent["msg-3"] != "⚙️ [Step 2] read" {
+		t.Fatalf("phase 2 card = %q, want carried [Step 2]", reply.sent["msg-3"])
 	}
-	wantRollup := "✅ 2 tool calls · 🧠 Thought for 3s\n\n<blockquote expandable>\n• bash ×1\n• read ×1\n</blockquote>"
-	if len(edits) == 0 || edits[len(edits)-1] != wantRollup {
-		t.Fatalf("rollup = %v, want last %q", edits, wantRollup)
+	wantRollup := "✅ 2 tool calls · 🧠 Thought for 2s\n\n<blockquote expandable>\n• bash ×1\n• read ×1\n</blockquote>"
+	card2 := reply.edits["msg-3"]
+	if len(card2) == 0 || card2[len(card2)-1] != wantRollup {
+		t.Fatalf("rollup = %v, want last %q", card2, wantRollup)
 	}
 }
 
@@ -336,9 +397,9 @@ func (h *countingQuestionHandler) Prompt(_ context.Context, req QuestionRequest)
 }
 
 func TestStreamerPromptsDuringInterleavedTurn(t *testing.T) {
-	reply := newFakeReplyContext()
+	reply := &auditingReply{fakeReplyContext: newFakeReplyContext()}
 	s := NewStreamer(reply, render.New(), render.Telegram)
-	s.SetStopCallbackData("stop:turn-3")
+	s.SetStopCallbackData("stop:turn-4")
 	s.workingEditInterval = -1
 
 	perm := &countingPermissionHandler{}
@@ -369,21 +430,23 @@ func TestStreamerPromptsDuringInterleavedTurn(t *testing.T) {
 	if perm.gotID != "perm-1" || perm.gotTool != "bash" {
 		t.Fatalf("permission request = id %q tool %q", perm.gotID, perm.gotTool)
 	}
-	if quest.gotID != "quest-1" {
-		t.Fatalf("question request = %q", quest.gotID)
+	if got := progressCardSendCount(reply.fakeReplyContext); got != 2 {
+		t.Fatalf("progress card sends = %d, want 2 (sends: %v)", got, reply.sends)
 	}
-	if got := progressCardSendCount(reply); got != 1 {
-		t.Fatalf("progress card sends = %d, want 1 (sends: %v)", got, reply.sends)
+	if len(reply.sentButtons["msg-3"]) != 1 {
+		t.Fatalf("live card did not carry the stop button: %+v", reply.sentButtons["msg-3"])
 	}
-	if len(reply.sentButtons["msg-1"]) != 1 {
-		t.Fatalf("live card lost its stop button: %+v", reply.sentButtons["msg-1"])
+	if len(reply.editButtons["msg-1"]) == 0 || reply.editButtons["msg-1"][len(reply.editButtons["msg-1"])-1] != nil {
+		t.Fatalf("previous card buttons not migrated away: %v", reply.editButtons["msg-1"])
 	}
-	cardEdits := reply.edits["msg-1"]
-	btnEdits := reply.editButtons["msg-1"]
-	if len(btnEdits) == 0 || len(btnEdits[len(btnEdits)-1]) != 0 {
-		t.Fatalf("terminal card buttons not cleared: %v", btnEdits)
+	terminalEdits := reply.editButtons["msg-3"]
+	if len(terminalEdits) == 0 || len(terminalEdits[len(terminalEdits)-1]) != 0 {
+		t.Fatalf("terminal card buttons not cleared: %v", terminalEdits)
 	}
-	if !editsContain(cardEdits, "⚙️ [Step 2] read") {
-		t.Fatalf("card never reached [Step 2] after prompts: %v", cardEdits)
+	if !editsContain(reply.edits["msg-3"], "⚙️ [Step 2] read") && reply.sent["msg-3"] != "⚙️ [Step 2] read" {
+		t.Fatalf("card never reached [Step 2] after prompts: %v", reply.edits["msg-3"])
+	}
+	if reply.maxLive > 1 {
+		t.Fatalf("max live stop buttons during turn = %d, want at most 1", reply.maxLive)
 	}
 }

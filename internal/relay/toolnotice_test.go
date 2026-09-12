@@ -68,21 +68,22 @@ func TestToolBubbleConsolidatesAcrossSegments(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	if len(reply.sends) != 2 {
-		t.Fatalf("sends = %v, want 2 (progress card + narration)", reply.sends)
+	if len(reply.sends) != 3 {
+		t.Fatalf("sends = %v, want 3 (phase 1 card, narration, phase 2 card)", reply.sends)
 	}
-	edits := reply.edits["msg-1"]
-	foundConsolidated := false
-	for _, e := range edits {
-		if e == "⚙️ [Step 1] glob ×3" {
-			foundConsolidated = true
-		}
+	if reply.sent["msg-3"] != "⚙️ [Step 2] glob" {
+		t.Fatalf("phase 2 card = %q, want carried [Step 2]", reply.sent["msg-3"])
 	}
-	if !foundConsolidated {
-		t.Fatalf("card never consolidated to glob ×3: %v", edits)
+	card1 := reply.edits["msg-1"]
+	if !editsContain(card1, "⚙️ [Step 1] glob ×2") {
+		t.Fatalf("phase 1 card never consolidated to glob ×2: %v", card1)
 	}
-	if len(edits) == 0 || edits[len(edits)-1] != "✅ 3 tool calls · glob ×3" {
-		t.Fatalf("rollup = %v", edits)
+	if len(card1) == 0 || card1[len(card1)-1] != "⚙️ [Step 1] glob ×2" {
+		t.Fatalf("phase 1 card did not freeze on its consolidated text: %v", card1)
+	}
+	card2 := reply.edits["msg-3"]
+	if len(card2) == 0 || card2[len(card2)-1] != "✅ 3 tool calls · glob ×3" {
+		t.Fatalf("rollup = %v", card2)
 	}
 }
 
@@ -129,7 +130,7 @@ func TestToolBubbleSingleProgressCard(t *testing.T) {
 	}
 }
 
-func TestToolBubbleEmptySegmentKeepsCard(t *testing.T) {
+func TestToolBubbleEmptySegmentStartsNewCard(t *testing.T) {
 	reply := newFakeReplyContext()
 	s := NewStreamer(reply, render.New(), render.Telegram)
 	s.workingEditInterval = -1
@@ -143,20 +144,14 @@ func TestToolBubbleEmptySegmentKeepsCard(t *testing.T) {
 	if err := s.Run(context.Background(), events); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(reply.sends) != 1 {
-		t.Fatalf("sends = %v, want 1 progress card across the empty segment", reply.sends)
+	if len(reply.sends) != 2 {
+		t.Fatalf("sends = %v, want 2 progress cards across the empty segment", reply.sends)
 	}
-	edits := reply.edits["msg-1"]
-	foundStep2 := false
-	for _, e := range edits {
-		if e == "⚙️ [Step 2] b" {
-			foundStep2 = true
-		}
-	}
-	if !foundStep2 {
-		t.Fatalf("card never reached [Step 2] b: %v", edits)
+	if reply.sent["msg-2"] != "⚙️ [Step 2] b" {
+		t.Fatalf("phase 2 card = %q, want carried [Step 2] b", reply.sent["msg-2"])
 	}
 	want := "✅ 2 tool calls\n\n<blockquote expandable>\n• a ×1\n• b ×1\n</blockquote>"
+	edits := reply.edits["msg-2"]
 	if len(edits) == 0 || edits[len(edits)-1] != want {
 		t.Fatalf("rollup = %v, want %q", edits, want)
 	}
@@ -170,8 +165,8 @@ func TestToolBubbleShortTextBetweenTools(t *testing.T) {
 		Event{Type: EventSegment},
 		Event{Type: EventTool, Delta: "f"},
 	)
-	want := []string{"✅ 3 tool calls\n\n<blockquote expandable>\n• a ×1\n• b ×1\n• f ×1\n</blockquote>"}
-	if len(got) != 1 || got[0] != want[0] {
+	want := []string{"⚙️ [Step 2] b", "✅ 3 tool calls\n\n<blockquote expandable>\n• a ×1\n• b ×1\n• f ×1\n</blockquote>"}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("notices = %v, want %v", got, want)
 	}
 }
@@ -423,11 +418,11 @@ func TestTerminalRollupCountsAcrossPhases(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	if len(reply.sends) != 2 {
-		t.Fatalf("sends = %v, want 2 (progress card + narration)", reply.sends)
+	if len(reply.sends) != 3 {
+		t.Fatalf("sends = %v, want 3 (phase 1 card, narration, phase 2 card)", reply.sends)
 	}
 
-	edits := reply.edits["msg-1"]
+	edits := reply.edits["msg-3"]
 	wantRollup := "✅ 7 tool calls\n\n<blockquote expandable>\n• a ×1\n• b ×1\n• bash ×1\n• c ×1\n• d ×1\n• e ×1\n• f ×1\n</blockquote>"
 	if len(edits) == 0 || edits[len(edits)-1] != wantRollup {
 		t.Fatalf("cross-segment rollup = %v, want last %q", edits, wantRollup)
@@ -526,7 +521,7 @@ func TestWorkingBubbleEditThrottle(t *testing.T) {
 	}
 }
 
-func TestWorkingCardSurvivesSegment(t *testing.T) {
+func TestWorkingStepCarriesAcrossPhases(t *testing.T) {
 	reply := newFakeReplyContext()
 	s := NewStreamer(reply, render.New(), render.Telegram)
 	s.workingEditInterval = -1
@@ -549,19 +544,13 @@ func TestWorkingCardSurvivesSegment(t *testing.T) {
 
 	reply.mu.Lock()
 	defer reply.mu.Unlock()
-	if len(reply.sends) != 2 {
-		t.Fatalf("sends = %v, want 2 messages (progress card, text)", reply.sends)
+	if len(reply.sends) != 3 {
+		t.Fatalf("sends = %v, want 3 messages (phase 1 card, text, phase 2 card)", reply.sends)
 	}
 
-	edits := reply.edits["msg-1"]
-	foundStep7 := false
-	for _, e := range edits {
-		if e == "⚙️ [Step 7] g" {
-			foundStep7 = true
-		}
-	}
-	if !foundStep7 {
-		t.Fatalf("card steps did not continue past the segment: %v", edits)
+	edits := reply.edits["msg-3"]
+	if reply.sent["msg-3"] != "⚙️ [Step 7] g" {
+		t.Fatalf("phase 2 card = %q, want steps continuing at [Step 7] g", reply.sent["msg-3"])
 	}
 	wantRollup := "✅ 12 tool calls\n\n<blockquote expandable>\n• a ×1\n• b ×1\n• c ×1\n• d ×1\n• e ×1\n• f ×1\n• g ×1\n• h ×1\n• +4 more\n</blockquote>"
 	if len(edits) == 0 || edits[len(edits)-1] != wantRollup {
