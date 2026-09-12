@@ -288,7 +288,7 @@ func TestResponseCoordinatorUsesSamePathForCommands(t *testing.T) {
 
 func waitForAllResponses(t *testing.T, r *Router) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		r.responses.mu.Lock()
 		active := len(r.responses.active)

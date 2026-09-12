@@ -320,3 +320,117 @@ func TestPermissionRuleMigrationRemovesOnlyLegacyCallIDsAndIsIdempotent(t *testi
 	s3 := openAndCheck()
 	defer func() { _ = s3.Close() }()
 }
+
+func TestPermissionRuleChannelScopeInheritance(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+	repo := s.PermissionRuleRepo()
+
+	channelOwner := PermissionOwner{Platform: "telegram", ChannelID: "chat1"}
+	id, err := repo.Add(ctx, channelOwner, "bash", []string{"git status"})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	threadOwner1 := PermissionOwner{Platform: "telegram", ChannelID: "chat1", ThreadID: "thread-1"}
+	matched1, err := repo.Match(ctx, threadOwner1, "bash", []string{"git status"})
+	if err != nil {
+		t.Fatalf("Match thread 1: %v", err)
+	}
+	if matched1 == nil || matched1.ID != id {
+		t.Fatalf("thread 1 matched = %+v, want id %d", matched1, id)
+	}
+
+	threadOwner2 := PermissionOwner{Platform: "telegram", ChannelID: "chat1", ThreadID: "thread-2", UserID: "user-2"}
+	matched2, err := repo.Match(ctx, threadOwner2, "bash", []string{"git status"})
+	if err != nil {
+		t.Fatalf("Match thread 2: %v", err)
+	}
+	if matched2 == nil || matched2.ID != id {
+		t.Fatalf("thread 2 matched = %+v, want id %d", matched2, id)
+	}
+}
+
+func TestPermissionRuleExactPrecedenceOverChannel(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+	repo := s.PermissionRuleRepo()
+
+	channelOwner := PermissionOwner{Platform: "telegram", ChannelID: "chat1"}
+	idChan, err := repo.Add(ctx, channelOwner, "bash", []string{"git status"})
+	if err != nil {
+		t.Fatalf("Add channel rule: %v", err)
+	}
+
+	threadOwner := PermissionOwner{Platform: "telegram", ChannelID: "chat1", ThreadID: "thread-pinned", UserID: "user-1"}
+	idExact, err := repo.Add(ctx, threadOwner, "bash", []string{"git status"})
+	if err != nil {
+		t.Fatalf("Add exact rule: %v", err)
+	}
+
+	matched, err := repo.Match(ctx, threadOwner, "bash", []string{"git status"})
+	if err != nil {
+		t.Fatalf("Match: %v", err)
+	}
+	if matched == nil || matched.ID != idExact {
+		t.Fatalf("matched = %+v, want exact rule id %d (channel rule was %d)", matched, idExact, idChan)
+	}
+}
+
+func TestPermissionRuleCrossChannelIsolation(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+	repo := s.PermissionRuleRepo()
+
+	channelOwner := PermissionOwner{Platform: "telegram", ChannelID: "chat1"}
+	if _, err := repo.Add(ctx, channelOwner, "bash", []string{"git status"}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	diffChannel := PermissionOwner{Platform: "telegram", ChannelID: "chat2", ThreadID: "thread-1"}
+	matched, err := repo.Match(ctx, diffChannel, "bash", []string{"git status"})
+	if err != nil {
+		t.Fatalf("Match different channel: %v", err)
+	}
+	if matched != nil {
+		t.Fatalf("matched rule across channels: %+v", matched)
+	}
+
+	diffPlatform := PermissionOwner{Platform: "discord", ChannelID: "chat1", ThreadID: "thread-1"}
+	matched, err = repo.Match(ctx, diffPlatform, "bash", []string{"git status"})
+	if err != nil {
+		t.Fatalf("Match different platform: %v", err)
+	}
+	if matched != nil {
+		t.Fatalf("matched rule across platforms: %+v", matched)
+	}
+}
+
+func TestPermissionRuleLegacyThreadPinnedIsolation(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+	repo := s.PermissionRuleRepo()
+
+	pinnedOwner := PermissionOwner{Platform: "telegram", ChannelID: "chat1", ThreadID: "thread-pinned"}
+	id, err := repo.Add(ctx, pinnedOwner, "bash", []string{"git status"})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	matchedSame, err := repo.Match(ctx, pinnedOwner, "bash", []string{"git status"})
+	if err != nil {
+		t.Fatalf("Match pinned: %v", err)
+	}
+	if matchedSame == nil || matchedSame.ID != id {
+		t.Fatalf("matched same = %+v, want %d", matchedSame, id)
+	}
+
+	siblingOwner := PermissionOwner{Platform: "telegram", ChannelID: "chat1", ThreadID: "thread-sibling"}
+	matchedSibling, err := repo.Match(ctx, siblingOwner, "bash", []string{"git status"})
+	if err != nil {
+		t.Fatalf("Match sibling: %v", err)
+	}
+	if matchedSibling != nil {
+		t.Fatalf("legacy thread-pinned rule matched sibling: %+v", matchedSibling)
+	}
+}

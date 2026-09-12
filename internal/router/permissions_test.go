@@ -165,7 +165,7 @@ func TestPermissionAutoApplyDifferentConversationPrompts(t *testing.T) {
 		owner:     owner,
 		client:    client,
 		platform:  "telegram",
-		channelID: "chat1",
+		channelID: "chat2",
 		threadID:  "thread-9",
 		sessionID: "session-1",
 		reply:     reply,
@@ -214,6 +214,162 @@ func TestPermissionAlwaysTapPersistsRule(t *testing.T) {
 	}
 	if view := reply.lastEdit(); view.text != "✅ Always allowed" || len(view.buttons) != 0 {
 		t.Fatalf("terminal view = %+v", view)
+	}
+}
+
+func TestPermissionAlwaysTapInThreadPersistsChannelScope(t *testing.T) {
+	client := &permissionClient{}
+	rules := newFakePermissionRuleRepo()
+	broker := fastPermissionBroker()
+	broker.rules = rules
+	owner := &permissionOwner{}
+	reply := &permissionReply{}
+	handler := &permissionPromptHandler{
+		broker:    broker,
+		owner:     owner,
+		client:    client,
+		platform:  "telegram",
+		channelID: "chat1",
+		threadID:  "thread-42",
+		userID:    "user-99",
+		sessionID: "session-1",
+		reply:     reply,
+	}
+	if err := handler.Prompt(context.Background(), relay.PermissionRequest{
+		ID:         "request-thread-1",
+		SessionID:  "session-1",
+		Permission: "external_directory",
+		Tool:       "bash",
+	}); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	waitForSends(reply)
+	if len(reply.sends) != 1 || len(reply.sends[0].buttons) != 3 {
+		t.Fatalf("prompt view = %+v", reply.sends)
+	}
+	token, _, ok := parsePermissionCallback(reply.sends[0].buttons[0].Value)
+	if !ok {
+		t.Fatalf("invalid callback value: %q", reply.sends[0].buttons[0].Value)
+	}
+
+	callback := permissionCallback(token, reply.sends[0].ref, reply)
+	callback.CallbackData = "permission:" + token + ":always"
+	if err := broker.handle(context.Background(), callback); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+
+	channelOwner := store.PermissionOwner{Platform: "telegram", ChannelID: "chat1"}
+	gotChan, err := rules.ListByOwner(context.Background(), channelOwner)
+	if err != nil {
+		t.Fatalf("ListByOwner channel: %v", err)
+	}
+	if len(gotChan) != 1 || gotChan[0].Tool != "external_directory" {
+		t.Fatalf("expected 1 channel-wide rule, got: %+v", gotChan)
+	}
+	if gotChan[0].ThreadID != "" || gotChan[0].UserID != "" {
+		t.Fatalf("expected empty thread_id and user_id, got thread=%q user=%q", gotChan[0].ThreadID, gotChan[0].UserID)
+	}
+
+	threadOwner := store.PermissionOwner{Platform: "telegram", ChannelID: "chat1", ThreadID: "thread-42", UserID: "user-99"}
+	gotThread, err := rules.ListByOwner(context.Background(), threadOwner)
+	if err != nil {
+		t.Fatalf("ListByOwner thread: %v", err)
+	}
+	if len(gotThread) != 0 {
+		t.Fatalf("expected 0 thread-scoped rules, got: %+v", gotThread)
+	}
+}
+
+func TestPermissionThreadAutoApplyInheritsChannelGrant(t *testing.T) {
+	client := &permissionClient{}
+	rules := newFakePermissionRuleRepo()
+	ctx := context.Background()
+	channelOwner := store.PermissionOwner{Platform: "telegram", ChannelID: "chat1"}
+	if _, err := rules.Add(ctx, channelOwner, "bash", []string{"git status"}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	broker := fastPermissionBroker()
+	broker.rules = rules
+	reply := &permissionReply{}
+	handler := &permissionPromptHandler{
+		broker:    broker,
+		owner:     &permissionOwner{},
+		client:    client,
+		platform:  "telegram",
+		channelID: "chat1",
+		threadID:  "sibling-thread-7",
+		userID:    "user-5",
+		sessionID: "session-1",
+		reply:     reply,
+	}
+
+	if err := handler.Prompt(ctx, relay.PermissionRequest{
+		ID:         "req-thread-1",
+		SessionID:  "session-1",
+		Permission: "bash",
+		Tool:       "bash",
+		Patterns:   []string{"git status"},
+	}); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	calls := client.callSnapshot()
+	if len(calls) != 1 || calls[0].decision != relay.PermissionAlways {
+		t.Fatalf("calls = %+v, want auto-allowed", calls)
+	}
+	if len(reply.sends) != 1 || len(reply.sends[0].buttons) != 0 {
+		t.Fatalf("sends = %+v, want notice without buttons", reply.sends)
+	}
+}
+
+func TestPermissionWebhookThreadInheritsChannelGrant(t *testing.T) {
+	client := &permissionClient{}
+	rules := newFakePermissionRuleRepo()
+	ctx := context.Background()
+	channelOwner := store.PermissionOwner{Platform: "discord", ChannelID: "chan-delivery"}
+	if _, err := rules.Add(ctx, channelOwner, "external_directory", []string{"/vault/**"}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	broker := fastPermissionBroker()
+	broker.rules = rules
+	reply := &permissionReply{}
+	handler := &permissionPromptHandler{
+		broker:    broker,
+		owner:     &permissionOwner{},
+		client:    client,
+		platform:  "discord",
+		channelID: "chan-delivery",
+		threadID:  "thread-webhook-delivery-123",
+		userID:    "",
+		sessionID: "session-webhook",
+		reply:     reply,
+	}
+
+	if err := handler.Prompt(ctx, relay.PermissionRequest{
+		ID:         "req-hook-1",
+		SessionID:  "session-webhook",
+		Permission: "external_directory",
+		Tool:       "bash",
+		Patterns:   []string{"/vault/**"},
+	}); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	calls := client.callSnapshot()
+	if len(calls) != 1 || calls[0].requestID != "req-hook-1" || calls[0].decision != relay.PermissionAlways {
+		t.Fatalf("calls = %+v, want auto-answered PermissionAlways", calls)
+	}
+	if len(reply.sends) != 1 {
+		t.Fatalf("sends count = %d, want 1 notice", len(reply.sends))
+	}
+	if len(reply.sends[0].buttons) != 0 {
+		t.Fatalf("sends carried buttons: %+v", reply.sends[0].buttons)
+	}
+	if !strings.Contains(reply.sends[0].text, "⚡ Auto-allowed") {
+		t.Fatalf("notice = %q, want Auto-allowed", reply.sends[0].text)
 	}
 }
 
