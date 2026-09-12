@@ -362,6 +362,28 @@ func TestResolveTakeoverAdoptsFailedSession(t *testing.T) {
 	}
 }
 
+func TestResolveTakeoverAdoptsCompletedSession(t *testing.T) {
+	repo := &mockSessionRepo{takeover: &store.TakeoverCandidate{SessionID: "completed-sess", AgentPID: 999, Seed: "envelope-seed"}}
+	client := &mockClient{sessionID: "fresh", sessionExists: true}
+	res, err := NewSessionResolver(repo, client).ResolveDetailed(context.Background(), "discord", "chan-1", "thread-9", "op-1", 200)
+	if err != nil {
+		t.Fatalf("ResolveDetailed: %v", err)
+	}
+	if !res.Resumed || !res.HadStored || res.SessionID != "completed-sess" || res.TakeoverSeed != "envelope-seed" {
+		t.Fatalf("resolution = %+v, want adopted completed session with seed", res)
+	}
+	if client.existsCalls != 1 {
+		t.Fatalf("SessionExists calls = %d, want 1", client.existsCalls)
+	}
+	if len(repo.setCalls) != 1 {
+		t.Fatalf("expected 1 SetActive call, got %d SetActive calls", len(repo.setCalls))
+	}
+	call := repo.setCalls[0]
+	if call.channelID != "chan-1" || call.threadID != "thread-9" || call.userID != "op-1" || call.sessionID != "completed-sess" || call.agentPID != 200 {
+		t.Fatalf("expected adoption re-keyed to operator with current PID, got %+v", call)
+	}
+}
+
 func TestResolveTakeoverDeadCandidateCreatesFresh(t *testing.T) {
 	repo := &mockSessionRepo{takeover: &store.TakeoverCandidate{SessionID: "gone-sess", AgentPID: 999, Seed: "envelope-seed"}}
 	client := &mockClient{sessionID: "fresh", sessionExists: false}
@@ -392,7 +414,7 @@ func TestResolveTakeoverSkippedWithoutThread(t *testing.T) {
 	}
 }
 
-func TestResolveCompletedThreadStaysFresh(t *testing.T) {
+func TestResolveDirectKeyResumeWithoutTakeover(t *testing.T) {
 	repo := &mockSessionRepo{activeID: "own-sess", ownerPID: 999}
 	client := &mockClient{sessionID: "fresh", sessionExists: true}
 	res, err := NewSessionResolver(repo, client).ResolveDetailed(context.Background(), "discord", "chan-1", "thread-9", "", 200)
