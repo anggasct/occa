@@ -69,6 +69,7 @@ type ChannelStore interface {
 type TakeoverStore interface {
 	MarkTakeoverEligible(ctx context.Context, platform, channelID, threadID, sessionID string, agentPID int, seed string) error
 	ClearTakeoverEligible(ctx context.Context, platform, channelID, threadID string) error
+	LinkThreadRoot(ctx context.Context, platform, channelID, threadID, messageID, channel, card string) error
 }
 
 type Executor func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error
@@ -901,6 +902,7 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 				slog.Warn("webhook: takeover mark failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
 			}
 		}
+		s.linkRootCard(ep, envelope, "COMPLETED", "", workCtx, deliveryID)
 		return nil
 	case errors.Is(err, context.DeadlineExceeded), ctx.Err() == context.DeadlineExceeded:
 		s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary(timeoutSummary(s.processingTimeout, workCtx), maxErrorSummaryRunes, ep.Secret), workCtx)
@@ -941,6 +943,21 @@ func takeoverBannerTarget(ep config.EndpointConfig, workCtx *WebhookWorkContext)
 	return ep.ChannelID
 }
 
+func (s *Server) linkRootCard(ep config.EndpointConfig, envelope WebhookEnvelope, status, reason string, workCtx *WebhookWorkContext, deliveryID string) {
+	if s.sessions == nil || workCtx == nil || workCtx.ThreadID == "" || workCtx.RootMessageID == "" {
+		return
+	}
+	elapsed := time.Duration(0)
+	if !workCtx.StartTime.IsZero() {
+		elapsed = time.Since(workCtx.StartTime)
+	}
+	card := redactAuditSummary(terminalRootCard(envelope, ep.Workflow, status, reason, workCtx.ThreadID, ep.Platform, elapsed), ep.Secret)
+	target := auditTargetChannel(ep.Platform, ep.ChannelID, workCtx.ThreadID)
+	if err := s.sessions.LinkThreadRoot(context.Background(), ep.Platform, ep.ChannelID, workCtx.ThreadID, workCtx.RootMessageID, target, card); err != nil {
+		slog.Warn("webhook: root card link failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
+	}
+}
+
 func (s *Server) failDelivery(ep config.EndpointConfig, id int64, deliveryID, eventType string, envelope WebhookEnvelope, summary string, workCtx *WebhookWorkContext) {
 	ok, err := s.deliveries.Transition(context.Background(), id, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusFailed, summary)
 	if err != nil {
@@ -954,9 +971,10 @@ func (s *Server) failDelivery(ep config.EndpointConfig, id int64, deliveryID, ev
 			slog.Warn("webhook: takeover mark failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
 		}
 	}
+	s.linkRootCard(ep, envelope, "FAILED", summary, workCtx, deliveryID)
 	if s.notifier != nil && workCtx != nil && workCtx.ThreadID != "" {
 		target := takeoverBannerTarget(ep, workCtx)
-		banner := "💬 Delivery " + deliveryID + " gagal (" + summary + "). Chat di thread ini untuk lanjut dari context terakhir."
+		banner := "💬 Delivery " + deliveryID + " failed (" + summary + "). Continue in this thread to resume from the last context."
 		if err := s.notifier(context.Background(), ep.Platform, target, banner); err != nil {
 			slog.Warn("webhook: takeover banner failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
 		}

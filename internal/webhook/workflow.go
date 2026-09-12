@@ -141,6 +141,32 @@ func formatAuditSummary(envelope WebhookEnvelope, workflow string, statusAndReas
 	return strings.Join(lines, "\n")
 }
 
+func auditTargetChannel(platform, channelID, threadID string) string {
+	if platform == "telegram" && threadID != "" && !strings.Contains(channelID, ":") {
+		return channelID + ":" + threadID
+	}
+	return channelID
+}
+
+func terminalRootCard(envelope WebhookEnvelope, workflow, status, reason, threadID, platform string, elapsed time.Duration) string {
+	statusText := status
+	switch status {
+	case "COMPLETED":
+		if elapsed > 0 {
+			statusText = fmt.Sprintf("✅ COMPLETED (%s)", formatDuration(elapsed))
+		} else {
+			statusText = "✅ COMPLETED"
+		}
+	case "FAILED":
+		if elapsed > 0 {
+			statusText = fmt.Sprintf("⚠️ FAILED (%s)", formatDuration(elapsed))
+		} else {
+			statusText = "⚠️ FAILED"
+		}
+	}
+	return FormatRootCard(envelope, workflow, statusText, reason, threadID, platform)
+}
+
 func FormatThreadName(envelope WebhookEnvelope, workflow string) string {
 	workflow = strings.TrimSpace(workflow)
 	if workflow == "" {
@@ -231,29 +257,18 @@ func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelo
 		wCtx = workCtx[0]
 	}
 
-	targetChannel := ep.ChannelID
-	if ep.Platform == "telegram" && wCtx != nil && wCtx.ThreadID != "" && !strings.Contains(targetChannel, ":") {
-		targetChannel = targetChannel + ":" + wCtx.ThreadID
+	threadID := ""
+	if wCtx != nil {
+		threadID = wCtx.ThreadID
 	}
+	targetChannel := auditTargetChannel(ep.Platform, ep.ChannelID, threadID)
 
 	if wCtx != nil && wCtx.RootMessageID != "" && s.editor != nil {
-		statusText := status
-		switch status {
-		case "COMPLETED":
-			if !wCtx.StartTime.IsZero() {
-				statusText = fmt.Sprintf("✅ COMPLETED (%s)", formatDuration(time.Since(wCtx.StartTime)))
-			} else {
-				statusText = "✅ COMPLETED"
-			}
-		case "FAILED":
-			if !wCtx.StartTime.IsZero() {
-				statusText = fmt.Sprintf("⚠️ FAILED (%s)", formatDuration(time.Since(wCtx.StartTime)))
-			} else {
-				statusText = "⚠️ FAILED"
-			}
+		elapsed := time.Duration(0)
+		if !wCtx.StartTime.IsZero() {
+			elapsed = time.Since(wCtx.StartTime)
 		}
-		card := FormatRootCard(envelope, ep.Workflow, statusText, reason, wCtx.ThreadID, ep.Platform)
-		card = redactAuditSummary(card, ep.Secret)
+		card := redactAuditSummary(terminalRootCard(envelope, ep.Workflow, status, reason, wCtx.ThreadID, ep.Platform, elapsed), ep.Secret)
 		if err := s.editor(ctx, ep.Platform, targetChannel, wCtx.RootMessageID, card); err != nil {
 			slog.Warn("webhook: failed to edit root card, falling back to notifier", "endpoint", ep.Name, "error", err)
 		} else {

@@ -153,6 +153,10 @@ func (r *Router) runResponse(
 ) {
 	started := time.Now()
 	outcome := "complete"
+	root := r.threadRoot(key)
+	if root != nil {
+		r.editRootCard(key.platform, root, followupRunningLine)
+	}
 	owner := &permissionOwner{}
 	permissionHandler := &permissionPromptHandler{
 		broker:    r.permissions,
@@ -320,6 +324,55 @@ func (r *Router) runResponse(
 	}
 	if outcome == "complete" {
 		r.detectNewAgents(ctx, msg, inst)
+	}
+	if root != nil {
+		r.editRootCard(key.platform, root, followupTerminalLine(outcome, time.Since(started)))
+	}
+}
+
+const followupRunningLine = "Follow-up: 🔄 running in thread"
+
+func followupTerminalLine(outcome string, elapsed time.Duration) string {
+	switch outcome {
+	case "complete":
+		return "Follow-up: ✅ completed (" + formatFollowupDuration(elapsed) + ")"
+	case "cancelled":
+		return "Follow-up: ⏹️ cancelled"
+	default:
+		return "Follow-up: ⚠️ failed"
+	}
+}
+
+func formatFollowupDuration(d time.Duration) string {
+	d = d.Round(time.Second)
+	m := int(d / time.Minute)
+	s := int((d % time.Minute) / time.Second)
+	if m > 0 {
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
+}
+
+func (r *Router) threadRoot(key responseKey) *store.ThreadRootCard {
+	if r.rootCardEditor == nil || r.store == nil || key.threadID == "" {
+		return nil
+	}
+	root, err := r.store.SessionRepo().ThreadRoot(context.Background(), key.platform, key.channelID, key.threadID)
+	if err != nil {
+		slog.Warn("router: thread root card lookup failed", "platform", key.platform, "channel_id", key.channelID, "thread_id", key.threadID, "error", err)
+		return nil
+	}
+	return root
+}
+
+func (r *Router) editRootCard(platform string, root *store.ThreadRootCard, line string) {
+	if r.rootCardEditor == nil || root == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := r.rootCardEditor(ctx, platform, root.Channel, root.MessageID, root.Card+"\n"+line); err != nil {
+		slog.Warn("router: root card follow-up edit failed", "platform", platform, "channel_id", root.Channel, "message_id", root.MessageID, "error", err)
 	}
 }
 

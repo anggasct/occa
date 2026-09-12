@@ -101,6 +101,7 @@ type Router struct {
 	renderer               render.Renderer
 	streamerNoEventTimeout time.Duration
 	threadParentOf         func(threadID string) (string, error)
+	rootCardEditor         func(ctx context.Context, platform, channelID, messageID, text string) error
 }
 
 type ScheduleStore interface {
@@ -110,6 +111,10 @@ type ScheduleStore interface {
 
 func (r *Router) SetScheduler(s ScheduleStore) {
 	r.sched = s
+}
+
+func (r *Router) SetRootCardEditor(editor func(ctx context.Context, platform, channelID, messageID, text string) error) {
+	r.rootCardEditor = editor
 }
 
 func (r *Router) SetAttributionStore(s *attribution.Store) {
