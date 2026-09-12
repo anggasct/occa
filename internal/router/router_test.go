@@ -580,6 +580,15 @@ func (f *fakePermissionRuleRepo) Match(_ context.Context, owner store.Permission
 			return &copy, nil
 		}
 	}
+	if owner.ThreadID != "" || owner.UserID != "" {
+		chanOwner := store.PermissionOwner{Platform: owner.Platform, ChannelID: owner.ChannelID}
+		for _, rule := range f.rules {
+			if ownerKey(chanOwner) == ownerKey(store.PermissionOwner{Platform: rule.Platform, ChannelID: rule.ChannelID, ThreadID: rule.ThreadID, UserID: rule.UserID}) && rule.Tool == tool && rule.Patterns == canonical {
+				copy := rule
+				return &copy, nil
+			}
+		}
+	}
 	return nil, nil
 }
 

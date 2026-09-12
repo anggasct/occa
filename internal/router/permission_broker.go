@@ -172,7 +172,11 @@ func (h *permissionPromptHandler) autoApply(ctx context.Context, request relay.P
 		slog.Warn("permission: auto-allow reply failed; prompting instead", "rule_id", rule.ID, "error", err)
 		return false
 	}
-	slog.Info("permission auto-allowed", "rule_id", rule.ID, "platform", h.platform, "channel_id", h.channelID, "tool", identity)
+	scope := "channel"
+	if rule.ThreadID != "" || rule.UserID != "" {
+		scope = "thread"
+	}
+	slog.Info("permission auto-allowed", "rule_id", rule.ID, "platform", h.platform, "channel_id", h.channelID, "tool", identity, "scope", scope)
 	if h.reply != nil {
 		if _, err := h.reply.Send(autoAllowedNotice(request)); err != nil {
 			slog.Warn("permission: auto-allowed notice send failed", "error", err)
@@ -245,7 +249,10 @@ func describePatterns(patterns []string) string {
 }
 
 func persistRules(ctx context.Context, rules store.PermissionRuleRepo, record *permissionRecord) error {
-	owner := record.ownerKey()
+	owner := store.PermissionOwner{
+		Platform:  record.platform,
+		ChannelID: record.channelID,
+	}
 	identities := make([]string, len(record.requests))
 	for i, req := range record.requests {
 		identities[i] = relay.PermissionRuleIdentity(req)

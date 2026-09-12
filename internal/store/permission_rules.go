@@ -109,6 +109,24 @@ func (r *sqlitePermissionRuleRepo) ClearByOwner(ctx context.Context, owner Permi
 
 func (r *sqlitePermissionRuleRepo) Match(ctx context.Context, owner PermissionOwner, tool string, patterns []string) (*PermissionRule, error) {
 	canonical := CanonicalizePatterns(patterns)
+	rule, err := r.matchExact(ctx, owner, tool, canonical)
+	if err != nil {
+		return nil, err
+	}
+	if rule != nil {
+		return rule, nil
+	}
+	if owner.ThreadID == "" && owner.UserID == "" {
+		return nil, nil
+	}
+	channelOwner := PermissionOwner{
+		Platform:  owner.Platform,
+		ChannelID: owner.ChannelID,
+	}
+	return r.matchExact(ctx, channelOwner, tool, canonical)
+}
+
+func (r *sqlitePermissionRuleRepo) matchExact(ctx context.Context, owner PermissionOwner, tool, canonical string) (*PermissionRule, error) {
 	var rule PermissionRule
 	err := r.db.QueryRowContext(ctx,
 		`SELECT id, platform, channel_id, thread_id, user_id, tool, patterns, created_at
