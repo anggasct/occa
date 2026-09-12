@@ -50,6 +50,7 @@ type Streamer struct {
 	lastWorkingRef             channel.MessageRef
 	lastWorkingHandle          EditHandle
 	lastWorkingRendered        string
+	cards                      []sentCard
 	noEventTimeout             time.Duration
 	typingInterval             time.Duration
 	permissionPendingFunc      func() bool
@@ -59,8 +60,13 @@ type Streamer struct {
 }
 
 type toolPhaseState struct {
-	calls   int
 	working workingState
+}
+
+type sentCard struct {
+	handle   EditHandle
+	rendered string
+	stripped bool
 }
 
 type workingState struct {
@@ -204,6 +210,9 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 	respTypes := make(map[string]int)
 	var respReasoning time.Duration
 
+	s.cards = nil
+	defer func() { s.cards = nil }()
+
 	typingTicker := time.NewTicker(s.typingInterval)
 	defer typingTicker.Stop()
 	if s.sink != nil {
@@ -336,7 +345,6 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 						respReasoning += elapsed
 					}
 				}
-				s.resetToolPhase(&phase)
 				if buf.Len() > 0 {
 					slog.Debug("streaming: segment break", "finalized_len", buf.Len())
 					s.finalizeSegment(&handles, &lastChunks, buf.String())
@@ -377,7 +385,6 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				}
 				respTotal++
 				respTypes[name]++
-				phase.calls++
 				if phase.working.step > 0 && phase.working.latestName == name {
 					phase.working.latestCount++
 					phase.working.total = respTotal
@@ -472,6 +479,9 @@ func formatDuration(d time.Duration) string {
 func (s *Streamer) updateWorking(working *workingState) {
 	if working.handle == nil && working.ref == nil {
 		handle, rendered, err := s.sendWorking(working.pending)
+		if handle != nil {
+			s.cards = append(s.cards, sentCard{handle: handle, rendered: rendered})
+		}
 		if err != nil {
 			slog.Warn("streaming: working notice send failed", "error", err)
 			return
@@ -486,6 +496,7 @@ func (s *Streamer) updateWorking(working *workingState) {
 		s.lastWorkingRef = handle.Ref()
 		s.lastWorkingRendered = rendered
 		s.trackFirstRef(handle.Ref())
+		s.stripStaleCards(handle)
 		return
 	}
 	s.maybeEditWorking(working)
@@ -555,9 +566,33 @@ func (s *Streamer) flushWorking(working *workingState) {
 	s.lastWorkingRendered = working.rendered
 }
 
-func (s *Streamer) resetToolPhase(phase *toolPhaseState) {
-	s.flushWorking(&phase.working)
-	*phase = toolPhaseState{}
+func (s *Streamer) stripStaleCards(current EditHandle) {
+	if s.stopCallbackData == "" {
+		return
+	}
+	var currentID string
+	if current != nil {
+		if ref := current.Ref(); ref != nil {
+			currentID = ref.ID()
+		}
+	}
+	for i := range s.cards {
+		card := &s.cards[i]
+		if card.stripped || card.handle == nil {
+			continue
+		}
+		if currentID != "" {
+			if ref := card.handle.Ref(); ref != nil && ref.ID() == currentID {
+				continue
+			}
+		}
+		if card.rendered != "" {
+			if err := card.handle.EditWithButtons(context.Background(), card.rendered, nil); err != nil {
+				slog.Warn("streaming: stale card button strip failed", "error", err)
+			}
+		}
+		card.stripped = true
+	}
 }
 
 func (s *Streamer) resolveWorking(working *workingState, success bool, total int, types map[string]int, reasoning time.Duration) {
@@ -565,6 +600,7 @@ func (s *Streamer) resolveWorking(working *workingState, success bool, total int
 	if handle == nil {
 		handle = s.lastWorkingHandle
 	}
+	s.stripStaleCards(handle)
 	if handle == nil {
 		return
 	}
@@ -601,10 +637,10 @@ func (s *Streamer) clearWorkingStopButton(working *workingState) {
 		handle = s.lastWorkingHandle
 		text = s.lastWorkingRendered
 	}
-	if handle == nil || text == "" {
-		return
+	if handle != nil && text != "" {
+		_ = handle.EditWithButtons(context.Background(), text, nil)
 	}
-	_ = handle.EditWithButtons(context.Background(), text, nil)
+	s.stripStaleCards(handle)
 }
 
 const maxRollupTypes = 8
@@ -685,7 +721,7 @@ func (s *Streamer) sendWorking(raw string) (EditHandle, string, error) {
 		handle, err = s.sink.Send(context.Background(), rendered)
 	}
 	if err != nil {
-		return nil, "", err
+		return handle, rendered, err
 	}
 	return handle, rendered, nil
 }
