@@ -576,6 +576,8 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 				}
 				defer inst.End()
 
+				permissionHandler := webhook.NewPermissionResponder(inst.Client(), workCtx.DocsRoot)
+
 				var streamer *relay.Streamer
 				if workCtx.RootMessageID != "" && sender != nil && editor != nil {
 					sink := webhook.NewWebhookSink(targetChannelID, platform,
@@ -587,18 +589,20 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 						},
 					)
 					streamer = relay.NewStreamerWithSink(sink, outboundRenderer, render.PlatformFor(platform))
+					streamer.SetPermissionPromptHandler(permissionHandler)
 				}
 
 				turn := relay.WebhookTurn{
-					Client:       inst.Client(),
-					Prompt:       prompt,
-					Model:        workCtx.Model,
-					Platform:     platform,
-					ChannelID:    channelID,
-					DeliveryID:   workCtx.DeliveryID,
-					ExecutionKey: workCtx.Key.String(),
-					Attempt:      workCtx.Attempt,
-					Streamer:     streamer,
+					Client:            inst.Client(),
+					Prompt:            prompt,
+					Model:             workCtx.Model,
+					Platform:          platform,
+					ChannelID:         channelID,
+					DeliveryID:        workCtx.DeliveryID,
+					ExecutionKey:      workCtx.Key.String(),
+					Attempt:           workCtx.Attempt,
+					Streamer:          streamer,
+					PermissionHandler: permissionHandler,
 				}
 				result, err := turn.Run(ctx)
 

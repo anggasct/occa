@@ -43,6 +43,10 @@ type WebhookTurn struct {
 	AbortTimeout time.Duration
 	OnEvent      func(ev Event)
 	Streamer     *Streamer
+	// PermissionHandler resolves permission asks deterministically for a
+	// headless delivery. Nil falls back to a rejection so an unattended
+	// delivery never waits on a prompt nobody can answer.
+	PermissionHandler PermissionPromptHandler
 }
 
 type WebhookTurnResult struct {
@@ -155,6 +159,19 @@ func (t WebhookTurn) Run(ctx context.Context) (res WebhookTurnResult, err error)
 				}
 				completed = true
 				return res, nil
+			case "permission_asked":
+				// Headless deliveries must not wait for a chat approval
+				// that will never arrive. With a handler, the configured
+				// policy decides; without one, fail closed deterministically.
+				if ev.Permission != nil {
+					if t.PermissionHandler != nil {
+						if err := t.PermissionHandler.Prompt(ctx, *ev.Permission); err != nil {
+							slog.Warn("relay: webhook turn: permission prompt failed", t.attrs(sessionID, "error", err)...)
+						}
+					} else if err := t.Client.ReplyPermission(ctx, ev.Permission.ID, PermissionReject); err != nil {
+						slog.Warn("relay: webhook turn: permission reject failed", t.attrs(sessionID, "error", err)...)
+					}
+				}
 			case "stream_error":
 				closeStreamer()
 				return res, fmt.Errorf("%w: %v", ErrWebhookEventStream, ev.Err)

@@ -46,6 +46,7 @@ type WebhookWorkContext struct {
 	ProgressCard   bool
 	Workflow       string
 	Envelope       WebhookEnvelope
+	DocsRoot       string
 	RootMessageID  string
 	ThreadID       string
 	StartTime      time.Time

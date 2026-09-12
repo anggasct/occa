@@ -73,6 +73,7 @@ type EndpointConfig struct {
 	Thread       bool              `yaml:"thread,omitempty"`
 	ProgressCard bool              `yaml:"progress_card,omitempty"`
 	Model        string            `yaml:"model,omitempty"`
+	DocsRoot     string            `yaml:"docs_root,omitempty"`
 }
 
 func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
@@ -93,6 +94,7 @@ func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
 		Thread       bool              `yaml:"thread,omitempty"`
 		ProgressCard *bool             `yaml:"progress_card,omitempty"`
 		Model        string            `yaml:"model,omitempty"`
+		DocsRoot     string            `yaml:"docs_root,omitempty"`
 	}
 	var raw rawEndpoint
 	if err := node.Decode(&raw); err != nil {
@@ -113,6 +115,7 @@ func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
 	e.Workspace = raw.Workspace
 	e.Thread = raw.Thread
 	e.Model = strings.TrimSpace(raw.Model)
+	e.DocsRoot = strings.TrimSpace(raw.DocsRoot)
 	if raw.ProgressCard != nil {
 		e.ProgressCard = *raw.ProgressCard
 	} else {

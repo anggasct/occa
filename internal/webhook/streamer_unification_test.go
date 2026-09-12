@@ -290,6 +290,10 @@ func (c *fakeHeadlessClient) SendMessage(ctx context.Context, sessionID, prompt 
 	return nil
 }
 
+func (c *fakeHeadlessClient) ReplyPermission(ctx context.Context, requestID string, reply relay.PermissionReply) error {
+	return nil
+}
+
 func (c *fakeHeadlessClient) ListMessages(ctx context.Context, sessionID string) ([]relay.MessageInfo, error) {
 	return []relay.MessageInfo{
 		{Role: "assistant", Completed: 1},
