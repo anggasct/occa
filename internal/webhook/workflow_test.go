@@ -189,7 +189,7 @@ func TestWebhookAuditNotificationsHaveSeparator(t *testing.T) {
 			srv.emitAudit(context.Background(), config.EndpointConfig{Platform: "telegram", ChannelID: "chat"}, WebhookEnvelope{
 				"event_type": "pull_request",
 				"action":     "opened",
-			}, status, "")
+			}, status, "", "")
 
 			if !strings.HasSuffix(got, "\n"+webhookMessageSeparator) && got != webhookMessageSeparator {
 				t.Fatalf("audit notification = %q, want one trailing separator", got)
@@ -491,7 +491,7 @@ func TestEmitAuditRootCardEditing(t *testing.T) {
 			StartTime:     time.Now().Add(-105 * time.Second),
 		}
 
-		srv.emitAudit(context.Background(), ep, envelope, "COMPLETED", "", workCtx)
+		srv.emitAudit(context.Background(), ep, envelope, "COMPLETED", "", "", workCtx)
 
 		if notifierCalled {
 			t.Error("notifier was called when editor succeeded")
@@ -528,7 +528,7 @@ func TestEmitAuditRootCardEditing(t *testing.T) {
 			StartTime:     time.Now().Add(-30 * time.Second),
 		}
 
-		srv.emitAudit(context.Background(), tgEp, envelope, "COMPLETED", "", workCtx)
+		srv.emitAudit(context.Background(), tgEp, envelope, "COMPLETED", "", "", workCtx)
 
 		if editedChannel != "-10012345:777" {
 			t.Errorf("editedChannel = %q, want -10012345:777", editedChannel)
@@ -555,7 +555,7 @@ func TestEmitAuditRootCardEditing(t *testing.T) {
 			StartTime:     time.Now().Add(-30 * time.Second),
 		}
 
-		srv.emitAudit(context.Background(), ep, envelope, "FAILED", "some error", workCtx)
+		srv.emitAudit(context.Background(), ep, envelope, "FAILED", "some error", "", workCtx)
 
 		if notifierContent == "" {
 			t.Fatal("notifier was not called on editor failure")
@@ -577,7 +577,7 @@ func TestEmitAuditRootCardEditing(t *testing.T) {
 			return nil
 		})
 
-		srv.emitAudit(context.Background(), ep, envelope, "COMPLETED", "")
+		srv.emitAudit(context.Background(), ep, envelope, "COMPLETED", "", "")
 
 		if editorCalled {
 			t.Error("editor was called when RootMessageID was empty")

@@ -222,8 +222,22 @@ func TestFailDeliveryLinksRootCard(t *testing.T) {
 	t.Run("discord thread", func(t *testing.T) {
 		srv, _, st := newTestServerFull(t, []config.EndpointConfig{takeoverTestEndpoint()})
 		srv.SetSessionStore(st.SessionRepo())
-		workCtx := &WebhookWorkContext{SessionID: "failed-sess", ThreadID: "thread-1", RootMessageID: "root-1"}
-		srv.failDelivery(ep, 0, "del-1", "pull_request_review", envelope, "agent exploded", workCtx)
+		var editedText string
+		srv.SetEditor(func(_ context.Context, _, _, _ string, text string) error {
+			editedText = text
+			time.Sleep(1100 * time.Millisecond)
+			return nil
+		})
+		ctx := context.Background()
+		if _, err := st.WebhookDeliveryRepo().Create(ctx, store.WebhookDelivery{Endpoint: "takeover-test", DeliveryID: "del-1", EventType: "pull_request_review", Status: store.WebhookStatusProcessing}); err != nil {
+			t.Fatalf("seed processing receipt: %v", err)
+		}
+		receipt, err := st.WebhookDeliveryRepo().Get(ctx, "takeover-test", "del-1")
+		if err != nil || receipt == nil {
+			t.Fatalf("seeded receipt lookup: %v, %v", receipt, err)
+		}
+		workCtx := &WebhookWorkContext{SessionID: "failed-sess", ThreadID: "thread-1", RootMessageID: "root-1", StartTime: time.Now().Add(-2 * time.Second)}
+		srv.failDelivery(ep, receipt.ID, "del-1", "pull_request_review", envelope, "agent exploded", workCtx)
 
 		root, err := st.SessionRepo().ThreadRoot(context.Background(), "discord", "chan-1", "thread-1")
 		if err != nil {
@@ -234,6 +248,9 @@ func TestFailDeliveryLinksRootCard(t *testing.T) {
 		}
 		if root.MessageID != "root-1" || root.Channel != "chan-1" {
 			t.Fatalf("root target = %s/%s, want root-1/chan-1", root.MessageID, root.Channel)
+		}
+		if FormatWebhookMessage(root.Card) != editedText {
+			t.Fatalf("stored card diverges from the edited message:\nstored: %q\nedited: %q", root.Card, editedText)
 		}
 		for _, want := range []string{"⚠️ FAILED", "Reason: agent exploded", "Delivery: del-1", "➡️ Details in thread: <#thread-1>"} {
 			if !strings.Contains(root.Card, want) {
@@ -285,11 +302,25 @@ func TestExecuteDeliveryCompletedLinksRootCard(t *testing.T) {
 		workCtx.SessionID = "completed-sess"
 		workCtx.AgentPID = 4242
 		workCtx.RootMessageID = "root-9"
+		workCtx.StartTime = time.Now().Add(-2 * time.Second)
 		return nil
+	}
+	var editedText string
+	srv.SetEditor(func(_ context.Context, _, _, _ string, text string) error {
+		editedText = text
+		time.Sleep(1100 * time.Millisecond)
+		return nil
+	})
+	if _, err := st.WebhookDeliveryRepo().Create(ctx, store.WebhookDelivery{Endpoint: "takeover-test", DeliveryID: "del-9", EventType: "pull_request_review", Status: store.WebhookStatusProcessing}); err != nil {
+		t.Fatalf("seed processing receipt: %v", err)
+	}
+	receipt, err := st.WebhookDeliveryRepo().Get(ctx, "takeover-test", "del-9")
+	if err != nil || receipt == nil {
+		t.Fatalf("seeded receipt lookup: %v, %v", receipt, err)
 	}
 	ep := takeoverTestEndpoint()
 	ep.Workflow = ""
-	if err := srv.executeDelivery(ep, []byte(`{"x":1}`), 0, "del-9", "pull_request_review", 1, nil, nil); err != nil {
+	if err := srv.executeDelivery(ep, []byte(`{"x":1}`), receipt.ID, "del-9", "pull_request_review", 1, nil, nil); err != nil {
 		t.Fatalf("executeDelivery: %v", err)
 	}
 
@@ -302,6 +333,9 @@ func TestExecuteDeliveryCompletedLinksRootCard(t *testing.T) {
 	}
 	if root.MessageID != "root-9" || root.Channel != "chan-1" {
 		t.Fatalf("root target = %s/%s, want root-9/chan-1", root.MessageID, root.Channel)
+	}
+	if FormatWebhookMessage(root.Card) != editedText {
+		t.Fatalf("stored card diverges from the edited message:\nstored: %q\nedited: %q", root.Card, editedText)
 	}
 	if !strings.Contains(root.Card, "✅ COMPLETED") || !strings.Contains(root.Card, "Delivery: del-9") {
 		t.Fatalf("stored card missing terminal audit lines: %q", root.Card)

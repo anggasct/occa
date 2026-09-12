@@ -690,7 +690,7 @@ func (s *Server) beginExecution(item dispatchItem) *store.WebhookDelivery {
 			return nil
 		}
 		slog.Info("webhook: delivery skipped", "endpoint", ep.Name, "delivery_id", item.deliveryID, "event_type", item.eventType)
-		s.emitAudit(ctx, ep, envelope, "SKIP", reason)
+		s.emitAudit(ctx, ep, envelope, "SKIP", reason, "")
 		return nil
 	}
 
@@ -881,11 +881,12 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 
 	switch {
 	case err == nil:
+		card := s.terminalCard(ep, envelope, "COMPLETED", "", workCtx)
 		ok, tErr := s.deliveries.Transition(context.Background(), id, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusCompleted, "")
 		if tErr != nil {
 			slog.Error("webhook: completed transition failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", tErr)
 		} else if ok {
-			s.emitAudit(context.Background(), ep, envelope, "COMPLETED", "", workCtx)
+			s.emitAudit(context.Background(), ep, envelope, "COMPLETED", "", card, workCtx)
 		}
 		slog.Info("webhook: delivery completed",
 			append([]any{
@@ -902,7 +903,7 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 				slog.Warn("webhook: takeover mark failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
 			}
 		}
-		s.linkRootCard(ep, envelope, "COMPLETED", "", workCtx, deliveryID)
+		s.linkRootCard(ep, workCtx, deliveryID, card)
 		return nil
 	case errors.Is(err, context.DeadlineExceeded), ctx.Err() == context.DeadlineExceeded:
 		s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary(timeoutSummary(s.processingTimeout, workCtx), maxErrorSummaryRunes, ep.Secret), workCtx)
@@ -943,15 +944,22 @@ func takeoverBannerTarget(ep config.EndpointConfig, workCtx *WebhookWorkContext)
 	return ep.ChannelID
 }
 
-func (s *Server) linkRootCard(ep config.EndpointConfig, envelope WebhookEnvelope, status, reason string, workCtx *WebhookWorkContext, deliveryID string) {
+func (s *Server) terminalCard(ep config.EndpointConfig, envelope WebhookEnvelope, status, reason string, workCtx *WebhookWorkContext) string {
+	elapsed := time.Duration(0)
+	threadID := ""
+	if workCtx != nil {
+		if !workCtx.StartTime.IsZero() {
+			elapsed = time.Since(workCtx.StartTime)
+		}
+		threadID = workCtx.ThreadID
+	}
+	return redactAuditSummary(terminalRootCard(envelope, ep.Workflow, status, reason, threadID, ep.Platform, elapsed), ep.Secret)
+}
+
+func (s *Server) linkRootCard(ep config.EndpointConfig, workCtx *WebhookWorkContext, deliveryID, card string) {
 	if s.sessions == nil || workCtx == nil || workCtx.ThreadID == "" || workCtx.RootMessageID == "" {
 		return
 	}
-	elapsed := time.Duration(0)
-	if !workCtx.StartTime.IsZero() {
-		elapsed = time.Since(workCtx.StartTime)
-	}
-	card := redactAuditSummary(terminalRootCard(envelope, ep.Workflow, status, reason, workCtx.ThreadID, ep.Platform, elapsed), ep.Secret)
 	target := auditTargetChannel(ep.Platform, ep.ChannelID, workCtx.ThreadID)
 	if err := s.sessions.LinkThreadRoot(context.Background(), ep.Platform, ep.ChannelID, workCtx.ThreadID, workCtx.RootMessageID, target, card); err != nil {
 		slog.Warn("webhook: root card link failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
@@ -959,11 +967,12 @@ func (s *Server) linkRootCard(ep config.EndpointConfig, envelope WebhookEnvelope
 }
 
 func (s *Server) failDelivery(ep config.EndpointConfig, id int64, deliveryID, eventType string, envelope WebhookEnvelope, summary string, workCtx *WebhookWorkContext) {
+	card := s.terminalCard(ep, envelope, "FAILED", summary, workCtx)
 	ok, err := s.deliveries.Transition(context.Background(), id, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusFailed, summary)
 	if err != nil {
 		slog.Error("webhook: failed transition", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
 	} else if ok {
-		s.emitAudit(context.Background(), ep, envelope, "FAILED", summary, workCtx)
+		s.emitAudit(context.Background(), ep, envelope, "FAILED", summary, card, workCtx)
 	}
 	if s.sessions != nil && workCtx != nil && workCtx.ThreadID != "" {
 		seed := redactAuditSummary(formatAuditSummary(envelope, ep.Workflow, "FAILED", summary), ep.Secret)
@@ -971,7 +980,7 @@ func (s *Server) failDelivery(ep config.EndpointConfig, id int64, deliveryID, ev
 			slog.Warn("webhook: takeover mark failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
 		}
 	}
-	s.linkRootCard(ep, envelope, "FAILED", summary, workCtx, deliveryID)
+	s.linkRootCard(ep, workCtx, deliveryID, card)
 	if s.notifier != nil && workCtx != nil && workCtx.ThreadID != "" {
 		target := takeoverBannerTarget(ep, workCtx)
 		banner := "💬 Delivery " + deliveryID + " failed (" + summary + "). Continue in this thread to resume from the last context."

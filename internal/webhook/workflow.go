@@ -236,7 +236,7 @@ func (s *Server) markSkipped(id int64, ep config.EndpointConfig, envelope Webhoo
 			return
 		}
 	}
-	s.emitAudit(context.Background(), ep, envelope, "SKIP", reason)
+	s.emitAudit(context.Background(), ep, envelope, "SKIP", reason, "")
 }
 
 func FormatProgressStatus(step int, tool, toolCtx string, elapsed time.Duration) string {
@@ -251,7 +251,7 @@ func FormatProgressStatus(step int, tool, toolCtx string, elapsed time.Duration)
 	})
 }
 
-func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelope WebhookEnvelope, status, reason string, workCtx ...*WebhookWorkContext) {
+func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelope WebhookEnvelope, status, reason, card string, workCtx ...*WebhookWorkContext) {
 	var wCtx *WebhookWorkContext
 	if len(workCtx) > 0 {
 		wCtx = workCtx[0]
@@ -264,12 +264,15 @@ func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelo
 	targetChannel := auditTargetChannel(ep.Platform, ep.ChannelID, threadID)
 
 	if wCtx != nil && wCtx.RootMessageID != "" && s.editor != nil {
-		elapsed := time.Duration(0)
-		if !wCtx.StartTime.IsZero() {
-			elapsed = time.Since(wCtx.StartTime)
+		text := card
+		if text == "" {
+			elapsed := time.Duration(0)
+			if !wCtx.StartTime.IsZero() {
+				elapsed = time.Since(wCtx.StartTime)
+			}
+			text = redactAuditSummary(terminalRootCard(envelope, ep.Workflow, status, reason, wCtx.ThreadID, ep.Platform, elapsed), ep.Secret)
 		}
-		card := redactAuditSummary(terminalRootCard(envelope, ep.Workflow, status, reason, wCtx.ThreadID, ep.Platform, elapsed), ep.Secret)
-		if err := s.editor(ctx, ep.Platform, targetChannel, wCtx.RootMessageID, card); err != nil {
+		if err := s.editor(ctx, ep.Platform, targetChannel, wCtx.RootMessageID, text); err != nil {
 			slog.Warn("webhook: failed to edit root card, falling back to notifier", "endpoint", ep.Name, "error", err)
 		} else {
 			return
