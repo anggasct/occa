@@ -133,7 +133,7 @@ func (r *Router) permissionContextHeader(ctx context.Context, msg channel.Incomi
 
 func (r *Router) buildPermissionsPage(ctx context.Context, msg channel.IncomingMessage, page int) (string, []channel.Button, error) {
 	owner := permissionOwnerFromMsg(msg)
-	rules, err := r.store.PermissionRuleRepo().ListByOwner(ctx, owner)
+	rules, err := r.store.PermissionRuleRepo().ListVisible(ctx, owner)
 	if err != nil {
 		return "", nil, fmt.Errorf("permissions list: %w", err)
 	}
@@ -163,7 +163,7 @@ func (r *Router) buildPermissionsPage(ctx context.Context, msg channel.IncomingM
 		num := i + 1
 		desc := permissionRuleDescription(rule)
 		row := permissionRuleRow(msg.Platform, i-start)
-		fmt.Fprintf(&sb, "%d · %s\n   🕒 %s\n", num, desc, permissionAgeLabel(rule.CreatedAt))
+		fmt.Fprintf(&sb, "%d · %s [%s]\n   🕒 %s\n", num, desc, permissionRuleScope(rule), permissionAgeLabel(rule.CreatedAt))
 		buttons = append(buttons,
 			channel.Button{Label: "🔍 Details", Value: fmt.Sprintf("%sdet:%d:%d:%s", permCallbackPrefix, rule.ID, clampedPage, fp), Row: row},
 			channel.Button{Label: "🗑 Delete", Value: fmt.Sprintf("%sdel:%d:%s", permCallbackPrefix, rule.ID, fp), Row: row},
@@ -254,7 +254,7 @@ func (r *Router) handlePermissionDetailsCallback(ctx context.Context, msg channe
 	}
 
 	owner := permissionOwnerFromMsg(msg)
-	rules, err := r.store.PermissionRuleRepo().ListByOwner(ctx, owner)
+	rules, err := r.store.PermissionRuleRepo().ListVisible(ctx, owner)
 	if err != nil {
 		return err
 	}
@@ -308,6 +308,7 @@ func formatPermissionDetails(rule store.PermissionRule) string {
 		fmt.Fprintf(&sb, ", user %s", rule.UserID)
 	}
 	sb.WriteString("\n")
+	fmt.Fprintf(&sb, "Scope: %s\n", permissionRuleScope(rule))
 	fmt.Fprintf(&sb, "Created: %s UTC (%s)\n", time.Unix(rule.CreatedAt, 0).UTC().Format("2006-01-02 15:04"), permissionAgeLabel(rule.CreatedAt))
 	fmt.Fprintf(&sb, "Rule ID: %d", rule.ID)
 	return sb.String()
@@ -319,13 +320,13 @@ func (r *Router) permissionsDelete(ctx context.Context, msg channel.IncomingMess
 		return "Rule id must be a number.", nil
 	}
 	owner := permissionOwnerFromMsg(msg)
-	rules, err := r.store.PermissionRuleRepo().ListByOwner(ctx, owner)
+	rules, err := r.store.PermissionRuleRepo().ListVisible(ctx, owner)
 	if err != nil {
 		return "", fmt.Errorf("permissions delete: %w", err)
 	}
 	for _, rule := range rules {
 		if rule.ID == id {
-			if err := r.store.PermissionRuleRepo().DeleteByID(ctx, owner, id); err != nil {
+			if err := r.store.PermissionRuleRepo().DeleteByID(ctx, permissionRuleOwner(rule), id); err != nil {
 				return "", fmt.Errorf("permissions delete: %w", err)
 			}
 			return fmt.Sprintf("🗑 Rule #%d deleted: %s.", rule.ID, permissionRuleDescription(rule)), nil
@@ -365,8 +366,14 @@ func (r *Router) renderPermissionClearConfirm(ctx context.Context, msg channel.I
 
 func (r *Router) handlePermissionCleared(ctx context.Context, msg channel.IncomingMessage) error {
 	owner := permissionOwnerFromMsg(msg)
-	if err := r.store.PermissionRuleRepo().ClearByOwner(ctx, owner); err != nil {
+	rules, err := r.store.PermissionRuleRepo().ListVisible(ctx, owner)
+	if err != nil {
 		return err
+	}
+	for _, rule := range rules {
+		if err := r.store.PermissionRuleRepo().DeleteByID(ctx, permissionRuleOwner(rule), rule.ID); err != nil {
+			return fmt.Errorf("permissions clear: %w", err)
+		}
 	}
 	const text = "🗑 All always-allow rules cleared."
 	if msg.ReplyCtx != nil && msg.CallbackRef != nil {
@@ -378,6 +385,17 @@ func (r *Router) handlePermissionCleared(ctx context.Context, msg channel.Incomi
 
 func permissionRuleDescription(rule store.PermissionRule) string {
 	return fmt.Sprintf("%s — %s", displayTool(rule.Tool), describePatterns(splitPatterns(rule.Patterns)))
+}
+
+func permissionRuleScope(rule store.PermissionRule) string {
+	if rule.ThreadID != "" || rule.UserID != "" {
+		return "thread"
+	}
+	return "channel"
+}
+
+func permissionRuleOwner(rule store.PermissionRule) store.PermissionOwner {
+	return store.PermissionOwner{Platform: rule.Platform, ChannelID: rule.ChannelID, ThreadID: rule.ThreadID, UserID: rule.UserID}
 }
 
 func splitPatterns(canonical string) []string {

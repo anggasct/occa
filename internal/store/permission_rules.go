@@ -87,6 +87,31 @@ func (r *sqlitePermissionRuleRepo) ListByOwner(ctx context.Context, owner Permis
 	return rules, rows.Err()
 }
 
+func (r *sqlitePermissionRuleRepo) ListVisible(ctx context.Context, owner PermissionOwner) ([]PermissionRule, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, platform, channel_id, thread_id, user_id, tool, patterns, created_at
+		 FROM permission_rule
+		 WHERE platform = ? AND channel_id = ?
+		 AND ((thread_id = ? AND user_id = ?) OR (thread_id = '' AND user_id = ''))
+		 ORDER BY id DESC`,
+		owner.Platform, owner.ChannelID, owner.ThreadID, owner.UserID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: permission rule list: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var rules []PermissionRule
+	for rows.Next() {
+		var rule PermissionRule
+		if err := rows.Scan(&rule.ID, &rule.Platform, &rule.ChannelID, &rule.ThreadID, &rule.UserID, &rule.Tool, &rule.Patterns, &rule.CreatedAt); err != nil {
+			return nil, fmt.Errorf("store: permission rule list: scan: %w", err)
+		}
+		rules = append(rules, rule)
+	}
+	return rules, rows.Err()
+}
+
 func (r *sqlitePermissionRuleRepo) DeleteByID(ctx context.Context, owner PermissionOwner, id int64) error {
 	if _, err := r.db.ExecContext(ctx,
 		`DELETE FROM permission_rule WHERE id = ? AND platform = ? AND channel_id = ? AND thread_id = ? AND user_id = ?`,

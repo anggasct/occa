@@ -538,6 +538,23 @@ func (f *fakePermissionRuleRepo) ListByOwner(_ context.Context, owner store.Perm
 	return out, nil
 }
 
+func (f *fakePermissionRuleRepo) ListVisible(_ context.Context, owner store.PermissionOwner) ([]store.PermissionRule, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	channelOwner := store.PermissionOwner{Platform: owner.Platform, ChannelID: owner.ChannelID}
+	var out []store.PermissionRule
+	for _, rule := range f.rules {
+		ruleOwner := store.PermissionOwner{Platform: rule.Platform, ChannelID: rule.ChannelID, ThreadID: rule.ThreadID, UserID: rule.UserID}
+		if ownerKey(owner) == ownerKey(ruleOwner) || ownerKey(channelOwner) == ownerKey(ruleOwner) {
+			out = append(out, rule)
+		}
+	}
+	return out, nil
+}
+
 func (f *fakePermissionRuleRepo) DeleteByID(_ context.Context, owner store.PermissionOwner, id int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

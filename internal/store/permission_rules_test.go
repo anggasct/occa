@@ -434,3 +434,54 @@ func TestPermissionRuleLegacyThreadPinnedIsolation(t *testing.T) {
 		t.Fatalf("legacy thread-pinned rule matched sibling: %+v", matchedSibling)
 	}
 }
+
+func TestPermissionRuleListVisibleMergesChannelScope(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+	repo := s.PermissionRuleRepo()
+
+	channelOwner := PermissionOwner{Platform: "telegram", ChannelID: "chat1"}
+	threadOwner := PermissionOwner{Platform: "telegram", ChannelID: "chat1", ThreadID: "thread-1"}
+	siblingOwner := PermissionOwner{Platform: "telegram", ChannelID: "chat1", ThreadID: "thread-2"}
+	foreignOwner := PermissionOwner{Platform: "telegram", ChannelID: "chat2"}
+
+	idChan, err := repo.Add(ctx, channelOwner, "bash", []string{"chan-pattern"})
+	if err != nil {
+		t.Fatalf("Add channel: %v", err)
+	}
+	idThread, err := repo.Add(ctx, threadOwner, "bash", []string{"thread-pattern"})
+	if err != nil {
+		t.Fatalf("Add thread: %v", err)
+	}
+	idSibling, err := repo.Add(ctx, siblingOwner, "bash", []string{"sibling-pattern"})
+	if err != nil {
+		t.Fatalf("Add sibling: %v", err)
+	}
+	if _, err := repo.Add(ctx, foreignOwner, "bash", []string{"foreign-pattern"}); err != nil {
+		t.Fatalf("Add foreign: %v", err)
+	}
+
+	got, err := repo.ListVisible(ctx, threadOwner)
+	if err != nil {
+		t.Fatalf("ListVisible: %v", err)
+	}
+	if len(got) != 2 || got[0].ID != idThread || got[1].ID != idChan {
+		t.Fatalf("thread visible = %+v, want newest-first [%d %d]", got, idThread, idChan)
+	}
+
+	chanGot, err := repo.ListVisible(ctx, channelOwner)
+	if err != nil {
+		t.Fatalf("ListVisible channel: %v", err)
+	}
+	if len(chanGot) != 1 || chanGot[0].ID != idChan {
+		t.Fatalf("channel visible = %+v, want exactly [%d] with no duplicates", chanGot, idChan)
+	}
+
+	sibGot, err := repo.ListVisible(ctx, siblingOwner)
+	if err != nil {
+		t.Fatalf("ListVisible sibling: %v", err)
+	}
+	if len(sibGot) != 2 || sibGot[0].ID != idSibling || sibGot[1].ID != idChan {
+		t.Fatalf("sibling visible = %+v, want newest-first [%d %d]", sibGot, idSibling, idChan)
+	}
+}

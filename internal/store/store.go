@@ -181,6 +181,7 @@ type ThreadConfigRepo interface {
 type PermissionRuleRepo interface {
 	Add(ctx context.Context, owner PermissionOwner, tool string, patterns []string) (int64, error)
 	ListByOwner(ctx context.Context, owner PermissionOwner) ([]PermissionRule, error)
+	ListVisible(ctx context.Context, owner PermissionOwner) ([]PermissionRule, error)
 	DeleteByID(ctx context.Context, owner PermissionOwner, id int64) error
 	ClearByOwner(ctx context.Context, owner PermissionOwner) error
 	Match(ctx context.Context, owner PermissionOwner, tool string, patterns []string) (*PermissionRule, error)
