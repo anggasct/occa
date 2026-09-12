@@ -62,20 +62,22 @@ func (r *SessionResolver) ResolveDetailed(ctx context.Context, platform, channel
 		if err != nil {
 			return SessionResolution{}, fmt.Errorf("relay: resolve session: takeover lookup: %w", err)
 		}
-		if candidate != nil && candidate.SessionID != "" {
-			exists, err := r.client.SessionExists(ctx, candidate.SessionID)
-			if err != nil {
-				return SessionResolution{}, fmt.Errorf("relay: resolve session: takeover check exists: %w", err)
-			}
-			if exists {
-				if err := r.repo.SetActive(ctx, platform, channelID, threadID, userID, candidate.SessionID, agentPID); err != nil {
-					return SessionResolution{}, fmt.Errorf("relay: resolve session: takeover persist: %w", err)
-				}
-				slog.Info("relay: webhook session takeover", "platform", platform, "channel_id", channelID, "thread_id", threadID, "operator", userID, "session_id", candidate.SessionID)
-				return SessionResolution{SessionID: candidate.SessionID, Resumed: true, HadStored: true, TakeoverSeed: candidate.Seed}, nil
-			}
-			hadStored = true
+		if candidate != nil {
 			takeoverSeed = candidate.Seed
+			hadStored = true
+			if candidate.SessionID != "" {
+				exists, err := r.client.SessionExists(ctx, candidate.SessionID)
+				if err != nil {
+					return SessionResolution{}, fmt.Errorf("relay: resolve session: takeover check exists: %w", err)
+				}
+				if exists {
+					if err := r.repo.SetActive(ctx, platform, channelID, threadID, userID, candidate.SessionID, agentPID); err != nil {
+						return SessionResolution{}, fmt.Errorf("relay: resolve session: takeover persist: %w", err)
+					}
+					slog.Info("relay: webhook session takeover", "platform", platform, "channel_id", channelID, "thread_id", threadID, "operator", userID, "session_id", candidate.SessionID)
+					return SessionResolution{SessionID: candidate.SessionID, Resumed: true, HadStored: true, TakeoverSeed: candidate.Seed}, nil
+				}
+			}
 		}
 	}
 

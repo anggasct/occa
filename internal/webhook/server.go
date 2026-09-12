@@ -927,6 +927,19 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 	return err
 }
 
+func takeoverBannerTarget(ep config.EndpointConfig, workCtx *WebhookWorkContext) string {
+	if workCtx == nil {
+		return ep.ChannelID
+	}
+	if ep.Platform == "discord" && workCtx.ThreadID != "" {
+		return workCtx.ThreadID
+	}
+	if ep.Platform == "telegram" && workCtx.ThreadID != "" && !strings.Contains(ep.ChannelID, ":") {
+		return ep.ChannelID + ":" + workCtx.ThreadID
+	}
+	return ep.ChannelID
+}
+
 func (s *Server) failDelivery(ep config.EndpointConfig, id int64, deliveryID, eventType string, envelope WebhookEnvelope, summary string, workCtx *WebhookWorkContext) {
 	ok, err := s.deliveries.Transition(context.Background(), id, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusFailed, summary)
 	if err != nil {
@@ -934,10 +947,17 @@ func (s *Server) failDelivery(ep config.EndpointConfig, id int64, deliveryID, ev
 	} else if ok {
 		s.emitAudit(context.Background(), ep, envelope, "FAILED", summary, workCtx)
 	}
-	if s.sessions != nil && workCtx != nil && workCtx.SessionID != "" && workCtx.ThreadID != "" {
+	if s.sessions != nil && workCtx != nil && workCtx.ThreadID != "" {
 		seed := redactAuditSummary(formatAuditSummary(envelope, ep.Workflow, "FAILED", summary), ep.Secret)
 		if err := s.sessions.MarkTakeoverEligible(context.Background(), ep.Platform, ep.ChannelID, workCtx.ThreadID, workCtx.SessionID, workCtx.AgentPID, seed); err != nil {
 			slog.Warn("webhook: takeover mark failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
+		}
+	}
+	if s.notifier != nil && workCtx != nil && workCtx.ThreadID != "" {
+		target := takeoverBannerTarget(ep, workCtx)
+		banner := "💬 Delivery " + deliveryID + " gagal (" + summary + "). Chat di thread ini untuk lanjut dari context terakhir."
+		if err := s.notifier(context.Background(), ep.Platform, target, banner); err != nil {
+			slog.Warn("webhook: takeover banner failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
 		}
 	}
 	slog.Warn("webhook: delivery failed",

@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/anggasct/occa/internal/channel"
@@ -37,6 +38,9 @@ func TestFailedThreadAdoptsFailedSession(t *testing.T) {
 	if len(client.sendSessions) != 1 || client.sendSessions[0] != "failed-sess" {
 		t.Fatalf("prompt went to sessions %v, want exactly [failed-sess]", client.sendSessions)
 	}
+	if len(client.sendTexts) != 1 || client.sendTexts[0] != "continue the fix" {
+		t.Fatalf("adopted prompt = %v, want raw operator text without envelope seed", client.sendTexts)
+	}
 	if !reply.contains("response") {
 		t.Fatalf("continued turn produced no response: %v", reply.texts())
 	}
@@ -69,5 +73,40 @@ func TestFailedThreadDeniedSenderDoesNotAdopt(t *testing.T) {
 	}
 	if got, _, _ := st.SessionRepo().Active(ctx, "discord", "parent-1", "thread-orphan", "user1"); got != "" {
 		t.Fatalf("denied sender gained a session: %q", got)
+	}
+}
+
+func TestFailedThreadWithoutSessionSeedsEnvelope(t *testing.T) {
+	client := newResponseClient(nil)
+	r, st := newResponseRouter(client)
+	ctx := context.Background()
+
+	if err := st.SessionRepo().MarkTakeoverEligible(ctx, "telegram", "chat1", "thread-1", "", 0, "envelope-seed-xyz"); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+
+	reply := newResponseReply()
+	msg := channel.IncomingMessage{
+		Platform:  "telegram",
+		ChannelID: "chat1",
+		ThreadID:  "thread-1",
+		IsThread:  true,
+		UserID:    "user1",
+		Text:      "continue the fix",
+		IsMention: true,
+		ReplyCtx:  reply,
+	}
+	if err := r.Route(ctx, msg); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	waitForResponse(t, r)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.sendSessions) != 1 || client.sendSessions[0] != "session" {
+		t.Fatalf("prompt went to sessions %v, want exactly one fresh [session]", client.sendSessions)
+	}
+	if len(client.sendTexts) != 1 || !strings.Contains(client.sendTexts[0], "envelope-seed-xyz") || !strings.Contains(client.sendTexts[0], "continue the fix") {
+		t.Fatalf("seeded prompt = %v, want envelope seed plus operator text", client.sendTexts)
 	}
 }

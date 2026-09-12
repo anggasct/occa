@@ -403,3 +403,21 @@ func TestResolveCompletedThreadStaysFresh(t *testing.T) {
 		t.Fatalf("resolution = %+v, want own session resumed without takeover", res)
 	}
 }
+
+func TestResolveTakeoverSeedOnlyCandidateCreatesFresh(t *testing.T) {
+	repo := &mockSessionRepo{takeover: &store.TakeoverCandidate{SessionID: "", Seed: "envelope-seed"}}
+	client := &mockClient{sessionID: "fresh"}
+	res, err := NewSessionResolver(repo, client).ResolveDetailed(context.Background(), "discord", "chan-1", "thread-1", "op-1", 200)
+	if err != nil {
+		t.Fatalf("ResolveDetailed: %v", err)
+	}
+	if res.Resumed || !res.HadStored || res.SessionID != "fresh" || res.TakeoverSeed != "envelope-seed" {
+		t.Fatalf("resolution = %+v, want fresh session carrying the seed", res)
+	}
+	if client.existsCalls != 0 {
+		t.Fatalf("SessionExists calls = %d, want 0 for a session-less mark", client.existsCalls)
+	}
+	if len(repo.setCalls) != 1 || repo.setCalls[0].sessionID != "fresh" {
+		t.Fatalf("expected 1 SetActive for fresh session, got %+v", repo.setCalls)
+	}
+}
