@@ -191,4 +191,69 @@ func (r *sqliteSessionRepo) Delete(ctx context.Context, id int64) error {
 	return nil
 }
 
+func (r *sqliteSessionRepo) MarkTakeoverEligible(ctx context.Context, platform, channelID, threadID, sessionID string, agentPID int, seed string) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: session mark takeover: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	now := time.Now().Unix()
+
+	var id int64
+	var continuable int
+	err = tx.QueryRowContext(ctx,
+		`SELECT id, continuable FROM session WHERE platform = ? AND channel_id = ? AND thread_id = ? AND user_id = '' AND active = 1`,
+		platform, channelID, threadID,
+	).Scan(&id, &continuable)
+	switch {
+	case err == sql.ErrNoRows:
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO session (channel_id, platform, agent_session_id, thread_id, user_id, agent_pid, continuable, takeover_seed, active, created_at, updated_at) VALUES (?, ?, ?, ?, '', ?, 1, ?, 1, ?, ?)`,
+			channelID, platform, sessionID, threadID, agentPID, seed, now, now,
+		); err != nil {
+			return fmt.Errorf("store: session mark takeover: insert: %w", err)
+		}
+	case err != nil:
+		return fmt.Errorf("store: session mark takeover: lookup: %w", err)
+	case continuable == 0:
+		return nil
+	default:
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE session SET agent_session_id = ?, agent_pid = ?, takeover_seed = ?, updated_at = ? WHERE id = ?`,
+			sessionID, agentPID, seed, now, id,
+		); err != nil {
+			return fmt.Errorf("store: session mark takeover: replace: %w", err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (r *sqliteSessionRepo) ClearTakeoverEligible(ctx context.Context, platform, channelID, threadID string) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE session SET continuable = 0, takeover_seed = '', updated_at = ? WHERE platform = ? AND channel_id = ? AND thread_id = ? AND continuable = 1`,
+		time.Now().Unix(), platform, channelID, threadID,
+	)
+	if err != nil {
+		return fmt.Errorf("store: session clear takeover: %w", err)
+	}
+	return nil
+}
+
+func (r *sqliteSessionRepo) TakeoverCandidate(ctx context.Context, platform, channelID, threadID string) (*TakeoverCandidate, error) {
+	var c TakeoverCandidate
+	err := r.db.QueryRowContext(ctx,
+		`SELECT agent_session_id, agent_pid, takeover_seed FROM session WHERE platform = ? AND channel_id = ? AND thread_id = ? AND user_id = '' AND active = 1 AND continuable = 1`,
+		platform, channelID, threadID,
+	).Scan(&c.SessionID, &c.AgentPID, &c.Seed)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: session takeover candidate: %w", err)
+	}
+	return &c, nil
+}
+
 var _ SessionRepo = (*sqliteSessionRepo)(nil)

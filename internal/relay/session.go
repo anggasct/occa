@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/anggasct/occa/internal/store"
 )
@@ -12,9 +13,10 @@ import (
 // existed before resolution began. A caller that recreates a session after
 // a stored one existed uses HadStored to report context loss.
 type SessionResolution struct {
-	SessionID string
-	Resumed   bool
-	HadStored bool
+	SessionID    string
+	Resumed      bool
+	HadStored    bool
+	TakeoverSeed string
 }
 
 type SessionResolver struct {
@@ -54,6 +56,29 @@ func (r *SessionResolver) ResolveDetailed(ctx context.Context, platform, channel
 		}
 	}
 
+	takeoverSeed := ""
+	if threadID != "" {
+		candidate, err := r.repo.TakeoverCandidate(ctx, platform, channelID, threadID)
+		if err != nil {
+			return SessionResolution{}, fmt.Errorf("relay: resolve session: takeover lookup: %w", err)
+		}
+		if candidate != nil && candidate.SessionID != "" {
+			exists, err := r.client.SessionExists(ctx, candidate.SessionID)
+			if err != nil {
+				return SessionResolution{}, fmt.Errorf("relay: resolve session: takeover check exists: %w", err)
+			}
+			if exists {
+				if err := r.repo.SetActive(ctx, platform, channelID, threadID, userID, candidate.SessionID, agentPID); err != nil {
+					return SessionResolution{}, fmt.Errorf("relay: resolve session: takeover persist: %w", err)
+				}
+				slog.Info("relay: webhook session takeover", "platform", platform, "channel_id", channelID, "thread_id", threadID, "operator", userID, "session_id", candidate.SessionID)
+				return SessionResolution{SessionID: candidate.SessionID, Resumed: true, HadStored: true, TakeoverSeed: candidate.Seed}, nil
+			}
+			hadStored = true
+			takeoverSeed = candidate.Seed
+		}
+	}
+
 	sessionID, err = r.client.CreateSession(ctx)
 	if err != nil {
 		return SessionResolution{}, fmt.Errorf("relay: resolve session: create: %w", err)
@@ -63,5 +88,5 @@ func (r *SessionResolver) ResolveDetailed(ctx context.Context, platform, channel
 		return SessionResolution{}, fmt.Errorf("relay: resolve session: persist: %w", err)
 	}
 
-	return SessionResolution{SessionID: sessionID, Resumed: false, HadStored: hadStored}, nil
+	return SessionResolution{SessionID: sessionID, Resumed: false, HadStored: hadStored, TakeoverSeed: takeoverSeed}, nil
 }

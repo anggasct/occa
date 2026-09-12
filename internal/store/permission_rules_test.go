@@ -215,6 +215,15 @@ func TestPermissionRuleMigrationFromV7PreservesRows(t *testing.T) {
 	if _, err := s1.db.Exec("ALTER TABLE user_override DROP COLUMN agent"); err != nil {
 		t.Fatalf("drop override agent column: %v", err)
 	}
+	if _, err := s1.db.Exec("DROP INDEX IF EXISTS idx_session_takeover"); err != nil {
+		t.Fatalf("drop takeover index: %v", err)
+	}
+	if _, err := s1.db.Exec("ALTER TABLE session DROP COLUMN continuable"); err != nil {
+		t.Fatalf("drop continuable: %v", err)
+	}
+	if _, err := s1.db.Exec("ALTER TABLE session DROP COLUMN takeover_seed"); err != nil {
+		t.Fatalf("drop takeover_seed: %v", err)
+	}
 	if _, err := s1.db.Exec("PRAGMA user_version=7"); err != nil {
 		t.Fatalf("stamp user_version=7: %v", err)
 	}
@@ -285,6 +294,15 @@ func TestPermissionRuleMigrationRemovesOnlyLegacyCallIDsAndIsIdempotent(t *testi
 	}
 	if _, err := s1.db.Exec("ALTER TABLE user_override DROP COLUMN agent"); err != nil {
 		t.Fatalf("drop override agent column: %v", err)
+	}
+	if _, err := s1.db.Exec("DROP INDEX IF EXISTS idx_session_takeover"); err != nil {
+		t.Fatalf("drop takeover index: %v", err)
+	}
+	if _, err := s1.db.Exec("ALTER TABLE session DROP COLUMN continuable"); err != nil {
+		t.Fatalf("drop continuable: %v", err)
+	}
+	if _, err := s1.db.Exec("ALTER TABLE session DROP COLUMN takeover_seed"); err != nil {
+		t.Fatalf("drop takeover_seed: %v", err)
 	}
 	if _, err := s1.db.Exec("PRAGMA user_version=10"); err != nil {
 		t.Fatalf("stamp version 10: %v", err)

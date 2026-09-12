@@ -39,6 +39,7 @@ type WebhookWorkContext struct {
 	SessionID      string
 	SessionAborted bool
 	SessionAbortOK bool
+	AgentPID       int
 	Model          *relay.ModelRef
 	ModelSource    string
 	Progress       relay.TurnProgress

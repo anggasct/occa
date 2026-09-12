@@ -72,6 +72,18 @@ func TestAgentMigrationFromV12(t *testing.T) {
 		_ = s1.Close()
 		t.Fatalf("drop override agent: %v", err)
 	}
+	if _, err := s1.db.Exec("DROP INDEX IF EXISTS idx_session_takeover"); err != nil {
+		_ = s1.Close()
+		t.Fatalf("drop takeover index: %v", err)
+	}
+	if _, err := s1.db.Exec("ALTER TABLE session DROP COLUMN continuable"); err != nil {
+		_ = s1.Close()
+		t.Fatalf("drop continuable: %v", err)
+	}
+	if _, err := s1.db.Exec("ALTER TABLE session DROP COLUMN takeover_seed"); err != nil {
+		_ = s1.Close()
+		t.Fatalf("drop takeover_seed: %v", err)
+	}
 	if _, err := s1.db.Exec("PRAGMA user_version=12"); err != nil {
 		_ = s1.Close()
 		t.Fatalf("stamp user_version=12: %v", err)

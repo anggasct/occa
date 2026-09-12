@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	schemaVersion    = 13
+	schemaVersion    = 14
 	SchemaVersion    = schemaVersion
 	busyTimeoutMilli = 5000
 )
@@ -30,6 +30,20 @@ var migrations = []func(s *SQLiteStore, tx *sql.Tx) error{
 	cleanupLegacyPermissionRules,
 	addRecoveryEvents,
 	addAgentDefaults,
+	addSessionTakeover,
+}
+
+func addSessionTakeover(_ *SQLiteStore, tx *sql.Tx) error {
+	if _, err := tx.Exec(`ALTER TABLE session ADD COLUMN continuable INTEGER NOT NULL DEFAULT 0;`); err != nil {
+		return fmt.Errorf("store: migrate session takeover: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE session ADD COLUMN takeover_seed TEXT NOT NULL DEFAULT '';`); err != nil {
+		return fmt.Errorf("store: migrate session takeover seed: %w", err)
+	}
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_session_takeover ON session (platform, channel_id, thread_id) WHERE continuable = 1 AND active = 1;`); err != nil {
+		return fmt.Errorf("store: migrate session takeover index: %w", err)
+	}
+	return nil
 }
 
 func addAgentDefaults(_ *SQLiteStore, tx *sql.Tx) error {

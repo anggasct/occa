@@ -12,6 +12,7 @@ type mockSessionRepo struct {
 	ownerPID int
 	byKey    map[[4]string]string
 	setCalls []setActiveCall
+	takeover *store.TakeoverCandidate
 }
 
 type setActiveCall struct {
@@ -60,6 +61,20 @@ func (m *mockSessionRepo) ActiveModel(_ context.Context, _, _, _, _ string) (str
 }
 
 func (m *mockSessionRepo) Delete(_ context.Context, id int64) error { return nil }
+
+func (m *mockSessionRepo) MarkTakeoverEligible(_ context.Context, _, _, _, sessionID string, agentPID int, seed string) error {
+	m.takeover = &store.TakeoverCandidate{SessionID: sessionID, AgentPID: agentPID, Seed: seed}
+	return nil
+}
+
+func (m *mockSessionRepo) ClearTakeoverEligible(_ context.Context, _, _, _ string) error {
+	m.takeover = nil
+	return nil
+}
+
+func (m *mockSessionRepo) TakeoverCandidate(_ context.Context, _, _, _ string) (*store.TakeoverCandidate, error) {
+	return m.takeover, nil
+}
 
 type mockClient struct {
 	sessionID     string
@@ -323,4 +338,68 @@ func TestResolveDetailedOutcomes(t *testing.T) {
 			t.Fatalf("resolution = %+v, want fresh session without HadStored", res)
 		}
 	})
+}
+
+func TestResolveTakeoverAdoptsFailedSession(t *testing.T) {
+	repo := &mockSessionRepo{takeover: &store.TakeoverCandidate{SessionID: "failed-sess", AgentPID: 999, Seed: "envelope-seed"}}
+	client := &mockClient{sessionID: "fresh", sessionExists: true}
+	res, err := NewSessionResolver(repo, client).ResolveDetailed(context.Background(), "discord", "chan-1", "thread-1", "op-1", 200)
+	if err != nil {
+		t.Fatalf("ResolveDetailed: %v", err)
+	}
+	if !res.Resumed || !res.HadStored || res.SessionID != "failed-sess" || res.TakeoverSeed != "envelope-seed" {
+		t.Fatalf("resolution = %+v, want adopted failed session with seed", res)
+	}
+	if client.existsCalls != 1 {
+		t.Fatalf("SessionExists calls = %d, want 1", client.existsCalls)
+	}
+	if len(repo.setCalls) != 1 {
+		t.Fatalf("expected 1 SetActive call, got %d", len(repo.setCalls))
+	}
+	call := repo.setCalls[0]
+	if call.channelID != "chan-1" || call.threadID != "thread-1" || call.userID != "op-1" || call.sessionID != "failed-sess" || call.agentPID != 200 {
+		t.Fatalf("expected adoption re-keyed to operator with current PID, got %+v", call)
+	}
+}
+
+func TestResolveTakeoverDeadCandidateCreatesFresh(t *testing.T) {
+	repo := &mockSessionRepo{takeover: &store.TakeoverCandidate{SessionID: "gone-sess", AgentPID: 999, Seed: "envelope-seed"}}
+	client := &mockClient{sessionID: "fresh", sessionExists: false}
+	res, err := NewSessionResolver(repo, client).ResolveDetailed(context.Background(), "discord", "chan-1", "thread-1", "op-1", 200)
+	if err != nil {
+		t.Fatalf("ResolveDetailed: %v", err)
+	}
+	if res.Resumed || !res.HadStored || res.SessionID != "fresh" || res.TakeoverSeed != "envelope-seed" {
+		t.Fatalf("resolution = %+v, want fresh session with HadStored and seed", res)
+	}
+	if len(repo.setCalls) != 1 || repo.setCalls[0].sessionID != "fresh" {
+		t.Fatalf("expected 1 SetActive for fresh session, got %+v", repo.setCalls)
+	}
+}
+
+func TestResolveTakeoverSkippedWithoutThread(t *testing.T) {
+	repo := &mockSessionRepo{takeover: &store.TakeoverCandidate{SessionID: "failed-sess", AgentPID: 999, Seed: "envelope-seed"}}
+	client := &mockClient{sessionID: "fresh", sessionExists: true}
+	res, err := NewSessionResolver(repo, client).ResolveDetailed(context.Background(), "telegram", "chat1", "", "user1", 100)
+	if err != nil {
+		t.Fatalf("ResolveDetailed: %v", err)
+	}
+	if res.Resumed || res.HadStored || res.SessionID != "fresh" || res.TakeoverSeed != "" {
+		t.Fatalf("resolution = %+v, want plain fresh session outside threads", res)
+	}
+	if client.existsCalls != 0 {
+		t.Fatalf("SessionExists calls = %d, want 0", client.existsCalls)
+	}
+}
+
+func TestResolveCompletedThreadStaysFresh(t *testing.T) {
+	repo := &mockSessionRepo{activeID: "own-sess", ownerPID: 999}
+	client := &mockClient{sessionID: "fresh", sessionExists: true}
+	res, err := NewSessionResolver(repo, client).ResolveDetailed(context.Background(), "discord", "chan-1", "thread-9", "", 200)
+	if err != nil {
+		t.Fatalf("ResolveDetailed: %v", err)
+	}
+	if !res.Resumed || !res.HadStored || res.SessionID != "own-sess" || res.TakeoverSeed != "" {
+		t.Fatalf("resolution = %+v, want own session resumed without takeover", res)
+	}
 }
