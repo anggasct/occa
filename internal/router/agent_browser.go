@@ -327,7 +327,7 @@ func (r *Router) buildAgentPickerPage(ctx context.Context, msg channel.IncomingM
 	if err != nil {
 		return "", nil, fmt.Errorf("agent picker: %w", err)
 	}
-	if activeSession == nil {
+	if activeSession == nil && isOwnedThreadMessage(msg) {
 		view, err := r.agentDefaultView(ctx, msg)
 		if err != nil {
 			return "", nil, err
@@ -357,8 +357,14 @@ func (r *Router) buildAgentPickerPage(ctx context.Context, msg channel.IncomingM
 	}
 
 	activeAgentName := "build"
-	if sessInfo, err := inst.Client().GetSession(ctx, activeSession.AgentSessionID); err == nil && sessInfo != nil && sessInfo.Agent != "" {
-		activeAgentName = sessInfo.Agent
+	if activeSession != nil {
+		if sessInfo, err := inst.Client().GetSession(ctx, activeSession.AgentSessionID); err == nil && sessInfo != nil && sessInfo.Agent != "" {
+			activeAgentName = sessInfo.Agent
+		}
+	} else {
+		if defAgent, _, _ := r.resolveAgentDefault(ctx, msg); defAgent != "" {
+			activeAgentName = defAgent
+		}
 	}
 
 	providers, _ := inst.Client().Providers(ctx)
@@ -562,8 +568,45 @@ func (r *Router) switchAgent(ctx context.Context, msg channel.IncomingMessage, t
 	if err != nil {
 		return "", fmt.Errorf("switch agent: %w", err)
 	}
-	if activeSession == nil {
-		return r.handleAgentNoSession(ctx, msg, target, inst)
+
+	inThread := isOwnedThreadMessage(msg)
+
+	if target == "default" {
+		if inThread {
+			if activeSession == nil {
+				return "No active session in this thread. Send a message first to start a session.", nil
+			}
+			if err := inst.Client().SwitchAgent(ctx, activeSession.AgentSessionID, "build"); err != nil {
+				if errors.Is(err, relay.ErrUnsupported) {
+					return "⚠️ Agent switching is not supported by the current agent backend.", nil
+				}
+				return "", fmt.Errorf("switch agent: %w", err)
+			}
+			return "✅ Switched to agent build\nScope: this conversation", nil
+		}
+
+		channelID, err := modelScopeChannelID(msg)
+		if err != nil {
+			return "", safeReplyError("Channel information unavailable. Please try again.", err)
+		}
+		if r.isAdmin(ctx, msg) {
+			if err := r.store.ChannelRepo().UpsertAgent(ctx, msg.Platform, channelID, ""); err != nil {
+				return "", fmt.Errorf("agent: clear channel: %w", err)
+			}
+			slog.Info("agent default cleared", "platform", msg.Platform, "channel_id", channelID, "user_id", msg.UserID, "scope", "channel")
+			if activeSession != nil {
+				_ = inst.Client().SwitchAgent(ctx, activeSession.AgentSessionID, "build")
+			}
+			return "✅ Channel agent cleared.", nil
+		}
+		if err := r.store.OverrideRepo().UpsertAgent(ctx, msg.Platform, channelID, msg.UserID, ""); err != nil {
+			return "", fmt.Errorf("agent: clear personal: %w", err)
+		}
+		slog.Info("agent default cleared", "platform", msg.Platform, "channel_id", channelID, "user_id", msg.UserID, "scope", "personal")
+		if activeSession != nil {
+			_ = inst.Client().SwitchAgent(ctx, activeSession.AgentSessionID, "build")
+		}
+		return "✅ Personal agent cleared.", nil
 	}
 
 	allAgents, err := inst.Client().ListAgents(ctx)
@@ -610,20 +653,54 @@ func (r *Router) switchAgent(ctx context.Context, msg channel.IncomingMessage, t
 		return "Agent not found — refresh with /agent", nil
 	}
 
-	if err := inst.Client().SwitchAgent(ctx, activeSession.AgentSessionID, matched.Name); err != nil {
-		if errors.Is(err, relay.ErrNotFound) {
-			return "Agent not found — refresh with /agent", nil
+	if inThread {
+		if activeSession == nil {
+			return "No active session in this thread. Send a message first to start a session.", nil
 		}
-		if errors.Is(err, relay.ErrUnsupported) {
-			return "⚠️ Agent switching is not supported by the current agent backend.", nil
+		if err := inst.Client().SwitchAgent(ctx, activeSession.AgentSessionID, matched.Name); err != nil {
+			if errors.Is(err, relay.ErrNotFound) {
+				return "Agent not found — refresh with /agent", nil
+			}
+			if errors.Is(err, relay.ErrUnsupported) {
+				return "⚠️ Agent switching is not supported by the current agent backend.", nil
+			}
+			return "", fmt.Errorf("switch agent: %w", err)
 		}
-		return "", fmt.Errorf("switch agent: %w", err)
+
+		if matched.Model != nil && matched.Model.ID != "" {
+			return fmt.Sprintf("✅ Switched to agent %s (%s)\nScope: this conversation", matched.Name, matched.Model.ID), nil
+		}
+		return fmt.Sprintf("✅ Switched to agent %s\nScope: this conversation", matched.Name), nil
 	}
 
-	if matched.Model != nil && matched.Model.ID != "" {
-		return fmt.Sprintf("✅ Switched to agent %s (%s)", matched.Name, matched.Model.ID), nil
+	channelID, err := modelScopeChannelID(msg)
+	if err != nil {
+		return "", safeReplyError("Channel information unavailable. Please try again.", err)
 	}
-	return fmt.Sprintf("✅ Switched to agent %s", matched.Name), nil
+
+	if r.isAdmin(ctx, msg) {
+		if err := r.store.ChannelRepo().UpsertAgent(ctx, msg.Platform, channelID, matched.Name); err != nil {
+			return "", fmt.Errorf("agent: set channel: %w", err)
+		}
+		slog.Info("agent default set", "platform", msg.Platform, "channel_id", channelID, "user_id", msg.UserID, "scope", "channel", "agent", matched.Name)
+		if activeSession != nil {
+			if err := inst.Client().SwitchAgent(ctx, activeSession.AgentSessionID, matched.Name); err != nil {
+				slog.Warn("switch active session agent failed", "session_id", activeSession.AgentSessionID, "agent", matched.Name, "error", err)
+			}
+		}
+		return fmt.Sprintf("✅ Channel agent set: %s\nScope: this channel — new sessions start on this agent.", matched.Name), nil
+	}
+
+	if err := r.store.OverrideRepo().UpsertAgent(ctx, msg.Platform, channelID, msg.UserID, matched.Name); err != nil {
+		return "", fmt.Errorf("agent: set personal: %w", err)
+	}
+	slog.Info("agent default set", "platform", msg.Platform, "channel_id", channelID, "user_id", msg.UserID, "scope", "personal", "agent", matched.Name)
+	if activeSession != nil {
+		if err := inst.Client().SwitchAgent(ctx, activeSession.AgentSessionID, matched.Name); err != nil {
+			slog.Warn("switch active session agent failed", "session_id", activeSession.AgentSessionID, "agent", matched.Name, "error", err)
+		}
+	}
+	return fmt.Sprintf("✅ Personal agent set: %s\nScope: personal — your new sessions start on this agent.", matched.Name), nil
 }
 
 func (r *Router) handleAgentCallback(ctx context.Context, msg channel.IncomingMessage) error {

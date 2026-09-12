@@ -17,13 +17,40 @@ import (
 )
 
 func TestAgentPicker_NoSession(t *testing.T) {
-	r, _, reply := newTestRouter()
+	r, client, reply := newTestRouter()
+	client.agents = []relay.AgentInfo{
+		{Name: "build", Description: "General software development agent", Mode: "primary", Native: true},
+		{Name: "reviewer", Description: "Code reviewer", Mode: "primary", Native: false},
+	}
 	msg := msgFrom("user1", "/agent", reply)
 	if err := r.Route(context.Background(), msg); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
-	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "No active session") {
-		t.Fatalf("expected no active session reply, got %v", reply.sends)
+	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Page 1/1 · Agents") {
+		t.Fatalf("expected picker page text at root channel without session, got %v", reply.sends)
+	}
+	if len(reply.buttons) == 0 || len(reply.buttons[0]) == 0 {
+		t.Fatalf("expected picker buttons at root channel without session, got %v", reply.buttons)
+	}
+}
+
+func TestAgentPicker_ThreadNoSession(t *testing.T) {
+	r, client, reply := newTestRouter()
+	client.agents = []relay.AgentInfo{
+		{Name: "build", Description: "General software development agent", Mode: "primary", Native: true},
+		{Name: "reviewer", Description: "Code reviewer", Mode: "primary", Native: false},
+	}
+	msg := msgFrom("user1", "/agent", reply)
+	msg.IsThread = true
+	msg.ThreadID = "thread-1"
+	if err := r.Route(context.Background(), msg); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "No active session here") {
+		t.Fatalf("expected no active session guidance in thread, got %v", reply.sends)
+	}
+	if len(reply.buttons) != 0 && len(reply.buttons[0]) > 0 {
+		t.Fatalf("expected no buttons in thread without session, got %v", reply.buttons)
 	}
 }
 
@@ -214,7 +241,7 @@ func TestAgentPicker_UnknownModelWarning(t *testing.T) {
 
 func TestAgentSwitch_NumberNameSubstringAndModeFilter(t *testing.T) {
 	r, client, reply := newTestRouter()
-	if err := r.store.SessionRepo().SetActive(context.Background(), "telegram", "chat1", "", "user1", "sess-1", 100); err != nil {
+	if err := r.store.SessionRepo().SetActive(context.Background(), "telegram", "chat1", "thread-1", "", "sess-1", 100); err != nil {
 		t.Fatal(err)
 	}
 
@@ -227,8 +254,15 @@ func TestAgentSwitch_NumberNameSubstringAndModeFilter(t *testing.T) {
 		{Name: "unknown-moded", Mode: "custom_mode", Native: false},
 	}
 
+	threadMsg := func(text string) channel.IncomingMessage {
+		m := msgFrom("user1", text, reply)
+		m.IsThread = true
+		m.ThreadID = "thread-1"
+		return m
+	}
+
 	t.Run("switch by number", func(t *testing.T) {
-		msg := msgFrom("user1", "/agent switch 3", reply)
+		msg := threadMsg("/agent switch 3")
 		out, err := r.handleAgent(context.Background(), msg, "switch 3")
 		if err != nil {
 			t.Fatalf("handleAgent: %v", err)
@@ -242,7 +276,7 @@ func TestAgentSwitch_NumberNameSubstringAndModeFilter(t *testing.T) {
 	})
 
 	t.Run("switch by exact name", func(t *testing.T) {
-		msg := msgFrom("user1", "/agent switch plan", reply)
+		msg := threadMsg("/agent switch plan")
 		out, err := r.handleAgent(context.Background(), msg, "switch plan")
 		if err != nil {
 			t.Fatalf("handleAgent: %v", err)
@@ -253,7 +287,7 @@ func TestAgentSwitch_NumberNameSubstringAndModeFilter(t *testing.T) {
 	})
 
 	t.Run("switch subagent refused", func(t *testing.T) {
-		msg := msgFrom("user1", "/agent switch general", reply)
+		msg := threadMsg("/agent switch general")
 		out, err := r.handleAgent(context.Background(), msg, "switch general")
 		if err != nil {
 			t.Fatalf("handleAgent: %v", err)
@@ -264,7 +298,7 @@ func TestAgentSwitch_NumberNameSubstringAndModeFilter(t *testing.T) {
 	})
 
 	t.Run("switch unknown mode refused", func(t *testing.T) {
-		msg := msgFrom("user1", "/agent switch unknown-moded", reply)
+		msg := threadMsg("/agent switch unknown-moded")
 		out, err := r.handleAgent(context.Background(), msg, "switch unknown-moded")
 		if err != nil {
 			t.Fatalf("handleAgent: %v", err)
@@ -275,7 +309,7 @@ func TestAgentSwitch_NumberNameSubstringAndModeFilter(t *testing.T) {
 	})
 
 	t.Run("switch by unique substring", func(t *testing.T) {
-		msg := msgFrom("user1", "/agent switch plan", reply)
+		msg := threadMsg("/agent switch pla")
 		out, err := r.handleAgent(context.Background(), msg, "switch pla")
 		if err != nil {
 			t.Fatalf("handleAgent: %v", err)
@@ -286,7 +320,7 @@ func TestAgentSwitch_NumberNameSubstringAndModeFilter(t *testing.T) {
 	})
 
 	t.Run("switch by ambiguous substring re-renders picker", func(t *testing.T) {
-		msg := msgFrom("user1", "/agent switch review", reply)
+		msg := threadMsg("/agent switch review")
 		_, err := r.handleAgent(context.Background(), msg, "switch review")
 		if err != nil && err != errReplied {
 			t.Fatalf("handleAgent: %v", err)
@@ -297,7 +331,7 @@ func TestAgentSwitch_NumberNameSubstringAndModeFilter(t *testing.T) {
 	})
 
 	t.Run("switch unknown agent", func(t *testing.T) {
-		msg := msgFrom("user1", "/agent switch non-existent", reply)
+		msg := threadMsg("/agent switch non-existent")
 		out, err := r.handleAgent(context.Background(), msg, "switch non-existent")
 		if err != nil {
 			t.Fatalf("handleAgent: %v", err)
@@ -721,6 +755,244 @@ func TestAgentPicker_CLIBackendUnsupported(t *testing.T) {
 	}
 	if !strings.Contains(out, "Agent switching is not supported by the current agent backend") {
 		t.Fatalf("expected unsupported backend message on switch, got: %s", out)
+	}
+}
+
+func TestAgentPicker_CallbackRootChannelAdminPersistsChannel(t *testing.T) {
+	r, client, reply := newTestRouter()
+	if err := r.store.SessionRepo().SetActive(context.Background(), "telegram", "chat1", "", "user1", "sess-root", 100); err != nil {
+		t.Fatal(err)
+	}
+	client.agents = []relay.AgentInfo{
+		{Name: "build", Mode: "primary", Native: true},
+		{Name: "reviewer", Mode: "primary", Native: false},
+	}
+
+	msg := msgFrom("user1", "/agent", reply)
+	_, buttons, err := r.buildAgentPickerPage(context.Background(), msg, 1)
+	if err != nil {
+		t.Fatalf("buildAgentPickerPage: %v", err)
+	}
+	if len(buttons) < 2 {
+		t.Fatalf("expected at least 2 buttons, got %d", len(buttons))
+	}
+
+	reviewerBtn := buttons[1]
+	ref := fakeRef{id: "msg-1"}
+	cbMsg := channel.IncomingMessage{
+		Platform:     "telegram",
+		ChannelID:    "chat1",
+		UserID:       "user1",
+		IsCallback:   true,
+		CallbackData: reviewerBtn.Value,
+		CallbackRef:  ref,
+		ReplyCtx:     reply,
+	}
+
+	if err := r.handleCallback(context.Background(), cbMsg); err != nil {
+		t.Fatalf("handleCallback: %v", err)
+	}
+
+	st := r.store.(*fakeStore)
+	ch := st.channelRepo.channels["telegram:chat1"]
+	if ch == nil || ch.Agent != "reviewer" {
+		t.Fatalf("channel agent = %+v, want reviewer", ch)
+	}
+
+	if len(client.switchAgentCalls) != 1 || client.switchAgentCalls[0].sessionID != "sess-root" || client.switchAgentCalls[0].name != "reviewer" {
+		t.Fatalf("expected active session switch to reviewer, got %v", client.switchAgentCalls)
+	}
+
+	if len(reply.edits) == 0 {
+		t.Fatal("expected reply edit on callback")
+	}
+	lastEdit := reply.edits[len(reply.edits)-1]
+	if !strings.Contains(lastEdit, "✅ Channel agent set: reviewer") || !strings.Contains(lastEdit, "Scope: this channel") {
+		t.Fatalf("unexpected callback edit output: %s", lastEdit)
+	}
+}
+
+func TestAgentPicker_CallbackRootChannelNonAdminPersistsOverride(t *testing.T) {
+	r, client, reply, overrides := newTestRouterWithAccess()
+	overrides.overrides["telegram:chat1:user2"] = &store.UserOverride{
+		ChannelID: "chat1", Platform: "telegram", UserID: "user2", Role: "allow",
+	}
+	if err := r.store.SessionRepo().SetActive(context.Background(), "telegram", "chat1", "", "user2", "sess-root-2", 100); err != nil {
+		t.Fatal(err)
+	}
+	client.agents = []relay.AgentInfo{
+		{Name: "build", Mode: "primary", Native: true},
+		{Name: "reviewer", Mode: "primary", Native: false},
+	}
+
+	msg := channel.IncomingMessage{Platform: "telegram", ChannelID: "chat1", UserID: "user2", ReplyCtx: reply}
+	_, buttons, err := r.buildAgentPickerPage(context.Background(), msg, 1)
+	if err != nil {
+		t.Fatalf("buildAgentPickerPage: %v", err)
+	}
+	if len(buttons) < 2 {
+		t.Fatalf("expected at least 2 buttons, got %d", len(buttons))
+	}
+
+	reviewerBtn := buttons[1]
+	ref := fakeRef{id: "msg-2"}
+	cbMsg := channel.IncomingMessage{
+		Platform:     "telegram",
+		ChannelID:    "chat1",
+		UserID:       "user2",
+		IsCallback:   true,
+		CallbackData: reviewerBtn.Value,
+		CallbackRef:  ref,
+		ReplyCtx:     reply,
+	}
+
+	if err := r.handleCallback(context.Background(), cbMsg); err != nil {
+		t.Fatalf("handleCallback: %v", err)
+	}
+
+	st := r.store.(*fakeStore)
+	if ch := st.channelRepo.channels["telegram:chat1"]; ch != nil && ch.Agent != "" {
+		t.Fatalf("channel agent must remain empty for non-admin, got %q", ch.Agent)
+	}
+
+	o := overrides.overrides["telegram:chat1:user2"]
+	if o == nil || o.Agent != "reviewer" {
+		t.Fatalf("user override agent = %+v, want reviewer", o)
+	}
+
+	if len(client.switchAgentCalls) != 1 || client.switchAgentCalls[0].sessionID != "sess-root-2" || client.switchAgentCalls[0].name != "reviewer" {
+		t.Fatalf("expected active session switch to reviewer, got %v", client.switchAgentCalls)
+	}
+
+	if len(reply.edits) == 0 {
+		t.Fatal("expected reply edit on callback")
+	}
+	lastEdit := reply.edits[len(reply.edits)-1]
+	if !strings.Contains(lastEdit, "✅ Personal agent set: reviewer") || !strings.Contains(lastEdit, "Scope: personal") {
+		t.Fatalf("unexpected callback edit output: %s", lastEdit)
+	}
+}
+
+func TestAgentPicker_CallbackThreadSwitchesSessionOnly(t *testing.T) {
+	r, client, reply := newTestRouter()
+	if err := r.store.SessionRepo().SetActive(context.Background(), "discord", "chat1", "thread-99", "", "sess-thread", 100); err != nil {
+		t.Fatal(err)
+	}
+	client.agents = []relay.AgentInfo{
+		{Name: "build", Mode: "primary", Native: true},
+		{Name: "reviewer", Mode: "primary", Native: false, Model: &relay.ModelRef{ID: "glm-5.2"}},
+	}
+
+	msg := channel.IncomingMessage{
+		Platform:  "discord",
+		ChannelID: "chat1",
+		ThreadID:  "thread-99",
+		IsThread:  true,
+		UserID:    "user1",
+		ReplyCtx:  reply,
+	}
+	_, buttons, err := r.buildAgentPickerPage(context.Background(), msg, 1)
+	if err != nil {
+		t.Fatalf("buildAgentPickerPage: %v", err)
+	}
+	if len(buttons) < 2 {
+		t.Fatalf("expected at least 2 buttons, got %d", len(buttons))
+	}
+
+	reviewerBtn := buttons[1]
+	ref := fakeRef{id: "msg-3"}
+	cbMsg := channel.IncomingMessage{
+		Platform:     "discord",
+		ChannelID:    "chat1",
+		ThreadID:     "thread-99",
+		IsThread:     true,
+		UserID:       "user1",
+		IsCallback:   true,
+		CallbackData: reviewerBtn.Value,
+		CallbackRef:  ref,
+		ReplyCtx:     reply,
+	}
+
+	if err := r.handleCallback(context.Background(), cbMsg); err != nil {
+		t.Fatalf("handleCallback: %v", err)
+	}
+
+	st := r.store.(*fakeStore)
+	if ch := st.channelRepo.channels["discord:chat1"]; ch != nil && ch.Agent != "" {
+		t.Fatalf("thread switch must not alter channel agent, got %q", ch.Agent)
+	}
+
+	if len(client.switchAgentCalls) != 1 || client.switchAgentCalls[0].sessionID != "sess-thread" || client.switchAgentCalls[0].name != "reviewer" {
+		t.Fatalf("expected thread session switch, got %v", client.switchAgentCalls)
+	}
+
+	if len(reply.edits) == 0 {
+		t.Fatal("expected reply edit on callback")
+	}
+	lastEdit := reply.edits[len(reply.edits)-1]
+	if !strings.Contains(lastEdit, "✅ Switched to agent reviewer (glm-5.2)") || !strings.Contains(lastEdit, "Scope: this conversation") {
+		t.Fatalf("unexpected callback edit output: %s", lastEdit)
+	}
+}
+
+func TestAgentPicker_InheritedByNewThreadAutoThread(t *testing.T) {
+	r, client, reply := newTestRouter()
+	client.agents = []relay.AgentInfo{
+		{Name: "build", Mode: "primary", Native: true},
+		{Name: "reviewer", Mode: "primary", Native: false},
+	}
+
+	st := r.store.(*fakeStore)
+	st.overrideRepo.overrides["discord:parent-ch:user1"] = &store.UserOverride{
+		ChannelID: "parent-ch",
+		Platform:  "discord",
+		UserID:    "user1",
+		Role:      "admin",
+	}
+	st.channelRepo.channels["discord:parent-ch"] = &store.Channel{
+		ChannelID:  "parent-ch",
+		Platform:   "discord",
+		ListenMode: "all",
+	}
+
+	rootMsg := msgFrom("user1", "/agent reviewer", reply)
+	rootMsg.Platform = "discord"
+	rootMsg.ChannelID = "parent-ch"
+	if err := r.Route(context.Background(), rootMsg); err != nil {
+		t.Fatalf("Route root: %v", err)
+	}
+
+	ch := st.channelRepo.channels["discord:parent-ch"]
+	if ch == nil || ch.Agent != "reviewer" {
+		t.Fatalf("expected channel agent reviewer, got %+v", ch)
+	}
+
+	threadMsg := channel.IncomingMessage{
+		Platform:        "discord",
+		ChannelID:       "thread-new",
+		ParentChannelID: "parent-ch",
+		ThreadID:        "thread-new",
+		IsThread:        true,
+		UserID:          "user1",
+		Text:            "new message in new thread",
+		ReplyCtx:        reply,
+	}
+
+	if err := r.Route(context.Background(), threadMsg); err != nil {
+		t.Fatalf("Route thread: %v", err)
+	}
+	waitForDispatch(t, client)
+	waitForResponse(t, r)
+
+	var foundReviewerSwitch bool
+	for _, call := range client.switchAgentCalls {
+		if call.name == "reviewer" {
+			foundReviewerSwitch = true
+			break
+		}
+	}
+	if !foundReviewerSwitch {
+		t.Fatalf("expected new thread session to inherit channel agent reviewer, switch calls: %v", client.switchAgentCalls)
 	}
 }
 

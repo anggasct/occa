@@ -2,14 +2,11 @@ package router
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"strings"
 
 	"github.com/anggasct/occa/internal/channel"
-	"github.com/anggasct/occa/internal/relay"
 )
 
 func noSessionAgentGuidance(admin bool) string {
@@ -55,75 +52,6 @@ func (r *Router) agentDefaultView(ctx context.Context, msg channel.IncomingMessa
 	}
 	sb.WriteString(noSessionAgentGuidance(r.isAdmin(ctx, msg)))
 	return sb.String(), nil
-}
-
-func matchAgentName(switchable []relay.AgentInfo, target string) *relay.AgentInfo {
-	if num, err := strconv.Atoi(target); err == nil && num >= 1 && num <= len(switchable) {
-		return &switchable[num-1]
-	}
-	for i := range switchable {
-		if strings.EqualFold(switchable[i].Name, target) {
-			return &switchable[i]
-		}
-	}
-	lowerTarget := strings.ToLower(target)
-	var single *relay.AgentInfo
-	count := 0
-	for i := range switchable {
-		if strings.Contains(strings.ToLower(switchable[i].Name), lowerTarget) {
-			single = &switchable[i]
-			count++
-			if count > 1 {
-				return nil
-			}
-		}
-	}
-	return single
-}
-
-func (r *Router) handleAgentNoSession(ctx context.Context, msg channel.IncomingMessage, target string, inst AgentInstance) (string, error) {
-	channelID, err := modelScopeChannelID(msg)
-	if err != nil {
-		return "", safeReplyError("Channel information unavailable. Please try again.", err)
-	}
-	if target == "default" {
-		if r.isAdmin(ctx, msg) {
-			if err := r.store.ChannelRepo().UpsertAgent(ctx, msg.Platform, channelID, ""); err != nil {
-				return "", fmt.Errorf("agent: clear channel: %w", err)
-			}
-			slog.Info("agent default cleared", "platform", msg.Platform, "channel_id", channelID, "user_id", msg.UserID, "scope", "channel")
-			return "✅ Channel agent cleared.", nil
-		}
-		if err := r.store.OverrideRepo().UpsertAgent(ctx, msg.Platform, channelID, msg.UserID, ""); err != nil {
-			return "", fmt.Errorf("agent: clear personal: %w", err)
-		}
-		slog.Info("agent default cleared", "platform", msg.Platform, "channel_id", channelID, "user_id", msg.UserID, "scope", "personal")
-		return "✅ Personal agent cleared.", nil
-	}
-	allAgents, err := inst.Client().ListAgents(ctx)
-	if err != nil {
-		if errors.Is(err, relay.ErrUnsupported) {
-			return "⚠️ Agent switching is not supported by the current agent backend.", nil
-		}
-		return "⚠️ Agents unavailable — agent server not responding", nil
-	}
-	switchable, _ := filterAgents(allAgents)
-	matched := matchAgentName(switchable, target)
-	if matched == nil {
-		return "Agent not found — refresh with /agent", nil
-	}
-	if r.isAdmin(ctx, msg) {
-		if err := r.store.ChannelRepo().UpsertAgent(ctx, msg.Platform, channelID, matched.Name); err != nil {
-			return "", fmt.Errorf("agent: set channel: %w", err)
-		}
-		slog.Info("agent default set", "platform", msg.Platform, "channel_id", channelID, "user_id", msg.UserID, "scope", "channel", "agent", matched.Name)
-		return fmt.Sprintf("✅ Channel agent set: %s\nScope: this channel — new sessions start on this agent.", matched.Name), nil
-	}
-	if err := r.store.OverrideRepo().UpsertAgent(ctx, msg.Platform, channelID, msg.UserID, matched.Name); err != nil {
-		return "", fmt.Errorf("agent: set personal: %w", err)
-	}
-	slog.Info("agent default set", "platform", msg.Platform, "channel_id", channelID, "user_id", msg.UserID, "scope", "personal", "agent", matched.Name)
-	return fmt.Sprintf("✅ Personal agent set: %s\nScope: personal — your new sessions start on this agent.", matched.Name), nil
 }
 
 func (r *Router) applyAgentDefault(ctx context.Context, msg channel.IncomingMessage, inst AgentInstance, sessionID string) {
