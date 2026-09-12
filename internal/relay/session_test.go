@@ -76,6 +76,14 @@ func (m *mockSessionRepo) TakeoverCandidate(_ context.Context, _, _, _ string) (
 	return m.takeover, nil
 }
 
+func (m *mockSessionRepo) LinkThreadRoot(_ context.Context, _, _, _, _, _, _ string) error {
+	return nil
+}
+
+func (m *mockSessionRepo) ThreadRoot(_ context.Context, _, _, _ string) (*store.ThreadRootCard, error) {
+	return nil, nil
+}
+
 type mockClient struct {
 	sessionID     string
 	sessionExists bool

@@ -352,6 +352,14 @@ func main() {
 			}
 			return errors.New("webhook channel adapter unavailable")
 		})
+		rt.SetRootCardEditor(func(ctx context.Context, platform, channelID, messageID, text string) error {
+			for _, ch := range channels {
+				if ch.Name() == platform {
+					return notifyEdit(ch, channelID, messageID, text)
+				}
+			}
+			return errors.New("channel adapter unavailable")
+		})
 		webhookSrv.SetWorkspaceResolver(webhook.NewWorkspaceManager())
 		webhookSrv.SetSessionStore(db.SessionRepo())
 		if err := webhookSrv.Start(ctx); err != nil {

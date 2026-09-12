@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	schemaVersion    = 14
+	schemaVersion    = 15
 	SchemaVersion    = schemaVersion
 	busyTimeoutMilli = 5000
 )
@@ -31,6 +31,20 @@ var migrations = []func(s *SQLiteStore, tx *sql.Tx) error{
 	addRecoveryEvents,
 	addAgentDefaults,
 	addSessionTakeover,
+	addSessionRootCard,
+}
+
+func addSessionRootCard(_ *SQLiteStore, tx *sql.Tx) error {
+	if _, err := tx.Exec(`ALTER TABLE session ADD COLUMN root_message_id TEXT NOT NULL DEFAULT '';`); err != nil {
+		return fmt.Errorf("store: migrate session root message: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE session ADD COLUMN root_channel TEXT NOT NULL DEFAULT '';`); err != nil {
+		return fmt.Errorf("store: migrate session root channel: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE session ADD COLUMN root_card TEXT NOT NULL DEFAULT '';`); err != nil {
+		return fmt.Errorf("store: migrate session root card: %w", err)
+	}
+	return nil
 }
 
 func addSessionTakeover(_ *SQLiteStore, tx *sql.Tx) error {

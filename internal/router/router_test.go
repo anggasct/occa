@@ -759,6 +759,7 @@ type fakeSessionRepo struct {
 	sessions []store.Session
 	models   map[string]string
 	takeover map[string]takeoverMark
+	roots    map[string]store.ThreadRootCard
 }
 
 type takeoverMark struct {
@@ -804,6 +805,22 @@ func (f *fakeSessionRepo) TakeoverCandidate(_ context.Context, platform, channel
 		return nil, nil
 	}
 	return &store.TakeoverCandidate{SessionID: mark.sessionID, AgentPID: mark.pid, Seed: mark.seed}, nil
+}
+
+func (f *fakeSessionRepo) LinkThreadRoot(_ context.Context, platform, channelID, threadID, messageID, channel, card string) error {
+	if f.roots == nil {
+		f.roots = make(map[string]store.ThreadRootCard)
+	}
+	f.roots[f.takeoverKey(platform, channelID, threadID)] = store.ThreadRootCard{MessageID: messageID, Channel: channel, Card: card}
+	return nil
+}
+
+func (f *fakeSessionRepo) ThreadRoot(_ context.Context, platform, channelID, threadID string) (*store.ThreadRootCard, error) {
+	root, ok := f.roots[f.takeoverKey(platform, channelID, threadID)]
+	if !ok {
+		return nil, nil
+	}
+	return &root, nil
 }
 
 func (f *fakeSessionRepo) sessionKey(platform, channelID, threadID, userID string) string {

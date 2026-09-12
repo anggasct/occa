@@ -256,4 +256,55 @@ func (r *sqliteSessionRepo) TakeoverCandidate(ctx context.Context, platform, cha
 	return &c, nil
 }
 
+func (r *sqliteSessionRepo) LinkThreadRoot(ctx context.Context, platform, channelID, threadID, messageID, channel, card string) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: session link thread root: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	now := time.Now().Unix()
+
+	var id int64
+	err = tx.QueryRowContext(ctx,
+		`SELECT id FROM session WHERE platform = ? AND channel_id = ? AND thread_id = ? AND user_id = ''`,
+		platform, channelID, threadID,
+	).Scan(&id)
+	switch {
+	case err == sql.ErrNoRows:
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO session (channel_id, platform, agent_session_id, thread_id, user_id, active, root_message_id, root_channel, root_card, created_at, updated_at) VALUES (?, ?, '', ?, '', 1, ?, ?, ?, ?, ?)`,
+			channelID, platform, threadID, messageID, channel, card, now, now,
+		); err != nil {
+			return fmt.Errorf("store: session link thread root: insert: %w", err)
+		}
+	case err != nil:
+		return fmt.Errorf("store: session link thread root: lookup: %w", err)
+	default:
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE session SET root_message_id = ?, root_channel = ?, root_card = ?, updated_at = ? WHERE id = ?`,
+			messageID, channel, card, now, id,
+		); err != nil {
+			return fmt.Errorf("store: session link thread root: update: %w", err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (r *sqliteSessionRepo) ThreadRoot(ctx context.Context, platform, channelID, threadID string) (*ThreadRootCard, error) {
+	var rc ThreadRootCard
+	err := r.db.QueryRowContext(ctx,
+		`SELECT root_message_id, root_channel, root_card FROM session WHERE platform = ? AND channel_id = ? AND thread_id = ? AND user_id = '' AND root_message_id != '' ORDER BY updated_at DESC, id DESC LIMIT 1`,
+		platform, channelID, threadID,
+	).Scan(&rc.MessageID, &rc.Channel, &rc.Card)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: session thread root: %w", err)
+	}
+	return &rc, nil
+}
+
 var _ SessionRepo = (*sqliteSessionRepo)(nil)

@@ -140,6 +140,12 @@ type TakeoverCandidate struct {
 	Seed      string
 }
 
+type ThreadRootCard struct {
+	MessageID string
+	Channel   string
+	Card      string
+}
+
 type SessionRepo interface {
 	Active(ctx context.Context, platform, channelID, threadID, userID string) (sessionID string, agentPID int, err error)
 	SetActive(ctx context.Context, platform, channelID, threadID, userID, sessionID string, agentPID int) error
@@ -154,6 +160,8 @@ type SessionRepo interface {
 	MarkTakeoverEligible(ctx context.Context, platform, channelID, threadID, sessionID string, agentPID int, seed string) error
 	ClearTakeoverEligible(ctx context.Context, platform, channelID, threadID string) error
 	TakeoverCandidate(ctx context.Context, platform, channelID, threadID string) (*TakeoverCandidate, error)
+	LinkThreadRoot(ctx context.Context, platform, channelID, threadID, messageID, channel, card string) error
+	ThreadRoot(ctx context.Context, platform, channelID, threadID string) (*ThreadRootCard, error)
 }
 
 type ChannelRepo interface {
