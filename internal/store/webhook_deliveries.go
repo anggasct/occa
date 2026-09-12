@@ -200,4 +200,32 @@ func (r *sqliteWebhookDeliveryRepo) FailStale(ctx context.Context, cutoff int64,
 	return int(n), nil
 }
 
+func (r *sqliteWebhookDeliveryRepo) SetReviewKey(ctx context.Context, id int64, reviewKey string) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE webhook_delivery SET review_key = ?, updated_at = ? WHERE id = ?`,
+		reviewKey, time.Now().Unix(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("store: webhook delivery set review key: %w", err)
+	}
+	return nil
+}
+
+func (r *sqliteWebhookDeliveryRepo) FindReviewDuplicate(ctx context.Context, endpoint, reviewKey string, cutoff int64) (*WebhookDelivery, error) {
+	row := r.db.QueryRowContext(ctx,
+		`SELECT `+deliveryColumns+` FROM webhook_delivery
+		 WHERE endpoint = ? AND review_key = ? AND status IN (?, ?) AND updated_at >= ?
+		 ORDER BY id DESC LIMIT 1`,
+		endpoint, reviewKey, string(WebhookStatusCompleted), string(WebhookStatusSkipped), cutoff,
+	)
+	d, err := scanWebhookDelivery(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: webhook delivery find review duplicate: %w", err)
+	}
+	return d, nil
+}
+
 var _ WebhookDeliveryRepo = (*sqliteWebhookDeliveryRepo)(nil)
