@@ -1156,3 +1156,193 @@ func TestPermissionContextHeader(t *testing.T) {
 		t.Fatalf("unknown project header = %q", unknown)
 	}
 }
+
+func threadPermissionsMessage(reply channel.ReplyContext, threadID string) channel.IncomingMessage {
+	return channel.IncomingMessage{
+		Platform:  "telegram",
+		ChannelID: "chat1",
+		IsThread:  true,
+		ThreadID:  threadID,
+		Text:      "/permissions",
+		ReplyCtx:  reply,
+	}
+}
+
+func TestPermissionsBrowserListsChannelAndThreadScopes(t *testing.T) {
+	r, st := permissionsTestRouter(t)
+	ctx := context.Background()
+	repo := st.PermissionRuleRepo()
+	channelOwner := store.PermissionOwner{Platform: "telegram", ChannelID: "chat1"}
+	threadOwner := store.PermissionOwner{Platform: "telegram", ChannelID: "chat1", ThreadID: "thread-1"}
+	siblingOwner := store.PermissionOwner{Platform: "telegram", ChannelID: "chat1", ThreadID: "thread-2"}
+	foreignOwner := store.PermissionOwner{Platform: "telegram", ChannelID: "chat2"}
+	for owner, pattern := range map[store.PermissionOwner]string{
+		channelOwner: "chan-pattern",
+		threadOwner:  "thread-pattern",
+		siblingOwner: "sibling-pattern",
+		foreignOwner: "foreign-pattern",
+	} {
+		if _, err := repo.Add(ctx, owner, "bash", []string{pattern}); err != nil {
+			t.Fatalf("Add %v: %v", owner, err)
+		}
+	}
+
+	reply := &permissionReply{}
+	if _, err := r.handlePermissions(ctx, threadPermissionsMessage(reply, "thread-1"), ""); !errors.Is(err, errReplied) {
+		t.Fatalf("err = %v, want errReplied", err)
+	}
+	text := reply.sends[0].text
+	for _, want := range []string{
+		"🔐 Saved permissions: 2",
+		`Bash — "thread-pattern" [thread]`,
+		`Bash — "chan-pattern" [channel]`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("thread-1 list missing %q: %q", want, text)
+		}
+	}
+	for _, leak := range []string{"sibling-pattern", "foreign-pattern"} {
+		if strings.Contains(text, leak) {
+			t.Fatalf("thread-1 list leaked %q: %q", leak, text)
+		}
+	}
+	if len(reply.sends[0].buttons) != 5 { // 2 rules x (Details + Delete) + clear
+		t.Fatalf("buttons = %+v, want 5", reply.sends[0].buttons)
+	}
+
+	sibReply := &permissionReply{}
+	if _, err := r.handlePermissions(ctx, threadPermissionsMessage(sibReply, "thread-2"), ""); !errors.Is(err, errReplied) {
+		t.Fatalf("sibling err = %v, want errReplied", err)
+	}
+	sibText := sibReply.sends[0].text
+	for _, want := range []string{`Bash — "sibling-pattern" [thread]`, `Bash — "chan-pattern" [channel]`} {
+		if !strings.Contains(sibText, want) {
+			t.Fatalf("thread-2 list missing %q: %q", want, sibText)
+		}
+	}
+	if strings.Contains(sibText, "thread-pattern") {
+		t.Fatalf("thread-2 list leaked thread-1 rule: %q", sibText)
+	}
+}
+
+func TestPermissionsDeleteChannelScopedRuleFromThread(t *testing.T) {
+	r, st := permissionsTestRouter(t)
+	ctx := context.Background()
+	repo := st.PermissionRuleRepo()
+	channelOwner := store.PermissionOwner{Platform: "telegram", ChannelID: "chat1"}
+	threadOwner := store.PermissionOwner{Platform: "telegram", ChannelID: "chat1", ThreadID: "thread-1"}
+	ruleID, err := repo.Add(ctx, channelOwner, "bash", []string{"chan-gone"})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	text, err := r.handlePermissions(ctx, threadPermissionsMessage(&permissionReply{}, "thread-1"), "delete "+strconv.FormatInt(ruleID, 10))
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if !strings.Contains(text, "🗑 Rule #"+strconv.FormatInt(ruleID, 10)+" deleted") {
+		t.Fatalf("delete reply = %q", text)
+	}
+	if got, _ := repo.ListVisible(ctx, threadOwner); len(got) != 0 {
+		t.Fatalf("rules after text delete = %+v", got)
+	}
+
+	ruleID2, err := repo.Add(ctx, channelOwner, "bash", []string{"chan-gone-2"})
+	if err != nil {
+		t.Fatalf("Add 2: %v", err)
+	}
+	reply := &permissionReply{}
+	delMsg := channel.IncomingMessage{
+		Platform:     "telegram",
+		ChannelID:    "chat1",
+		IsThread:     true,
+		ThreadID:     "thread-1",
+		IsCallback:   true,
+		CallbackData: "perm:del:" + strconv.FormatInt(ruleID2, 10) + ":" + permissionOwnerFingerprint(threadOwner),
+		CallbackRef:  permissionRef("perm-message"),
+		ReplyCtx:     reply,
+	}
+	if err := r.handlePermissionCallback(ctx, delMsg); err != nil {
+		t.Fatalf("delete callback: %v", err)
+	}
+	if edit := reply.lastEdit(); !strings.Contains(edit.text, "🗑 Rule #"+strconv.FormatInt(ruleID2, 10)+" deleted") {
+		t.Fatalf("delete callback reply = %q", edit.text)
+	}
+	if got, _ := repo.ListVisible(ctx, threadOwner); len(got) != 0 {
+		t.Fatalf("rules after callback delete = %+v", got)
+	}
+}
+
+func TestPermissionsDetailsShowsScope(t *testing.T) {
+	r, st := permissionsTestRouter(t)
+	ctx := context.Background()
+	repo := st.PermissionRuleRepo()
+	channelOwner := store.PermissionOwner{Platform: "telegram", ChannelID: "chat1"}
+	threadOwner := store.PermissionOwner{Platform: "telegram", ChannelID: "chat1", ThreadID: "thread-1"}
+	chanID, err := repo.Add(ctx, channelOwner, "bash", []string{"chan-pattern"})
+	if err != nil {
+		t.Fatalf("Add channel: %v", err)
+	}
+	threadID, err := repo.Add(ctx, threadOwner, "bash", []string{"thread-pattern"})
+	if err != nil {
+		t.Fatalf("Add thread: %v", err)
+	}
+
+	fp := permissionOwnerFingerprint(threadOwner)
+	for id, want := range map[int64]string{chanID: "Scope: channel", threadID: "Scope: thread"} {
+		reply := &permissionReply{}
+		msg := channel.IncomingMessage{
+			Platform:     "telegram",
+			ChannelID:    "chat1",
+			IsThread:     true,
+			ThreadID:     "thread-1",
+			IsCallback:   true,
+			CallbackData: "perm:det:" + strconv.FormatInt(id, 10) + ":1:" + fp,
+			CallbackRef:  permissionRef("perm-message"),
+			ReplyCtx:     reply,
+		}
+		if err := r.handlePermissionCallback(ctx, msg); err != nil {
+			t.Fatalf("details callback %d: %v", id, err)
+		}
+		if edit := reply.lastEdit(); !strings.Contains(edit.text, want) {
+			t.Fatalf("details %d missing %q: %q", id, want, edit.text)
+		}
+	}
+}
+
+func TestPermissionsClearRemovesChannelScopedRules(t *testing.T) {
+	r, st := permissionsTestRouter(t)
+	ctx := context.Background()
+	repo := st.PermissionRuleRepo()
+	owner := permissionsMessageOwner()
+	channelOwner := store.PermissionOwner{Platform: "telegram", ChannelID: "chat1"}
+	if _, err := repo.Add(ctx, owner, "bash", []string{"own-pattern"}); err != nil {
+		t.Fatalf("Add own: %v", err)
+	}
+	if _, err := repo.Add(ctx, channelOwner, "bash", []string{"chan-pattern"}); err != nil {
+		t.Fatalf("Add channel: %v", err)
+	}
+
+	reply := &permissionReply{}
+	if _, err := r.handlePermissions(ctx, permissionsMessage(reply), "clear"); !errors.Is(err, errReplied) {
+		t.Fatalf("err = %v, want errReplied", err)
+	}
+	clearMsg := channel.IncomingMessage{
+		Platform:     "telegram",
+		ChannelID:    "chat1",
+		UserID:       "user1",
+		IsCallback:   true,
+		CallbackData: "perm:clear:confirm:" + permissionOwnerFingerprint(owner),
+		CallbackRef:  permissionRef("perm-message"),
+		ReplyCtx:     reply,
+	}
+	if err := r.handlePermissionCallback(ctx, clearMsg); err != nil {
+		t.Fatalf("clear callback: %v", err)
+	}
+	if got, _ := repo.ListVisible(ctx, owner); len(got) != 0 {
+		t.Fatalf("rules after clear = %+v", got)
+	}
+	if got, _ := repo.ListByOwner(ctx, channelOwner); len(got) != 0 {
+		t.Fatalf("channel rules after clear = %+v", got)
+	}
+}
