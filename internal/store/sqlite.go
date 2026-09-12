@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	schemaVersion    = 15
+	schemaVersion    = 16
 	SchemaVersion    = schemaVersion
 	busyTimeoutMilli = 5000
 )
@@ -32,6 +32,17 @@ var migrations = []func(s *SQLiteStore, tx *sql.Tx) error{
 	addAgentDefaults,
 	addSessionTakeover,
 	addSessionRootCard,
+	addWebhookReviewKey,
+}
+
+func addWebhookReviewKey(_ *SQLiteStore, tx *sql.Tx) error {
+	if _, err := tx.Exec(`ALTER TABLE webhook_delivery ADD COLUMN review_key TEXT NOT NULL DEFAULT '';`); err != nil {
+		return fmt.Errorf("store: migrate webhook review key: %w", err)
+	}
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_webhook_delivery_review ON webhook_delivery (endpoint, review_key, status);`); err != nil {
+		return fmt.Errorf("store: migrate webhook review key index: %w", err)
+	}
+	return nil
 }
 
 func addSessionRootCard(_ *SQLiteStore, tx *sql.Tx) error {

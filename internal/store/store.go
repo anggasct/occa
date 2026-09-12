@@ -227,6 +227,12 @@ type WebhookDeliveryRepo interface {
 	// FailStale marks in-flight receipts (received/accepted/processing) whose
 	// last update predates cutoff as failed — startup recovery after a crash.
 	FailStale(ctx context.Context, cutoff int64, summary string) (int, error)
+	// SetReviewKey stamps the semantic review identity on a delivery so later
+	// duplicates can find it.
+	SetReviewKey(ctx context.Context, id int64, reviewKey string) error
+	// FindReviewDuplicate returns the terminal delivery (completed or skipped)
+	// with the same review key updated at/after cutoff, or nil when none.
+	FindReviewDuplicate(ctx context.Context, endpoint, reviewKey string, cutoff int64) (*WebhookDelivery, error)
 }
 
 type RecoveryEventRepo interface {

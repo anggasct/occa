@@ -60,6 +60,8 @@ type DeliveryStore interface {
 	ClaimStale(ctx context.Context, id, cutoff int64) (bool, error)
 	Prune(ctx context.Context, cutoff int64, keep int) (int, error)
 	FailStale(ctx context.Context, cutoff int64, summary string) (int, error)
+	SetReviewKey(ctx context.Context, id int64, reviewKey string) error
+	FindReviewDuplicate(ctx context.Context, endpoint, reviewKey string, cutoff int64) (*store.WebhookDelivery, error)
 }
 
 type ChannelStore interface {
@@ -109,6 +111,8 @@ type Server struct {
 	writeTimeout          time.Duration
 	idleTimeout           time.Duration
 	listening             atomic.Bool
+	reviewDedupeWindow    time.Duration
+	reviewDedupeNow       func() time.Time
 }
 
 func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) *Server {
@@ -141,7 +145,16 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 		readTimeout:         readTimeout,
 		writeTimeout:        writeTimeout,
 		idleTimeout:         idleTimeout,
+		reviewDedupeWindow:  60 * time.Minute,
 	}
+}
+
+func (s *Server) reviewDedupeCutoff() int64 {
+	now := time.Now()
+	if s.reviewDedupeNow != nil {
+		now = s.reviewDedupeNow()
+	}
+	return now.Add(-s.reviewDedupeWindow).Unix()
 }
 
 func (s *Server) SetWorkspaceResolver(r WorkspaceResolver) {
@@ -808,6 +821,20 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 	if allowed, reason := workflowAllows(ep.Workflow, envelope); !allowed {
 		s.markSkipped(id, ep, envelope, reason)
 		return nil
+	}
+
+	if reviewKey := reviewDedupeKey(envelope); reviewKey != "" && id != 0 {
+		prior, err := s.deliveries.FindReviewDuplicate(context.Background(), ep.Name, reviewKey, s.reviewDedupeCutoff())
+		if err != nil {
+			slog.Warn("webhook: review duplicate lookup failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
+		} else if prior != nil {
+			slog.Info("webhook: duplicate review event skipped", "endpoint", ep.Name, "delivery_id", deliveryID, "review_key", reviewKey, "handled_by", prior.DeliveryID)
+			s.markSkipped(id, ep, envelope, "duplicate review event (same commit, verdict and body; already handled by delivery "+prior.DeliveryID+")")
+			return nil
+		}
+		if err := s.deliveries.SetReviewKey(context.Background(), id, reviewKey); err != nil {
+			slog.Warn("webhook: review key persist failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
+		}
 	}
 
 	if strings.TrimSpace(ep.Model) != "" {

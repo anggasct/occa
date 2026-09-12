@@ -1,6 +1,8 @@
 package webhook
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -34,6 +36,8 @@ func normalizeWebhook(body []byte, eventType, deliveryID string, skipped bool, s
 		"review_state":    "",
 		"review_user":     "",
 		"review_verdict":  "",
+		"review_commit":   "",
+		"review_url":      "",
 		"has_findings":    false,
 		"comment_body":    "",
 		"comment_trigger": "",
@@ -57,6 +61,8 @@ func normalizeWebhook(body []byte, eventType, deliveryID string, skipped bool, s
 				envelope["review_user"] = userName(review["user"])
 				envelope["comment_body"] = stringValue(review["body"])
 				envelope["review_verdict"] = reviewVerdict(stringValue(review["body"]))
+				envelope["review_commit"] = stringValue(review["commit_id"])
+				envelope["review_url"] = stringValue(review["html_url"])
 				envelope["has_findings"] = hasActionableFindings(stringValue(review["body"]))
 			}
 		}
@@ -176,6 +182,26 @@ func commentTrigger(body string) string {
 		return trigger
 	}
 	return ""
+}
+
+func normalizedReviewBody(body string) string {
+	return strings.Join(strings.Fields(body), " ")
+}
+
+func reviewDedupeKey(envelope WebhookEnvelope) string {
+	if stringValue(envelope["event_type"]) != "pull_request_review" {
+		return ""
+	}
+	repo := strings.TrimSpace(stringValue(envelope["repository"]))
+	pr := strings.TrimSpace(stringValue(envelope["pr_number"]))
+	commit := strings.TrimSpace(stringValue(envelope["review_commit"]))
+	state := strings.ToLower(strings.TrimSpace(stringValue(envelope["review_state"])))
+	if repo == "" || pr == "" || state == "" {
+		return ""
+	}
+	body := normalizedReviewBody(stringValue(envelope["comment_body"]))
+	sum := sha256.Sum256([]byte(repo + "\n" + pr + "\n" + commit + "\n" + state + "\n" + body))
+	return hex.EncodeToString(sum[:])
 }
 
 func reviewVerdict(body string) string {

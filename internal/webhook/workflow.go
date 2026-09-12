@@ -123,6 +123,9 @@ func formatAuditSummary(envelope WebhookEnvelope, workflow string, statusAndReas
 	if head, base := auditField(stringValue(envelope["head_branch"])), auditField(stringValue(envelope["base_branch"])); head != "" || base != "" {
 		lines = append(lines, "Branch: "+head+" → "+base)
 	}
+	if verdict := reviewVerdictLine(envelope); verdict != "" {
+		lines = append(lines, verdict)
+	}
 	if model := auditField(stringValue(envelope["model"])); model != "" {
 		lines = append(lines, "Model: "+model)
 		if src := auditField(stringValue(envelope["model_source"])); src != "" {
@@ -214,6 +217,24 @@ func formatDuration(d time.Duration) string {
 func auditField(value string) string {
 	value = strings.Join(strings.Fields(value), " ")
 	return strings.ReplaceAll(value, "<no value>", "")
+}
+
+func reviewVerdictLine(envelope WebhookEnvelope) string {
+	verdict := strings.ToUpper(strings.TrimSpace(stringValue(envelope["review_verdict"])))
+	if verdict == "" {
+		return ""
+	}
+	line := "Review verdict: " + verdict
+	if commit := strings.TrimSpace(stringValue(envelope["review_commit"])); commit != "" {
+		if len(commit) > 7 {
+			commit = commit[:7]
+		}
+		line += " · commit " + commit
+	}
+	if url := auditField(stringValue(envelope["review_url"])); url != "" {
+		line += " · " + url
+	}
+	return line
 }
 
 func redactAuditSummary(summary, secret string) string {

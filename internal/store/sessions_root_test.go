@@ -15,6 +15,16 @@ func dropSessionRootCardColumns(t *testing.T, s *SQLiteStore) {
 	}
 }
 
+func dropWebhookReviewKey(t *testing.T, s *SQLiteStore) {
+	t.Helper()
+	if _, err := s.db.Exec(`DROP INDEX IF EXISTS idx_webhook_delivery_review`); err != nil {
+		t.Fatalf("drop review key index: %v", err)
+	}
+	if _, err := s.db.Exec(`ALTER TABLE webhook_delivery DROP COLUMN review_key`); err != nil {
+		t.Fatalf("drop review_key: %v", err)
+	}
+}
+
 func TestThreadRootLinkAndLookup(t *testing.T) {
 	st, err := OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
 	if err != nil {
