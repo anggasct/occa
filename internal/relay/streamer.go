@@ -51,6 +51,7 @@ type Streamer struct {
 	lastWorkingHandle          EditHandle
 	lastWorkingRendered        string
 	cards                      []sentCard
+	turnStep                   int
 	noEventTimeout             time.Duration
 	typingInterval             time.Duration
 	permissionPendingFunc      func() bool
@@ -211,6 +212,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 	var respReasoning time.Duration
 
 	s.cards = nil
+	s.turnStep = 0
 	defer func() { s.cards = nil }()
 
 	typingTicker := time.NewTicker(s.typingInterval)
@@ -345,6 +347,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 						respReasoning += elapsed
 					}
 				}
+				s.resetToolPhase(&phase)
 				if buf.Len() > 0 {
 					slog.Debug("streaming: segment break", "finalized_len", buf.Len())
 					s.finalizeSegment(&handles, &lastChunks, buf.String())
@@ -394,6 +397,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 					s.queueWorking(&phase.working)
 				} else {
 					phase.working.step++
+					s.turnStep++
 					phase.working.latestName = name
 					phase.working.latestContext = ctxStr
 					phase.working.latestCount = 1
@@ -450,8 +454,12 @@ func (s *Streamer) currentTime() time.Time {
 }
 
 func (s *Streamer) workingText(working *workingState) string {
+	step := 0
+	if working.step > 0 {
+		step = s.turnStep
+	}
 	return FormatWorkingText(WorkingTextParams{
-		Step:              working.step,
+		Step:              step,
 		Tool:              working.latestName,
 		ToolContext:       working.latestContext,
 		ToolCount:         working.latestCount,
@@ -478,6 +486,7 @@ func formatDuration(d time.Duration) string {
 
 func (s *Streamer) updateWorking(working *workingState) {
 	if working.handle == nil && working.ref == nil {
+		s.stripStaleCards(nil)
 		handle, rendered, err := s.sendWorking(working.pending)
 		if handle != nil {
 			s.cards = append(s.cards, sentCard{handle: handle, rendered: rendered})
@@ -496,7 +505,6 @@ func (s *Streamer) updateWorking(working *workingState) {
 		s.lastWorkingRef = handle.Ref()
 		s.lastWorkingRendered = rendered
 		s.trackFirstRef(handle.Ref())
-		s.stripStaleCards(handle)
 		return
 	}
 	s.maybeEditWorking(working)
@@ -564,6 +572,34 @@ func (s *Streamer) flushWorking(working *workingState) {
 	working.lastEditAt = s.currentTime()
 	working.hasLastEditAt = true
 	s.lastWorkingRendered = working.rendered
+}
+
+func (s *Streamer) resetToolPhase(phase *toolPhaseState) {
+	if phase.working.handle != nil || phase.working.ref != nil {
+		s.queueWorking(&phase.working)
+	}
+	s.flushWorking(&phase.working)
+	s.syncCardRendered(s.workingHandle(&phase.working), phase.working.rendered)
+	*phase = toolPhaseState{}
+}
+
+func (s *Streamer) syncCardRendered(handle EditHandle, rendered string) {
+	if handle == nil || rendered == "" {
+		return
+	}
+	ref := handle.Ref()
+	if ref == nil {
+		return
+	}
+	id := ref.ID()
+	for i := range s.cards {
+		card := &s.cards[i]
+		if card.handle == nil || card.handle.Ref() == nil || card.handle.Ref().ID() != id {
+			continue
+		}
+		card.rendered = rendered
+		return
+	}
 }
 
 func (s *Streamer) stripStaleCards(current EditHandle) {
