@@ -102,6 +102,7 @@ type responseClient struct {
 	eventsCall   int
 	sendCalls    int
 	sendSessions []string
+	sendTexts    []string
 	commandCalls int
 	started      chan struct{}
 	startOnce    sync.Once
@@ -124,10 +125,11 @@ func (c *responseClient) SessionExists(_ context.Context, _ string) (bool, error
 
 func (c *responseClient) AbortSession(_ context.Context, _ string) error { return nil }
 
-func (c *responseClient) SendMessage(ctx context.Context, sessionID string, _ string, _ *relay.ModelRef, _ []relay.Attachment) error {
+func (c *responseClient) SendMessage(ctx context.Context, sessionID string, text string, _ *relay.ModelRef, _ []relay.Attachment) error {
 	c.mu.Lock()
 	c.sendCalls++
 	c.sendSessions = append(c.sendSessions, sessionID)
+	c.sendTexts = append(c.sendTexts, text)
 	events := c.events
 	dispatch := c.dispatch
 	c.mu.Unlock()

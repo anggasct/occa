@@ -514,7 +514,7 @@ func (r *Router) executePassthrough(taskCtx context.Context, cancel context.Canc
 	preResolveActiveID, _, _ := r.store.SessionRepo().Active(ctx, msg.Platform, msg.ChannelID, threadID, userID)
 
 	resolver := relay.NewSessionResolver(r.store.SessionRepo(), inst.Client())
-	sessionID, err := resolver.Resolve(ctx, msg.Platform, msg.ChannelID, threadID, userID, inst.PID())
+	resolution, err := resolver.ResolveDetailed(ctx, msg.Platform, msg.ChannelID, threadID, userID, inst.PID())
 	if err != nil {
 		inst.End()
 		r.recordHealthError("agent unreachable")
@@ -523,6 +523,7 @@ func (r *Router) executePassthrough(taskCtx context.Context, cancel context.Canc
 		r.dispatchDrained(key, r.responses.drain(key))
 		return nil
 	}
+	sessionID := resolution.SessionID
 
 	if preResolveActiveID == "" {
 		r.applyAgentDefault(ctx, msg, inst, sessionID)
@@ -546,7 +547,6 @@ func (r *Router) executePassthrough(taskCtx context.Context, cancel context.Canc
 	text := msg.Text
 	var model *relay.ModelRef
 	var attachments []relay.Attachment
-
 	if !strings.HasPrefix(msg.Text, "/") {
 		model, err = r.modelForMessage(ctx, msg)
 		if err != nil {
@@ -561,6 +561,10 @@ func (r *Router) executePassthrough(taskCtx context.Context, cancel context.Canc
 		for i, a := range msg.Attachments {
 			attachments[i] = relay.Attachment{Filename: a.Filename, MimeType: a.MimeType, Data: a.Data}
 		}
+	}
+
+	if resolution.TakeoverSeed != "" && !resolution.Resumed && !strings.HasPrefix(msg.Text, "/") {
+		text = "Last failed webhook delivery in this thread (its agent session is gone; starting fresh from the envelope summary):\n" + resolution.TakeoverSeed + "\n\nOperator message:\n" + text
 	}
 
 	_ = msg.ReplyCtx.SendTyping()

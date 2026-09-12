@@ -135,3 +135,20 @@ func TestSessionTakeoverNoCandidateWhenUnmarked(t *testing.T) {
 		t.Fatalf("sibling thread must not see the mark: %+v", other)
 	}
 }
+
+func TestSessionTakeoverMarkWithoutSession(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+	repo := s.SessionRepo()
+
+	if err := repo.MarkTakeoverEligible(ctx, "discord", "chan-1", "thread-1", "", 0, "seed-summary"); err != nil {
+		t.Fatalf("MarkTakeoverEligible: %v", err)
+	}
+	candidate, err := repo.TakeoverCandidate(ctx, "discord", "chan-1", "thread-1")
+	if err != nil {
+		t.Fatalf("TakeoverCandidate: %v", err)
+	}
+	if candidate == nil || candidate.SessionID != "" || candidate.Seed != "seed-summary" {
+		t.Fatalf("candidate = %+v, want seed-only mark", candidate)
+	}
+}

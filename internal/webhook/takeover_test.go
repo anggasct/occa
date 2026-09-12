@@ -50,9 +50,13 @@ func TestFailDeliverySkipsMarkWithoutSessionOrThread(t *testing.T) {
 	t.Run("no session", func(t *testing.T) {
 		srv, _, st := newTestServerFull(t, []config.EndpointConfig{takeoverTestEndpoint()})
 		srv.SetSessionStore(st.SessionRepo())
-		srv.failDelivery(ep, 0, "del-1", "pull_request_review", envelope, "template render failed", &WebhookWorkContext{ThreadID: "thread-1"})
-		if c, _ := st.SessionRepo().TakeoverCandidate(context.Background(), "discord", "chan-1", "thread-1"); c != nil {
-			t.Fatalf("session-less failure must not mark: %+v", c)
+		srv.failDelivery(ep, 0, "del-1", "pull_request_review", envelope, "session create failed", &WebhookWorkContext{ThreadID: "thread-1"})
+		candidate, err := st.SessionRepo().TakeoverCandidate(context.Background(), "discord", "chan-1", "thread-1")
+		if err != nil {
+			t.Fatalf("TakeoverCandidate: %v", err)
+		}
+		if candidate == nil || candidate.SessionID != "" {
+			t.Fatalf("session-less failure must leave a seed-only mark, got %+v", candidate)
 		}
 	})
 
@@ -68,6 +72,67 @@ func TestFailDeliverySkipsMarkWithoutSessionOrThread(t *testing.T) {
 	t.Run("no store", func(t *testing.T) {
 		srv, _, _ := newTestServerFull(t, []config.EndpointConfig{takeoverTestEndpoint()})
 		srv.failDelivery(ep, 0, "del-1", "pull_request_review", envelope, "boom", &WebhookWorkContext{SessionID: "failed-sess", ThreadID: "thread-1"})
+	})
+}
+
+func TestFailDeliveryPostsContinuationBanner(t *testing.T) {
+	type bannerSend struct {
+		platform  string
+		channelID string
+		text      string
+	}
+
+	ep := takeoverTestEndpoint()
+	envelope := WebhookEnvelope{"delivery_id": "del-1", "repository": "o/r", "pr_number": "7"}
+
+	t.Run("discord thread", func(t *testing.T) {
+		srv, _, _ := newTestServerFull(t, []config.EndpointConfig{takeoverTestEndpoint()})
+		var sends []bannerSend
+		srv.notifier = func(_ context.Context, platform, channelID, text string) error {
+			sends = append(sends, bannerSend{platform, channelID, text})
+			return nil
+		}
+		srv.failDelivery(ep, 0, "del-1", "pull_request_review", envelope, "agent exploded", &WebhookWorkContext{SessionID: "failed-sess", ThreadID: "thread-1"})
+		if len(sends) != 1 {
+			t.Fatalf("banner sends = %d, want exactly 1", len(sends))
+		}
+		if sends[0].platform != "discord" || sends[0].channelID != "thread-1" {
+			t.Fatalf("banner target = %+v, want discord/thread-1", sends[0])
+		}
+		for _, want := range []string{"del-1", "agent exploded", "Chat di thread ini"} {
+			if !strings.Contains(sends[0].text, want) {
+				t.Fatalf("banner missing %q: %q", want, sends[0].text)
+			}
+		}
+	})
+
+	t.Run("telegram topic", func(t *testing.T) {
+		srv, _, _ := newTestServerFull(t, []config.EndpointConfig{takeoverTestEndpoint()})
+		var sends []bannerSend
+		srv.notifier = func(_ context.Context, platform, channelID, text string) error {
+			sends = append(sends, bannerSend{platform, channelID, text})
+			return nil
+		}
+		tgEp := takeoverTestEndpoint()
+		tgEp.Platform = "telegram"
+		tgEp.ChannelID = "chan-1"
+		srv.failDelivery(tgEp, 0, "del-1", "pull_request_review", envelope, "agent exploded", &WebhookWorkContext{SessionID: "failed-sess", ThreadID: "topic-1"})
+		if len(sends) != 1 || sends[0].channelID != "chan-1:topic-1" {
+			t.Fatalf("banner sends = %+v, want one to chan-1:topic-1", sends)
+		}
+	})
+
+	t.Run("no thread sends nothing", func(t *testing.T) {
+		srv, _, _ := newTestServerFull(t, []config.EndpointConfig{takeoverTestEndpoint()})
+		var sends []bannerSend
+		srv.notifier = func(_ context.Context, platform, channelID, text string) error {
+			sends = append(sends, bannerSend{platform, channelID, text})
+			return nil
+		}
+		srv.failDelivery(ep, 0, "del-1", "pull_request_review", envelope, "boom", &WebhookWorkContext{SessionID: "failed-sess"})
+		if len(sends) != 0 {
+			t.Fatalf("thread-less failure posted %d banners, want 0", len(sends))
+		}
 	})
 }
 
