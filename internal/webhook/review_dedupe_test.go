@@ -3,6 +3,7 @@ package webhook
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -294,5 +295,88 @@ func TestReviewDuplicateLookupSurvivesRestart(t *testing.T) {
 	}
 	if miss, _ := st2.WebhookDeliveryRepo().FindReviewDuplicate(ctx, "other", "key-1", cutoff); miss != nil {
 		t.Fatalf("foreign endpoint matched: %+v", miss)
+	}
+}
+
+func issueCommentEventBody(t *testing.T, prNumber int, commentBody string) []byte {
+	t.Helper()
+	payload := map[string]any{
+		"action":     "created",
+		"repository": map[string]any{"full_name": "o/r"},
+		"issue": map[string]any{
+			"number":       prNumber,
+			"title":        "Fix it",
+			"state":        "open",
+			"pull_request": map[string]any{"html_url": fmt.Sprintf("https://github.com/o/r/pull/%d", prNumber)},
+		},
+		"comment": map[string]any{
+			"body": commentBody,
+			"user": map[string]any{"login": "someone"},
+		},
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal issue_comment payload: %v", err)
+	}
+	return encoded
+}
+
+func TestCommentTriggerRateCap(t *testing.T) {
+	ep := reviewGuardEndpoint()
+	ep.Workflow = "github_reviewer"
+	ep.CommentTrigger = []string{"please re-review"}
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{ep})
+
+	bodyPR7 := issueCommentEventBody(t, 7, "please re-review this PR")
+
+	for i := 1; i <= 3; i++ {
+		delID := fmt.Sprintf("del-%d", i)
+		id := seedReviewDelivery(t, st.WebhookDeliveryRepo(), ep.Name, delID)
+		if err := srv.executeDelivery(ep, bodyPR7, id, delID, "issue_comment", 1, nil, nil); err != nil {
+			t.Fatalf("executeDelivery %d: %v", i, err)
+		}
+		if count := exec.callCount(); count != i {
+			t.Fatalf("delivery %d spawned %d turns, want %d", i, count, i)
+		}
+		receipt, err := st.WebhookDeliveryRepo().Get(context.Background(), ep.Name, delID)
+		if err != nil || receipt == nil || receipt.Status != store.WebhookStatusCompleted {
+			t.Fatalf("receipt %d = %+v err=%v, want completed", i, receipt, err)
+		}
+	}
+
+	id4 := seedReviewDelivery(t, st.WebhookDeliveryRepo(), ep.Name, "del-4")
+	if err := srv.executeDelivery(ep, bodyPR7, id4, "del-4", "issue_comment", 1, nil, nil); err != nil {
+		t.Fatalf("executeDelivery 4: %v", err)
+	}
+	if count := exec.callCount(); count != 3 {
+		t.Fatalf("fourth delivery spawned turn (total %d, want 3)", count)
+	}
+	fourth, err := st.WebhookDeliveryRepo().Get(context.Background(), ep.Name, "del-4")
+	if err != nil || fourth == nil {
+		t.Fatalf("get fourth receipt: %v", err)
+	}
+	if fourth.Status != store.WebhookStatusSkipped {
+		t.Fatalf("fourth receipt status = %s, want skipped", fourth.Status)
+	}
+	if !strings.Contains(fourth.ErrorSummary, "trigger rate cap") {
+		t.Fatalf("fourth skip reason = %q, want trigger rate cap", fourth.ErrorSummary)
+	}
+
+	bodyPR8 := issueCommentEventBody(t, 8, "please re-review this PR")
+	idPR8 := seedReviewDelivery(t, st.WebhookDeliveryRepo(), ep.Name, "del-pr8")
+	if err := srv.executeDelivery(ep, bodyPR8, idPR8, "del-pr8", "issue_comment", 1, nil, nil); err != nil {
+		t.Fatalf("executeDelivery PR 8: %v", err)
+	}
+	if count := exec.callCount(); count != 4 {
+		t.Fatalf("different PR spawned %d turns, want 4", count)
+	}
+
+	srv.reviewDedupeNow = func() time.Time { return time.Now().Add(2 * time.Hour) }
+	id5 := seedReviewDelivery(t, st.WebhookDeliveryRepo(), ep.Name, "del-5")
+	if err := srv.executeDelivery(ep, bodyPR7, id5, "del-5", "issue_comment", 1, nil, nil); err != nil {
+		t.Fatalf("expired window executeDelivery: %v", err)
+	}
+	if count := exec.callCount(); count != 5 {
+		t.Fatalf("delivery after window spawned %d turns, want 5", count)
 	}
 }

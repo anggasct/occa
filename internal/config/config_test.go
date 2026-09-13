@@ -805,3 +805,46 @@ func TestWebhookEndpointModelValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestWebhookEndpointCommentTrigger(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
+
+	yaml := `webhooks:
+  endpoints:
+    - name: with-trigger
+      path: /with-trigger
+      secret: sec1
+      platform: telegram
+      channel_id: c1
+      prompt: p
+      comment_trigger:
+        - "please re-review"
+        - "  run checks  "
+      workspace:
+        type: none
+    - name: without-trigger
+      path: /without-trigger
+      secret: sec2
+      platform: telegram
+      channel_id: c2
+      prompt: p
+      workspace:
+        type: none
+`
+	path := writeConfig(t, t.TempDir(), yaml)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.Webhooks.Endpoints) != 2 {
+		t.Fatalf("expected 2 endpoints, got %d", len(cfg.Webhooks.Endpoints))
+	}
+	ep1 := cfg.Webhooks.Endpoints[0]
+	if len(ep1.CommentTrigger) != 2 || ep1.CommentTrigger[0] != "please re-review" || ep1.CommentTrigger[1] != "run checks" {
+		t.Errorf("ep1 CommentTrigger = %#v, want ['please re-review', 'run checks']", ep1.CommentTrigger)
+	}
+	ep2 := cfg.Webhooks.Endpoints[1]
+	if len(ep2.CommentTrigger) != 0 {
+		t.Errorf("ep2 CommentTrigger = %#v, want empty", ep2.CommentTrigger)
+	}
+}

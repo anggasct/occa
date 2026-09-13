@@ -73,6 +73,26 @@ overridden with an `OCCA_*` environment variable (env var > config file >
 built-in default). Bot tokens are env-only and never written to the config
 file.
 
+### Webhook configuration
+
+Webhooks ingest events from GitHub and trigger workflows. For reviewer endpoints (`workflow: github_reviewer`), configure `comment_trigger` to admit re-reviews from PR comments:
+
+```yaml
+webhooks:
+  bind: 127.0.0.1:8787
+  endpoints:
+    - name: github-review
+      path: /github-review
+      secret: <webhook-secret>
+      workflow: github_reviewer
+      platform: discord
+      channel_id: "1519692433808556133"
+      prompt_file: webhooks/github-review.md
+      comment_trigger: ["please re-review"]
+```
+
+`comment_trigger` is an optional list of case-insensitive substrings matched against comment bodies. When unset or empty, the comment trigger path is closed (`skipped: comment trigger not configured`), and only pull request lifecycle events (`opened`, `reopened`, `ready_for_review`) can start a review. Existing installations that rely on comment-triggered re-reviews must add this key to their endpoint configuration.
+
 ## Database backup and restore
 
 Use the operator commands to protect the SQLite store during upgrades:

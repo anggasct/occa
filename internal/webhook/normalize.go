@@ -10,7 +10,7 @@ import (
 
 type WebhookEnvelope map[string]any
 
-func normalizeWebhook(body []byte, eventType, deliveryID string, skipped bool, skipReason string) WebhookEnvelope {
+func normalizeWebhook(body []byte, eventType, deliveryID string, skipped bool, skipReason string, commentTriggers ...[]string) WebhookEnvelope {
 	payload := make(map[string]any)
 	var decoded any
 	if json.Unmarshal(body, &decoded) == nil {
@@ -19,32 +19,51 @@ func normalizeWebhook(body []byte, eventType, deliveryID string, skipped bool, s
 		}
 	}
 
+	var triggers []string
+	if len(commentTriggers) > 0 {
+		triggers = commentTriggers[0]
+	}
+	var validTriggers []string
+	for _, t := range triggers {
+		if s := strings.TrimSpace(t); s != "" {
+			validTriggers = append(validTriggers, s)
+		}
+	}
+
 	envelope := WebhookEnvelope{
-		"source":          "github",
-		"event_type":      strings.TrimSpace(eventType),
-		"action":          stringValue(payload["action"]),
-		"delivery_id":     deliveryID,
-		"repository":      repoName(payload["repository"]),
-		"project":         "",
-		"pr_number":       "",
-		"pr_url":          "",
-		"title":           "",
-		"head_branch":     "",
-		"base_branch":     "",
-		"pr_author":       "",
-		"pr_state":        "",
-		"review_state":    "",
-		"review_user":     "",
-		"review_verdict":  "",
-		"review_commit":   "",
-		"review_url":      "",
-		"has_findings":    false,
-		"comment_body":    "",
-		"comment_trigger": "",
-		"merged":          false,
-		"merge_commit":    "",
-		"skip":            skipped,
-		"skip_reason":     skipReason,
+		"source":                     "github",
+		"event_type":                 strings.TrimSpace(eventType),
+		"action":                     stringValue(payload["action"]),
+		"delivery_id":                deliveryID,
+		"repository":                 repoName(payload["repository"]),
+		"project":                    "",
+		"pr_number":                  "",
+		"pr_url":                     "",
+		"title":                      "",
+		"head_branch":                "",
+		"base_branch":                "",
+		"default_branch":             repoDefaultBranch(payload["repository"]),
+		"pr_author":                  "",
+		"pr_state":                   "",
+		"review_state":               "",
+		"review_user":                "",
+		"review_verdict":             "",
+		"review_commit":              "",
+		"review_url":                 "",
+		"has_findings":               false,
+		"comment_body":               "",
+		"comment_trigger":            "",
+		"comment_trigger_configured": len(validTriggers) > 0,
+		"merged":                     false,
+		"merge_commit":               "",
+		"suite_id":                   "",
+		"app_name":                   "",
+		"status":                     "",
+		"conclusion":                 "",
+		"head_sha":                   "",
+		"pr_numbers":                 []string{},
+		"skip":                       skipped,
+		"skip_reason":                skipReason,
 	}
 
 	if envelope["event_type"] == "" {
@@ -73,7 +92,7 @@ func normalizeWebhook(body []byte, eventType, deliveryID string, skipped bool, s
 			envelope["pr_number"] = numberValue(issue["number"])
 			envelope["title"] = stringValue(issue["title"])
 			envelope["pr_url"] = stringValue(issuePR["html_url"])
-			envelope["comment_trigger"] = commentTrigger(stringValue(comment["body"]))
+			envelope["comment_trigger"] = commentTrigger(stringValue(comment["body"]), validTriggers)
 			// GitHub sets issue.state to "closed" on both merged and plain
 			// closed PRs; "merged" disambiguates. Expose both so the gate can
 			// refuse re-review execution on a terminal PR.
@@ -84,10 +103,15 @@ func normalizeWebhook(body []byte, eventType, deliveryID string, skipped bool, s
 		}
 		envelope["comment_body"] = stringValue(comment["body"])
 		envelope["review_user"] = userName(comment["user"])
+	case "check_suite":
+		fillCheckSuite(envelope, payload)
 	}
 
 	if envelope["repository"] == "" {
 		envelope["repository"] = repoName(mapValue(pullRequest, "base")["repo"])
+	}
+	if envelope["default_branch"] == "" {
+		envelope["default_branch"] = repoDefaultBranch(mapValue(pullRequest, "base")["repo"])
 	}
 	return envelope
 }
@@ -111,6 +135,128 @@ func fillPullRequest(envelope WebhookEnvelope, pullRequest map[string]any) {
 	if envelope["repository"] == "" {
 		envelope["repository"] = repoName(mapValue(pullRequest, "base")["repo"])
 	}
+	if envelope["default_branch"] == "" {
+		envelope["default_branch"] = repoDefaultBranch(mapValue(pullRequest, "base")["repo"])
+	}
+}
+
+func fillCheckSuite(envelope WebhookEnvelope, payload map[string]any) {
+	cs, _ := payload["check_suite"].(map[string]any)
+	if cs == nil {
+		cs = payload
+	}
+	if id := cs["id"]; id != nil {
+		envelope["suite_id"] = numberValue(id)
+	} else if id := cs["suite_id"]; id != nil {
+		envelope["suite_id"] = numberValue(id)
+	}
+	if status := cs["status"]; status != nil {
+		envelope["status"] = stringValue(status)
+	}
+	if conclusion := cs["conclusion"]; conclusion != nil {
+		envelope["conclusion"] = stringValue(conclusion)
+	}
+	if headBranch := cs["head_branch"]; headBranch != nil {
+		envelope["head_branch"] = stringValue(headBranch)
+	}
+	if headSHA := cs["head_sha"]; headSHA != nil {
+		envelope["head_sha"] = stringValue(headSHA)
+	}
+	if app, ok := cs["app"].(map[string]any); ok {
+		envelope["app_name"] = stringValue(app["name"])
+	} else if appName := cs["app_name"]; appName != nil {
+		envelope["app_name"] = stringValue(appName)
+	}
+
+	var prNumbers []string
+	rawPRs, ok := cs["pull_requests"].([]any)
+	if !ok {
+		rawPRs, _ = payload["pull_requests"].([]any)
+	}
+	if rawPRs != nil {
+		for _, prItem := range rawPRs {
+			if prMap, ok := prItem.(map[string]any); ok {
+				num := numberValue(prMap["number"])
+				if num != "" {
+					prNumbers = append(prNumbers, num)
+				}
+			}
+		}
+		if len(rawPRs) == 1 {
+			if prMap, ok := rawPRs[0].(map[string]any); ok {
+				if envelope["head_branch"] == "" {
+					envelope["head_branch"] = stringValue(mapValue(prMap, "head")["ref"])
+				}
+				if envelope["base_branch"] == "" {
+					envelope["base_branch"] = stringValue(mapValue(prMap, "base")["ref"])
+				}
+				if envelope["pr_url"] == "" {
+					if u := stringValue(prMap["html_url"]); u != "" {
+						envelope["pr_url"] = u
+					} else {
+						envelope["pr_url"] = stringValue(prMap["url"])
+					}
+				}
+				if envelope["title"] == "" {
+					envelope["title"] = stringValue(prMap["title"])
+				}
+				if st := stringValue(prMap["state"]); st != "" {
+					envelope["pr_state"] = st
+				}
+				if boolValue(prMap["merged"]) {
+					envelope["pr_state"] = "merged"
+				}
+			}
+		}
+		if len(rawPRs) > 1 {
+			allClosed := true
+			for _, prItem := range rawPRs {
+				if prMap, ok := prItem.(map[string]any); ok {
+					st := strings.ToLower(stringValue(prMap["state"]))
+					merged := boolValue(prMap["merged"])
+					if !merged && st != "closed" && st != "merged" {
+						allClosed = false
+						break
+					}
+				}
+			}
+			if allClosed {
+				envelope["pr_state"] = "closed"
+			}
+		}
+	} else if prs, ok := cs["pr_numbers"].([]any); ok {
+		for _, item := range prs {
+			if num := numberValue(item); num != "" {
+				prNumbers = append(prNumbers, num)
+			}
+		}
+	} else if prs, ok := cs["pr_numbers"].([]string); ok {
+		prNumbers = append(prNumbers, prs...)
+	} else if prNum := cs["pr_number"]; prNum != nil {
+		if num := numberValue(prNum); num != "" {
+			prNumbers = append(prNumbers, num)
+		}
+	}
+
+	envelope["pr_numbers"] = prNumbers
+	if len(prNumbers) == 1 {
+		envelope["pr_number"] = prNumbers[0]
+	}
+
+	if envelope["repository"] == "" {
+		if repo := cs["repository"]; repo != nil {
+			envelope["repository"] = repoName(repo)
+		} else if repo := payload["repository"]; repo != nil {
+			envelope["repository"] = repoName(repo)
+		}
+	}
+	if envelope["default_branch"] == "" {
+		if repo := cs["repository"]; repo != nil {
+			envelope["default_branch"] = repoDefaultBranch(repo)
+		} else if repo := payload["repository"]; repo != nil {
+			envelope["default_branch"] = repoDefaultBranch(repo)
+		}
+	}
 }
 
 func mapValue(object map[string]any, key string) map[string]any {
@@ -126,6 +272,13 @@ func repoName(value any) string {
 		return stringValue(object["full_name"])
 	}
 	return stringValue(value)
+}
+
+func repoDefaultBranch(value any) string {
+	if object, ok := value.(map[string]any); ok {
+		return strings.TrimSpace(stringValue(object["default_branch"]))
+	}
+	return ""
 }
 
 func userName(value any) string {
@@ -176,12 +329,27 @@ func boolValue(value any) bool {
 	return result
 }
 
-func commentTrigger(body string) string {
-	const trigger = "please re-review"
-	if strings.Contains(strings.ToLower(body), trigger) {
-		return trigger
+func commentTrigger(body string, triggers []string) string {
+	lower := strings.ToLower(body)
+	for _, trigger := range triggers {
+		trimmed := strings.TrimSpace(trigger)
+		if trimmed != "" && strings.Contains(lower, strings.ToLower(trimmed)) {
+			return trigger
+		}
 	}
 	return ""
+}
+
+func commentTriggerKey(envelope WebhookEnvelope) string {
+	repo := strings.TrimSpace(stringValue(envelope["repository"]))
+	pr := strings.TrimSpace(stringValue(envelope["pr_number"]))
+	if pr == "" {
+		return ""
+	}
+	if repo == "" {
+		return "comment_trigger:" + pr
+	}
+	return "comment_trigger:" + repo + "#" + pr
 }
 
 func normalizedReviewBody(body string) string {

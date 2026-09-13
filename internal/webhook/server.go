@@ -62,6 +62,7 @@ type DeliveryStore interface {
 	FailStale(ctx context.Context, cutoff int64, summary string) (int, error)
 	SetReviewKey(ctx context.Context, id int64, reviewKey string) error
 	FindReviewDuplicate(ctx context.Context, endpoint, reviewKey string, cutoff int64) (*store.WebhookDelivery, error)
+	CountReviewDeliveries(ctx context.Context, endpoint, reviewKey string, cutoff int64) (int, error)
 }
 
 type ChannelStore interface {
@@ -613,7 +614,7 @@ func (s *Server) resolveWorkspace(item dispatchItem) (*WorkspaceLease, error) {
 }
 
 func (s *Server) failWorkspace(item dispatchItem, receipt *store.WebhookDelivery, err error) {
-	envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, false, "")
+	envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, false, "", item.ep.CommentTrigger)
 	workCtx := &WebhookWorkContext{
 		Key:        ExtractExecutionKey(item.body),
 		DeliveryID: item.deliveryID,
@@ -691,7 +692,7 @@ func (s *Server) beginExecution(item dispatchItem) *store.WebhookDelivery {
 
 	if s.shouldSkip(ep, item.eventType) {
 		reason := "configured event skip"
-		envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, true, reason)
+		envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, true, reason, ep.CommentTrigger)
 		summary := redactAuditSummary(formatAuditSummary(envelope, ep.Workflow, "SKIP", reason), ep.Secret)
 		ok, tErr := s.deliveries.Transition(ctx, receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived, store.WebhookStatusAccepted, store.WebhookStatusProcessing}, store.WebhookStatusSkipped, summary)
 		if tErr != nil {
@@ -781,7 +782,7 @@ func (s *Server) failAbandonedReceipt(receipt *store.WebhookDelivery, reason str
 // transition (or retry grant) is recorded.
 func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64, deliveryID, eventType string, attempt int, lease *WorkspaceLease, allowRetryIncomplete func() bool) error {
 	key := ExtractExecutionKey(body)
-	envelope := normalizeWebhook(body, eventType, deliveryID, false, "")
+	envelope := normalizeWebhook(body, eventType, deliveryID, false, "", ep.CommentTrigger)
 
 	workCtx := &WebhookWorkContext{
 		Key:          key,
@@ -834,6 +835,23 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		}
 		if err := s.deliveries.SetReviewKey(context.Background(), id, reviewKey); err != nil {
 			slog.Warn("webhook: review key persist failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
+		}
+	}
+
+	if stringValue(envelope["event_type"]) == "issue_comment" && stringValue(envelope["comment_trigger"]) != "" && id != 0 {
+		triggerKey := commentTriggerKey(envelope)
+		if triggerKey != "" {
+			count, err := s.deliveries.CountReviewDeliveries(context.Background(), ep.Name, triggerKey, s.reviewDedupeCutoff())
+			if err != nil {
+				slog.Warn("webhook: review trigger count lookup failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
+			} else if count >= 3 {
+				slog.Info("webhook: review delivery trigger rate cap reached", "endpoint", ep.Name, "delivery_id", deliveryID, "trigger_key", triggerKey, "count", count)
+				s.markSkipped(id, ep, envelope, "trigger rate cap")
+				return nil
+			}
+			if err := s.deliveries.SetReviewKey(context.Background(), id, triggerKey); err != nil {
+				slog.Warn("webhook: review trigger key persist failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
+			}
 		}
 	}
 
