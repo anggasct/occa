@@ -880,12 +880,15 @@ func TestPermissionsClearAllConfirmFlow(t *testing.T) {
 		t.Fatalf("err = %v, want errReplied", err)
 	}
 	confirm := reply.sends[0]
-	if confirm.text != "Hapus SEMUA rule?" {
+	if confirm.text != "Delete ALL rules?" {
 		t.Fatalf("confirm text = %q", confirm.text)
 	}
 	fp := permissionOwnerFingerprint(owner)
 	if len(confirm.buttons) != 2 || confirm.buttons[0].Value != "perm:clear:confirm:"+fp || confirm.buttons[1].Value != "perm:page:1:"+fp {
 		t.Fatalf("confirm buttons = %+v", confirm.buttons)
+	}
+	if confirm.buttons[0].Label != "✅ Yes, delete" || confirm.buttons[1].Label != "⬅️ Cancel" {
+		t.Fatalf("confirm button labels = %+v", confirm.buttons)
 	}
 	rules, _ := st.PermissionRuleRepo().ListByOwner(ctx, owner)
 	if len(rules) != 2 {
