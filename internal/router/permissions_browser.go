@@ -350,10 +350,10 @@ func (r *Router) handlePermissionDeleteCallback(ctx context.Context, msg channel
 func (r *Router) renderPermissionClearConfirm(ctx context.Context, msg channel.IncomingMessage, page int, edit bool) error {
 	fp := permissionOwnerFingerprint(permissionOwnerFromMsg(msg))
 	buttons := []channel.Button{
-		{Label: "✅ Ya, hapus", Value: permCallbackPrefix + "clear:confirm:" + fp, Row: 1},
-		{Label: "⬅️ Batal", Value: fmt.Sprintf("%spage:%d:%s", permCallbackPrefix, page, fp), Row: 1},
+		{Label: "✅ Yes, delete", Value: permCallbackPrefix + "clear:confirm:" + fp, Row: 1},
+		{Label: "⬅️ Cancel", Value: fmt.Sprintf("%spage:%d:%s", permCallbackPrefix, page, fp), Row: 1},
 	}
-	text := "Hapus SEMUA rule?"
+	text := "Delete ALL rules?"
 	if edit && msg.ReplyCtx != nil && msg.CallbackRef != nil {
 		return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, text, buttons)
 	}
