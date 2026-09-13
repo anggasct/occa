@@ -26,7 +26,7 @@ func seedBackupDB(t *testing.T, path, mark string) *SQLiteStore {
 	if err := s.ChannelRepo().UpsertModel(ctx, "discord", "chan1", "provider/model"); err != nil {
 		t.Fatalf("channel: %v", err)
 	}
-	if err := s.OverrideRepo().UpsertRole(ctx, "telegram", "chat1", "alice", "admin"); err != nil {
+	if err := s.OverrideRepo().UpsertAgent(ctx, "telegram", "chat1", "alice", "reviewer"); err != nil {
 		t.Fatalf("override: %v", err)
 	}
 	if _, err := s.ScheduleRepo().Create(ctx, &Schedule{Platform: "telegram", ChannelID: "chat1", CronExpression: "0 * * * *", HumanSchedule: "hourly", Prompt: "remind " + mark, Enabled: true}); err != nil {
@@ -277,8 +277,8 @@ func TestRestoreRoundTripPreservesData(t *testing.T) {
 		t.Fatalf("restored channel = %+v err %v, want provider/model", ch, err)
 	}
 	override, err := restored.OverrideRepo().Get(ctx, "telegram", "chat1", "alice")
-	if err != nil || override == nil || override.Role != "admin" {
-		t.Fatalf("restored override = %+v err %v, want admin", override, err)
+	if err != nil || override == nil || override.Agent != "reviewer" {
+		t.Fatalf("restored override = %+v err %v, want reviewer", override, err)
 	}
 }
 
@@ -367,7 +367,16 @@ func TestRestoreRefusesOlderSchemaWithoutForce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := bdb.Exec("PRAGMA user_version=5"); err != nil {
+	if _, err := bdb.Exec("ALTER TABLE user_override ADD COLUMN role TEXT NOT NULL DEFAULT 'allow'"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bdb.Exec("ALTER TABLE user_override DROP COLUMN agent"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bdb.Exec("ALTER TABLE channel DROP COLUMN agent"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bdb.Exec("PRAGMA user_version=12"); err != nil {
 		t.Fatal(err)
 	}
 	_ = bdb.Close()
@@ -392,8 +401,8 @@ func TestRestoreRefusesOlderSchemaWithoutForce(t *testing.T) {
 	if err := ro.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 5 {
-		t.Fatalf("restored user_version = %d, want 5", version)
+	if version != 12 {
+		t.Fatalf("restored user_version = %d, want 12", version)
 	}
 	var n int
 	if err := ro.QueryRow("SELECT COUNT(*) FROM session").Scan(&n); err != nil || n != 1 {

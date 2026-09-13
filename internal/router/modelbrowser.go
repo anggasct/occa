@@ -278,17 +278,10 @@ func (r *Router) modelBrowserSet(ctx context.Context, msg channel.IncomingMessag
 	if err != nil {
 		return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "⚠️ Channel information unavailable. Please try again.", nil)
 	}
-	if r.isAdmin(ctx, msg) {
-		if err := r.store.ChannelRepo().UpsertModel(ctx, msg.Platform, modelChannelID, formatModelRef(ref)); err != nil {
-			return err
-		}
-		return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "✅ Channel model set: "+formatModelRef(ref)+"\nScope: this channel", nil)
-	}
-	if err := r.store.OverrideRepo().UpsertModel(ctx, msg.Platform, modelChannelID, msg.UserID, formatModelRef(ref)); err != nil {
+	if err := r.store.ChannelRepo().UpsertModel(ctx, msg.Platform, modelChannelID, formatModelRef(ref)); err != nil {
 		return err
 	}
-	slog.Info("model browser: personal model set", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID, "model", formatModelRef(ref))
-	return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "✅ Personal model set: "+formatModelRef(ref)+"\nScope: personal override", nil)
+	return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "✅ Channel model set: "+formatModelRef(ref)+"\nScope: this channel", nil)
 }
 
 // modelBrowserClose removes the buttons while preserving the current page's

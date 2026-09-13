@@ -589,24 +589,14 @@ func (r *Router) switchAgent(ctx context.Context, msg channel.IncomingMessage, t
 		if err != nil {
 			return "", safeReplyError("Channel information unavailable. Please try again.", err)
 		}
-		if r.isAdmin(ctx, msg) {
-			if err := r.store.ChannelRepo().UpsertAgent(ctx, msg.Platform, channelID, ""); err != nil {
-				return "", fmt.Errorf("agent: clear channel: %w", err)
-			}
-			slog.Info("agent default cleared", "platform", msg.Platform, "channel_id", channelID, "user_id", msg.UserID, "scope", "channel")
-			if activeSession != nil {
-				_ = inst.Client().SwitchAgent(ctx, activeSession.AgentSessionID, "build")
-			}
-			return "✅ Channel agent cleared.", nil
+		if err := r.store.ChannelRepo().UpsertAgent(ctx, msg.Platform, channelID, ""); err != nil {
+			return "", fmt.Errorf("agent: clear channel: %w", err)
 		}
-		if err := r.store.OverrideRepo().UpsertAgent(ctx, msg.Platform, channelID, msg.UserID, ""); err != nil {
-			return "", fmt.Errorf("agent: clear personal: %w", err)
-		}
-		slog.Info("agent default cleared", "platform", msg.Platform, "channel_id", channelID, "user_id", msg.UserID, "scope", "personal")
+		slog.Info("agent default cleared", "platform", msg.Platform, "channel_id", channelID, "user_id", msg.UserID, "scope", "channel")
 		if activeSession != nil {
 			_ = inst.Client().SwitchAgent(ctx, activeSession.AgentSessionID, "build")
 		}
-		return "✅ Personal agent cleared.", nil
+		return "✅ Channel agent cleared.", nil
 	}
 
 	allAgents, err := inst.Client().ListAgents(ctx)
@@ -678,29 +668,16 @@ func (r *Router) switchAgent(ctx context.Context, msg channel.IncomingMessage, t
 		return "", safeReplyError("Channel information unavailable. Please try again.", err)
 	}
 
-	if r.isAdmin(ctx, msg) {
-		if err := r.store.ChannelRepo().UpsertAgent(ctx, msg.Platform, channelID, matched.Name); err != nil {
-			return "", fmt.Errorf("agent: set channel: %w", err)
-		}
-		slog.Info("agent default set", "platform", msg.Platform, "channel_id", channelID, "user_id", msg.UserID, "scope", "channel", "agent", matched.Name)
-		if activeSession != nil {
-			if err := inst.Client().SwitchAgent(ctx, activeSession.AgentSessionID, matched.Name); err != nil {
-				slog.Warn("switch active session agent failed", "session_id", activeSession.AgentSessionID, "agent", matched.Name, "error", err)
-			}
-		}
-		return fmt.Sprintf("✅ Channel agent set: %s\nScope: this channel — new sessions start on this agent.", matched.Name), nil
+	if err := r.store.ChannelRepo().UpsertAgent(ctx, msg.Platform, channelID, matched.Name); err != nil {
+		return "", fmt.Errorf("agent: set channel: %w", err)
 	}
-
-	if err := r.store.OverrideRepo().UpsertAgent(ctx, msg.Platform, channelID, msg.UserID, matched.Name); err != nil {
-		return "", fmt.Errorf("agent: set personal: %w", err)
-	}
-	slog.Info("agent default set", "platform", msg.Platform, "channel_id", channelID, "user_id", msg.UserID, "scope", "personal", "agent", matched.Name)
+	slog.Info("agent default set", "platform", msg.Platform, "channel_id", channelID, "user_id", msg.UserID, "scope", "channel", "agent", matched.Name)
 	if activeSession != nil {
 		if err := inst.Client().SwitchAgent(ctx, activeSession.AgentSessionID, matched.Name); err != nil {
 			slog.Warn("switch active session agent failed", "session_id", activeSession.AgentSessionID, "agent", matched.Name, "error", err)
 		}
 	}
-	return fmt.Sprintf("✅ Personal agent set: %s\nScope: personal — your new sessions start on this agent.", matched.Name), nil
+	return fmt.Sprintf("✅ Channel agent set: %s\nScope: this channel — new sessions start on this agent.", matched.Name), nil
 }
 
 func (r *Router) handleAgentCallback(ctx context.Context, msg channel.IncomingMessage) error {
@@ -760,10 +737,6 @@ func (r *Router) handleAgentCallback(ctx context.Context, msg channel.IncomingMe
 }
 
 func (r *Router) handleAgentDeleteCommand(ctx context.Context, msg channel.IncomingMessage, target string) (string, error) {
-	if !r.isAdmin(ctx, msg) {
-		return accessDeniedMessage, nil
-	}
-
 	if !isValidAgentName(target) {
 		return "Agent not found — refresh with /agent", nil
 	}
@@ -869,14 +842,6 @@ func (r *Router) handleAgentDeleteCommand(ctx context.Context, msg channel.Incom
 }
 
 func (r *Router) executeAgentDelete(ctx context.Context, msg channel.IncomingMessage, agentName string) error {
-	if !r.isAdmin(ctx, msg) {
-		if msg.ReplyCtx != nil && msg.CallbackRef != nil {
-			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, accessDeniedMessage, nil)
-		}
-		r.reply(msg, accessDeniedMessage)
-		return nil
-	}
-
 	if !isValidAgentName(agentName) {
 		if msg.ReplyCtx != nil && msg.CallbackRef != nil {
 			return msg.ReplyCtx.EditWithButtons(msg.CallbackRef, "⚠️ Invalid agent name.", nil)

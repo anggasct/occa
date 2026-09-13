@@ -54,7 +54,23 @@ func TestLoadMissingAdminID(t *testing.T) {
 	path := writeConfig(t, t.TempDir(), "")
 	t.Setenv("OCCA_ADMIN_ID", "")
 	if _, err := Load(path); err == nil {
-		t.Fatal("expected error when OCCA_ADMIN_ID is missing")
+		t.Fatal("expected error when every allowlist is empty and OCCA_ADMIN_ID is missing")
+	}
+}
+
+func TestLoadEmptyAllowlistsWithoutAliasFails(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "")
+	path := writeConfig(t, t.TempDir(), "discord:\n  allowed_sender_ids: []\ntelegram:\n  allowed_sender_ids: []\n")
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "allowed_sender_ids") {
+		t.Fatalf("Load error = %v, want allowed_sender_ids failure", err)
+	}
+}
+
+func TestLoadAliasOptionalWhenListsPopulated(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "")
+	path := writeConfig(t, t.TempDir(), "discord:\n  allowed_sender_ids:\n    - '123'\n")
+	if _, err := Load(path); err != nil {
+		t.Fatalf("alias must be optional with a populated list: %v", err)
 	}
 }
 
@@ -462,47 +478,54 @@ func TestWebhookAuthModeValidation(t *testing.T) {
 	}
 }
 
-func TestLoadDiscordPolicy(t *testing.T) {
+func TestLoadSenderAllowlist(t *testing.T) {
 	t.Setenv("OCCA_ADMIN_ID", "admin123")
 	path := writeConfig(t, t.TempDir(), `discord:
-  trigger_role_ids:
-    - " role-1 "
-  trusted_bot_senders:
-    - user_id: " bot-1 "
-      channel_ids:
-        - " channel-1 "
-        - channel-2
+  allowed_sender_ids:
+    - " 1519692433808556133 "
+    - '678339321312444448'
+telegram:
+  allowed_sender_ids:
+    - ' 1065778107 '
 `)
 
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(cfg.Discord.TriggerRoleIDs) != 1 || cfg.Discord.TriggerRoleIDs[0] != "role-1" {
-		t.Fatalf("TriggerRoleIDs = %#v, want [role-1]", cfg.Discord.TriggerRoleIDs)
+	if len(cfg.Discord.AllowedSenderIDs) != 2 || cfg.Discord.AllowedSenderIDs[0] != "1519692433808556133" || cfg.Discord.AllowedSenderIDs[1] != "678339321312444448" {
+		t.Fatalf("Discord allowlist = %#v", cfg.Discord.AllowedSenderIDs)
 	}
-	if len(cfg.Discord.TrustedBotSenders) != 1 {
-		t.Fatalf("TrustedBotSenders = %#v, want one sender", cfg.Discord.TrustedBotSenders)
-	}
-	sender := cfg.Discord.TrustedBotSenders[0]
-	if sender.UserID != "bot-1" || strings.Join(sender.ChannelIDs, ",") != "channel-1,channel-2" {
-		t.Fatalf("trusted sender = %#v, want trimmed IDs", sender)
+	if len(cfg.Telegram.AllowedSenderIDs) != 1 || cfg.Telegram.AllowedSenderIDs[0] != "1065778107" {
+		t.Fatalf("Telegram allowlist = %#v", cfg.Telegram.AllowedSenderIDs)
 	}
 }
 
-func TestLoadDiscordPolicyValidation(t *testing.T) {
+func TestLoadSenderAllowlistAbsentYieldsEmpty(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
+	path := writeConfig(t, t.TempDir(), "")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Discord.AllowedSenderIDs) != 0 || len(cfg.Telegram.AllowedSenderIDs) != 0 {
+		t.Fatalf("absent keys must yield empty lists, got discord=%#v telegram=%#v", cfg.Discord.AllowedSenderIDs, cfg.Telegram.AllowedSenderIDs)
+	}
+}
+
+func TestLoadSenderAllowlistValidation(t *testing.T) {
 	t.Setenv("OCCA_ADMIN_ID", "admin123")
 	tests := []struct {
 		name      string
 		yaml      string
 		errSubstr string
 	}{
-		{name: "empty user", yaml: "discord:\n  trusted_bot_senders:\n    - user_id: \" \"\n      channel_ids: [channel-1]\n", errSubstr: "discord.trusted_bot_senders[0].user_id"},
-		{name: "empty channels", yaml: "discord:\n  trusted_bot_senders:\n    - user_id: bot-1\n      channel_ids: []\n", errSubstr: "discord.trusted_bot_senders[0].channel_ids"},
-		{name: "empty channel", yaml: "discord:\n  trusted_bot_senders:\n    - user_id: bot-1\n      channel_ids: [\" \"]\n", errSubstr: "discord.trusted_bot_senders[0].channel_ids[0]"},
-		{name: "duplicate channel", yaml: "discord:\n  trusted_bot_senders:\n    - user_id: bot-1\n      channel_ids: [channel-1, channel-1]\n", errSubstr: "discord.trusted_bot_senders[0].channel_ids[1]"},
-		{name: "duplicate sender", yaml: "discord:\n  trusted_bot_senders:\n    - user_id: bot-1\n      channel_ids: [channel-1]\n    - user_id: bot-1\n      channel_ids: [channel-2]\n", errSubstr: "discord.trusted_bot_senders[1].user_id"},
-		{name: "duplicate role", yaml: "discord:\n  trigger_role_ids: [role-1, role-1]\n", errSubstr: "discord.trigger_role_ids[1]"},
+		{name: "empty discord id", yaml: "discord:\n  allowed_sender_ids:\n    - '  '\n", errSubstr: "discord.allowed_sender_ids[0]"},
+		{name: "duplicate discord", yaml: "discord:\n  allowed_sender_ids: ['1', '1']\n", errSubstr: "discord.allowed_sender_ids[1]"},
+		{name: "empty telegram id", yaml: "telegram:\n  allowed_sender_ids:\n    - ' '\n", errSubstr: "telegram.allowed_sender_ids[0]"},
+		{name: "duplicate telegram", yaml: "telegram:\n  allowed_sender_ids: ['7', ' 7 ']\n", errSubstr: "telegram.allowed_sender_ids[1]"},
+		{name: "legacy trigger roles", yaml: "discord:\n  trigger_role_ids: [role-1]\n", errSubstr: "discord.allowed_sender_ids"},
+		{name: "legacy trusted senders", yaml: "discord:\n  trusted_bot_senders:\n    - user_id: bot-1\n      channel_ids: [channel-1]\n", errSubstr: "discord.allowed_sender_ids"},
 	}
 
 	for _, tt := range tests {

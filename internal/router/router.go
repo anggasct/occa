@@ -24,7 +24,7 @@ var ErrDenied = errors.New("access denied")
 const (
 	maxPickerSessions   = 6
 	maxPickerPages      = 5
-	accessDeniedMessage = "⚠️ Access denied. Ask an admin to /allow you."
+	accessDeniedMessage = "⚠️ Access denied. Your sender ID is not in this platform's allowlist."
 	accessVerifyMessage = "⚠️ Unable to verify access. Try again."
 	// contextMeterStaleAfter is the maximum age of the last completed assistant
 	// request before /status stops presenting its occupancy as live: stale
@@ -34,7 +34,6 @@ const (
 
 type Command struct {
 	Name    string
-	Admin   bool
 	Handler func(ctx context.Context, msg channel.IncomingMessage, args string) (string, error)
 }
 
@@ -52,9 +51,6 @@ func (r *Router) MenuCommands() []channel.MenuCommand {
 		{Alias: "redo", Description: "Restore a reverted turn"},
 		{Alias: "reset", Description: "Clear current session and start fresh"},
 		{Alias: "dir", Description: "View or set this channel's working directory", HasArgs: true},
-		{Alias: "allow", Description: "Allow a user to use this bot", HasArgs: true},
-		{Alias: "deny", Description: "Revoke a user's access to this bot", HasArgs: true},
-		{Alias: "admin", Description: "Grant a user admin access", HasArgs: true},
 		{Alias: "channel", Description: "View or set listen mode (mention, all, thread)", HasArgs: true},
 		{Alias: "model", Description: "View, set, or search the active model", HasArgs: true},
 		{Alias: "variants", Description: "List and set model reasoning variants", HasArgs: true},
@@ -63,7 +59,7 @@ func (r *Router) MenuCommands() []channel.MenuCommand {
 		{Alias: "schedules", Description: "View or delete scheduled tasks", HasArgs: true},
 		{Alias: "loop", Description: "Repeat a prompt on an interval", HasArgs: true},
 		{Alias: "loops", Description: "List active loops in this conversation"},
-		{Alias: "webhooks", Description: "Recent webhook delivery diagnostics (admin)"},
+		{Alias: "webhooks", Description: "Recent webhook delivery diagnostics"},
 	}
 }
 
@@ -86,6 +82,8 @@ type Router struct {
 	health                 *health.Reporter
 	defaultWorkdir         string
 	adminID                string
+	discordSenders         []string
+	telegramSenders        []string
 	startedAt              time.Time
 	sched                  ScheduleStore
 	loops                  *loop.Looper
@@ -122,21 +120,27 @@ func (r *Router) SetAttributionStore(s *attribution.Store) {
 }
 
 func New(instances InstanceProvider, st store.Store, defaultWorkdir string, adminID string) *Router {
+	return NewWithAllowlists(instances, st, defaultWorkdir, adminID, nil, nil)
+}
+
+func NewWithAllowlists(instances InstanceProvider, st store.Store, defaultWorkdir, adminID string, discordSenders, telegramSenders []string) *Router {
 	r := &Router{
-		commands:       make(map[string]Command),
-		instances:      instances,
-		store:          st,
-		defaultWorkdir: defaultWorkdir,
-		adminID:        adminID,
-		startedAt:      time.Now(),
-		responses:      newResponseCoordinator(),
-		permissions:    newPermissionBroker(st.PermissionRuleRepo()),
-		questions:      newQuestionBroker(),
-		modelBrowser:   newModelBrowserBroker(),
-		agentBrowser:   newAgentBrowserBroker(),
-		agentTracker:   newAgentTracker(),
-		recovery:       newRecoveryCoordinator(),
-		renderer:       render.New(),
+		commands:        make(map[string]Command),
+		instances:       instances,
+		store:           st,
+		defaultWorkdir:  defaultWorkdir,
+		adminID:         strings.TrimSpace(adminID),
+		discordSenders:  append([]string(nil), discordSenders...),
+		telegramSenders: append([]string(nil), telegramSenders...),
+		startedAt:       time.Now(),
+		responses:       newResponseCoordinator(),
+		permissions:     newPermissionBroker(st.PermissionRuleRepo()),
+		questions:       newQuestionBroker(),
+		modelBrowser:    newModelBrowserBroker(),
+		agentBrowser:    newAgentBrowserBroker(),
+		agentTracker:    newAgentTracker(),
+		recovery:        newRecoveryCoordinator(),
+		renderer:        render.New(),
 	}
 	r.registerDefaults()
 	return r
@@ -279,61 +283,25 @@ func (r *Router) listenModeDecision(ctx context.Context, msg channel.IncomingMes
 	}
 }
 
-func (r *Router) ensureAdminBootstrap(ctx context.Context, msg channel.IncomingMessage) error {
-	if r.adminID == "" || msg.UserID != r.adminID {
+func (r *Router) authorize(_ context.Context, msg channel.IncomingMessage) error {
+	if r.adminID != "" && strings.TrimSpace(msg.UserID) == r.adminID {
 		return nil
 	}
-	o, err := r.store.OverrideRepo().Get(ctx, msg.Platform, msg.ChannelID, msg.UserID)
-	if err != nil {
-		return fmt.Errorf("admin bootstrap lookup: %w", err)
+	var list []string
+	switch msg.Platform {
+	case "discord":
+		list = r.discordSenders
+	case "telegram":
+		list = r.telegramSenders
+	default:
+		return ErrDenied
 	}
-	if o == nil || o.Role != "admin" {
-		if err := r.store.OverrideRepo().UpsertRole(ctx, msg.Platform, msg.ChannelID, msg.UserID, "admin"); err != nil {
-			return fmt.Errorf("admin bootstrap persist: %w", err)
-		}
-		slog.Info("bootstrapped admin role for channel", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID)
-	}
-	return nil
-}
-
-func (r *Router) authorize(ctx context.Context, msg channel.IncomingMessage) error {
-	if r.adminID != "" && msg.UserID == r.adminID {
-		return r.ensureAdminBootstrap(ctx, msg)
-	}
-	o, err := r.store.OverrideRepo().Get(ctx, msg.Platform, msg.ChannelID, msg.UserID)
-	if err != nil {
-		return fmt.Errorf("authorize: %w", err)
-	}
-	if o != nil && (o.Role == "allow" || o.Role == "admin") {
-		return nil
-	}
-	if msg.Platform == "discord" && msg.IsThread && msg.ParentChannelID != "" && msg.ParentChannelID != msg.ChannelID {
-		po, err := r.store.OverrideRepo().Get(ctx, msg.Platform, msg.ParentChannelID, msg.UserID)
-		if err != nil {
-			return fmt.Errorf("authorize: %w", err)
-		}
-		if po != nil && (po.Role == "allow" || po.Role == "admin") {
+	for _, id := range list {
+		if strings.TrimSpace(msg.UserID) == id {
 			return nil
 		}
 	}
 	return ErrDenied
-}
-
-func (r *Router) isAdmin(ctx context.Context, msg channel.IncomingMessage) bool {
-	if r.adminID != "" && msg.UserID == r.adminID {
-		return true
-	}
-	o, err := r.store.OverrideRepo().Get(ctx, msg.Platform, msg.ChannelID, msg.UserID)
-	if err == nil && o != nil && o.Role == "admin" {
-		return true
-	}
-	if msg.Platform == "discord" && msg.IsThread && msg.ParentChannelID != "" && msg.ParentChannelID != msg.ChannelID {
-		po, err := r.store.OverrideRepo().Get(ctx, msg.Platform, msg.ParentChannelID, msg.UserID)
-		if err == nil && po != nil && po.Role == "admin" {
-			return true
-		}
-	}
-	return false
 }
 
 func (r *Router) handleCommand(ctx context.Context, msg channel.IncomingMessage) error {
@@ -348,11 +316,6 @@ func (r *Router) handleCommand(ctx context.Context, msg channel.IncomingMessage)
 	cmd, ok := r.commands[name]
 	if !ok {
 		r.reply(msg, r.helpText())
-		return nil
-	}
-
-	if cmd.Admin && !r.isAdmin(ctx, msg) {
-		r.reply(msg, "⚠️ Admin access required.")
 		return nil
 	}
 
@@ -642,27 +605,10 @@ func (r *Router) registerDefaults() {
 	}
 	r.commands["dir"] = Command{
 		Name:    "dir",
-		Admin:   true,
 		Handler: r.handleDir,
-	}
-	r.commands["allow"] = Command{
-		Name:    "allow",
-		Admin:   true,
-		Handler: r.handleAllow,
-	}
-	r.commands["deny"] = Command{
-		Name:    "deny",
-		Admin:   true,
-		Handler: r.handleDeny,
-	}
-	r.commands["admin"] = Command{
-		Name:    "admin",
-		Admin:   true,
-		Handler: r.handleAdmin,
 	}
 	r.commands["channel"] = Command{
 		Name:    "channel",
-		Admin:   true,
 		Handler: r.handleChannel,
 	}
 	r.commands["model"] = Command{
@@ -680,7 +626,6 @@ func (r *Router) registerDefaults() {
 	r.registerPermissionCommand()
 	r.commands["schedules"] = Command{
 		Name:    "schedules",
-		Admin:   true,
 		Handler: r.handleSchedules,
 	}
 	r.commands["loop"] = Command{
@@ -693,7 +638,6 @@ func (r *Router) registerDefaults() {
 	}
 	r.commands["webhooks"] = Command{
 		Name:    "webhooks",
-		Admin:   true,
 		Handler: r.handleWebhooks,
 	}
 }
@@ -1452,69 +1396,4 @@ func (r *Router) handleRedo(ctx context.Context, msg channel.IncomingMessage, _ 
 		return fmt.Sprintf("⚠️ Failed to restore turn: %v", err), nil
 	}
 	return "✅ Reverted turns restored.", nil
-}
-
-func (r *Router) handleAllow(ctx context.Context, msg channel.IncomingMessage, args string) (string, error) {
-	userID := strings.TrimSpace(args)
-	if userID == "" {
-		return "Usage: /allow <user_id>", nil
-	}
-	err := r.store.OverrideRepo().UpsertRole(ctx, msg.Platform, msg.ChannelID, userID, "allow")
-	if err != nil {
-		return "", fmt.Errorf("allow: %w", err)
-	}
-	return fmt.Sprintf("✅ Allowed user: %s", userID), nil
-}
-
-func (r *Router) handleDeny(ctx context.Context, msg channel.IncomingMessage, args string) (string, error) {
-	userID := strings.TrimSpace(args)
-	if userID == "" {
-		return "Usage: /deny <user_id>", nil
-	}
-
-	o, err := r.store.OverrideRepo().Get(ctx, msg.Platform, msg.ChannelID, userID)
-	if err != nil {
-		return "", fmt.Errorf("deny: %w", err)
-	}
-	if o != nil && o.Role == "admin" {
-		admins, err := r.countAdmins(ctx, msg.Platform, msg.ChannelID)
-		if err != nil {
-			return "", fmt.Errorf("deny: %w", err)
-		}
-		if admins <= 1 {
-			return "⚠️ Cannot deny the last admin.", nil
-		}
-	}
-
-	err = r.store.OverrideRepo().UpsertRole(ctx, msg.Platform, msg.ChannelID, userID, "deny")
-	if err != nil {
-		return "", fmt.Errorf("deny: %w", err)
-	}
-	return fmt.Sprintf("✅ Denied user: %s", userID), nil
-}
-
-func (r *Router) handleAdmin(ctx context.Context, msg channel.IncomingMessage, args string) (string, error) {
-	userID := strings.TrimSpace(args)
-	if userID == "" {
-		return "Usage: /admin <user_id>", nil
-	}
-	err := r.store.OverrideRepo().UpsertRole(ctx, msg.Platform, msg.ChannelID, userID, "admin")
-	if err != nil {
-		return "", fmt.Errorf("admin: %w", err)
-	}
-	return fmt.Sprintf("✅ Granted admin: %s", userID), nil
-}
-
-func (r *Router) countAdmins(ctx context.Context, platform, channelID string) (int, error) {
-	overrides, err := r.store.OverrideRepo().ListByChannel(ctx, platform, channelID)
-	if err != nil {
-		return 0, err
-	}
-	count := 0
-	for _, o := range overrides {
-		if o.Role == "admin" {
-			count++
-		}
-	}
-	return count, nil
 }

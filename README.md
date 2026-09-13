@@ -21,8 +21,11 @@ provider state.
   `/status`, and session control via `/stop`, `/steer`, and `/reset`.
 - **Conversation queue** — while the agent is busy, up to five more messages
   queue up and run automatically in order when the current response finishes.
-- **Access control** — deny-by-default at the ingress, per-user roles per
-  channel, admin-only commands.
+- **Access control** — deny-by-default at the ingress, per-platform sender
+  allowlists: list your Telegram and Discord sender IDs under
+  `telegram.allowed_sender_ids` / `discord.allowed_sender_ids` in
+  `~/.occa/config.yaml` (a listed sender holds full rights in every channel
+  and thread on that platform).
 - **Scheduled tasks** — describe a recurring task in plain language and OCCA
   runs it on a cron schedule, pushing each result back to the chat.
 - **Webhook ingestion** — HTTP endpoints with per-endpoint secrets that feed
@@ -51,8 +54,18 @@ Quick start:
 
 ```sh
 export OCCA_TELEGRAM_TOKEN="<your bot token>"
-export OCCA_ADMIN_ID="<your user id>"
 occa
+```
+
+Add your sender IDs to `~/.occa/config.yaml` so OCCA answers you:
+
+```yaml
+telegram:
+  allowed_sender_ids:
+    - '1065778107'
+discord:
+  allowed_sender_ids:
+    - '1519692433808556133'
 ```
 
 The first run creates `~/.occa/config.yaml` with defaults; every option can be

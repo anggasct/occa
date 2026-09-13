@@ -84,16 +84,10 @@ func (r *Router) handleModel(ctx context.Context, msg channel.IncomingMessage, a
 	if err := r.validateModel(ctx, msg, ref); err != nil {
 		return "", err
 	}
-	if r.isAdmin(ctx, msg) {
-		if err := r.store.ChannelRepo().UpsertModel(ctx, msg.Platform, modelChannelID, formatModelRef(ref)); err != nil {
-			return "", fmt.Errorf("model: set channel: %w", err)
-		}
-		return fmt.Sprintf("✅ Channel model set: %s\nScope: this channel", formatModelRef(ref)), nil
+	if err := r.store.ChannelRepo().UpsertModel(ctx, msg.Platform, modelChannelID, formatModelRef(ref)); err != nil {
+		return "", fmt.Errorf("model: set channel: %w", err)
 	}
-	if err := r.store.OverrideRepo().UpsertModel(ctx, msg.Platform, modelChannelID, msg.UserID, formatModelRef(ref)); err != nil {
-		return "", fmt.Errorf("model: set personal: %w", err)
-	}
-	return fmt.Sprintf("✅ Personal model set: %s\nScope: personal override", formatModelRef(ref)), nil
+	return fmt.Sprintf("✅ Channel model set: %s\nScope: this channel", formatModelRef(ref)), nil
 }
 
 func parseModelSearch(parts []string) (providerID, query string, search, usage bool) {
@@ -123,16 +117,10 @@ func (r *Router) clearModel(ctx context.Context, msg channel.IncomingMessage) (s
 	if err != nil {
 		return "", safeReplyError("Channel information unavailable. Please try again.", err)
 	}
-	if r.isAdmin(ctx, msg) {
-		if err := r.store.ChannelRepo().UpsertModel(ctx, msg.Platform, modelChannelID, ""); err != nil {
-			return "", fmt.Errorf("model: clear channel: %w", err)
-		}
-		return "✅ Channel model cleared.", nil
+	if err := r.store.ChannelRepo().UpsertModel(ctx, msg.Platform, modelChannelID, ""); err != nil {
+		return "", fmt.Errorf("model: clear channel: %w", err)
 	}
-	if err := r.store.OverrideRepo().UpsertModel(ctx, msg.Platform, modelChannelID, msg.UserID, ""); err != nil {
-		return "", fmt.Errorf("model: clear personal: %w", err)
-	}
-	return "✅ Personal model cleared.", nil
+	return "✅ Channel model cleared.", nil
 }
 
 func (r *Router) viewModel(ctx context.Context, msg channel.IncomingMessage) (string, error) {

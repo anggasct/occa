@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	schemaVersion    = 16
+	schemaVersion    = 17
 	SchemaVersion    = schemaVersion
 	busyTimeoutMilli = 5000
 )
@@ -33,6 +33,43 @@ var migrations = []func(s *SQLiteStore, tx *sql.Tx) error{
 	addSessionTakeover,
 	addSessionRootCard,
 	addWebhookReviewKey,
+	dropOverrideRoleColumn,
+}
+
+func dropOverrideRoleColumn(_ *SQLiteStore, tx *sql.Tx) error {
+	var hasRole bool
+	rows, err := tx.Query(`PRAGMA table_info(user_override)`)
+	if err != nil {
+		return fmt.Errorf("store: inspect override columns: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var cid int
+		var name, dataType string
+		var notNull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &dataType, &notNull, &dflt, &pk); err != nil {
+			return fmt.Errorf("store: inspect override columns: %w", err)
+		}
+		if name == "role" {
+			hasRole = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("store: inspect override columns: %w", err)
+	}
+	if !hasRole {
+		return nil
+	}
+	var grants int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM user_override`).Scan(&grants); err != nil {
+		return fmt.Errorf("store: count legacy grants: %w", err)
+	}
+	slog.Warn("store: legacy grant rows no longer grant access; move these sender IDs into the config allowlist", "rows", grants)
+	if _, err := tx.Exec(`ALTER TABLE user_override DROP COLUMN role;`); err != nil {
+		return fmt.Errorf("store: drop override role: %w", err)
+	}
+	return nil
 }
 
 func addWebhookReviewKey(_ *SQLiteStore, tx *sql.Tx) error {

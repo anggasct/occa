@@ -159,7 +159,7 @@ func TestModelDefaultAllowsLowerScopeWithoutMutatingIt(t *testing.T) {
 	r, _, reply, overrides := newTestRouterWithAccess()
 	st := r.store.(*fakeStore)
 	st.channelRepo.channels["telegram:chat1"] = &store.Channel{Platform: "telegram", ChannelID: "chat1", Model: "anthropic/claude-3", ListenMode: "mention"}
-	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{Platform: "telegram", ChannelID: "chat1", UserID: "user1", Role: "admin", Model: "openai/gpt-4o"}
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{Platform: "telegram", ChannelID: "chat1", UserID: "user1", Model: "openai/gpt-4o"}
 
 	if err := r.Route(context.Background(), msg("/model default", reply)); err != nil {
 		t.Fatalf("Route: %v", err)
@@ -181,7 +181,7 @@ func TestModelDefaultAllowsLowerScopeWithoutMutatingIt(t *testing.T) {
 
 func TestIgnoredListenMessageDoesNotAcquireResponseSlot(t *testing.T) {
 	r, client, reply, overrides := newTestRouterWithAccess()
-	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{Platform: "telegram", ChannelID: "chat1", UserID: "user1", Role: "allow"}
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{Platform: "telegram", ChannelID: "chat1", UserID: "user1"}
 	r.store.(*fakeStore).channelRepo.channels["telegram:chat1"] = &store.Channel{Platform: "telegram", ChannelID: "chat1", ListenMode: "mention"}
 
 	ordinary := msg("ordinary message", reply)
@@ -202,7 +202,7 @@ func TestIgnoredListenMessageDoesNotAcquireResponseSlot(t *testing.T) {
 
 func TestThreadListenModeRejectsUnownedDiscordThreadWithoutMention(t *testing.T) {
 	r, _, _, overrides := newTestRouterWithAccess()
-	overrides.overrides["discord:thread-1:user1"] = &store.UserOverride{Platform: "discord", ChannelID: "thread-1", UserID: "user1", Role: "allow"}
+	overrides.overrides["discord:thread-1:user1"] = &store.UserOverride{Platform: "discord", ChannelID: "thread-1", UserID: "user1"}
 	r.store.(*fakeStore).channelRepo.channels["discord:parent"] = &store.Channel{Platform: "discord", ChannelID: "parent", ListenMode: "thread"}
 
 	msg := channel.IncomingMessage{
@@ -224,7 +224,7 @@ func TestThreadListenModeRejectsUnownedDiscordThreadWithoutMention(t *testing.T)
 
 func TestListenModeViewShowsLocationModeAndNextAction(t *testing.T) {
 	r, _, reply, overrides := newTestRouterWithAccess()
-	overrides.overrides["discord:parent:user1"] = &store.UserOverride{Platform: "discord", ChannelID: "parent", UserID: "user1", Role: "admin"}
+	overrides.overrides["discord:parent:user1"] = &store.UserOverride{Platform: "discord", ChannelID: "parent", UserID: "user1"}
 	st := r.store.(*fakeStore)
 	st.channelRepo.channels["discord:parent"] = &store.Channel{Platform: "discord", ChannelID: "parent", ListenMode: "mention"}
 
@@ -247,7 +247,7 @@ func TestListenModeViewShowsLocationModeAndNextAction(t *testing.T) {
 
 func TestDiscordThreadConfigScopeUsesParentForMessageAndInteractionShapes(t *testing.T) {
 	r, _, _, overrides := newTestRouterWithAccess()
-	overrides.overrides["discord:parent:user1"] = &store.UserOverride{Platform: "discord", ChannelID: "parent", UserID: "user1", Role: "allow"}
+	overrides.overrides["discord:parent:user1"] = &store.UserOverride{Platform: "discord", ChannelID: "parent", UserID: "user1"}
 	st := r.store.(*fakeStore)
 	st.channelRepo.channels["discord:parent"] = &store.Channel{Platform: "discord", ChannelID: "parent", Model: "openai/gpt-4o", ListenMode: "all"}
 

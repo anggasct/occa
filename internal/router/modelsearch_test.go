@@ -83,7 +83,7 @@ func browseCommand(text string, reply *browseReplyCtx) channel.IncomingMessage {
 
 func TestModelSearchFiltersAndPaginatesResults(t *testing.T) {
 	r, client, _, overrides := newTestRouterWithAccess()
-	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{Platform: "telegram", ChannelID: "chat1", UserID: "user1", Role: "allow"}
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{Platform: "telegram", ChannelID: "chat1", UserID: "user1"}
 	client.providers = relayProvidersWithSearchModels()
 	reply := newBrowseReplyCtx()
 
@@ -121,7 +121,7 @@ func TestModelSearchFiltersAndPaginatesResults(t *testing.T) {
 
 func TestModelSearchRejectsDisconnectedProviderWithoutMutation(t *testing.T) {
 	r, client, _, overrides := newTestRouterWithAccess()
-	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{Platform: "telegram", ChannelID: "chat1", UserID: "user1", Role: "allow"}
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{Platform: "telegram", ChannelID: "chat1", UserID: "user1"}
 	providers := relayProvidersWithSearchModels()
 	providers.Connected = []string{"anthropic"}
 	client.providers = providers
@@ -143,7 +143,7 @@ func TestModelSearchRejectsDisconnectedProviderWithoutMutation(t *testing.T) {
 
 func TestModelSearchNoMatchesShowsEmptyViewWithoutMutation(t *testing.T) {
 	r, client, _, overrides := newTestRouterWithAccess()
-	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{Platform: "telegram", ChannelID: "chat1", UserID: "user1", Role: "allow"}
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{Platform: "telegram", ChannelID: "chat1", UserID: "user1"}
 	client.providers = relayProvidersWithSearchModels()
 	reply := newBrowseReplyCtx()
 
@@ -163,7 +163,7 @@ func TestModelSearchNoMatchesShowsEmptyViewWithoutMutation(t *testing.T) {
 
 func TestModelSearchCallbackRevalidatesStaleModel(t *testing.T) {
 	r, client, _, overrides := newTestRouterWithAccess()
-	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{Platform: "telegram", ChannelID: "chat1", UserID: "user1", Role: "allow"}
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{Platform: "telegram", ChannelID: "chat1", UserID: "user1"}
 	client.providers = relayProvidersWithSearchModels()
 	reply := newBrowseReplyCtx()
 
@@ -191,7 +191,7 @@ func TestModelSearchCallbackRevalidatesStaleModel(t *testing.T) {
 
 func TestModelSearchVariantSelectionUsesExistingSetPath(t *testing.T) {
 	r, client, _, overrides := newTestRouterWithAccess()
-	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{Platform: "telegram", ChannelID: "chat1", UserID: "user1", Role: "admin"}
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{Platform: "telegram", ChannelID: "chat1", UserID: "user1"}
 	client.providers = relayProvidersWithSearchModels()
 	reply := newBrowseReplyCtx()
 

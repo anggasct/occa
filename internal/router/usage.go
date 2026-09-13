@@ -115,14 +115,13 @@ func (r *Router) usageView(ctx context.Context, msg channel.IncomingMessage, per
 		ThreadID:  threadID,
 		UserID:    userID,
 	}
-	admin := r.isAdmin(ctx, msg)
-	if admin && period != usageSession {
+	if period != usageSession {
 		query.ChannelWide = true
 	}
 	if period == usageSession {
 		query.SessionID, _, _ = r.store.SessionRepo().Active(ctx, msg.Platform, msg.ChannelID, threadID, userID)
 		if query.SessionID == "" {
-			return usageHeader(period, admin) + "\nNo active session usage yet.", usageButtons(period, 1, 1), nil
+			return usageHeader(period) + "\nNo active session usage yet.", usageButtons(period, 1, 1), nil
 		}
 	}
 	query.Since = usageSince(period, time.Now().UTC())
@@ -145,7 +144,7 @@ func (r *Router) usageView(ctx context.Context, msg channel.IncomingMessage, per
 	}
 
 	var b strings.Builder
-	b.WriteString(usageHeader(period, admin))
+	b.WriteString(usageHeader(period))
 	b.WriteString("\nInput: ")
 	b.WriteString(formatMetric(report.Totals.Input))
 	b.WriteString(" cumulative\nOutput: ")
@@ -176,10 +175,8 @@ func (r *Router) usageView(ctx context.Context, msg channel.IncomingMessage, per
 				b.WriteString(" · ")
 				b.WriteString(truncateRunes(breakdown.Workdir, 60))
 			}
-			if admin {
-				b.WriteString(" · ")
-				b.WriteString(truncateRunes(usageConversationLabel(breakdown), 42))
-			}
+			b.WriteString(" · ")
+			b.WriteString(truncateRunes(usageConversationLabel(breakdown), 42))
 			fmt.Fprintf(&b, "\n  Input %s · Output %s · Reasoning %s", formatMetric(breakdown.Input), formatMetric(breakdown.Output), formatMetric(breakdown.Reasoning))
 			fmt.Fprintf(&b, "\n  Cache %s/%s · Cost ", formatMetric(breakdown.CacheRead), formatMetric(breakdown.CacheWrite))
 			if breakdown.CostKnown {
@@ -197,10 +194,10 @@ func (r *Router) usageView(ctx context.Context, msg channel.IncomingMessage, per
 	return b.String(), usageButtons(period, page, pages), nil
 }
 
-func usageHeader(period usagePeriod, admin bool) string {
-	scope := "current conversation"
-	if admin && period != usageSession {
-		scope = "channel · admin view"
+func usageHeader(period usagePeriod) string {
+	scope := "channel"
+	if period == usageSession {
+		scope = "current conversation"
 	}
 	return fmt.Sprintf("📊 Usage\n%s · %s", usagePeriodLabel(period), scope)
 }

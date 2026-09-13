@@ -163,10 +163,10 @@ func TestModelBrowserProviderToModels(t *testing.T) {
 	}
 }
 
-func TestModelBrowserSetPersonalForCaller(t *testing.T) {
+func TestModelBrowserSetChannelForCaller(t *testing.T) {
 	r, client, _, overrideRepo := newTestRouterWithAccess()
-	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin"}
-	overrideRepo.overrides["telegram:chat1:user2"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "user2", Role: "allow"}
+	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "user1"}
+	overrideRepo.overrides["telegram:chat1:user2"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "user2"}
 	client.providers = browseProviders()
 	reply := newBrowseReplyCtx()
 
@@ -188,25 +188,22 @@ func TestModelBrowserSetPersonalForCaller(t *testing.T) {
 		t.Fatalf("Route set: %v", err)
 	}
 	text, buttons := setReply.editSnapshot()
-	if text != "✅ Personal model set: openai/gpt-4o\nScope: personal override" {
+	if text != "✅ Channel model set: openai/gpt-4o\nScope: this channel" {
 		t.Fatalf("text = %q", text)
 	}
 	if len(buttons) != 0 {
 		t.Fatalf("buttons = %v, want removed", buttons)
 	}
-	o := overrideRepo.overrides["telegram:chat1:user2"]
-	if o == nil || o.Model != "openai/gpt-4o" {
-		t.Fatalf("user2 model = %+v, want openai/gpt-4o", o)
-	}
-	if u1 := overrideRepo.overrides["telegram:chat1:user1"]; u1 != nil && u1.Model != "" {
-		t.Fatalf("user1 model must stay untouched, got %+v", u1)
+	ch := r.store.(*fakeStore).channelRepo.channels["telegram:chat1"]
+	if ch == nil || ch.Model != "openai/gpt-4o" {
+		t.Fatalf("channel model = %+v, want openai/gpt-4o", ch)
 	}
 }
 
 func TestModelBrowserRoundTripsSlashContainingModelID(t *testing.T) {
 	r, client, _, overrideRepo := newTestRouterWithAccess()
 	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{
-		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1",
 	}
 	providers := browseProviders()
 	providers.All = append(providers.All, relay.Provider{
@@ -241,13 +238,13 @@ func TestModelBrowserRoundTripsSlashContainingModelID(t *testing.T) {
 		t.Fatalf("Route model callback: %v", err)
 	}
 	text, buttons := setReply.editSnapshot()
-	if text != "✅ Personal model set: openrouter/stealth/ox-alpha\nScope: personal override" {
+	if text != "✅ Channel model set: openrouter/stealth/ox-alpha\nScope: this channel" {
 		t.Fatalf("set text = %q", text)
 	}
 	if len(buttons) != 0 {
 		t.Fatalf("set buttons = %v, want removed", buttons)
 	}
-	if got := overrideRepo.overrides["telegram:chat1:user1"].Model; got != "openrouter/stealth/ox-alpha" {
+	if got := r.store.(*fakeStore).channelRepo.channels["telegram:chat1"].Model; got != "openrouter/stealth/ox-alpha" {
 		t.Fatalf("stored model = %q, want openrouter/stealth/ox-alpha", got)
 	}
 
@@ -440,7 +437,7 @@ func TestModelBrowserRowLayoutDiscord(t *testing.T) {
 		providers.All = append(providers.All, relay.Provider{ID: "provider-" + string(rune('a'+i)), Models: map[string]json.RawMessage{"m": json.RawMessage(`{}`)}})
 	}
 	r, client, _, overrideRepo := newTestRouterWithAccess()
-	overrideRepo.overrides["discord:chat1:user1"] = &store.UserOverride{ChannelID: "chat1", Platform: "discord", UserID: "user1", Role: "admin"}
+	overrideRepo.overrides["discord:chat1:user1"] = &store.UserOverride{ChannelID: "chat1", Platform: "discord", UserID: "user1"}
 	client.providers = providers
 	reply := newBrowseReplyCtx()
 
@@ -487,7 +484,7 @@ func modelNavLabel(label string) bool {
 
 func TestModelBrowserVariantSelection(t *testing.T) {
 	r, client, _, overrideRepo := newTestRouterWithAccess()
-	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin"}
+	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "user1"}
 	client.providers = browseProviders()
 	reply := newBrowseReplyCtx()
 

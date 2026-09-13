@@ -1,7 +1,6 @@
 package discord
 
 import (
-	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -336,46 +335,36 @@ func TestIdentityWriteAndReadAreConcurrencySafe(t *testing.T) {
 	wg.Wait()
 }
 
-func TestTrustedBotAdmission(t *testing.T) {
-	policy := TrustedBotPolicy{
-		TriggerRoleIDs: []string{"role-1"},
-		TrustedBotSenders: []TrustedBotSender{{
-			UserID:     "trusted-bot",
-			ChannelIDs: []string{"allowed-channel"},
-		}},
-	}
-	a := NewWithPolicy("fake-token", nil, policy)
+func TestAllowlistedBotAdmission(t *testing.T) {
+	a := NewWithPolicy("fake-token", nil, AllowlistPolicy{AllowedSenderIDs: []string{"trusted-bot"}})
 	a.onReady(&discordgo.Ready{User: &discordgo.User{ID: "occa-bot"}})
 	a.channelLookup = func(string) (*discordgo.Channel, error) {
 		return &discordgo.Channel{Type: discordgo.ChannelTypeGuildText}, nil
 	}
 
 	tests := []struct {
-		name       string
-		authorID   string
-		channelID  string
-		mentions   []*discordgo.User
-		mentionIDs []string
-		want       bool
+		name      string
+		authorID  string
+		channelID string
+		mentions  []*discordgo.User
+		want      bool
 	}{
-		{name: "user mention", authorID: "trusted-bot", channelID: "allowed-channel", mentions: []*discordgo.User{{ID: "occa-bot"}}, want: true},
-		{name: "configured role mention", authorID: "trusted-bot", channelID: "allowed-channel", mentionIDs: []string{"role-1"}, want: true},
-		{name: "sender mismatch", authorID: "other-bot", channelID: "allowed-channel", mentions: []*discordgo.User{{ID: "occa-bot"}}},
-		{name: "channel mismatch", authorID: "trusted-bot", channelID: "other-channel", mentions: []*discordgo.User{{ID: "occa-bot"}}},
-		{name: "missing mention", authorID: "trusted-bot", channelID: "allowed-channel"},
-		{name: "unconfigured role", authorID: "trusted-bot", channelID: "allowed-channel", mentionIDs: []string{"other-role"}},
-		{name: "self bot", authorID: "occa-bot", channelID: "allowed-channel", mentions: []*discordgo.User{{ID: "occa-bot"}}, mentionIDs: []string{"role-1"}},
+		{name: "listed bot admitted in any channel", authorID: "trusted-bot", channelID: "allowed-channel", mentions: []*discordgo.User{{ID: "occa-bot"}}, want: true},
+		{name: "listed bot admitted in new channel", authorID: "trusted-bot", channelID: "other-channel", mentions: []*discordgo.User{{ID: "occa-bot"}}, want: true},
+		{name: "unlisted bot dropped", authorID: "other-bot", channelID: "allowed-channel", mentions: []*discordgo.User{{ID: "occa-bot"}}},
+		{name: "listed bot still needs bot-user mention", authorID: "trusted-bot", channelID: "allowed-channel"},
+		{name: "role mention alone never counts", authorID: "trusted-bot", channelID: "allowed-channel", mentions: []*discordgo.User{{ID: "someone-else"}}},
+		{name: "self bot", authorID: "occa-bot", channelID: "allowed-channel", mentions: []*discordgo.User{{ID: "occa-bot"}}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			delivered := 0
 			a.onMessage(&discordgo.MessageCreate{Message: &discordgo.Message{
-				GuildID:      "guild",
-				ChannelID:    tt.channelID,
-				Author:       &discordgo.User{ID: tt.authorID, Bot: true},
-				Mentions:     tt.mentions,
-				MentionRoles: tt.mentionIDs,
+				GuildID:   "guild",
+				ChannelID: tt.channelID,
+				Author:    &discordgo.User{ID: tt.authorID, Bot: true},
+				Mentions:  tt.mentions,
 			}}, func(channel.IncomingMessage) { delivered++ })
 			if got := delivered == 1; got != tt.want {
 				t.Fatalf("delivered = %d, want match=%v", delivered, tt.want)
@@ -384,7 +373,7 @@ func TestTrustedBotAdmission(t *testing.T) {
 	}
 }
 
-func TestTrustedBotThreadAdmission(t *testing.T) {
+func TestAllowlistedBotThreadAdmission(t *testing.T) {
 	const (
 		trustedBotID = "trusted-bot"
 		occaBotID    = "occa-bot"
@@ -398,46 +387,25 @@ func TestTrustedBotThreadAdmission(t *testing.T) {
 		bot         bool
 		channelType discordgo.ChannelType
 		parentID    string
-		lookupErr   error
-		lookupNil   bool
 		owned       bool
-		ownedErr    error
 		mention     bool
 		want        bool
 	}{
-		{name: "owned public thread", authorID: trustedBotID, bot: true, channelType: discordgo.ChannelTypeGuildPublicThread, parentID: parentID, owned: true, mention: true, want: true},
-		{name: "owned private thread", authorID: trustedBotID, bot: true, channelType: discordgo.ChannelTypeGuildPrivateThread, parentID: parentID, owned: true, mention: true, want: true},
-		{name: "owned news thread", authorID: trustedBotID, bot: true, channelType: discordgo.ChannelTypeGuildNewsThread, parentID: parentID, owned: true, mention: true, want: true},
-		{name: "unowned thread", authorID: trustedBotID, bot: true, channelType: discordgo.ChannelTypeGuildPublicThread, parentID: parentID, mention: true},
-		{name: "lookup failure", authorID: trustedBotID, bot: true, lookupErr: errors.New("lookup failed"), mention: true},
-		{name: "empty lookup result", authorID: trustedBotID, bot: true, lookupNil: true, mention: true},
-		{name: "missing parent", authorID: trustedBotID, bot: true, channelType: discordgo.ChannelTypeGuildPublicThread, owned: true, mention: true},
-		{name: "sender mismatch", authorID: "other-bot", bot: true, channelType: discordgo.ChannelTypeGuildPublicThread, parentID: parentID, owned: true, mention: true},
-		{name: "parent mismatch", authorID: trustedBotID, bot: true, channelType: discordgo.ChannelTypeGuildPublicThread, parentID: "other-parent", owned: true, mention: true},
-		{name: "missing mention", authorID: trustedBotID, bot: true, channelType: discordgo.ChannelTypeGuildPublicThread, parentID: parentID, owned: true},
-		{name: "ownership lookup failure", authorID: trustedBotID, bot: true, channelType: discordgo.ChannelTypeGuildPublicThread, parentID: parentID, ownedErr: errors.New("ownership lookup failed"), mention: true},
+		{name: "listed bot in owned thread", authorID: trustedBotID, bot: true, channelType: discordgo.ChannelTypeGuildPublicThread, parentID: parentID, owned: true, mention: true, want: true},
+		{name: "unlisted bot in owned thread", authorID: "other-bot", bot: true, channelType: discordgo.ChannelTypeGuildPublicThread, parentID: parentID, owned: true, mention: true},
+		{name: "listed bot without mention", authorID: trustedBotID, bot: true, channelType: discordgo.ChannelTypeGuildPublicThread, parentID: parentID, owned: true},
 		{name: "self bot", authorID: occaBotID, bot: true, channelType: discordgo.ChannelTypeGuildPublicThread, parentID: parentID, owned: true, mention: true},
 		{name: "human compatibility", authorID: "human", channelType: discordgo.ChannelTypeGuildPublicThread, parentID: parentID, mention: false, want: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			policy := TrustedBotPolicy{TrustedBotSenders: []TrustedBotSender{{
-				UserID:     trustedBotID,
-				ChannelIDs: []string{parentID},
-			}}}
-			a := NewWithPolicy("fake-token", nil, policy)
+			a := NewWithPolicy("fake-token", nil, AllowlistPolicy{AllowedSenderIDs: []string{trustedBotID}})
 			a.setBotID(occaBotID)
 			a.channelLookup = func(string) (*discordgo.Channel, error) {
-				if tt.lookupErr != nil {
-					return nil, tt.lookupErr
-				}
-				if tt.lookupNil {
-					return nil, nil
-				}
 				return &discordgo.Channel{Type: tt.channelType, ParentID: tt.parentID}, nil
 			}
-			a.SetOwnedThreadCheck(func(string) (bool, error) { return tt.owned, tt.ownedErr })
+			a.SetOwnedThreadCheck(func(string) (bool, error) { return tt.owned, nil })
 
 			var got channel.IncomingMessage
 			delivered := 0
@@ -471,31 +439,23 @@ func TestTrustedBotThreadAdmission(t *testing.T) {
 	}
 }
 
-func TestConfiguredRoleMentionNormalization(t *testing.T) {
-	a := NewWithPolicy("fake-token", nil, TrustedBotPolicy{TriggerRoleIDs: []string{"role-1"}})
+func TestRoleMentionNeverCountsAsOccaMention(t *testing.T) {
+	a := NewWithPolicy("fake-token", nil, AllowlistPolicy{AllowedSenderIDs: []string{"human"}})
 	a.channelLookup = func(string) (*discordgo.Channel, error) {
 		return &discordgo.Channel{Type: discordgo.ChannelTypeGuildText}, nil
 	}
 
-	tests := []struct {
-		name       string
-		mentionIDs []string
-		want       bool
-	}{
-		{name: "configured role", mentionIDs: []string{"role-1"}, want: true},
-		{name: "arbitrary role", mentionIDs: []string{"role-2"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, roleID := range []string{"role-1", "role-2"} {
+		t.Run(roleID, func(t *testing.T) {
 			var got channel.IncomingMessage
 			a.onMessage(&discordgo.MessageCreate{Message: &discordgo.Message{
 				GuildID:      "guild",
 				ChannelID:    "channel",
 				Author:       &discordgo.User{ID: "human"},
-				MentionRoles: tt.mentionIDs,
+				MentionRoles: []string{roleID},
 			}}, func(message channel.IncomingMessage) { got = message })
-			if got.IsMention != tt.want {
-				t.Fatalf("IsMention = %v, want %v", got.IsMention, tt.want)
+			if got.IsMention {
+				t.Fatalf("role mention %q must never count as an OCCA mention", roleID)
 			}
 		})
 	}

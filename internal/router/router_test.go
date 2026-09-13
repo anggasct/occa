@@ -339,22 +339,11 @@ func (f *fakeOverrideRepo) Get(_ context.Context, platform, channelID, userID st
 	return f.overrides[f.key(platform, channelID, userID)], nil
 }
 
-func (f *fakeOverrideRepo) UpsertRole(_ context.Context, platform, channelID, userID, role string) error {
-	k := f.key(platform, channelID, userID)
-	o, ok := f.overrides[k]
-	if !ok {
-		o = &store.UserOverride{ChannelID: channelID, Platform: platform, UserID: userID}
-		f.overrides[k] = o
-	}
-	o.Role = role
-	return nil
-}
-
 func (f *fakeOverrideRepo) UpsertModel(_ context.Context, platform, channelID, userID, model string) error {
 	k := f.key(platform, channelID, userID)
 	o, ok := f.overrides[k]
 	if !ok {
-		o = &store.UserOverride{ChannelID: channelID, Platform: platform, UserID: userID, Role: "deny"}
+		o = &store.UserOverride{ChannelID: channelID, Platform: platform, UserID: userID}
 		f.overrides[k] = o
 	}
 	o.Model = model
@@ -365,7 +354,7 @@ func (f *fakeOverrideRepo) UpsertAgent(_ context.Context, platform, channelID, u
 	k := f.key(platform, channelID, userID)
 	o, ok := f.overrides[k]
 	if !ok {
-		o = &store.UserOverride{ChannelID: channelID, Platform: platform, UserID: userID, Role: "deny"}
+		o = &store.UserOverride{ChannelID: channelID, Platform: platform, UserID: userID}
 		f.overrides[k] = o
 	}
 	o.Agent = agent
@@ -1050,19 +1039,13 @@ func newTestRouterWithAccess() (*Router, *fakeRelayClient, *fakeReplyCtx, *fakeO
 		scheduleRepo: &fakeScheduleRepo{},
 	}
 	provider := &fakeInstanceProvider{client: client}
-	r := New(provider, st, "/default-workdir", "")
+	r := NewWithAllowlists(provider, st, "/default-workdir", "", []string{"user1", "user2", "alice", "bob", "admin1", "admin"}, []string{"user1", "user2", "alice", "bob", "admin1", "admin"})
 	reply := &fakeReplyCtx{}
 	return r, client, reply, overrideRepo
 }
 
 func newTestRouter() (*Router, *fakeRelayClient, *fakeReplyCtx) {
-	r, client, reply, overrideRepo := newTestRouterWithAccess()
-	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{
-		ChannelID: "chat1",
-		Platform:  "telegram",
-		UserID:    "user1",
-		Role:      "admin",
-	}
+	r, client, reply, _ := newTestRouterWithAccess()
 	return r, client, reply
 }
 
@@ -1846,16 +1829,13 @@ func TestAccessDeniedForUnknownUser(t *testing.T) {
 }
 
 func TestIngressAuthorizationMatrix(t *testing.T) {
-	roles := []struct {
+	sendMatrix := []struct {
 		name   string
 		userID string
-		role   string
 		denied bool
 	}{
 		{name: "unknown", userID: "stranger", denied: true},
-		{name: "deny", userID: "user1", role: "deny", denied: true},
-		{name: "allow", userID: "user1", role: "allow"},
-		{name: "admin", userID: "user1", role: "admin"},
+		{name: "listed", userID: "user1"},
 	}
 	actions := []struct {
 		name     string
@@ -1863,29 +1843,24 @@ func TestIngressAuthorizationMatrix(t *testing.T) {
 		callback bool
 	}{
 		{name: "ordinary", text: "hello"},
-		{name: "non-admin command", text: "/help"},
-		{name: "admin command", text: "/allow user2"},
+		{name: "command", text: "/help"},
 		{name: "permission callback", callback: true, text: "permission:req-1:once"},
 	}
 
-	for _, role := range roles {
+	for _, sender := range sendMatrix {
 		for _, action := range actions {
-			t.Run(role.name+"/"+action.name, func(t *testing.T) {
-				r, client, reply, overrideRepo := newTestRouterWithAccess()
+			t.Run(sender.name+"/"+action.name, func(t *testing.T) {
+				r, client, reply, _ := newTestRouterWithAccess()
 				provider := r.instances.(*fakeInstanceProvider)
-				if role.role != "" {
-					overrideRepo.overrides[overrideRepo.key("telegram", "chat1", role.userID)] = &store.UserOverride{
-						ChannelID: "chat1",
-						Platform:  "telegram",
-						UserID:    role.userID,
-						Role:      role.role,
-					}
+				userID := sender.userID
+				if !sender.denied {
+					userID = "user1"
 				}
 
 				m := channel.IncomingMessage{
 					Platform:     "telegram",
 					ChannelID:    "chat1",
-					UserID:       role.userID,
+					UserID:       userID,
 					Text:         action.text,
 					IsMention:    true,
 					IsCallback:   action.callback,
@@ -1896,12 +1871,12 @@ func TestIngressAuthorizationMatrix(t *testing.T) {
 				if err := r.Route(context.Background(), m); err != nil {
 					t.Fatalf("Route: %v", err)
 				}
-				if action.name == "ordinary" && !role.denied {
+				if action.name == "ordinary" && !sender.denied {
 					waitForDispatch(t, client)
 					waitForResponse(t, r)
 				}
 
-				if role.denied {
+				if sender.denied {
 					if len(reply.sends) != 1 || reply.sends[0] != accessDeniedMessage {
 						t.Fatalf("denied response = %v, want exactly %q", reply.sends, accessDeniedMessage)
 					}
@@ -1922,17 +1897,9 @@ func TestIngressAuthorizationMatrix(t *testing.T) {
 					if client.lastMsg != "hello" {
 						t.Fatalf("ordinary message = %q, want hello", client.lastMsg)
 					}
-				case "non-admin command":
+				case "command":
 					if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "/help") {
-						t.Fatalf("non-admin command response = %v", reply.sends)
-					}
-				case "admin command":
-					if role.role == "admin" {
-						if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Allowed user: user2") {
-							t.Fatalf("admin command response = %v", reply.sends)
-						}
-					} else if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Admin access required") {
-						t.Fatalf("non-admin command response = %v", reply.sends)
+						t.Fatalf("command response = %v", reply.sends)
 					}
 				case "permission callback":
 					if provider.calls != 0 {
@@ -1944,120 +1911,79 @@ func TestIngressAuthorizationMatrix(t *testing.T) {
 	}
 }
 
-func TestIngressAuthorizationStoreErrorFailsClosed(t *testing.T) {
-	r, client, reply, overrideRepo := newTestRouterWithAccess()
-	provider := r.instances.(*fakeInstanceProvider)
-	overrideRepo.getErr = errors.New("database unavailable")
-
-	if err := r.Route(context.Background(), msgFrom("stranger", "hello", reply)); err != nil {
-		t.Fatalf("Route: %v", err)
-	}
-	if len(reply.sends) != 1 || reply.sends[0] != accessVerifyMessage {
-		t.Fatalf("verification response = %v, want exactly %q", reply.sends, accessVerifyMessage)
-	}
-	if provider.calls != 0 || client.lastMsg != "" {
-		t.Fatalf("store error reached downstream: provider calls=%d, message=%q", provider.calls, client.lastMsg)
-	}
-}
-
-func TestAccessAllowedAfterAllow(t *testing.T) {
-	r, client, reply, overrideRepo := newTestRouterWithAccess()
-	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin"}
-
-	err := r.Route(context.Background(), msg("/allow user2", reply))
-	if err != nil {
-		t.Fatalf("Route allow: %v", err)
-	}
-
-	reply2 := &fakeReplyCtx{}
-	err = r.Route(context.Background(), msgFrom("user2", "hello", reply2))
-	if err != nil {
-		t.Fatalf("Route: %v", err)
-	}
-	waitForDispatch(t, client)
-	waitForResponse(t, r)
-	if client.lastMsg != "hello" {
-		t.Fatalf("expected passthrough after allow, got %q", client.lastMsg)
+func TestAllowlistGrantsAnyChannel(t *testing.T) {
+	r, client, reply, _ := newTestRouterWithAccess()
+	for _, channelID := range []string{"chat1", "brand-new-channel"} {
+		reply.sends = nil
+		m := channel.IncomingMessage{
+			Platform:  "telegram",
+			ChannelID: channelID,
+			UserID:    "user1",
+			Text:      "hello",
+			IsMention: true,
+			ReplyCtx:  reply,
+		}
+		if err := r.Route(context.Background(), m); err != nil {
+			t.Fatalf("Route %s: %v", channelID, err)
+		}
+		waitForDispatch(t, client)
+		waitForResponse(t, r)
+		if client.lastMsg != "hello" {
+			t.Fatalf("channel %s: message = %q, want hello", channelID, client.lastMsg)
+		}
 	}
 }
 
-func TestAccessDeniedAfterDeny(t *testing.T) {
-	r, client, reply, overrideRepo := newTestRouterWithAccess()
-	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin"}
-	overrideRepo.overrides["telegram:chat1:user2"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "user2", Role: "allow"}
-
-	err := r.Route(context.Background(), msg("/deny user2", reply))
-	if err != nil {
-		t.Fatalf("Route deny: %v", err)
-	}
-
-	reply2 := &fakeReplyCtx{}
-	err = r.Route(context.Background(), msgFrom("user2", "hello", reply2))
-	if err != nil {
-		t.Fatalf("Route: %v", err)
-	}
-	if client.lastMsg != "" {
-		t.Fatal("denied user should not reach the agent")
-	}
-}
-
-func TestNonAdminCannotAllow(t *testing.T) {
-	r, _, reply, overrideRepo := newTestRouterWithAccess()
-	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow"}
-
-	err := r.Route(context.Background(), msg("/allow user2", reply))
-	if err != nil {
-		t.Fatalf("Route: %v", err)
-	}
-	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Admin access required") {
-		t.Fatalf("expected admin required, got: %v", reply.sends)
-	}
-}
-
-func TestLastAdminCannotBeDenied(t *testing.T) {
-	r, _, reply, overrideRepo := newTestRouterWithAccess()
-	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin"}
-
-	err := r.Route(context.Background(), msg("/deny user1", reply))
-	if err != nil {
-		t.Fatalf("Route: %v", err)
-	}
-	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "last admin") {
-		t.Fatalf("expected last admin guard, got: %v", reply.sends)
-	}
-}
-
-func TestPerChannelScoping(t *testing.T) {
-	r, client, reply, overrideRepo := newTestRouterWithAccess()
-	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow"}
-
-	msgChat2 := channel.IncomingMessage{
-		Platform:  "telegram",
-		ChannelID: "chat2",
+func TestAllowlistRejectsOtherPlatform(t *testing.T) {
+	r, client, reply, _ := newTestRouterWithAccess()
+	r.discordSenders = nil
+	m := channel.IncomingMessage{
+		Platform:  "discord",
+		ChannelID: "chat1",
 		UserID:    "user1",
 		Text:      "hello",
 		IsMention: true,
 		ReplyCtx:  reply,
 	}
-	err := r.Route(context.Background(), msgChat2)
-	if err != nil {
+	if err := r.Route(context.Background(), m); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
-	if client.lastMsg != "" {
-		t.Fatal("user allowed in chat1 should be denied in chat2")
+	if client.lastMsg != "" || client.lastCmd != "" {
+		t.Fatalf("cross-platform request reached client: message=%q command=%q", client.lastMsg, client.lastCmd)
+	}
+	if len(reply.sends) != 1 || reply.sends[0] != accessDeniedMessage {
+		t.Fatalf("denied response = %v, want exactly %q", reply.sends, accessDeniedMessage)
 	}
 }
 
-func TestNonAdminCannotSetDir(t *testing.T) {
-	r, _, reply, overrideRepo := newTestRouterWithAccess()
-	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow"}
-
-	err := r.Route(context.Background(), msg("/dir "+t.TempDir(), reply))
-	if err != nil {
-		t.Fatalf("Route: %v", err)
+func TestEnvAliasGrantsAnyPlatform(t *testing.T) {
+	client := &fakeRelayClient{sessionID: "sess-new"}
+	st := &fakeStore{
+		sessionRepo:  &fakeSessionRepo{},
+		channelRepo:  newFakeChannelRepo(),
+		overrideRepo: newFakeOverrideRepo(),
+		scheduleRepo: &fakeScheduleRepo{},
 	}
-	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Admin access required") {
-		t.Fatalf("expected admin required, got: %v", reply.sends)
+	provider := &fakeInstanceProvider{client: client}
+	r := New(provider, st, "/default-workdir", "owner1")
+	for _, platform := range []string{"telegram", "discord"} {
+		reply := &fakeReplyCtx{}
+		m := channel.IncomingMessage{
+			Platform:  platform,
+			ChannelID: "chat1",
+			UserID:    "owner1",
+			Text:      "hello",
+			IsMention: true,
+			ReplyCtx:  reply,
+		}
+		if err := r.Route(context.Background(), m); err != nil {
+			t.Fatalf("Route %s: %v", platform, err)
+		}
+		waitForDispatch(t, client)
+		waitForResponse(t, r)
+		if client.lastMsg != "hello" {
+			t.Fatalf("platform %s: message = %q, want hello", platform, client.lastMsg)
+		}
 	}
 }
 
@@ -2183,7 +2109,7 @@ func TestDirThreadIsolation(t *testing.T) {
 
 	// Access control has no thread-inherits-parent fallback — an admin needs their own
 	// override row scoped to the thread's own channel_id.
-	st.overrideRepo.overrides["telegram:thread1:user1"] = &store.UserOverride{ChannelID: "thread1", Platform: "telegram", UserID: "user1", Role: "admin"}
+	st.overrideRepo.overrides["telegram:thread1:user1"] = &store.UserOverride{ChannelID: "thread1", Platform: "telegram", UserID: "user1"}
 
 	reply := &fakeReplyCtx{}
 	if err := r.Route(context.Background(), msgIn("thread1", "/dir "+dir, reply)); err != nil {
@@ -2215,8 +2141,9 @@ func TestDirChangeResetsSession(t *testing.T) {
 }
 
 func TestPerPlatformScoping(t *testing.T) {
-	r, client, reply, overrideRepo := newTestRouterWithAccess()
-	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow"}
+	r, client, reply, _ := newTestRouterWithAccess()
+	r.telegramSenders = []string{"user1"}
+	r.discordSenders = nil
 
 	msgDiscordSameID := channel.IncomingMessage{
 		Platform:  "discord",
@@ -2235,7 +2162,7 @@ func TestPerPlatformScoping(t *testing.T) {
 	}
 }
 
-func TestBootstrapAdminFirstMessage(t *testing.T) {
+func TestEnvAliasFirstMessage(t *testing.T) {
 	client := &fakeRelayClient{sessionID: "sess-new"}
 	overrideRepo := newFakeOverrideRepo()
 	st := &fakeStore{
@@ -2255,19 +2182,19 @@ func TestBootstrapAdminFirstMessage(t *testing.T) {
 	waitForDispatch(t, client)
 	waitForResponse(t, r)
 	if client.lastMsg != "hello admin" {
-		t.Fatalf("expected passthrough for bootstrap admin, got %q", client.lastMsg)
+		t.Fatalf("expected passthrough for env alias, got %q", client.lastMsg)
 	}
 
 	o, err := overrideRepo.Get(context.Background(), "telegram", "chat1", "admin123")
 	if err != nil {
 		t.Fatalf("Get override: %v", err)
 	}
-	if o == nil || o.Role != "admin" {
-		t.Fatalf("expected lazy upsert of admin role row, got %+v", o)
+	if o != nil {
+		t.Fatalf("env alias must not write an override row, got %+v", o)
 	}
 }
 
-func TestBootstrapAdminCanRunCommandsImmediately(t *testing.T) {
+func TestEnvAliasStaysAuthorizedAcrossMessages(t *testing.T) {
 	client := &fakeRelayClient{sessionID: "sess-new"}
 	overrideRepo := newFakeOverrideRepo()
 	st := &fakeStore{
@@ -2280,17 +2207,15 @@ func TestBootstrapAdminCanRunCommandsImmediately(t *testing.T) {
 	r := New(provider, st, "/default-workdir", "admin123")
 	reply := &fakeReplyCtx{}
 
-	err := r.Route(context.Background(), msgFrom("admin123", "/allow user2", reply))
-	if err != nil {
-		t.Fatalf("Route command: %v", err)
-	}
-	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Allowed user: user2") {
-		t.Fatalf("expected allow confirmation, got %v", reply.sends)
-	}
-
-	o, err := overrideRepo.Get(context.Background(), "telegram", "chat1", "admin123")
-	if err != nil || o == nil || o.Role != "admin" {
-		t.Fatalf("expected admin row created for bootstrap admin, got %+v", o)
+	for i := range 3 {
+		reply.sends = nil
+		if err := r.Route(context.Background(), msgFrom("admin123", "/help", reply)); err != nil {
+			t.Fatalf("Route message %d: %v", i+1, err)
+		}
+		assertNotRefused(t, reply.sends)
+		if len(reply.sends) != 1 || !strings.Contains(reply.sends[0], "/status") {
+			t.Fatalf("message %d: unexpected reply %v", i+1, reply.sends)
+		}
 	}
 }
 
@@ -2344,7 +2269,7 @@ func TestListenModeEnforcement(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r, client, reply, overrideRepo := newTestRouterWithAccess()
 			overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{
-				ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+				ChannelID: "chat1", Platform: "telegram", UserID: "user1",
 			}
 
 			if tt.listenMode != "" {
@@ -2437,23 +2362,22 @@ func TestChannelInvalidMode(t *testing.T) {
 	}
 }
 
-func TestChannelNonAdminDenied(t *testing.T) {
-	r, _, reply, overrideRepo := newTestRouterWithAccess()
-	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow"}
+func TestChannelListedSenderSetsMode(t *testing.T) {
+	r, _, reply, _ := newTestRouterWithAccess()
 
 	err := r.Route(context.Background(), msg("/channel all", reply))
 	if err != nil {
 		t.Fatalf("Route: %v", err)
 	}
-	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Admin access required") {
-		t.Fatalf("expected admin required, got: %v", reply.sends)
+	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "Listen mode set: all") {
+		t.Fatalf("expected listed sender to set mode, got: %v", reply.sends)
 	}
 }
 
 func TestChannelThreadIsolation(t *testing.T) {
 	r, _, _ := newTestRouter()
 	st := r.store.(*fakeStore)
-	st.overrideRepo.overrides["telegram:thread1:user1"] = &store.UserOverride{ChannelID: "thread1", Platform: "telegram", UserID: "user1", Role: "admin"}
+	st.overrideRepo.overrides["telegram:thread1:user1"] = &store.UserOverride{ChannelID: "thread1", Platform: "telegram", UserID: "user1"}
 
 	reply := &fakeReplyCtx{}
 	if err := r.Route(context.Background(), msgIn("thread1", "/channel thread", reply)); err != nil {
@@ -2525,11 +2449,8 @@ func TestResponseWiringScheduleAttribution(t *testing.T) {
 }
 
 func TestShortFormCommandsAndLegacyAliases(t *testing.T) {
-	r, client, reply, overrideRepo := newTestRouterWithAccess()
+	r, client, reply, _ := newTestRouterWithAccess()
 	client.providers = modelTestProviders()
-	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{
-		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
-	}
 
 	tests := []struct {
 		input        string
@@ -2542,9 +2463,9 @@ func TestShortFormCommandsAndLegacyAliases(t *testing.T) {
 		{input: "/session list", wantSend: "Usage: /session"},
 		{input: "/reset", wantSend: "Session reset"},
 		{input: "/dir", wantSend: "Workdir:"},
-		{input: "/allow user2", wantSend: "Allowed user: user2"},
-		{input: "/deny user2", wantSend: "Denied user: user2"},
-		{input: "/admin user2", wantSend: "Granted admin: user2"},
+		{input: "/allow user2", wantPassthru: "/allow user2"},
+		{input: "/deny user2", wantPassthru: "/deny user2"},
+		{input: "/admin user2", wantPassthru: "/admin user2"},
 		{input: "/channel all", wantSend: "Listen mode set: all"},
 		{input: "/model openai/gpt-4o", wantSend: "Channel model set: openai/gpt-4o"},
 		{input: "/schedules", wantSend: "Scheduler not available"},
@@ -2788,7 +2709,7 @@ func TestStopAndSteerHelpAndMenu(t *testing.T) {
 func TestStatusShowsActiveSessionTitle(t *testing.T) {
 	r, _, reply, overrides := newTestRouterWithAccess()
 	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1",
 	}
 
 	stRepo := &fakeSessionRepo{
@@ -2820,7 +2741,7 @@ func TestStatusShowsActiveSessionTitle(t *testing.T) {
 func TestStatusShowsUntitledSessionIDOnly(t *testing.T) {
 	r, _, reply, overrides := newTestRouterWithAccess()
 	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1",
 	}
 
 	stRepo := &fakeSessionRepo{
@@ -2854,7 +2775,7 @@ func TestStatusShowsUntitledSessionIDOnly(t *testing.T) {
 func TestBareSessionRendersNumberedPicker(t *testing.T) {
 	r, _, reply, overrides := newTestRouterWithAccess()
 	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1",
 	}
 
 	now := time.Now().Unix()
@@ -2906,7 +2827,7 @@ func TestBareSessionRendersNumberedPicker(t *testing.T) {
 func TestSessionPickerBoundedToMax(t *testing.T) {
 	r, _, reply, overrides := newTestRouterWithAccess()
 	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1",
 	}
 
 	var sessions []store.Session
@@ -2940,7 +2861,7 @@ func TestSessionPickerBoundedToMax(t *testing.T) {
 func TestSessionSwitchFullID(t *testing.T) {
 	r, _, reply, overrides := newTestRouterWithAccess()
 	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1",
 	}
 
 	stRepo := &fakeSessionRepo{
@@ -2975,7 +2896,7 @@ func TestSessionSwitchFullID(t *testing.T) {
 func TestSessionSwitchNumericIndex(t *testing.T) {
 	r, _, reply, overrides := newTestRouterWithAccess()
 	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1",
 	}
 
 	stRepo := &fakeSessionRepo{
@@ -3010,7 +2931,7 @@ func TestSessionSwitchNumericIndex(t *testing.T) {
 func TestSessionSwitchTitleSubstringUnique(t *testing.T) {
 	r, _, reply, overrides := newTestRouterWithAccess()
 	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1",
 	}
 
 	stRepo := &fakeSessionRepo{
@@ -3045,7 +2966,7 @@ func TestSessionSwitchTitleSubstringUnique(t *testing.T) {
 func TestSessionSwitchTitleSubstringAmbiguous(t *testing.T) {
 	r, _, reply, overrides := newTestRouterWithAccess()
 	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1",
 	}
 
 	stRepo := &fakeSessionRepo{
@@ -3080,7 +3001,7 @@ func TestSessionSwitchTitleSubstringAmbiguous(t *testing.T) {
 func TestSessionSwitchCancelsAndDrainsQueue(t *testing.T) {
 	r, _, reply, overrides := newTestRouterWithAccess()
 	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1",
 	}
 
 	stRepo := &fakeSessionRepo{
@@ -3117,7 +3038,7 @@ func TestSessionSwitchCancelsAndDrainsQueue(t *testing.T) {
 func TestCallbackSwitchSuccessAndDeadID(t *testing.T) {
 	r, _, reply, overrides := newTestRouterWithAccess()
 	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1",
 	}
 
 	stRepo := &fakeSessionRepo{
@@ -3476,10 +3397,10 @@ func TestSessionSwitchAbsoluteIndexing(t *testing.T) {
 func TestSessionPickerConversationIsolation(t *testing.T) {
 	r, _, reply, overrides := newTestRouterWithAccess()
 	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1",
 	}
 	overrides.overrides["telegram:chat1:user2"] = &store.UserOverride{
-		ChannelID: "chat1", Platform: "telegram", UserID: "user2", Role: "allow",
+		ChannelID: "chat1", Platform: "telegram", UserID: "user2",
 	}
 	ctx := context.Background()
 
@@ -3551,7 +3472,7 @@ func TestSessionStateCommands(t *testing.T) {
 	t.Run("compact with active session uses session model", func(t *testing.T) {
 		r, client, reply, overrides := newTestRouterWithAccess()
 		overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-			ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+			ChannelID: "chat1", Platform: "telegram", UserID: "user1",
 		}
 		_ = r.store.SessionRepo().SetActive(context.Background(), "telegram", "chat1", "", "user1", "active-sess-1", 100)
 		client.sessionInfo = &relay.SessionInfo{
@@ -3588,7 +3509,7 @@ func TestSessionStateCommands(t *testing.T) {
 		r, client, reply, overrides := newTestRouterWithAccess()
 		client.providers = modelTestProviders()
 		overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-			ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow", Model: "openai/gpt-4o",
+			ChannelID: "chat1", Platform: "telegram", UserID: "user1", Model: "openai/gpt-4o",
 		}
 		_ = r.store.SessionRepo().SetActive(context.Background(), "telegram", "chat1", "", "user1", "active-sess-2", 100)
 		client.sessionInfo = &relay.SessionInfo{}
@@ -3619,7 +3540,7 @@ func TestSessionStateCommands(t *testing.T) {
 	t.Run("compact with no active session", func(t *testing.T) {
 		r, client, reply, overrides := newTestRouterWithAccess()
 		overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-			ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+			ChannelID: "chat1", Platform: "telegram", UserID: "user1",
 		}
 
 		msg := channel.IncomingMessage{
@@ -3644,7 +3565,7 @@ func TestSessionStateCommands(t *testing.T) {
 	t.Run("compact surfaces server error in reply", func(t *testing.T) {
 		r, client, reply, overrides := newTestRouterWithAccess()
 		overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-			ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+			ChannelID: "chat1", Platform: "telegram", UserID: "user1",
 		}
 		_ = r.store.SessionRepo().SetActive(context.Background(), "telegram", "chat1", "", "user1", "active-sess-3", 100)
 		client.sessionInfo = &relay.SessionInfo{
@@ -3671,7 +3592,7 @@ func TestSessionStateCommands(t *testing.T) {
 	t.Run("undo resolves most recent user message", func(t *testing.T) {
 		r, client, reply, overrides := newTestRouterWithAccess()
 		overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-			ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+			ChannelID: "chat1", Platform: "telegram", UserID: "user1",
 		}
 		_ = r.store.SessionRepo().SetActive(context.Background(), "telegram", "chat1", "", "user1", "active-sess-4", 100)
 		client.messages = []relay.MessageInfo{
@@ -3711,7 +3632,7 @@ func TestSessionStateCommands(t *testing.T) {
 		t.Run("no session", func(t *testing.T) {
 			r, client, reply, overrides := newTestRouterWithAccess()
 			overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-				ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+				ChannelID: "chat1", Platform: "telegram", UserID: "user1",
 			}
 
 			msg := channel.IncomingMessage{
@@ -3736,7 +3657,7 @@ func TestSessionStateCommands(t *testing.T) {
 		t.Run("no user message", func(t *testing.T) {
 			r, client, reply, overrides := newTestRouterWithAccess()
 			overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-				ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+				ChannelID: "chat1", Platform: "telegram", UserID: "user1",
 			}
 			_ = r.store.SessionRepo().SetActive(context.Background(), "telegram", "chat1", "", "user1", "active-sess-5", 100)
 			client.messages = []relay.MessageInfo{
@@ -3766,7 +3687,7 @@ func TestSessionStateCommands(t *testing.T) {
 	t.Run("redo calls UnrevertSession", func(t *testing.T) {
 		r, client, reply, overrides := newTestRouterWithAccess()
 		overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-			ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+			ChannelID: "chat1", Platform: "telegram", UserID: "user1",
 		}
 		_ = r.store.SessionRepo().SetActive(context.Background(), "telegram", "chat1", "", "user1", "active-sess-6", 100)
 
@@ -3795,7 +3716,7 @@ func TestSessionStateCommands(t *testing.T) {
 	t.Run("redo with no active session", func(t *testing.T) {
 		r, client, reply, overrides := newTestRouterWithAccess()
 		overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-			ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
+			ChannelID: "chat1", Platform: "telegram", UserID: "user1",
 		}
 
 		msg := channel.IncomingMessage{

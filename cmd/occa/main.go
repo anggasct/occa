@@ -138,7 +138,7 @@ func main() {
 	reaped, err := manager.ReapOrphans(ctx)
 	slog.Info("agent orphan sweep complete", "reaped", reaped, "error", err)
 
-	rt := router.New(managerProvider{manager}, db, cfg.Agent.DefaultWorkdir, cfg.AdminID)
+	rt := router.NewWithAllowlists(managerProvider{manager}, db, cfg.Agent.DefaultWorkdir, cfg.AdminID, cfg.Discord.AllowedSenderIDs, cfg.Telegram.AllowedSenderIDs)
 
 	discoverAgent(ctx, manager, cfg.Agent.DefaultWorkdir)
 
@@ -148,16 +148,7 @@ func main() {
 		channels = append(channels, telegram.New(telegramToken, menu))
 	}
 	if discordToken != "" {
-		policy := discord.TrustedBotPolicy{
-			TriggerRoleIDs: cfg.Discord.TriggerRoleIDs,
-		}
-		for _, sender := range cfg.Discord.TrustedBotSenders {
-			policy.TrustedBotSenders = append(policy.TrustedBotSenders, discord.TrustedBotSender{
-				UserID:     sender.UserID,
-				ChannelIDs: sender.ChannelIDs,
-			})
-		}
-		da := discord.NewWithPolicy(discordToken, menu, policy)
+		da := discord.NewWithPolicy(discordToken, menu, discord.AllowlistPolicy{AllowedSenderIDs: cfg.Discord.AllowedSenderIDs})
 		da.SetAutoThreadPolicy(func(channelID string) (bool, error) {
 			ch, err := db.ChannelRepo().Get(context.Background(), "discord", channelID)
 			if err != nil {

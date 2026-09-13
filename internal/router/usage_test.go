@@ -31,15 +31,14 @@ func (f *fakeUsageRepo) Query(_ context.Context, query store.UsageQuery) (store.
 
 var _ store.UsageRepo = (*fakeUsageRepo)(nil)
 
-func TestUsageViewUsesConversationScopeAndNeverNeedsAgent(t *testing.T) {
-	r, _, reply, overrides := newTestRouterWithAccess()
+func TestUsageViewUsesChannelScopeAndNeverNeedsAgent(t *testing.T) {
+	r, _, reply, _ := newTestRouterWithAccess()
 	usage := &fakeUsageRepo{report: store.UsageReport{
 		Totals:         store.UsageTotals{Input: 120, Output: 30, Reasoning: 4, CacheRead: 8, CacheWrite: 2, Cost: 0.12, CostKnown: true},
 		Breakdowns:     []store.UsageBreakdown{{Model: "openai/gpt", Workdir: "/repo", Input: 120, Cost: 0.12, CostKnown: true}},
 		BreakdownTotal: 1,
 	}}
 	r.store.(*fakeStore).usage = usage
-	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{Role: "allow"}
 
 	if err := r.Route(context.Background(), msg("/usage", reply)); err != nil {
 		t.Fatalf("Route: %v", err)
@@ -54,7 +53,7 @@ func TestUsageViewUsesConversationScopeAndNeverNeedsAgent(t *testing.T) {
 		t.Fatalf("queries = %d", len(usage.queries))
 	}
 	query := usage.queries[0]
-	if query.ChannelWide || query.Platform != "telegram" || query.ChannelID != "chat1" || query.UserID != "user1" || query.ThreadID != "" {
+	if !query.ChannelWide || query.Platform != "telegram" || query.ChannelID != "chat1" {
 		t.Fatalf("query scope = %+v", query)
 	}
 	if r.instances.(*fakeInstanceProvider).calls != 0 {
@@ -62,18 +61,17 @@ func TestUsageViewUsesConversationScopeAndNeverNeedsAgent(t *testing.T) {
 	}
 }
 
-func TestUsageAdminGetsChannelScopeAndUnknownCost(t *testing.T) {
-	r, _, _, overrides := newTestRouterWithAccess()
+func TestUsageChannelScopeAndUnknownCost(t *testing.T) {
+	r, _, _, _ := newTestRouterWithAccess()
 	usage := &fakeUsageRepo{report: store.UsageReport{Totals: store.UsageTotals{Input: 10, CostKnown: false}, BreakdownTotal: 1}}
 	r.store.(*fakeStore).usage = usage
-	overrides.overrides["telegram:chat1:admin"] = &store.UserOverride{Role: "admin"}
 	msg := msgFrom("admin", "/usage 7d", &fakeReplyCtx{})
 
 	if _, err := r.handleUsage(context.Background(), msg, "7d"); err != errReplied {
 		t.Fatalf("handle usage err = %v, want errReplied", err)
 	}
 	if len(usage.queries) != 1 || !usage.queries[0].ChannelWide {
-		t.Fatalf("admin query = %+v", usage.queries)
+		t.Fatalf("query = %+v", usage.queries)
 	}
 	if !contains(msg.ReplyCtx.(*fakeReplyCtx).sends[0], "Estimated cost: unknown") {
 		t.Fatalf("unknown cost text = %q", msg.ReplyCtx.(*fakeReplyCtx).sends[0])
@@ -81,13 +79,12 @@ func TestUsageAdminGetsChannelScopeAndUnknownCost(t *testing.T) {
 }
 
 func TestUsageCallbackPaginatesAndKeepsScope(t *testing.T) {
-	r, _, _, overrides := newTestRouterWithAccess()
+	r, _, _, _ := newTestRouterWithAccess()
 	usage := &fakeUsageRepo{report: store.UsageReport{
 		Totals:         store.UsageTotals{Input: 1},
 		BreakdownTotal: 7,
 	}}
 	r.store.(*fakeStore).usage = usage
-	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{Role: "allow"}
 	reply := &fakeReplyCtx{}
 	msg := msgFrom("user1", "", reply)
 	msg.IsCallback = true
@@ -100,7 +97,7 @@ func TestUsageCallbackPaginatesAndKeepsScope(t *testing.T) {
 	if len(reply.edits) != 1 || len(usage.queries) != 1 {
 		t.Fatalf("edits=%d queries=%d", len(reply.edits), len(usage.queries))
 	}
-	if usage.queries[0].Offset != usagePageSize || usage.queries[0].Since == 0 || usage.queries[0].ChannelWide {
+	if usage.queries[0].Offset != usagePageSize || usage.queries[0].Since == 0 || !usage.queries[0].ChannelWide {
 		t.Fatalf("callback query = %+v", usage.queries[0])
 	}
 }

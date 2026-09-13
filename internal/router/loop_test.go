@@ -31,10 +31,10 @@ func newLoopFixture() *loopFixture {
 	f := &loopFixture{}
 	r, _, reply, overrides := newTestRouterWithAccess()
 	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1",
 	}
 	overrides.overrides["telegram:chat1:user2"] = &store.UserOverride{
-		ChannelID: "chat1", Platform: "telegram", UserID: "user2", Role: "allow",
+		ChannelID: "chat1", Platform: "telegram", UserID: "user2",
 	}
 	r.SetLooper(loop.New(f.execute, f.notify, f.isBusy))
 	f.r = r
