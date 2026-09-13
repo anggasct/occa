@@ -57,9 +57,9 @@ func TestNormalizeWebhookGitHubEvents(t *testing.T) {
 		{
 			name:  "check suite completed",
 			event: "check_suite",
-			body:  `{"action":"completed","repository":{"full_name":"acme/widgets"},"check_suite":{"id":123456,"status":"completed","conclusion":"success","head_branch":"feat/widgets","head_sha":"c0ffee123456","app":{"name":"GitHub Actions"},"pull_requests":[{"number":45,"html_url":"https://github.com/acme/widgets/pull/45","title":"Widgets PR","head":{"ref":"feat/widgets"},"base":{"ref":"main"},"state":"open"}]}}`,
+			body:  `{"action":"completed","repository":{"full_name":"acme/widgets","default_branch":"trunk"},"check_suite":{"id":123456,"status":"completed","conclusion":"success","head_branch":"feat/widgets","head_sha":"c0ffee123456","app":{"name":"GitHub Actions"},"pull_requests":[{"number":45,"html_url":"https://github.com/acme/widgets/pull/45","title":"Widgets PR","head":{"ref":"feat/widgets"},"base":{"ref":"main"},"state":"open"}]}}`,
 			assert: func(t *testing.T, got WebhookEnvelope) {
-				if got["repository"] != "acme/widgets" || got["suite_id"] != "123456" || got["app_name"] != "GitHub Actions" || got["status"] != "completed" || got["conclusion"] != "success" || got["head_branch"] != "feat/widgets" || got["head_sha"] != "c0ffee123456" || got["pr_number"] != "45" {
+				if got["repository"] != "acme/widgets" || got["default_branch"] != "trunk" || got["suite_id"] != "123456" || got["app_name"] != "GitHub Actions" || got["status"] != "completed" || got["conclusion"] != "success" || got["head_branch"] != "feat/widgets" || got["head_sha"] != "c0ffee123456" || got["pr_number"] != "45" {
 					t.Fatalf("unexpected check_suite envelope: %#v", got)
 				}
 				prs, ok := got["pr_numbers"].([]string)
@@ -621,10 +621,24 @@ func TestWebhookCheckSuiteGateMatrix(t *testing.T) {
 			allowed:  true,
 		},
 		{
-			name:     "merge admits check_suite without PRs when candidate head branch is non-main",
+			name:     "merge admits check_suite on non-default feature branch with no PR number",
 			workflow: "github_merge",
 			event:    "check_suite",
-			body:     `{"action":"completed","check_suite":{"status":"completed","conclusion":"success","app":{"name":"GitHub Actions"},"head_branch":"feat/my-branch","pull_requests":[]}}`,
+			body:     `{"action":"completed","repository":{"full_name":"acme/widgets","default_branch":"trunk"},"check_suite":{"status":"completed","conclusion":"success","app":{"name":"GitHub Actions"},"head_branch":"feat/my-branch","pull_requests":[]}}`,
+			allowed:  true,
+		},
+		{
+			name:     "merge admits check_suite for fork PR with head_branch main and PR number",
+			workflow: "github_merge",
+			event:    "check_suite",
+			body:     `{"action":"completed","repository":{"full_name":"acme/widgets","default_branch":"trunk"},"check_suite":{"status":"completed","app":{"name":"GitHub Actions"},"head_branch":"main","pull_requests":[{"number":42,"state":"open"}]}}`,
+			allowed:  true,
+		},
+		{
+			name:     "merge admits check_suite for fork PR whose head_branch matches default_branch when carrying PR number",
+			workflow: "github_merge",
+			event:    "check_suite",
+			body:     `{"action":"completed","repository":{"full_name":"acme/widgets","default_branch":"main"},"check_suite":{"status":"completed","app":{"name":"GitHub Actions"},"head_branch":"main","pull_requests":[{"number":42,"state":"open"}]}}`,
 			allowed:  true,
 		},
 		{
@@ -670,11 +684,25 @@ func TestWebhookCheckSuiteGateMatrix(t *testing.T) {
 			allowed:  false,
 		},
 		{
-			name:     "merge rejects push to main with empty pull_requests",
+			name:     "merge rejects check_suite whose head_branch equals repository default_branch with no PR number",
+			workflow: "github_merge",
+			event:    "check_suite",
+			body:     `{"action":"completed","repository":{"full_name":"acme/widgets","default_branch":"trunk"},"check_suite":{"status":"completed","app":{"name":"GitHub Actions"},"head_branch":"trunk","pull_requests":[]}}`,
+			allowed:  false,
+		},
+		{
+			name:     "merge admits check_suite when repository default_branch is absent",
+			workflow: "github_merge",
+			event:    "check_suite",
+			body:     `{"action":"completed","repository":{"full_name":"acme/widgets"},"check_suite":{"status":"completed","app":{"name":"GitHub Actions"},"head_branch":"feat/my-branch","pull_requests":[]}}`,
+			allowed:  true,
+		},
+		{
+			name:     "merge admits check_suite when default_branch is absent even if head_branch is main",
 			workflow: "github_merge",
 			event:    "check_suite",
 			body:     `{"action":"completed","check_suite":{"status":"completed","app":{"name":"GitHub Actions"},"head_branch":"main","pull_requests":[]}}`,
-			allowed:  false,
+			allowed:  true,
 		},
 		{
 			name:     "merge rejects suite with no pull requests and no head branch",
@@ -780,5 +808,80 @@ func TestCustomCommentTriggerCaseInsensitive(t *testing.T) {
 	allowedHistorical, _ := workflowAllows("github_reviewer", envHistorical)
 	if allowedHistorical {
 		t.Fatal("workflowAllows accepted unconfigured historical trigger phrase")
+	}
+}
+
+func TestHasResolvablePR(t *testing.T) {
+	tests := []struct {
+		name     string
+		envelope WebhookEnvelope
+		want     bool
+	}{
+		{
+			name: "fork-style PR with head_branch main carrying pr_number is admitted",
+			envelope: WebhookEnvelope{
+				"default_branch": "main",
+				"head_branch":    "main",
+				"pr_number":      "42",
+			},
+			want: true,
+		},
+		{
+			name: "fork-style PR with head_branch main carrying pr_numbers is admitted",
+			envelope: WebhookEnvelope{
+				"default_branch": "main",
+				"head_branch":    "main",
+				"pr_numbers":     []string{"42"},
+			},
+			want: true,
+		},
+		{
+			name: "head_branch equals default_branch with no PR number is rejected",
+			envelope: WebhookEnvelope{
+				"default_branch": "trunk",
+				"head_branch":    "trunk",
+			},
+			want: false,
+		},
+		{
+			name: "non-default feature branch with no PR number is admitted",
+			envelope: WebhookEnvelope{
+				"default_branch": "trunk",
+				"head_branch":    "feat/my-branch",
+			},
+			want: true,
+		},
+		{
+			name: "repository default_branch absent admits candidate branch",
+			envelope: WebhookEnvelope{
+				"default_branch": "",
+				"head_branch":    "feat/my-branch",
+			},
+			want: true,
+		},
+		{
+			name: "repository default_branch absent admits even if head_branch is main",
+			envelope: WebhookEnvelope{
+				"default_branch": "",
+				"head_branch":    "main",
+			},
+			want: true,
+		},
+		{
+			name: "empty head_branch and no PR number is rejected",
+			envelope: WebhookEnvelope{
+				"default_branch": "trunk",
+				"head_branch":    "",
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasResolvablePR(tt.envelope); got != tt.want {
+				t.Fatalf("hasResolvablePR() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

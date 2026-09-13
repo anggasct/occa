@@ -42,6 +42,7 @@ func normalizeWebhook(body []byte, eventType, deliveryID string, skipped bool, s
 		"title":                      "",
 		"head_branch":                "",
 		"base_branch":                "",
+		"default_branch":             repoDefaultBranch(payload["repository"]),
 		"pr_author":                  "",
 		"pr_state":                   "",
 		"review_state":               "",
@@ -109,6 +110,9 @@ func normalizeWebhook(body []byte, eventType, deliveryID string, skipped bool, s
 	if envelope["repository"] == "" {
 		envelope["repository"] = repoName(mapValue(pullRequest, "base")["repo"])
 	}
+	if envelope["default_branch"] == "" {
+		envelope["default_branch"] = repoDefaultBranch(mapValue(pullRequest, "base")["repo"])
+	}
 	return envelope
 }
 
@@ -130,6 +134,9 @@ func fillPullRequest(envelope WebhookEnvelope, pullRequest map[string]any) {
 	}
 	if envelope["repository"] == "" {
 		envelope["repository"] = repoName(mapValue(pullRequest, "base")["repo"])
+	}
+	if envelope["default_branch"] == "" {
+		envelope["default_branch"] = repoDefaultBranch(mapValue(pullRequest, "base")["repo"])
 	}
 }
 
@@ -243,6 +250,13 @@ func fillCheckSuite(envelope WebhookEnvelope, payload map[string]any) {
 			envelope["repository"] = repoName(repo)
 		}
 	}
+	if envelope["default_branch"] == "" {
+		if repo := cs["repository"]; repo != nil {
+			envelope["default_branch"] = repoDefaultBranch(repo)
+		} else if repo := payload["repository"]; repo != nil {
+			envelope["default_branch"] = repoDefaultBranch(repo)
+		}
+	}
 }
 
 func mapValue(object map[string]any, key string) map[string]any {
@@ -258,6 +272,13 @@ func repoName(value any) string {
 		return stringValue(object["full_name"])
 	}
 	return stringValue(value)
+}
+
+func repoDefaultBranch(value any) string {
+	if object, ok := value.(map[string]any); ok {
+		return strings.TrimSpace(stringValue(object["default_branch"]))
+	}
+	return ""
 }
 
 func userName(value any) string {

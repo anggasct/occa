@@ -88,14 +88,19 @@ func workflowAllows(workflow string, envelope WebhookEnvelope) (bool, string) {
 }
 
 func hasResolvablePR(envelope WebhookEnvelope) bool {
-	if stringValue(envelope["pr_number"]) != "" {
+	if strings.TrimSpace(stringValue(envelope["pr_number"])) != "" {
 		return true
 	}
-	if prs, ok := envelope["pr_numbers"].([]string); ok && len(prs) > 0 {
-		return true
+	if prs, ok := envelope["pr_numbers"].([]string); ok {
+		for _, pr := range prs {
+			if strings.TrimSpace(pr) != "" {
+				return true
+			}
+		}
 	}
 	headBranch := strings.TrimSpace(stringValue(envelope["head_branch"]))
-	if headBranch != "" && headBranch != "main" && headBranch != "master" {
+	defaultBranch := strings.TrimSpace(stringValue(envelope["default_branch"]))
+	if headBranch != "" && (defaultBranch == "" || headBranch != defaultBranch) {
 		return true
 	}
 	return false
