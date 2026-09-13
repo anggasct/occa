@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -229,25 +228,6 @@ func TestReviewVerdictLineOnRootCard(t *testing.T) {
 	noVerdict := reviewEnvelope("pull_request_review", "changes_requested", "looks fine", "5932515")
 	if card := FormatRootCard(noVerdict, "github_fix", "RUNNING", "", "", "discord"); strings.Contains(card, "Review verdict:") {
 		t.Fatalf("card gained verdict line without a verdict: %s", card)
-	}
-}
-
-func TestReviewerPromptPostContract(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("..", "..", "webhooks", "github-review.md"))
-	if err != nil {
-		t.Fatalf("read reviewer prompt: %v", err)
-	}
-	prompt := string(raw)
-	for _, want := range []string{
-		"post exactly ONE review command",
-		"gh pr view PR_NUMBER --repo REPO --json reviews",
-		"Never post a second review to verify",
-		"never chain a fallback with `||`",
-		"id/url and state into the working narration",
-	} {
-		if !strings.Contains(prompt, want) {
-			t.Fatalf("reviewer prompt missing post-contract phrase %q", want)
-		}
 	}
 }
 

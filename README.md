@@ -86,9 +86,9 @@ webhooks:
       secret: <webhook-secret>
       workflow: github_reviewer
       platform: discord
-      channel_id: "1519692433808556133"
-      prompt_file: webhooks/github-review.md
-      comment_trigger: ["please re-review"]
+      channel_id: "<your-channel-id>"
+      prompt_file: webhooks/example-review.md
+      comment_trigger: ["<your-trigger-phrase>"]
 ```
 
 `comment_trigger` is an optional list of case-insensitive substrings matched against comment bodies. When unset or empty, the comment trigger path is closed (`skipped: comment trigger not configured`), and only pull request lifecycle events (`opened`, `reopened`, `ready_for_review`) can start a review. Existing installations that rely on comment-triggered re-reviews must add this key to their endpoint configuration.
