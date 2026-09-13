@@ -232,7 +232,7 @@ func TestReviewVerdictLineOnRootCard(t *testing.T) {
 }
 
 func TestReviewerPromptPostContract(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("..", "..", "webhooks", "github-reviewer.md"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "webhooks", "github-review.md"))
 	if err != nil {
 		t.Fatalf("read reviewer prompt: %v", err)
 	}
