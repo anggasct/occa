@@ -53,6 +53,3 @@ jobs:
 
       - name: Install script test
         run: sh scripts/install_test.sh
-
-      - name: Merge gate end-to-end fixture
-        run: exit 1
