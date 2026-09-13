@@ -57,42 +57,44 @@ type WebhookConfig struct {
 }
 
 type EndpointConfig struct {
-	Name         string            `yaml:"name"`
-	Path         string            `yaml:"path"`
-	Auth         string            `yaml:"auth,omitempty"`
-	Secret       string            `yaml:"secret"`
-	Workflow     string            `yaml:"workflow,omitempty"`
-	Platform     string            `yaml:"platform"`
-	ChannelID    string            `yaml:"channel_id"`
-	ThreadID     string            `yaml:"thread_id,omitempty"`
-	Prompt       string            `yaml:"prompt"`
-	PromptFile   string            `yaml:"prompt_file,omitempty"`
-	SkipEvents   []string          `yaml:"skip_events,omitempty"`
-	Repository   string            `yaml:"repository,omitempty"`
-	Workspace    EndpointWorkspace `yaml:"workspace"`
-	Thread       bool              `yaml:"thread,omitempty"`
-	ProgressCard bool              `yaml:"progress_card,omitempty"`
-	Model        string            `yaml:"model,omitempty"`
+	Name           string            `yaml:"name"`
+	Path           string            `yaml:"path"`
+	Auth           string            `yaml:"auth,omitempty"`
+	Secret         string            `yaml:"secret"`
+	Workflow       string            `yaml:"workflow,omitempty"`
+	Platform       string            `yaml:"platform"`
+	ChannelID      string            `yaml:"channel_id"`
+	ThreadID       string            `yaml:"thread_id,omitempty"`
+	Prompt         string            `yaml:"prompt"`
+	PromptFile     string            `yaml:"prompt_file,omitempty"`
+	SkipEvents     []string          `yaml:"skip_events,omitempty"`
+	Repository     string            `yaml:"repository,omitempty"`
+	Workspace      EndpointWorkspace `yaml:"workspace"`
+	Thread         bool              `yaml:"thread,omitempty"`
+	ProgressCard   bool              `yaml:"progress_card,omitempty"`
+	Model          string            `yaml:"model,omitempty"`
+	CommentTrigger []string          `yaml:"comment_trigger,omitempty"`
 }
 
 func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
 	type rawEndpoint struct {
-		Name         string            `yaml:"name"`
-		Path         string            `yaml:"path"`
-		Auth         string            `yaml:"auth,omitempty"`
-		Secret       string            `yaml:"secret"`
-		Workflow     string            `yaml:"workflow,omitempty"`
-		Platform     string            `yaml:"platform"`
-		ChannelID    string            `yaml:"channel_id"`
-		ThreadID     string            `yaml:"thread_id,omitempty"`
-		Prompt       string            `yaml:"prompt"`
-		PromptFile   string            `yaml:"prompt_file,omitempty"`
-		SkipEvents   []string          `yaml:"skip_events,omitempty"`
-		Repository   string            `yaml:"repository,omitempty"`
-		Workspace    EndpointWorkspace `yaml:"workspace"`
-		Thread       bool              `yaml:"thread,omitempty"`
-		ProgressCard *bool             `yaml:"progress_card,omitempty"`
-		Model        string            `yaml:"model,omitempty"`
+		Name           string            `yaml:"name"`
+		Path           string            `yaml:"path"`
+		Auth           string            `yaml:"auth,omitempty"`
+		Secret         string            `yaml:"secret"`
+		Workflow       string            `yaml:"workflow,omitempty"`
+		Platform       string            `yaml:"platform"`
+		ChannelID      string            `yaml:"channel_id"`
+		ThreadID       string            `yaml:"thread_id,omitempty"`
+		Prompt         string            `yaml:"prompt"`
+		PromptFile     string            `yaml:"prompt_file,omitempty"`
+		SkipEvents     []string          `yaml:"skip_events,omitempty"`
+		Repository     string            `yaml:"repository,omitempty"`
+		Workspace      EndpointWorkspace `yaml:"workspace"`
+		Thread         bool              `yaml:"thread,omitempty"`
+		ProgressCard   *bool             `yaml:"progress_card,omitempty"`
+		Model          string            `yaml:"model,omitempty"`
+		CommentTrigger []string          `yaml:"comment_trigger,omitempty"`
 	}
 	var raw rawEndpoint
 	if err := node.Decode(&raw); err != nil {
@@ -113,6 +115,7 @@ func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
 	e.Workspace = raw.Workspace
 	e.Thread = raw.Thread
 	e.Model = strings.TrimSpace(raw.Model)
+	e.CommentTrigger = raw.CommentTrigger
 	if raw.ProgressCard != nil {
 		e.ProgressCard = *raw.ProgressCard
 	} else {
@@ -429,6 +432,14 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 					return Config{}, fmt.Errorf("config: webhooks.endpoints[%d].model is invalid: %w", i, err)
 				}
 			}
+			var triggers []string
+			for _, t := range endpoint.CommentTrigger {
+				t = strings.TrimSpace(t)
+				if t != "" {
+					triggers = append(triggers, t)
+				}
+			}
+			endpoint.CommentTrigger = triggers
 			if _, exists := paths[endpoint.Path]; exists {
 				return Config{}, fmt.Errorf("config: webhooks.endpoints[%d].path duplicates %q", i, endpoint.Path)
 			}

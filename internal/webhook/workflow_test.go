@@ -17,10 +17,11 @@ import (
 
 func TestNormalizeWebhookGitHubEvents(t *testing.T) {
 	tests := []struct {
-		name   string
-		event  string
-		body   string
-		assert func(t *testing.T, got WebhookEnvelope)
+		name     string
+		event    string
+		triggers []string
+		body     string
+		assert   func(t *testing.T, got WebhookEnvelope)
 	}{
 		{
 			name:  "pull request",
@@ -43,12 +44,27 @@ func TestNormalizeWebhookGitHubEvents(t *testing.T) {
 			},
 		},
 		{
-			name:  "issue comment re-review",
-			event: "issue_comment",
-			body:  `{"action":"created","repository":{"full_name":"acme/widgets"},"issue":{"number":44,"html_url":"https://github.com/acme/widgets/issues/44","title":"Improve widgets","pull_request":{"html_url":"https://github.com/acme/widgets/pull/44"}},"comment":{"body":"Please re-review this PR","user":{"login":"maintainer"}}}`,
+			name:     "issue comment re-review",
+			event:    "issue_comment",
+			triggers: []string{"please re-review"},
+			body:     `{"action":"created","repository":{"full_name":"acme/widgets"},"issue":{"number":44,"html_url":"https://github.com/acme/widgets/issues/44","title":"Improve widgets","pull_request":{"html_url":"https://github.com/acme/widgets/pull/44"}},"comment":{"body":"Please re-review this PR","user":{"login":"maintainer"}}}`,
 			assert: func(t *testing.T, got WebhookEnvelope) {
 				if got["pr_number"] != "44" || got["pr_url"] != "https://github.com/acme/widgets/pull/44" || got["comment_trigger"] != "please re-review" || got["review_user"] != "maintainer" {
 					t.Fatalf("unexpected issue comment envelope: %#v", got)
+				}
+			},
+		},
+		{
+			name:  "check suite completed",
+			event: "check_suite",
+			body:  `{"action":"completed","repository":{"full_name":"acme/widgets"},"check_suite":{"id":123456,"status":"completed","conclusion":"success","head_branch":"feat/widgets","head_sha":"c0ffee123456","app":{"name":"GitHub Actions"},"pull_requests":[{"number":45,"html_url":"https://github.com/acme/widgets/pull/45","title":"Widgets PR","head":{"ref":"feat/widgets"},"base":{"ref":"main"},"state":"open"}]}}`,
+			assert: func(t *testing.T, got WebhookEnvelope) {
+				if got["repository"] != "acme/widgets" || got["suite_id"] != "123456" || got["app_name"] != "GitHub Actions" || got["status"] != "completed" || got["conclusion"] != "success" || got["head_branch"] != "feat/widgets" || got["head_sha"] != "c0ffee123456" || got["pr_number"] != "45" {
+					t.Fatalf("unexpected check_suite envelope: %#v", got)
+				}
+				prs, ok := got["pr_numbers"].([]string)
+				if !ok || len(prs) != 1 || prs[0] != "45" {
+					t.Fatalf("unexpected check_suite pr_numbers: %#v", got["pr_numbers"])
 				}
 			},
 		},
@@ -56,7 +72,7 @@ func TestNormalizeWebhookGitHubEvents(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := normalizeWebhook([]byte(tt.body), tt.event, "delivery-1", false, "")
+			got := normalizeWebhook([]byte(tt.body), tt.event, "delivery-1", false, "", tt.triggers)
 			tt.assert(t, got)
 			for key, value := range got {
 				if value == nil {
@@ -79,7 +95,7 @@ func TestNormalizeWebhookMissingFieldsNeverRendersNoValue(t *testing.T) {
 }
 
 func TestNormalizeWebhookNonPullRequestIssueCommentKeepsPRFieldsEmpty(t *testing.T) {
-	envelope := normalizeWebhook([]byte(`{"action":"created","repository":{"full_name":"acme/widgets"},"issue":{"number":44,"title":"Question"},"comment":{"body":"please re-review"}}`), "issue_comment", "delivery-1", false, "")
+	envelope := normalizeWebhook([]byte(`{"action":"created","repository":{"full_name":"acme/widgets"},"issue":{"number":44,"title":"Question"},"comment":{"body":"please re-review"}}`), "issue_comment", "delivery-1", false, "", []string{"please re-review"})
 	if envelope["pr_number"] != "" || envelope["pr_url"] != "" || envelope["comment_trigger"] != "" {
 		t.Fatalf("non-PR issue comment envelope = %#v, want empty PR and trigger fields", envelope)
 	}
@@ -95,27 +111,28 @@ func TestWebhookWorkflowGateMatrix(t *testing.T) {
 	tests := []struct {
 		workflow string
 		event    string
+		triggers []string
 		body     string
 		allowed  bool
 	}{
-		{"github_reviewer", "pull_request", `{"action":"opened","pull_request":{"number":1}}`, true},
-		{"github_reviewer", "issue_comment", `{"action":"created","issue":{"number":2,"pull_request":{"html_url":"https://example/pull/2"}},"comment":{"body":"please re-review"}}`, true},
-		{"github_reviewer", "pull_request_review", `{"action":"submitted","review":{"state":"approved"}}`, false},
-		{"github_fix", "pull_request_review", `{"action":"submitted","review":{"state":"changes_requested"}}`, true},
-		{"github_fix", "pull_request", `{"action":"closed","pull_request":{"merged":true}}`, false},
-		{"github_merge", "pull_request_review", `{"action":"submitted","review":{"state":"approved"}}`, true},
-		{"github_fix", "pull_request_review", `{"action":"submitted","pull_request":{"user":{"login":"kumasct"}},"review":{"state":"commented","body":"**Verdict:** REQUEST_CHANGES\n\nActionable findings: 1","user":{"login":"kumasct"}}}`, true},
-		{"github_merge", "pull_request_review", `{"action":"submitted","pull_request":{"user":{"login":"kumasct"}},"review":{"state":"commented","body":"**Verdict:** APPROVED\n\nNo actionable findings.","user":{"login":"kumasct"}}}`, true},
-		{"github_merge", "pull_request_review", `{"action":"submitted","pull_request":{"user":{"login":"kumasct"}},"review":{"state":"commented","body":"**Verdict:** APPROVED\n\n### Findings\n\nNo blocking findings.","user":{"login":"kumasct"}}}`, true},
-		{"github_merge", "pull_request_review", `{"action":"submitted","pull_request":{"user":{"login":"kumasct"}},"review":{"state":"commented","body":"**Verdict:** APPROVED\n\nActionable findings: 1","user":{"login":"kumasct"}}}`, false},
-		{"github_merge", "pull_request_review", `{"action":"submitted","pull_request":{"user":{"login":"other"}},"review":{"state":"commented","body":"**Verdict:** APPROVED\n\nNo actionable findings.","user":{"login":"kumasct"}}}`, false},
-		{"github_merge", "issue_comment", `{"action":"created","issue":{"number":2},"comment":{"body":"please re-review"}}`, false},
-		{"github_merged", "pull_request", `{"action":"closed","pull_request":{"merged":true}}`, true},
-		{"github_merged", "pull_request_review", `{"action":"submitted","review":{"state":"approved"}}`, false},
+		{"github_reviewer", "pull_request", nil, `{"action":"opened","pull_request":{"number":1}}`, true},
+		{"github_reviewer", "issue_comment", []string{"please re-review"}, `{"action":"created","issue":{"number":2,"pull_request":{"html_url":"https://example/pull/2"}},"comment":{"body":"please re-review"}}`, true},
+		{"github_reviewer", "pull_request_review", nil, `{"action":"submitted","review":{"state":"approved"}}`, false},
+		{"github_fix", "pull_request_review", nil, `{"action":"submitted","review":{"state":"changes_requested"}}`, true},
+		{"github_fix", "pull_request", nil, `{"action":"closed","pull_request":{"merged":true}}`, false},
+		{"github_merge", "pull_request_review", nil, `{"action":"submitted","review":{"state":"approved"}}`, true},
+		{"github_fix", "pull_request_review", nil, `{"action":"submitted","pull_request":{"user":{"login":"kumasct"}},"review":{"state":"commented","body":"**Verdict:** REQUEST_CHANGES\n\nActionable findings: 1","user":{"login":"kumasct"}}}`, true},
+		{"github_merge", "pull_request_review", nil, `{"action":"submitted","pull_request":{"user":{"login":"kumasct"}},"review":{"state":"commented","body":"**Verdict:** APPROVED\n\nNo actionable findings.","user":{"login":"kumasct"}}}`, true},
+		{"github_merge", "pull_request_review", nil, `{"action":"submitted","pull_request":{"user":{"login":"kumasct"}},"review":{"state":"commented","body":"**Verdict:** APPROVED\n\n### Findings\n\nNo blocking findings.","user":{"login":"kumasct"}}}`, true},
+		{"github_merge", "pull_request_review", nil, `{"action":"submitted","pull_request":{"user":{"login":"kumasct"}},"review":{"state":"commented","body":"**Verdict:** APPROVED\n\nActionable findings: 1","user":{"login":"kumasct"}}}`, false},
+		{"github_merge", "pull_request_review", nil, `{"action":"submitted","pull_request":{"user":{"login":"other"}},"review":{"state":"commented","body":"**Verdict:** APPROVED\n\nNo actionable findings.","user":{"login":"kumasct"}}}`, false},
+		{"github_merge", "issue_comment", []string{"please re-review"}, `{"action":"created","issue":{"number":2},"comment":{"body":"please re-review"}}`, false},
+		{"github_merged", "pull_request", nil, `{"action":"closed","pull_request":{"merged":true}}`, true},
+		{"github_merged", "pull_request_review", nil, `{"action":"submitted","review":{"state":"approved"}}`, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.workflow+"/"+tt.event, func(t *testing.T) {
-			allowed, _ := workflowAllows(tt.workflow, normalizeWebhook([]byte(tt.body), tt.event, "d", false, ""))
+			allowed, _ := workflowAllows(tt.workflow, normalizeWebhook([]byte(tt.body), tt.event, "d", false, "", tt.triggers))
 			if allowed != tt.allowed {
 				t.Fatalf("workflowAllows = %v, want %v", allowed, tt.allowed)
 			}
@@ -157,7 +174,7 @@ func TestWebhookGateSkipsReReviewOnClosedOrMergedPR(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			body := fmt.Sprintf(`{"action":"created","issue":{"number":5,"state":%q,"pull_request":{"html_url":"https://example/pull/5","merged":%t}},"comment":{"body":"please re-review"}}`, tt.state, tt.merged)
-			envelope := normalizeWebhook([]byte(body), "issue_comment", "d", false, "")
+			envelope := normalizeWebhook([]byte(body), "issue_comment", "d", false, "", []string{"please re-review"})
 			wantState := tt.state
 			if tt.merged {
 				wantState = "merged" // merged flag wins over issue.state
@@ -328,7 +345,7 @@ func TestWebhookWorkflowMismatchSkipsAndNotifiesWithoutExecutor(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.workflow, func(t *testing.T) {
-			srv, exec, st := newTestServerFull(t, []config.EndpointConfig{{Name: "github", Path: "/github", Secret: "secret", Workflow: tt.workflow, Platform: "telegram", ChannelID: "chat", Prompt: "must not run"}})
+			srv, exec, st := newTestServerFull(t, []config.EndpointConfig{{Name: "github", Path: "/github", Secret: "secret", Workflow: tt.workflow, Platform: "telegram", ChannelID: "chat", Prompt: "must not run", CommentTrigger: []string{"please re-review"}}})
 			var mu sync.Mutex
 			var notifications []string
 			srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
@@ -586,4 +603,182 @@ func TestEmitAuditRootCardEditing(t *testing.T) {
 			t.Error("notifier was not called when RootMessageID was empty")
 		}
 	})
+}
+
+func TestWebhookCheckSuiteGateMatrix(t *testing.T) {
+	tests := []struct {
+		name     string
+		workflow string
+		event    string
+		body     string
+		allowed  bool
+	}{
+		{
+			name:     "merge admits completed check_suite with GitHub Actions and open PR",
+			workflow: "github_merge",
+			event:    "check_suite",
+			body:     `{"action":"completed","check_suite":{"status":"completed","conclusion":"success","app":{"name":"GitHub Actions"},"pull_requests":[{"number":10,"state":"open"}]}}`,
+			allowed:  true,
+		},
+		{
+			name:     "merge admits check_suite without PRs when candidate head branch is non-main",
+			workflow: "github_merge",
+			event:    "check_suite",
+			body:     `{"action":"completed","check_suite":{"status":"completed","conclusion":"success","app":{"name":"GitHub Actions"},"head_branch":"feat/my-branch","pull_requests":[]}}`,
+			allowed:  true,
+		},
+		{
+			name:     "merge admits check_suite with failure conclusion to wake up gate",
+			workflow: "github_merge",
+			event:    "check_suite",
+			body:     `{"action":"completed","check_suite":{"status":"completed","conclusion":"failure","app":{"name":"GitHub Actions"},"pull_requests":[{"number":10}]}}`,
+			allowed:  true,
+		},
+		{
+			name:     "merge rejects non-completed action",
+			workflow: "github_merge",
+			event:    "check_suite",
+			body:     `{"action":"requested","check_suite":{"status":"completed","app":{"name":"GitHub Actions"},"pull_requests":[{"number":10}]}}`,
+			allowed:  false,
+		},
+		{
+			name:     "merge rejects non-completed status",
+			workflow: "github_merge",
+			event:    "check_suite",
+			body:     `{"action":"completed","check_suite":{"status":"in_progress","app":{"name":"GitHub Actions"},"pull_requests":[{"number":10}]}}`,
+			allowed:  false,
+		},
+		{
+			name:     "merge rejects other apps",
+			workflow: "github_merge",
+			event:    "check_suite",
+			body:     `{"action":"completed","check_suite":{"status":"completed","app":{"name":"Travis CI"},"pull_requests":[{"number":10}]}}`,
+			allowed:  false,
+		},
+		{
+			name:     "merge rejects closed PR",
+			workflow: "github_merge",
+			event:    "check_suite",
+			body:     `{"action":"completed","check_suite":{"status":"completed","app":{"name":"GitHub Actions"},"pull_requests":[{"number":10,"state":"closed"}]}}`,
+			allowed:  false,
+		},
+		{
+			name:     "merge rejects merged PR",
+			workflow: "github_merge",
+			event:    "check_suite",
+			body:     `{"action":"completed","check_suite":{"status":"completed","app":{"name":"GitHub Actions"},"pull_requests":[{"number":10,"merged":true}]}}`,
+			allowed:  false,
+		},
+		{
+			name:     "merge rejects push to main with empty pull_requests",
+			workflow: "github_merge",
+			event:    "check_suite",
+			body:     `{"action":"completed","check_suite":{"status":"completed","app":{"name":"GitHub Actions"},"head_branch":"main","pull_requests":[]}}`,
+			allowed:  false,
+		},
+		{
+			name:     "merge rejects suite with no pull requests and no head branch",
+			workflow: "github_merge",
+			event:    "check_suite",
+			body:     `{"action":"completed","check_suite":{"status":"completed","app":{"name":"GitHub Actions"},"pull_requests":[]}}`,
+			allowed:  false,
+		},
+		{
+			name:     "reviewer workflow rejects check_suite",
+			workflow: "github_reviewer",
+			event:    "check_suite",
+			body:     `{"action":"completed","check_suite":{"status":"completed","app":{"name":"GitHub Actions"},"pull_requests":[{"number":10}]}}`,
+			allowed:  false,
+		},
+		{
+			name:     "fix workflow rejects check_suite",
+			workflow: "github_fix",
+			event:    "check_suite",
+			body:     `{"action":"completed","check_suite":{"status":"completed","app":{"name":"GitHub Actions"},"pull_requests":[{"number":10}]}}`,
+			allowed:  false,
+		},
+		{
+			name:     "merged workflow rejects check_suite",
+			workflow: "github_merged",
+			event:    "check_suite",
+			body:     `{"action":"completed","check_suite":{"status":"completed","app":{"name":"GitHub Actions"},"pull_requests":[{"number":10}]}}`,
+			allowed:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			envelope := normalizeWebhook([]byte(tt.body), tt.event, "del-cs", false, "")
+			allowed, _ := workflowAllows(tt.workflow, envelope)
+			if allowed != tt.allowed {
+				t.Fatalf("workflowAllows(%s, check_suite) = %v, want %v", tt.workflow, allowed, tt.allowed)
+			}
+		})
+	}
+}
+
+func TestCommentDeliveryRejectedWhenTriggerNotConfigured(t *testing.T) {
+	body := `{"action":"created","repository":{"full_name":"o/r"},"issue":{"number":5,"state":"open","pull_request":{"html_url":"https://github.com/o/r/pull/5"}},"comment":{"body":"please re-review"}}`
+	envelope := normalizeWebhook([]byte(body), "issue_comment", "del-1", false, "")
+	allowed, reason := workflowAllows("github_reviewer", envelope)
+	if allowed {
+		t.Fatal("workflowAllows accepted comment delivery with unconfigured comment trigger")
+	}
+	if reason != "skipped: comment trigger not configured" {
+		t.Fatalf("reason = %q, want %q", reason, "skipped: comment trigger not configured")
+	}
+
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{{
+		Name:      "github",
+		Path:      "/github",
+		Secret:    "secret",
+		Workflow:  "github_reviewer",
+		Platform:  "telegram",
+		ChannelID: "chat",
+		Prompt:    "must not run",
+	}})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	if response := post(t, ts.URL+"/github?secret=secret", "del-unconfigured", "issue_comment", body); response.StatusCode != http.StatusOK {
+		t.Fatalf("POST status = %d, want 200", response.StatusCode)
+	}
+	waitForReceipt(t, st, store.WebhookStatusSkipped)
+	if exec.callCount() != 0 {
+		t.Fatalf("unconfigured comment trigger invoked executor %d times, want 0", exec.callCount())
+	}
+	receipt, err := st.WebhookDeliveryRepo().Get(context.Background(), "github", "del-unconfigured")
+	if err != nil || receipt == nil {
+		t.Fatalf("failed to get receipt: %v", err)
+	}
+	if !strings.Contains(receipt.ErrorSummary, "comment trigger not configured") {
+		t.Fatalf("receipt summary = %q, want comment trigger not configured", receipt.ErrorSummary)
+	}
+}
+
+func TestCustomCommentTriggerCaseInsensitive(t *testing.T) {
+	customTrigger := "run fast check"
+	triggers := []string{customTrigger}
+
+	bodyCustom := `{"action":"created","repository":{"full_name":"o/r"},"issue":{"number":5,"state":"open","pull_request":{"html_url":"https://github.com/o/r/pull/5"}},"comment":{"body":"Hey operator, RUN FAST CHECK now"}}`
+	envCustom := normalizeWebhook([]byte(bodyCustom), "issue_comment", "del-1", false, "", triggers)
+	if got := stringValue(envCustom["comment_trigger"]); got != customTrigger {
+		t.Fatalf("comment_trigger = %q, want %q", got, customTrigger)
+	}
+	allowed, _ := workflowAllows("github_reviewer", envCustom)
+	if !allowed {
+		t.Fatal("workflowAllows rejected case-insensitive custom trigger match")
+	}
+
+	bodyHistorical := `{"action":"created","repository":{"full_name":"o/r"},"issue":{"number":5,"state":"open","pull_request":{"html_url":"https://github.com/o/r/pull/5"}},"comment":{"body":"please re-review"}}`
+	envHistorical := normalizeWebhook([]byte(bodyHistorical), "issue_comment", "del-2", false, "", triggers)
+	if got := stringValue(envHistorical["comment_trigger"]); got != "" {
+		t.Fatalf("comment_trigger = %q, want empty for unconfigured historical trigger", got)
+	}
+	allowedHistorical, _ := workflowAllows("github_reviewer", envHistorical)
+	if allowedHistorical {
+		t.Fatal("workflowAllows accepted unconfigured historical trigger phrase")
+	}
 }

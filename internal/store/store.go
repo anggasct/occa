@@ -231,6 +231,7 @@ type WebhookDeliveryRepo interface {
 	// FindReviewDuplicate returns the terminal delivery (completed or skipped)
 	// with the same review key updated at/after cutoff, or nil when none.
 	FindReviewDuplicate(ctx context.Context, endpoint, reviewKey string, cutoff int64) (*WebhookDelivery, error)
+	CountReviewDeliveries(ctx context.Context, endpoint, reviewKey string, cutoff int64) (int, error)
 }
 
 type RecoveryEventRepo interface {

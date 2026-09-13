@@ -28,23 +28,22 @@ func workflowAllows(workflow string, envelope WebhookEnvelope) (bool, string) {
 
 	switch workflow {
 	case "github_reviewer":
-		// Pushes to an open PR's branch (synchronize) must never spawn an
-		// agent execution — every push during active work would otherwise
-		// start a parallel session racing the first one.
 		if eventType == "pull_request" && action == "synchronize" {
 			return false, "skipped: pull_request synchronize (push while PR open spawns no execution)"
 		}
 		if eventType == "pull_request" && containsString([]string{"opened", "reopened", "ready_for_review"}, action) {
 			return true, ""
 		}
-		if eventType == "issue_comment" && action == "created" && prNumber != "" && stringValue(envelope["comment_trigger"]) == "please re-review" {
-			// Re-review triggers on a merged/closed PR execute against
-			// code that is already integrated or rejected; refuse them at
-			// the gate so no session/worktree is ever spawned.
-			if state := prState(envelope); state == "closed" || state == "merged" {
-				return false, fmt.Sprintf("skipped: PR #%s is %s; no re-review execution", prNumber, state)
+		if eventType == "issue_comment" {
+			if !boolValue(envelope["comment_trigger_configured"]) {
+				return false, "skipped: comment trigger not configured"
 			}
-			return true, ""
+			if action == "created" && prNumber != "" && stringValue(envelope["comment_trigger"]) != "" {
+				if state := prState(envelope); state == "closed" || state == "merged" {
+					return false, fmt.Sprintf("skipped: PR #%s is %s; no re-review execution", prNumber, state)
+				}
+				return true, ""
+			}
 		}
 	case "github_fix":
 		if eventType == "pull_request_review" && action == "submitted" && reviewState == "changes_requested" {
@@ -60,12 +59,46 @@ func workflowAllows(workflow string, envelope WebhookEnvelope) (bool, string) {
 		if eventType == "pull_request_review" && action == "submitted" && selfReview && reviewVerdict == "approved" && !boolValue(envelope["has_findings"]) {
 			return true, ""
 		}
+		if eventType == "check_suite" {
+			status := strings.ToLower(stringValue(envelope["status"]))
+			appName := stringValue(envelope["app_name"])
+			if action != "completed" || (status != "" && status != "completed") {
+				return false, fmt.Sprintf("skipped: check_suite status is %s.%s (only completed is admitted)", action, status)
+			}
+			if !strings.EqualFold(appName, "github actions") {
+				return false, fmt.Sprintf("skipped: check_suite app %q is not GitHub Actions", appName)
+			}
+			if state := prState(envelope); state == "closed" || state == "merged" {
+				if prNumber != "" {
+					return false, fmt.Sprintf("skipped: PR #%s is %s; no merge execution", prNumber, state)
+				}
+				return false, fmt.Sprintf("skipped: PR is %s; no merge execution", state)
+			}
+			if !hasResolvablePR(envelope) {
+				return false, "skipped: check_suite has no resolvable open PR"
+			}
+			return true, ""
+		}
 	case "github_merged":
 		if eventType == "pull_request" && action == "closed" && boolValue(envelope["merged"]) {
 			return true, ""
 		}
 	}
 	return false, fmt.Sprintf("workflow %s rejected %s.%s", workflow, eventType, action)
+}
+
+func hasResolvablePR(envelope WebhookEnvelope) bool {
+	if stringValue(envelope["pr_number"]) != "" {
+		return true
+	}
+	if prs, ok := envelope["pr_numbers"].([]string); ok && len(prs) > 0 {
+		return true
+	}
+	headBranch := strings.TrimSpace(stringValue(envelope["head_branch"]))
+	if headBranch != "" && headBranch != "main" && headBranch != "master" {
+		return true
+	}
+	return false
 }
 
 // prState returns the terminal state of the referenced PR, if known: "open",

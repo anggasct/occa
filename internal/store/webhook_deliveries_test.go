@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 func webhookDelivery(overrides func(*WebhookDelivery)) WebhookDelivery {
@@ -455,5 +456,64 @@ func TestWebhookDeliveryConcurrentDuplicates(t *testing.T) {
 	}
 	if d.Attempt != workers {
 		t.Fatalf("attempt = %d, want %d (one bump per duplicate)", d.Attempt, workers)
+	}
+}
+
+func TestWebhookDeliveryCountReviewDeliveries(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+
+	for i := 1; i <= 3; i++ {
+		delID := fmt.Sprintf("del-%d", i)
+		if _, err := s.WebhookDeliveryRepo().Create(ctx, WebhookDelivery{
+			Endpoint:   "ep",
+			DeliveryID: delID,
+			EventType:  "issue_comment",
+		}); err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+		d, err := s.WebhookDeliveryRepo().Get(ctx, "ep", delID)
+		if err != nil || d == nil {
+			t.Fatalf("get %d: %v", i, err)
+		}
+		if err := s.WebhookDeliveryRepo().SetReviewKey(ctx, d.ID, "key-1"); err != nil {
+			t.Fatalf("set review key %d: %v", i, err)
+		}
+		if _, err := s.WebhookDeliveryRepo().Transition(ctx, d.ID, []WebhookStatus{WebhookStatusReceived}, WebhookStatusCompleted, ""); err != nil {
+			t.Fatalf("transition %d: %v", i, err)
+		}
+	}
+
+	cutoff := time.Now().Add(-time.Hour).Unix()
+	count, err := s.WebhookDeliveryRepo().CountReviewDeliveries(ctx, "ep", "key-1", cutoff)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("count = %d, want 3", count)
+	}
+
+	countExpired, err := s.WebhookDeliveryRepo().CountReviewDeliveries(ctx, "ep", "key-1", time.Now().Add(time.Hour).Unix())
+	if err != nil {
+		t.Fatalf("count expired: %v", err)
+	}
+	if countExpired != 0 {
+		t.Fatalf("count expired = %d, want 0", countExpired)
+	}
+
+	countOtherKey, err := s.WebhookDeliveryRepo().CountReviewDeliveries(ctx, "ep", "key-other", cutoff)
+	if err != nil {
+		t.Fatalf("count other key: %v", err)
+	}
+	if countOtherKey != 0 {
+		t.Fatalf("count other key = %d, want 0", countOtherKey)
+	}
+
+	countOtherEndpoint, err := s.WebhookDeliveryRepo().CountReviewDeliveries(ctx, "other-ep", "key-1", cutoff)
+	if err != nil {
+		t.Fatalf("count other endpoint: %v", err)
+	}
+	if countOtherEndpoint != 0 {
+		t.Fatalf("count other endpoint = %d, want 0", countOtherEndpoint)
 	}
 }

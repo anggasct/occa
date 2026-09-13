@@ -228,4 +228,22 @@ func (r *sqliteWebhookDeliveryRepo) FindReviewDuplicate(ctx context.Context, end
 	return d, nil
 }
 
+func (r *sqliteWebhookDeliveryRepo) CountReviewDeliveries(ctx context.Context, endpoint, reviewKey string, cutoff int64) (int, error) {
+	var count int
+	err := r.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM webhook_delivery
+		 WHERE endpoint = ? AND review_key = ? AND status IN (?, ?, ?, ?) AND updated_at >= ?`,
+		endpoint, reviewKey,
+		string(WebhookStatusCompleted),
+		string(WebhookStatusProcessing),
+		string(WebhookStatusAccepted),
+		string(WebhookStatusFailed),
+		cutoff,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("store: webhook delivery count review deliveries: %w", err)
+	}
+	return count, nil
+}
+
 var _ WebhookDeliveryRepo = (*sqliteWebhookDeliveryRepo)(nil)
