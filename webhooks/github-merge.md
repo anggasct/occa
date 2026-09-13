@@ -19,11 +19,15 @@ Event:
 - Head branch: {{.webhook.head_branch}}
 - Base branch: {{.webhook.base_branch}}
 - Review state: {{.webhook.review_state}}
+- Review user: {{.webhook.review_user}}
+- Review verdict: {{.webhook.review_verdict}}
+- Has actionable findings: {{.webhook.has_findings}}
+- PR author: {{.webhook.pr_author}}
 
 GATE — return exactly SKIP unless either:
 - Event type is `pull_request_review`, action is `submitted`, and either (A) review state is exactly `approved`, or (B) this is a same-account self-review where review state is `commented`, review user login equals pull-request author login, both are `kumasct`, and the body contains a formal APPROVED verdict with zero actionable findings; or
 - Event type is `check_suite` and action is `completed`.
-Do not merge ordinary comments, REQUEST_CHANGES, dismissed reviews, stale events, or text that merely says approved.
+Do not merge ordinary comments, REQUEST_CHANGES, dismissed reviews, stale events, or text that merely says approved. Evaluate this decision using the rendered fields above, and do not return SKIP merely because `Review state` is `commented` — clause (B) applies exactly to that case.
 
 Required merge procedure:
 1. Read the live PR first: identify the target PR number `<PR>` (use `{{.webhook.pr_number}}` if present; if the delivery carries no PR number, resolve it via step 2 first). Inspect the live PR with `gh pr view <PR> --repo {{.webhook.repository}} --json state,isDraft,mergeable,mergeStateStatus,baseRefName,headRefName,headRefOid,reviews`. If the PR is not OPEN, stop (report done; nothing to merge). Confirm the PR is not a draft, targets the repository's default branch (using the envelope value `{{.webhook.default_branch}}` when present and falling back to the live PR's `baseRefName` otherwise; when neither is available, do not block on the branch name), and is mergeable. If mergeability is UNKNOWN, wait briefly and re-check; if it remains unknown or is CONFLICTING, do not merge.
