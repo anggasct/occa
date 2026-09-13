@@ -13,7 +13,7 @@ import (
 func newThreadTestRouter() (*Router, *fakeRelayClient) {
 	r, client, _, overrides := newTestRouterWithAccess()
 	overrides.overrides["discord:parent:user1"] = &store.UserOverride{
-		ChannelID: "parent", Platform: "discord", UserID: "user1", Role: "admin",
+		ChannelID: "parent", Platform: "discord", UserID: "user1",
 	}
 	return r, client
 }
@@ -256,51 +256,24 @@ func TestBareModelInThreadWritesThreadConfig(t *testing.T) {
 	}
 }
 
-func TestBareModelInChannelAdminWritesChannel(t *testing.T) {
-	t.Run("admin writes channel model", func(t *testing.T) {
-		r, client, reply, overrides := newTestRouterWithAccess()
-		client.providers = modelTestProviders()
-		overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-			ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
-		}
-		st := r.store.(*fakeStore)
-		st.channelRepo.channels["telegram:chat1"] = &store.Channel{
-			ChannelID: "chat1", Platform: "telegram", ListenMode: "all", Workdir: "/repo",
-		}
+func TestBareModelInChannelWritesChannel(t *testing.T) {
+	r, client, reply, _ := newTestRouterWithAccess()
+	client.providers = modelTestProviders()
+	st := r.store.(*fakeStore)
+	st.channelRepo.channels["telegram:chat1"] = &store.Channel{
+		ChannelID: "chat1", Platform: "telegram", ListenMode: "all", Workdir: "/repo",
+	}
 
-		if err := r.Route(context.Background(), msg("/model openai/gpt-4o", reply)); err != nil {
-			t.Fatalf("Route: %v", err)
-		}
-		if !strings.Contains(reply.sends[0], "Channel model set: openai/gpt-4o") {
-			t.Fatalf("unexpected response: %q", reply.sends[0])
-		}
-		ch := channelOf(r, "telegram", "chat1")
-		if ch.Model != "openai/gpt-4o" || ch.ListenMode != "all" || ch.Workdir != "/repo" {
-			t.Fatalf("unexpected channel after model set: %+v", ch)
-		}
-	})
-
-	t.Run("non-admin writes personal override", func(t *testing.T) {
-		r, client, reply, overrides := newTestRouterWithAccess()
-		client.providers = modelTestProviders()
-		overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-			ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow",
-		}
-
-		if err := r.Route(context.Background(), msg("/model openai/gpt-4o", reply)); err != nil {
-			t.Fatalf("Route: %v", err)
-		}
-		if !strings.Contains(reply.sends[0], "Personal model set: openai/gpt-4o") {
-			t.Fatalf("unexpected response: %q", reply.sends[0])
-		}
-		o := overrides.overrides["telegram:chat1:user1"]
-		if o.Model != "openai/gpt-4o" {
-			t.Fatalf("non-admin personal model = %q, want openai/gpt-4o", o.Model)
-		}
-		if ch := channelOf(r, "telegram", "chat1"); ch != nil && ch.Model != "" {
-			t.Fatalf("non-admin changed channel model: %+v", ch)
-		}
-	})
+	if err := r.Route(context.Background(), msg("/model openai/gpt-4o", reply)); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if !strings.Contains(reply.sends[0], "Channel model set: openai/gpt-4o") {
+		t.Fatalf("unexpected response: %q", reply.sends[0])
+	}
+	ch := channelOf(r, "telegram", "chat1")
+	if ch.Model != "openai/gpt-4o" || ch.ListenMode != "all" || ch.Workdir != "/repo" {
+		t.Fatalf("unexpected channel after model set: %+v", ch)
+	}
 }
 
 func TestModelDefaultClearsCurrentLocation(t *testing.T) {
@@ -322,11 +295,8 @@ func TestModelDefaultClearsCurrentLocation(t *testing.T) {
 		}
 	})
 
-	t.Run("channel admin", func(t *testing.T) {
-		r, _, reply, overrides := newTestRouterWithAccess()
-		overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-			ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
-		}
+	t.Run("channel", func(t *testing.T) {
+		r, _, reply, _ := newTestRouterWithAccess()
 		r.store.(*fakeStore).channelRepo.channels["telegram:chat1"] = &store.Channel{
 			ChannelID: "chat1", Platform: "telegram", Model: "openai/gpt-4o", ListenMode: "mention",
 		}
@@ -342,22 +312,6 @@ func TestModelDefaultClearsCurrentLocation(t *testing.T) {
 		}
 	})
 
-	t.Run("personal non-admin", func(t *testing.T) {
-		r, _, reply, overrides := newTestRouterWithAccess()
-		overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-			ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "allow", Model: "openai/gpt-4o",
-		}
-		if err := r.Route(context.Background(), msg("/model default", reply)); err != nil {
-			t.Fatalf("Route: %v", err)
-		}
-		if !strings.Contains(reply.sends[0], "Personal model cleared") {
-			t.Fatalf("unexpected response: %q", reply.sends[0])
-		}
-		o := overrides.overrides["telegram:chat1:user1"]
-		if o.Model != "" {
-			t.Fatalf("personal model after default = %q, want empty", o.Model)
-		}
-	})
 }
 
 func TestOldSessionAndChannelKeywordsRejected(t *testing.T) {
@@ -435,7 +389,7 @@ func TestEffectiveModelIsolation(t *testing.T) {
 			Platform: "discord", ChannelID: "parent", ThreadID: "thread-1", Model: "openai/gpt-4o",
 		}
 		st.overrideRepo.overrides["discord:parent:user1"] = &store.UserOverride{
-			ChannelID: "parent", Platform: "discord", UserID: "user1", Role: "admin", Model: "zai-coding-plan/glm-5.2",
+			ChannelID: "parent", Platform: "discord", UserID: "user1", Model: "zai-coding-plan/glm-5.2",
 		}
 		model, err := r.effectiveModel(ctx, ownedThreadMsg("thread-1", "", &fakeReplyCtx{}))
 		if err != nil {
@@ -551,10 +505,10 @@ func TestSameThreadIDDifferentChatsIsolated(t *testing.T) {
 	ctx := context.Background()
 	st := r.store.(*fakeStore)
 	st.overrideRepo.overrides["telegram:chat-a:user1"] = &store.UserOverride{
-		ChannelID: "chat-a", Platform: "telegram", UserID: "user1", Role: "admin",
+		ChannelID: "chat-a", Platform: "telegram", UserID: "user1",
 	}
 	st.overrideRepo.overrides["telegram:chat-b:user1"] = &store.UserOverride{
-		ChannelID: "chat-b", Platform: "telegram", UserID: "user1", Role: "admin",
+		ChannelID: "chat-b", Platform: "telegram", UserID: "user1",
 	}
 	st.channelRepo.channels["telegram:chat-a"] = &store.Channel{
 		ChannelID: "chat-a", Platform: "telegram", Model: "anthropic/claude-3", ListenMode: "all",
@@ -670,7 +624,7 @@ func TestNonThreadResolutionSkipsThreadConfig(t *testing.T) {
 	}
 
 	st.overrideRepo.overrides["discord:text-channel:user1"] = &store.UserOverride{
-		ChannelID: "text-channel", Platform: "discord", UserID: "user1", Role: "admin",
+		ChannelID: "text-channel", Platform: "discord", UserID: "user1",
 	}
 	st.channelRepo.channels["discord:text-channel"] = &store.Channel{
 		ChannelID: "text-channel", Platform: "discord", Workdir: "/repo-discord", Model: "openai/gpt-4o", ListenMode: "all",

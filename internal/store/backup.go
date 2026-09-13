@@ -456,6 +456,13 @@ func requiredColumnsForVersion(version int) map[string][]string {
 	if version >= 8 {
 		columns["permission_rule"] = []string{"id", "platform", "channel_id", "thread_id", "user_id", "tool", "patterns", "created_at"}
 	}
+	if version >= 13 {
+		columns["channel"] = append(columns["channel"], "agent")
+		columns["user_override"] = append(columns["user_override"], "agent")
+	}
+	if version >= 17 {
+		columns["user_override"] = []string{"id", "channel_id", "platform", "user_id", "model", "agent", "created_at", "updated_at"}
+	}
 	return columns
 }
 

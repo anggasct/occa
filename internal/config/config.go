@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -20,6 +21,7 @@ type Config struct {
 	Agent    AgentConfig    `yaml:"agent"`
 	Database DatabaseConfig `yaml:"database"`
 	Discord  DiscordConfig  `yaml:"discord"`
+	Telegram TelegramConfig `yaml:"telegram"`
 	Logging  LoggingConfig  `yaml:"logging"`
 	Webhooks WebhookConfig  `yaml:"webhooks"`
 }
@@ -38,13 +40,11 @@ type DatabaseConfig struct {
 }
 
 type DiscordConfig struct {
-	TriggerRoleIDs    []string                 `yaml:"trigger_role_ids"`
-	TrustedBotSenders []TrustedBotSenderConfig `yaml:"trusted_bot_senders"`
+	AllowedSenderIDs []string `yaml:"allowed_sender_ids"`
 }
 
-type TrustedBotSenderConfig struct {
-	UserID     string   `yaml:"user_id"`
-	ChannelIDs []string `yaml:"channel_ids"`
+type TelegramConfig struct {
+	AllowedSenderIDs []string `yaml:"allowed_sender_ids"`
 }
 
 type LoggingConfig struct {
@@ -190,8 +190,16 @@ type fileConfig struct {
 	Database struct {
 		Path string `yaml:"path"`
 	} `yaml:"database"`
-	Discord DiscordConfig `yaml:"discord"`
-	Logging struct {
+	Discord struct {
+		AllowedSenderIDs  []string `yaml:"allowed_sender_ids"`
+		TriggerRoleIDs    []string `yaml:"trigger_role_ids"`
+		TrustedBotSenders []struct {
+			UserID     string   `yaml:"user_id"`
+			ChannelIDs []string `yaml:"channel_ids"`
+		} `yaml:"trusted_bot_senders"`
+	} `yaml:"discord"`
+	Telegram TelegramConfig `yaml:"telegram"`
+	Logging  struct {
 		Format string `yaml:"format"`
 	} `yaml:"logging"`
 	Webhooks WebhookConfig `yaml:"webhooks"`
@@ -223,10 +231,7 @@ func Load(configPath string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	adminID := os.Getenv("OCCA_ADMIN_ID")
-	if adminID == "" {
-		return Config{}, fmt.Errorf("config: OCCA_ADMIN_ID must be set")
-	}
+	adminID := strings.TrimSpace(os.Getenv("OCCA_ADMIN_ID"))
 	if configPath == "" {
 		configPath, err = DefaultConfigPath()
 		if err != nil {
@@ -357,8 +362,22 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	if err := validateDiscordPolicy(&fc.Discord); err != nil {
+	discordIDs, err := validateSenderAllowlist("discord", fc.Discord.AllowedSenderIDs)
+	if err != nil {
 		return Config{}, err
+	}
+	if len(fc.Discord.TriggerRoleIDs) > 0 || len(fc.Discord.TrustedBotSenders) > 0 {
+		return Config{}, fmt.Errorf("config: discord.trigger_role_ids and discord.trusted_bot_senders were replaced by discord.allowed_sender_ids")
+	}
+	telegramIDs, err := validateSenderAllowlist("telegram", fc.Telegram.AllowedSenderIDs)
+	if err != nil {
+		return Config{}, err
+	}
+	if len(discordIDs) == 0 && len(telegramIDs) == 0 && adminID == "" {
+		return Config{}, fmt.Errorf("config: allowed_sender_ids is empty on every platform and OCCA_ADMIN_ID is unset; nobody could reach OCCA")
+	}
+	if adminID != "" {
+		slog.Warn("config: OCCA_ADMIN_ID is a deprecated any-platform allowlist alias")
 	}
 
 	if len(fc.Webhooks.Endpoints) > 0 {
@@ -428,55 +447,28 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 			AutoInstall:    fc.Agent.AutoInstall,
 		},
 		Database: DatabaseConfig{Path: dbPath},
-		Discord:  fc.Discord,
+		Discord:  DiscordConfig{AllowedSenderIDs: discordIDs},
+		Telegram: TelegramConfig{AllowedSenderIDs: telegramIDs},
 		Logging:  LoggingConfig{Format: fc.Logging.Format},
 		Webhooks: fc.Webhooks,
 	}, nil
 }
 
-func validateDiscordPolicy(policy *DiscordConfig) error {
-	roleIDs := make(map[string]struct{}, len(policy.TriggerRoleIDs))
-	for i := range policy.TriggerRoleIDs {
-		roleID := strings.TrimSpace(policy.TriggerRoleIDs[i])
-		if roleID == "" {
-			return fmt.Errorf("config: discord.trigger_role_ids[%d] must not be empty", i)
+func validateSenderAllowlist(platform string, ids []string) ([]string, error) {
+	out := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for i := range ids {
+		id := strings.TrimSpace(ids[i])
+		if id == "" {
+			return nil, fmt.Errorf("config: %s.allowed_sender_ids[%d] must not be empty", platform, i)
 		}
-		if _, exists := roleIDs[roleID]; exists {
-			return fmt.Errorf("config: discord.trigger_role_ids[%d] duplicates %q", i, roleID)
+		if _, dup := seen[id]; dup {
+			return nil, fmt.Errorf("config: %s.allowed_sender_ids[%d] duplicates %q", platform, i, id)
 		}
-		policy.TriggerRoleIDs[i] = roleID
-		roleIDs[roleID] = struct{}{}
+		seen[id] = struct{}{}
+		out = append(out, id)
 	}
-
-	senderIDs := make(map[string]struct{}, len(policy.TrustedBotSenders))
-	for i := range policy.TrustedBotSenders {
-		sender := &policy.TrustedBotSenders[i]
-		sender.UserID = strings.TrimSpace(sender.UserID)
-		if sender.UserID == "" {
-			return fmt.Errorf("config: discord.trusted_bot_senders[%d].user_id must not be empty", i)
-		}
-		if _, exists := senderIDs[sender.UserID]; exists {
-			return fmt.Errorf("config: discord.trusted_bot_senders[%d].user_id duplicates %q", i, sender.UserID)
-		}
-		senderIDs[sender.UserID] = struct{}{}
-		if len(sender.ChannelIDs) == 0 {
-			return fmt.Errorf("config: discord.trusted_bot_senders[%d].channel_ids must not be empty", i)
-		}
-
-		channelIDs := make(map[string]struct{}, len(sender.ChannelIDs))
-		for j := range sender.ChannelIDs {
-			channelID := strings.TrimSpace(sender.ChannelIDs[j])
-			if channelID == "" {
-				return fmt.Errorf("config: discord.trusted_bot_senders[%d].channel_ids[%d] must not be empty", i, j)
-			}
-			if _, exists := channelIDs[channelID]; exists {
-				return fmt.Errorf("config: discord.trusted_bot_senders[%d].channel_ids[%d] duplicates %q", i, j, channelID)
-			}
-			sender.ChannelIDs[j] = channelID
-			channelIDs[channelID] = struct{}{}
-		}
-	}
-	return nil
+	return out, nil
 }
 
 func validateEndpointPath(p string) error {

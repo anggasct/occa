@@ -115,19 +115,16 @@ func newRecoveryTestRouter(provider InstanceProvider, client *fakeRelayClient, s
 		ChannelID: "chat1",
 		Platform:  "telegram",
 		UserID:    "user1",
-		Role:      "admin",
 	}
 	overrideRepo.overrides["telegram:chat1:user2"] = &store.UserOverride{
 		ChannelID: "chat1",
 		Platform:  "telegram",
 		UserID:    "user2",
-		Role:      "allow",
 	}
 	overrideRepo.overrides["telegram:chat1:user3"] = &store.UserOverride{
 		ChannelID: "chat1",
 		Platform:  "telegram",
 		UserID:    "user3",
-		Role:      "allow",
 	}
 	if sessions == nil {
 		sessions = &fakeSessionRepo{}
@@ -140,7 +137,7 @@ func newRecoveryTestRouter(provider InstanceProvider, client *fakeRelayClient, s
 		scheduleRepo:   &fakeScheduleRepo{},
 		recoveryEvents: recoveryRepo,
 	}
-	return New(provider, st, "/default-workdir", ""), recoveryRepo
+	return NewWithAllowlists(provider, st, "/default-workdir", "", []string{"user1", "user2", "user3"}, []string{"user1", "user2", "user3"}), recoveryRepo
 }
 
 func waitForRecoveryEvents(t *testing.T, repo *fakeRecoveryEventRepo, want int) []store.RecoveryEvent {

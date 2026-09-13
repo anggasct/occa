@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/anggasct/occa/internal/channel"
@@ -50,7 +51,7 @@ func knownThreadMsg(threadID, parentID, userID, text string, reply *fakeReplyCtx
 
 func seedParentAdmin(st *fakeStore, parent, user string) {
 	st.overrideRepo.overrides["discord:"+parent+":"+user] = &store.UserOverride{
-		ChannelID: parent, Platform: "discord", UserID: user, Role: "admin",
+		ChannelID: parent, Platform: "discord", UserID: user,
 	}
 }
 
@@ -81,8 +82,9 @@ func TestOrphanThreadAuthorizesViaParentMessage(t *testing.T) {
 	}
 }
 
-func TestOrphanThreadDeniedWithoutParentRole(t *testing.T) {
+func TestOrphanThreadDeniedForUnlistedSender(t *testing.T) {
 	r, client, reply, _ := newTestRouterWithAccess()
+	r.discordSenders = nil
 	resolver := &countingResolver{parent: "parent-1"}
 	r.SetThreadParentResolver(resolver.fn)
 
@@ -181,6 +183,7 @@ func TestOrphanThreadAPIFailureRetry(t *testing.T) {
 
 func TestOrphanThread404Denied(t *testing.T) {
 	r, client, reply, _ := newTestRouterWithAccess()
+	r.discordSenders = nil
 	resolver := &countingResolver{err: channel.ErrThreadNotFound}
 	r.SetThreadParentResolver(resolver.fn)
 
@@ -254,7 +257,7 @@ func TestOrphanThreadInheritsParentWorkdirModel(t *testing.T) {
 func TestTelegramThreadUnchanged(t *testing.T) {
 	r, client, reply, overrideRepo := newTestRouterWithAccess()
 	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{
-		ChannelID: "chat1", Platform: "telegram", UserID: "user1", Role: "admin",
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1",
 	}
 	resolver := &countingResolver{parent: "parent-1"}
 	r.SetThreadParentResolver(resolver.fn)
@@ -282,21 +285,15 @@ func TestTelegramThreadUnchanged(t *testing.T) {
 	}
 }
 
-func TestOrphanAdminCommandAllowedViaParent(t *testing.T) {
+func TestOrphanThreadCommandReachesHandler(t *testing.T) {
 	r, _, reply, _ := newTestRouterWithAccess()
-	st := r.store.(*fakeStore)
-	seedParentAdmin(st, "parent-1", "user1")
 	resolver := &countingResolver{parent: "parent-1"}
 	r.SetThreadParentResolver(resolver.fn)
 
-	if err := r.Route(context.Background(), orphanMsg("thread-orphan", "parent-1", "user1", "/allow user2", reply)); err != nil {
+	if err := r.Route(context.Background(), orphanMsg("thread-orphan", "parent-1", "user1", "/help", reply)); err != nil {
 		t.Fatalf("Route: %v", err)
 	}
-	if len(reply.sends) == 0 || reply.sends[0] != "✅ Allowed user: user2" {
-		t.Fatalf("admin command in orphan must use parent scope, got %v", reply.sends)
-	}
-	o, err := st.overrideRepo.Get(context.Background(), "discord", "thread-orphan", "user2")
-	if err != nil || o == nil || o.Role != "allow" {
-		t.Fatalf("allow must land on thread scope, got %+v err=%v", o, err)
+	if len(reply.sends) == 0 || !strings.Contains(reply.sends[0], "OCCA commands:") {
+		t.Fatalf("listed sender command in orphan must run, got %v", reply.sends)
 	}
 }

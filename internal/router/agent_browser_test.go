@@ -400,13 +400,11 @@ func TestAgentDelete_SecuritySymlinksAndModeFilter(t *testing.T) {
 		ChannelID: "chat1",
 		Platform:  "telegram",
 		UserID:    "admin1",
-		Role:      "admin",
 	}
 	overrideRepo.overrides["telegram:chat1:user1"] = &store.UserOverride{
 		ChannelID: "chat1",
 		Platform:  "telegram",
 		UserID:    "user1",
-		Role:      "user",
 	}
 
 	tmpDir := t.TempDir()
@@ -812,11 +810,8 @@ func TestAgentPicker_CallbackRootChannelAdminPersistsChannel(t *testing.T) {
 	}
 }
 
-func TestAgentPicker_CallbackRootChannelNonAdminPersistsOverride(t *testing.T) {
-	r, client, reply, overrides := newTestRouterWithAccess()
-	overrides.overrides["telegram:chat1:user2"] = &store.UserOverride{
-		ChannelID: "chat1", Platform: "telegram", UserID: "user2", Role: "allow",
-	}
+func TestAgentPicker_CallbackRootChannelSetsChannelDefault(t *testing.T) {
+	r, client, reply, _ := newTestRouterWithAccess()
 	if err := r.store.SessionRepo().SetActive(context.Background(), "telegram", "chat1", "", "user2", "sess-root-2", 100); err != nil {
 		t.Fatal(err)
 	}
@@ -851,13 +846,8 @@ func TestAgentPicker_CallbackRootChannelNonAdminPersistsOverride(t *testing.T) {
 	}
 
 	st := r.store.(*fakeStore)
-	if ch := st.channelRepo.channels["telegram:chat1"]; ch != nil && ch.Agent != "" {
-		t.Fatalf("channel agent must remain empty for non-admin, got %q", ch.Agent)
-	}
-
-	o := overrides.overrides["telegram:chat1:user2"]
-	if o == nil || o.Agent != "reviewer" {
-		t.Fatalf("user override agent = %+v, want reviewer", o)
+	if ch := st.channelRepo.channels["telegram:chat1"]; ch == nil || ch.Agent != "reviewer" {
+		t.Fatalf("channel agent = %+v, want reviewer", st.channelRepo.channels["telegram:chat1"])
 	}
 
 	if len(client.switchAgentCalls) != 1 || client.switchAgentCalls[0].sessionID != "sess-root-2" || client.switchAgentCalls[0].name != "reviewer" {
@@ -868,7 +858,7 @@ func TestAgentPicker_CallbackRootChannelNonAdminPersistsOverride(t *testing.T) {
 		t.Fatal("expected reply edit on callback")
 	}
 	lastEdit := reply.edits[len(reply.edits)-1]
-	if !strings.Contains(lastEdit, "✅ Personal agent set: reviewer") || !strings.Contains(lastEdit, "Scope: personal") {
+	if !strings.Contains(lastEdit, "✅ Channel agent set: reviewer") || !strings.Contains(lastEdit, "Scope: this channel") {
 		t.Fatalf("unexpected callback edit output: %s", lastEdit)
 	}
 }
@@ -947,7 +937,6 @@ func TestAgentPicker_InheritedByNewThreadAutoThread(t *testing.T) {
 		ChannelID: "parent-ch",
 		Platform:  "discord",
 		UserID:    "user1",
-		Role:      "admin",
 	}
 	st.channelRepo.channels["discord:parent-ch"] = &store.Channel{
 		ChannelID:  "parent-ch",

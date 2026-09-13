@@ -30,22 +30,15 @@ type ThreadPolicy func(channelID string) (bool, error)
 
 type OwnedThreadCheck func(threadID string) (bool, error)
 
-type TrustedBotSender struct {
-	UserID     string
-	ChannelIDs []string
-}
-
-type TrustedBotPolicy struct {
-	TriggerRoleIDs    []string
-	TrustedBotSenders []TrustedBotSender
+type AllowlistPolicy struct {
+	AllowedSenderIDs []string
 }
 
 type Adapter struct {
 	session        *discordgo.Session
 	token          string
 	menu           []channel.MenuCommand
-	triggerRoleIDs map[string]struct{}
-	trustedBots    map[string]map[string]struct{}
+	allowedSenders map[string]struct{}
 	botID          atomic.Value
 	appID          atomic.Value
 	channelLookup  func(string) (*discordgo.Channel, error)
@@ -62,26 +55,20 @@ type Adapter struct {
 const defaultDownloadTimeout = 60 * time.Second
 
 func New(token string, menu []channel.MenuCommand) *Adapter {
-	return NewWithPolicy(token, menu, TrustedBotPolicy{})
+	return NewWithPolicy(token, menu, AllowlistPolicy{})
 }
 
-func NewWithPolicy(token string, menu []channel.MenuCommand, policy TrustedBotPolicy) *Adapter {
+func NewWithPolicy(token string, menu []channel.MenuCommand, policy AllowlistPolicy) *Adapter {
 	a := &Adapter{
 		token:          token,
 		menu:           menu,
 		downloadClient: &http.Client{Timeout: defaultDownloadTimeout},
-		triggerRoleIDs: make(map[string]struct{}, len(policy.TriggerRoleIDs)),
-		trustedBots:    make(map[string]map[string]struct{}, len(policy.TrustedBotSenders)),
+		allowedSenders: make(map[string]struct{}, len(policy.AllowedSenderIDs)),
 	}
-	for _, roleID := range policy.TriggerRoleIDs {
-		a.triggerRoleIDs[strings.TrimSpace(roleID)] = struct{}{}
-	}
-	for _, sender := range policy.TrustedBotSenders {
-		channels := make(map[string]struct{}, len(sender.ChannelIDs))
-		for _, channelID := range sender.ChannelIDs {
-			channels[strings.TrimSpace(channelID)] = struct{}{}
+	for _, id := range policy.AllowedSenderIDs {
+		if id = strings.TrimSpace(id); id != "" {
+			a.allowedSenders[id] = struct{}{}
 		}
-		a.trustedBots[strings.TrimSpace(sender.UserID)] = channels
 	}
 	return a
 }
@@ -405,42 +392,27 @@ func (a *Adapter) onMessage(m *discordgo.MessageCreate, handler func(channel.Inc
 	if self := a.selfID(); self != "" && m.Author.ID == self {
 		return
 	}
-	if m.Author.Bot && !a.acceptsTrustedBotMessage(m.Message) {
+	if m.Author.Bot && !a.allowsBotSender(m.Author.ID) {
+		return
+	}
+	if m.Author.Bot && !a.hasOCCAMention(m.Message) {
 		return
 	}
 	handler(a.normalizeMessage(m.Message))
 }
 
-func (a *Adapter) acceptsTrustedBotMessage(m *discordgo.Message) bool {
-	channels, ok := a.trustedBots[m.Author.ID]
-	if !ok {
-		return false
-	}
-	if _, ok := channels[m.ChannelID]; ok {
-		return a.hasOCCAMention(m)
-	}
-
-	parentChannelID, isThread, scopeUnresolved := a.channelScope(m.GuildID, m.ChannelID)
-	if !isThread || scopeUnresolved || parentChannelID == "" || !a.isOwnedThread(m.ChannelID) {
-		return false
-	}
-	if _, ok := channels[parentChannelID]; !ok {
-		return false
-	}
-	return a.hasOCCAMention(m)
+func (a *Adapter) allowsBotSender(userID string) bool {
+	_, ok := a.allowedSenders[strings.TrimSpace(userID)]
+	return ok
 }
 
 func (a *Adapter) hasOCCAMention(m *discordgo.Message) bool {
 	self := a.selfID()
-	if self != "" {
-		for _, mention := range m.Mentions {
-			if mention != nil && mention.ID == self {
-				return true
-			}
-		}
+	if self == "" {
+		return false
 	}
-	for _, roleID := range m.MentionRoles {
-		if _, ok := a.triggerRoleIDs[roleID]; ok {
+	for _, mention := range m.Mentions {
+		if mention != nil && mention.ID == self {
 			return true
 		}
 	}

@@ -50,8 +50,8 @@ func TestConversationKeyPolicy(t *testing.T) {
 
 func TestTwoUsersSameChannelSeparateSessions(t *testing.T) {
 	r, client, _, overrideRepo := newTestRouterWithAccess()
-	overrideRepo.overrides["telegram:chat1:alice"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "alice", Role: "allow"}
-	overrideRepo.overrides["telegram:chat1:bob"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "bob", Role: "allow"}
+	overrideRepo.overrides["telegram:chat1:alice"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "alice"}
+	overrideRepo.overrides["telegram:chat1:bob"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "bob"}
 	st := r.store.(*fakeStore)
 
 	release := make(chan struct{})
@@ -92,7 +92,7 @@ func TestTwoUsersSameChannelSeparateSessions(t *testing.T) {
 
 func TestSameConversationIsSingleFlight(t *testing.T) {
 	r, client, _, overrideRepo := newTestRouterWithAccess()
-	overrideRepo.overrides["telegram:chat1:alice"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "alice", Role: "allow"}
+	overrideRepo.overrides["telegram:chat1:alice"] = &store.UserOverride{ChannelID: "chat1", Platform: "telegram", UserID: "alice"}
 
 	block := make(chan struct{})
 	client.blockSend = block
@@ -154,7 +154,7 @@ func TestSameConversationIsSingleFlight(t *testing.T) {
 func TestDifferentThreadsRunConcurrently(t *testing.T) {
 	r, client, _, overrideRepo := newTestRouterWithAccess()
 	for _, user := range []string{"alice", "bob"} {
-		overrideRepo.overrides["discord:chat1:"+user] = &store.UserOverride{ChannelID: "chat1", Platform: "discord", UserID: user, Role: "allow"}
+		overrideRepo.overrides["discord:chat1:"+user] = &store.UserOverride{ChannelID: "chat1", Platform: "discord", UserID: user}
 	}
 
 	block := make(chan struct{})
@@ -181,7 +181,7 @@ func TestDifferentThreadsRunConcurrently(t *testing.T) {
 func TestSessionNewResetsOnlyCurrentConversation(t *testing.T) {
 	r, client, _, overrideRepo := newTestRouterWithAccess()
 	for _, key := range []string{"discord:chat1:alice", "discord:chat1:bob"} {
-		overrideRepo.overrides[key] = &store.UserOverride{ChannelID: "chat1", Platform: "discord", UserID: strings.Split(key, ":")[2], Role: "allow"}
+		overrideRepo.overrides[key] = &store.UserOverride{ChannelID: "chat1", Platform: "discord", UserID: strings.Split(key, ":")[2]}
 	}
 	st := r.store.(*fakeStore)
 	client.blockSend = nil

@@ -9,12 +9,8 @@ import (
 	"github.com/anggasct/occa/internal/channel"
 )
 
-func noSessionAgentGuidance(admin bool) string {
-	base := "No active session here. Sessions live per thread (auto-thread is on for this channel). /agent <name> now sets the default agent for NEW sessions."
-	if admin {
-		base += " Channel admins can also set it channel-wide with /agent <name>."
-	}
-	return base
+func noSessionAgentGuidance() string {
+	return "No active session here. Sessions live per thread (auto-thread is on for this channel). /agent <name> sets the channel default for NEW sessions."
 }
 
 func (r *Router) resolveAgentDefault(ctx context.Context, msg channel.IncomingMessage) (string, string, error) {
@@ -50,7 +46,7 @@ func (r *Router) agentDefaultView(ctx context.Context, msg channel.IncomingMessa
 	} else {
 		sb.WriteString("🤖 Agent: opencode default\nSource: opencode default\n\n")
 	}
-	sb.WriteString(noSessionAgentGuidance(r.isAdmin(ctx, msg)))
+	sb.WriteString(noSessionAgentGuidance())
 	return sb.String(), nil
 }
 

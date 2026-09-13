@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -308,8 +309,8 @@ func TestOverrideCRUD(t *testing.T) {
 		t.Fatal("expected nil for missing override")
 	}
 
-	if err := s.OverrideRepo().UpsertRole(ctx, "telegram", "chat1", "user1", "allow"); err != nil {
-		t.Fatalf("UpsertRole: %v", err)
+	if err := s.OverrideRepo().UpsertAgent(ctx, "telegram", "chat1", "user1", "planner"); err != nil {
+		t.Fatalf("UpsertAgent: %v", err)
 	}
 	if err := s.OverrideRepo().UpsertModel(ctx, "telegram", "chat1", "user1", "gpt-4"); err != nil {
 		t.Fatalf("UpsertModel: %v", err)
@@ -319,23 +320,23 @@ func TestOverrideCRUD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if o == nil || o.Role != "allow" || o.Model != "gpt-4" {
+	if o == nil || o.Agent != "planner" || o.Model != "gpt-4" {
 		t.Fatalf("unexpected override: %+v", o)
 	}
 
-	if err := s.OverrideRepo().UpsertRole(ctx, "telegram", "chat1", "user1", "admin"); err != nil {
-		t.Fatalf("UpsertRole update: %v", err)
+	if err := s.OverrideRepo().UpsertAgent(ctx, "telegram", "chat1", "user1", "reviewer"); err != nil {
+		t.Fatalf("UpsertAgent update: %v", err)
 	}
 
 	o, err = s.OverrideRepo().Get(ctx, "telegram", "chat1", "user1")
 	if err != nil {
 		t.Fatalf("Get after update: %v", err)
 	}
-	if o.Role != "admin" {
-		t.Fatalf("expected admin, got %q", o.Role)
+	if o.Agent != "reviewer" {
+		t.Fatalf("expected reviewer, got %q", o.Agent)
 	}
 	if o.Model != "gpt-4" {
-		t.Fatalf("expected model untouched by UpsertRole, got %q", o.Model)
+		t.Fatalf("expected model untouched by UpsertAgent, got %q", o.Model)
 	}
 
 	list, err := s.OverrideRepo().ListByChannel(ctx, "telegram", "chat1")
@@ -359,19 +360,19 @@ func TestOverrideCRUD(t *testing.T) {
 	}
 }
 
-func TestOverrideRoleOnlyRowRoundTrips(t *testing.T) {
+func TestOverrideAgentOnlyRowRoundTrips(t *testing.T) {
 	s := tempStore(t)
 	ctx := context.Background()
 
-	if err := s.OverrideRepo().UpsertRole(ctx, "telegram", "chat1", "user1", "allow"); err != nil {
-		t.Fatalf("UpsertRole: %v", err)
+	if err := s.OverrideRepo().UpsertAgent(ctx, "telegram", "chat1", "user1", "planner"); err != nil {
+		t.Fatalf("UpsertAgent: %v", err)
 	}
 
 	o, err := s.OverrideRepo().Get(ctx, "telegram", "chat1", "user1")
 	if err != nil {
 		t.Fatalf("Get on a row with no model: %v", err)
 	}
-	if o == nil || o.Role != "allow" || o.Model != "" {
+	if o == nil || o.Agent != "planner" || o.Model != "" {
 		t.Fatalf("unexpected override: %+v", o)
 	}
 
@@ -379,7 +380,7 @@ func TestOverrideRoleOnlyRowRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListByChannel on a row with no model: %v", err)
 	}
-	if len(list) != 1 || list[0].Role != "allow" || list[0].Model != "" {
+	if len(list) != 1 || list[0].Agent != "planner" || list[0].Model != "" {
 		t.Fatalf("unexpected list: %+v", list)
 	}
 
@@ -390,8 +391,8 @@ func TestOverrideRoleOnlyRowRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get after UpsertModel: %v", err)
 	}
-	if o.Model != "openai/gpt-4o" || o.Role != "allow" {
-		t.Fatalf("expected model set and role preserved, got %+v", o)
+	if o.Model != "openai/gpt-4o" || o.Agent != "planner" {
+		t.Fatalf("expected model set and agent preserved, got %+v", o)
 	}
 }
 
@@ -402,33 +403,16 @@ func TestOverrideUpsertDoesNotClobberOtherField(t *testing.T) {
 	if err := s.OverrideRepo().UpsertModel(ctx, "telegram", "chat1", "user1", "gpt-4"); err != nil {
 		t.Fatalf("UpsertModel: %v", err)
 	}
-	if err := s.OverrideRepo().UpsertRole(ctx, "telegram", "chat1", "user1", "admin"); err != nil {
-		t.Fatalf("UpsertRole: %v", err)
+	if err := s.OverrideRepo().UpsertAgent(ctx, "telegram", "chat1", "user1", "reviewer"); err != nil {
+		t.Fatalf("UpsertAgent: %v", err)
 	}
 
 	o, err := s.OverrideRepo().Get(ctx, "telegram", "chat1", "user1")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if o.Role != "admin" || o.Model != "gpt-4" {
-		t.Fatalf("expected role/model to coexist without clobbering, got: %+v", o)
-	}
-}
-
-func TestOverrideUpsertModelDefaultsRoleToDeny(t *testing.T) {
-	s := tempStore(t)
-	ctx := context.Background()
-
-	if err := s.OverrideRepo().UpsertModel(ctx, "telegram", "chat1", "user1", "gpt-4"); err != nil {
-		t.Fatalf("UpsertModel: %v", err)
-	}
-
-	o, err := s.OverrideRepo().Get(ctx, "telegram", "chat1", "user1")
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if o.Role != "deny" {
-		t.Fatalf("expected a model-only write to default role to deny, got %q", o.Role)
+	if o.Agent != "reviewer" || o.Model != "gpt-4" {
+		t.Fatalf("expected agent/model to coexist without clobbering, got: %+v", o)
 	}
 }
 
@@ -436,8 +420,8 @@ func TestOverridePlatformScoping(t *testing.T) {
 	s := tempStore(t)
 	ctx := context.Background()
 
-	if err := s.OverrideRepo().UpsertRole(ctx, "telegram", "same-id", "user1", "admin"); err != nil {
-		t.Fatalf("UpsertRole telegram: %v", err)
+	if err := s.OverrideRepo().UpsertAgent(ctx, "telegram", "same-id", "user1", "reviewer"); err != nil {
+		t.Fatalf("UpsertAgent telegram: %v", err)
 	}
 
 	o, err := s.OverrideRepo().Get(ctx, "discord", "same-id", "user1")
@@ -446,6 +430,75 @@ func TestOverridePlatformScoping(t *testing.T) {
 	}
 	if o != nil {
 		t.Fatalf("expected no cross-platform leak, got: %+v", o)
+	}
+}
+
+func TestOverrideRoleDropMigrationPreservesPreferences(t *testing.T) {
+	dir := t.TempDir()
+	v16path := dir + "/v16.db"
+	ctx := context.Background()
+
+	s16, err := OpenWithDefaultWorkdir(v16path, "")
+	if err != nil {
+		t.Fatalf("open v16 fixture: %v", err)
+	}
+	if _, err := s16.db.ExecContext(ctx, `INSERT INTO user_override (channel_id, platform, user_id, model, agent, created_at, updated_at) VALUES ('chat1', 'telegram', 'user1', 'openai/gpt-4o', 'reviewer', 1, 1), ('chat2', 'telegram', 'user2', '', '', 2, 2)`); err != nil {
+		t.Fatalf("seed prefs: %v", err)
+	}
+	_ = s16.Close()
+
+	raw, err := sql.Open("sqlite", v16path)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE user_override ADD COLUMN role TEXT NOT NULL DEFAULT 'allow'`,
+		`UPDATE user_override SET role='admin' WHERE user_id='user1'`,
+		`ALTER TABLE channel DROP COLUMN agent`,
+		`ALTER TABLE session DROP COLUMN root_message_id`,
+		`ALTER TABLE session DROP COLUMN root_channel`,
+		`ALTER TABLE session DROP COLUMN root_card`,
+		`DROP INDEX IF EXISTS idx_session_takeover`,
+		`ALTER TABLE session DROP COLUMN continuable`,
+		`ALTER TABLE session DROP COLUMN takeover_seed`,
+		`DROP INDEX IF EXISTS idx_webhook_delivery_review`,
+		`ALTER TABLE webhook_delivery DROP COLUMN review_key`,
+		`PRAGMA user_version=16`,
+	} {
+		if _, err := raw.Exec(stmt); err != nil {
+			_ = raw.Close()
+			t.Fatalf("downgrade %q: %v", stmt, err)
+		}
+	}
+	_ = raw.Close()
+
+	s, err := OpenWithDefaultWorkdir(v16path, "")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	var version int
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatalf("read schema version: %v", err)
+	}
+	if version != SchemaVersion {
+		t.Fatalf("schema version = %d, want %d", version, SchemaVersion)
+	}
+
+	o, err := s.OverrideRepo().Get(ctx, "telegram", "chat1", "user1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if o == nil || o.Model != "openai/gpt-4o" || o.Agent != "reviewer" {
+		t.Fatalf("preferences lost by migration: %+v", o)
+	}
+	o2, err := s.OverrideRepo().Get(ctx, "telegram", "chat2", "user2")
+	if err != nil {
+		t.Fatalf("Get second: %v", err)
+	}
+	if o2 == nil || o2.Model != "" || o2.Agent != "" {
+		t.Fatalf("second row lost by migration: %+v", o2)
 	}
 }
 

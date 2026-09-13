@@ -192,6 +192,7 @@ func TestFailedThreadAdoptsFailedSession(t *testing.T) {
 
 func TestFailedThreadDeniedSenderDoesNotAdopt(t *testing.T) {
 	r, _, reply, _ := newTestRouterWithAccess()
+	r.discordSenders = nil
 	st := r.store.(*fakeStore)
 	ctx := context.Background()
 

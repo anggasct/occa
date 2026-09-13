@@ -37,7 +37,6 @@ type UserOverride struct {
 	ChannelID string
 	Platform  string
 	UserID    string
-	Role      string
 	Model     string
 	Agent     string
 	CreatedAt int64
@@ -174,7 +173,6 @@ type ChannelRepo interface {
 
 type OverrideRepo interface {
 	Get(ctx context.Context, platform, channelID, userID string) (*UserOverride, error)
-	UpsertRole(ctx context.Context, platform, channelID, userID, role string) error
 	UpsertModel(ctx context.Context, platform, channelID, userID, model string) error
 	UpsertAgent(ctx context.Context, platform, channelID, userID, agent string) error
 	Delete(ctx context.Context, platform, channelID, userID string) error

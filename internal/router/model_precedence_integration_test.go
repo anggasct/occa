@@ -6,14 +6,14 @@ import (
 )
 
 func TestModelPrecedenceAgainstRealStore(t *testing.T) {
-	r, _, _, st := newSQLiteBackedRouter(t, "")
+	r, _, _, st := newSQLiteBackedRouter(t, "", nil, nil)
 	ctx := context.Background()
 
 	if err := st.ChannelRepo().UpsertModel(ctx, "discord", "parent", "anthropic/claude-3"); err != nil {
 		t.Fatalf("Upsert channel model: %v", err)
 	}
-	if err := st.OverrideRepo().UpsertRole(ctx, "discord", "parent", "user1", "admin"); err != nil {
-		t.Fatalf("Upsert role: %v", err)
+	if err := st.OverrideRepo().UpsertAgent(ctx, "discord", "parent", "user1", "reviewer"); err != nil {
+		t.Fatalf("Upsert agent: %v", err)
 	}
 	if err := st.OverrideRepo().UpsertModel(ctx, "discord", "parent", "user1", "openai/gpt-4o"); err != nil {
 		t.Fatalf("Upsert personal model: %v", err)

@@ -202,16 +202,13 @@ func (c *responseClient) eventCalls() int {
 
 func newResponseRouter(client relay.Client) (*Router, *fakeStore) {
 	overrides := newFakeOverrideRepo()
-	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-		Platform: "telegram", ChannelID: "chat1", UserID: "user1", Role: "allow",
-	}
 	st := &fakeStore{
 		sessionRepo:  &fakeSessionRepo{},
 		channelRepo:  newFakeChannelRepo(),
 		overrideRepo: overrides,
 		scheduleRepo: &fakeScheduleRepo{},
 	}
-	r := New(&fakeInstanceProvider{client: client}, st, "/default-workdir", "")
+	r := NewWithAllowlists(&fakeInstanceProvider{client: client}, st, "/default-workdir", "", []string{"user1", "user2", "alice", "bob"}, []string{"user1", "user2", "alice", "bob"})
 	return r, st
 }
 
@@ -494,7 +491,7 @@ func TestResponseTimeoutTriggersRecoveryAndReplies(t *testing.T) {
 	provider := &fakeInstanceProvider{client: client}
 	overrides := newFakeOverrideRepo()
 	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
-		Platform: "telegram", ChannelID: "chat1", UserID: "user1", Role: "allow",
+		Platform: "telegram", ChannelID: "chat1", UserID: "user1",
 	}
 	st := &fakeStore{
 		sessionRepo:  &fakeSessionRepo{},
@@ -502,7 +499,7 @@ func TestResponseTimeoutTriggersRecoveryAndReplies(t *testing.T) {
 		overrideRepo: overrides,
 		scheduleRepo: &fakeScheduleRepo{},
 	}
-	r := New(provider, st, "/default-workdir", "")
+	r := NewWithAllowlists(provider, st, "/default-workdir", "", []string{"user1", "user2", "alice", "bob", "admin1", "admin"}, []string{"user1", "user2", "alice", "bob", "admin1", "admin"})
 	reply := newResponseReply()
 
 	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "hello", reply)); err != nil {
@@ -526,8 +523,8 @@ func TestResponseCoordinatorAllowsDifferentChannels(t *testing.T) {
 	first := newResponseClient(nil)
 	second := newResponseClient(nil)
 	overrides := newFakeOverrideRepo()
-	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{Platform: "telegram", ChannelID: "chat1", UserID: "user1", Role: "allow"}
-	overrides.overrides["telegram:chat2:user1"] = &store.UserOverride{Platform: "telegram", ChannelID: "chat2", UserID: "user1", Role: "allow"}
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{Platform: "telegram", ChannelID: "chat1", UserID: "user1"}
+	overrides.overrides["telegram:chat2:user1"] = &store.UserOverride{Platform: "telegram", ChannelID: "chat2", UserID: "user1"}
 	channels := newFakeChannelRepo()
 	channels.channels["telegram:chat2"] = &store.Channel{Platform: "telegram", ChannelID: "chat2", Workdir: "/chat2", ListenMode: "mention"}
 	st := &fakeStore{
@@ -536,10 +533,10 @@ func TestResponseCoordinatorAllowsDifferentChannels(t *testing.T) {
 		overrideRepo: overrides,
 		scheduleRepo: &fakeScheduleRepo{},
 	}
-	r := New(&responseProvider{clients: map[string]relay.Client{
+	r := NewWithAllowlists(&responseProvider{clients: map[string]relay.Client{
 		"/default-workdir": first,
 		"/chat2":           second,
-	}}, st, "/default-workdir", "")
+	}}, st, "/default-workdir", "", []string{"user1"}, []string{"user1"})
 
 	firstReply := newResponseReply()
 	secondReply := newResponseReply()
