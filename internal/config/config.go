@@ -286,8 +286,12 @@ func loadFileConfig(configPath string) (fileConfig, error) {
 		if err != nil {
 			return fileConfig{}, fmt.Errorf("config: read %s: %w", configPath, err)
 		}
-		if err := yaml.Unmarshal(data, &fc); err != nil {
-			return fileConfig{}, fmt.Errorf("config: parse %s: %w", configPath, err)
+		if len(bytes.TrimSpace(data)) > 0 {
+			dec := yaml.NewDecoder(bytes.NewReader(data))
+			dec.KnownFields(true)
+			if err := dec.Decode(&fc); err != nil {
+				return fileConfig{}, fmt.Errorf("config: parse %s: %w", configPath, err)
+			}
 		}
 	} else if explicit {
 		return fileConfig{}, fmt.Errorf("config: file not found: %s", configPath)

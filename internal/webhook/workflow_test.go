@@ -72,7 +72,7 @@ func TestNormalizeWebhookGitHubEvents(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := normalizeWebhook([]byte(tt.body), tt.event, "delivery-1", false, "", tt.triggers)
+			got := normalizeWebhook([]byte(tt.body), tt.event, "delivery-1", testVerdicts(), false, "", tt.triggers)
 			tt.assert(t, got)
 			for key, value := range got {
 				if value == nil {
@@ -84,7 +84,7 @@ func TestNormalizeWebhookGitHubEvents(t *testing.T) {
 }
 
 func TestNormalizeWebhookMissingFieldsNeverRendersNoValue(t *testing.T) {
-	envelope := normalizeWebhook([]byte(`{"action":"opened","repository":{"full_name":"acme/widgets"}}`), "pull_request", "delivery-1", false, "")
+	envelope := normalizeWebhook([]byte(`{"action":"opened","repository":{"full_name":"acme/widgets"}}`), "pull_request", "delivery-1", testVerdicts(), false, "")
 	prompt, err := renderTemplate(`{{.webhook.repository}}|{{.webhook.pr_number}}|{{.webhook.title}}|{{.webhook.comment_trigger}}`, map[string]any{"webhook": envelope})
 	if err != nil {
 		t.Fatalf("render normalized envelope: %v", err)
@@ -95,7 +95,7 @@ func TestNormalizeWebhookMissingFieldsNeverRendersNoValue(t *testing.T) {
 }
 
 func TestNormalizeWebhookNonPullRequestIssueCommentKeepsPRFieldsEmpty(t *testing.T) {
-	envelope := normalizeWebhook([]byte(`{"action":"created","repository":{"full_name":"acme/widgets"},"issue":{"number":44,"title":"Question"},"comment":{"body":"please re-review"}}`), "issue_comment", "delivery-1", false, "", []string{"please re-review"})
+	envelope := normalizeWebhook([]byte(`{"action":"created","repository":{"full_name":"acme/widgets"},"issue":{"number":44,"title":"Question"},"comment":{"body":"please re-review"}}`), "issue_comment", "delivery-1", testVerdicts(), false, "", []string{"please re-review"})
 	if envelope["pr_number"] != "" || envelope["pr_url"] != "" || envelope["comment_trigger"] != "" {
 		t.Fatalf("non-PR issue comment envelope = %#v, want empty PR and trigger fields", envelope)
 	}
@@ -132,7 +132,7 @@ func TestWebhookWorkflowGateMatrix(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.workflow+"/"+tt.event, func(t *testing.T) {
-			allowed, _ := legacyWorkflowAllows(tt.workflow, normalizeWebhook([]byte(tt.body), tt.event, "d", false, "", tt.triggers))
+			allowed, _ := legacyWorkflowAllows(tt.workflow, normalizeWebhook([]byte(tt.body), tt.event, "d", testVerdicts(), false, "", tt.triggers))
 			if allowed != tt.allowed {
 				t.Fatalf("workflowAllows = %v, want %v", allowed, tt.allowed)
 			}
@@ -144,7 +144,7 @@ func TestWebhookWorkflowGateMatrix(t *testing.T) {
 func TestWebhookGateRejectsSynchronizeAction(t *testing.T) {
 	for _, workflow := range []string{"github_reviewer", "github_fix", "github_merge", "github_merged", ""} {
 		allowed, reason := legacyWorkflowAllows(workflow, normalizeWebhook(
-			[]byte(`{"action":"synchronize","pull_request":{"number":9,"state":"open"}}`), "pull_request", "d", false, ""))
+			[]byte(`{"action":"synchronize","pull_request":{"number":9,"state":"open"}}`), "pull_request", "d", testVerdicts(), false, ""))
 		if workflow != "github_reviewer" {
 			continue // other workflows already reject every pull_request action
 		}
@@ -174,7 +174,7 @@ func TestWebhookGateSkipsReReviewOnClosedOrMergedPR(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			body := fmt.Sprintf(`{"action":"created","issue":{"number":5,"state":%q,"pull_request":{"html_url":"https://example/pull/5","merged":%t}},"comment":{"body":"please re-review"}}`, tt.state, tt.merged)
-			envelope := normalizeWebhook([]byte(body), "issue_comment", "d", false, "", []string{"please re-review"})
+			envelope := normalizeWebhook([]byte(body), "issue_comment", "d", testVerdicts(), false, "", []string{"please re-review"})
 			wantState := tt.state
 			if tt.merged {
 				wantState = "merged" // merged flag wins over issue.state
@@ -764,7 +764,7 @@ func TestWebhookCheckSuiteGateMatrix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			envelope := normalizeWebhook([]byte(tt.body), tt.event, "del-cs", false, "")
+			envelope := normalizeWebhook([]byte(tt.body), tt.event, "del-cs", testVerdicts(), false, "")
 			allowed, _ := legacyWorkflowAllows(tt.workflow, envelope)
 			if allowed != tt.allowed {
 				t.Fatalf("legacyWorkflowAllows(%s, check_suite) = %v, want %v", tt.workflow, allowed, tt.allowed)
@@ -775,7 +775,7 @@ func TestWebhookCheckSuiteGateMatrix(t *testing.T) {
 
 func TestCommentDeliveryRejectedWhenTriggerNotConfigured(t *testing.T) {
 	body := `{"action":"created","repository":{"full_name":"o/r"},"issue":{"number":5,"state":"open","pull_request":{"html_url":"https://github.com/o/r/pull/5"}},"comment":{"body":"please re-review"}}`
-	envelope := normalizeWebhook([]byte(body), "issue_comment", "del-1", false, "")
+	envelope := normalizeWebhook([]byte(body), "issue_comment", "del-1", testVerdicts(), false, "")
 	allowed, reason := legacyWorkflowAllows("github_reviewer", envelope)
 	if allowed {
 		t.Fatal("workflowAllows accepted comment delivery with unconfigured comment trigger")
@@ -822,7 +822,7 @@ func TestCustomCommentTriggerCaseInsensitive(t *testing.T) {
 	triggers := []string{customTrigger}
 
 	bodyCustom := `{"action":"created","repository":{"full_name":"o/r"},"issue":{"number":5,"state":"open","pull_request":{"html_url":"https://github.com/o/r/pull/5"}},"comment":{"body":"Hey operator, RUN FAST CHECK now"}}`
-	envCustom := normalizeWebhook([]byte(bodyCustom), "issue_comment", "del-1", false, "", triggers)
+	envCustom := normalizeWebhook([]byte(bodyCustom), "issue_comment", "del-1", testVerdicts(), false, "", triggers)
 	if got := stringValue(envCustom["comment_trigger"]); got != customTrigger {
 		t.Fatalf("comment_trigger = %q, want %q", got, customTrigger)
 	}
@@ -832,7 +832,7 @@ func TestCustomCommentTriggerCaseInsensitive(t *testing.T) {
 	}
 
 	bodyHistorical := `{"action":"created","repository":{"full_name":"o/r"},"issue":{"number":5,"state":"open","pull_request":{"html_url":"https://github.com/o/r/pull/5"}},"comment":{"body":"please re-review"}}`
-	envHistorical := normalizeWebhook([]byte(bodyHistorical), "issue_comment", "del-2", false, "", triggers)
+	envHistorical := normalizeWebhook([]byte(bodyHistorical), "issue_comment", "del-2", testVerdicts(), false, "", triggers)
 	if got := stringValue(envHistorical["comment_trigger"]); got != "" {
 		t.Fatalf("comment_trigger = %q, want empty for unconfigured historical trigger", got)
 	}

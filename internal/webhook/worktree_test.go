@@ -161,7 +161,7 @@ func TestWorkspaceMissingOrInvalidPathFailsClosed(t *testing.T) {
 func TestWorkspaceIsolatedRequiresRevision(t *testing.T) {
 	root := t.TempDir()
 	initTestGitRepo(t, root)
-	m := NewWorkspaceManager()
+	m := NewWorkspaceManagerWithTTL(time.Hour)
 	req := gitEndpointRequest(WebhookExecutionKey{Repository: "testowner/myrepo", Branch: "main"}, config.WorkspaceModeIsolated)
 	req.Path = root
 
@@ -178,7 +178,7 @@ func TestWorkspaceIsolatedCreatesDetachedSnapshotAndCleansUp(t *testing.T) {
 	root := t.TempDir()
 	initTestGitRepo(t, root)
 	rev := commitFile(t, root, "NOTES.md", "v1\n")
-	m := NewWorkspaceManager()
+	m := NewWorkspaceManagerWithTTL(time.Hour)
 	req := gitEndpointRequest(WebhookExecutionKey{Repository: "testowner/myrepo", Branch: "main", HeadRevision: rev}, config.WorkspaceModeIsolated)
 	req.Path = root
 
@@ -223,7 +223,7 @@ func TestWorkspaceIsolatedUniquePerDelivery(t *testing.T) {
 	root := t.TempDir()
 	initTestGitRepo(t, root)
 	rev := headRevision(t, root)
-	m := NewWorkspaceManager()
+	m := NewWorkspaceManagerWithTTL(time.Hour)
 	key := WebhookExecutionKey{Repository: "testowner/myrepo", Branch: "main", HeadRevision: rev}
 
 	reqA := gitEndpointRequest(key, config.WorkspaceModeIsolated)
@@ -251,7 +251,7 @@ func TestWorkspaceIsolatedUniquePerDelivery(t *testing.T) {
 func TestWorkspaceIsolatedUnknownRevisionFailsClosed(t *testing.T) {
 	root := t.TempDir()
 	initTestGitRepo(t, root)
-	m := NewWorkspaceManager()
+	m := NewWorkspaceManagerWithTTL(time.Hour)
 	req := gitEndpointRequest(WebhookExecutionKey{Repository: "testowner/myrepo", Branch: "main", HeadRevision: "1234567890abcdef1234567890abcdef12345678"}, config.WorkspaceModeIsolated)
 	req.Path = root
 
@@ -393,6 +393,27 @@ func TestWorkspaceMutableIdentityMismatchIsTerminal(t *testing.T) {
 	}
 }
 
+func TestWorkspaceIsolatedRequiresConfiguredTTL(t *testing.T) {
+	bare := NewWorkspaceManager()
+	if bare.isolatedTTL() != 0 {
+		t.Fatalf("bare manager TTL = %v, want zero", bare.isolatedTTL())
+	}
+	configured := NewWorkspaceManagerWithTTL(time.Hour)
+	if configured.isolatedTTL() <= 0 {
+		t.Fatalf("configured manager TTL = %v, want positive", configured.isolatedTTL())
+	}
+	root := t.TempDir()
+	initTestGitRepo(t, root)
+	rev := headRevision(t, root)
+	req := gitEndpointRequest(WebhookExecutionKey{Repository: "testowner/myrepo", Branch: "main", HeadRevision: rev}, config.WorkspaceModeIsolated)
+	req.Path = root
+	if _, err := bare.ResolveWorkspace(context.Background(), req); err == nil || !errors.Is(err, ErrWorkspaceUnavailable) {
+		t.Fatalf("bare manager isolated resolve must fail closed, got %v", err)
+	} else if !strings.Contains(err.Error(), "TTL") {
+		t.Fatalf("bare manager error must mention TTL, got %q", err.Error())
+	}
+}
+
 func TestWorkspaceReapExpiredIsolatedOnly(t *testing.T) {
 	root := t.TempDir()
 	initTestGitRepo(t, root)
@@ -503,7 +524,7 @@ func TestReaperSkipsActiveIsolatedLease(t *testing.T) {
 	root := t.TempDir()
 	initTestGitRepo(t, root)
 	rev := headRevision(t, root)
-	m := NewWorkspaceManager()
+	m := NewWorkspaceManagerWithTTL(time.Hour)
 
 	req := gitEndpointRequest(WebhookExecutionKey{Repository: "testowner/myrepo", Branch: "main", HeadRevision: rev}, config.WorkspaceModeIsolated)
 	req.Path = root

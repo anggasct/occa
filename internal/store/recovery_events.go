@@ -7,23 +7,13 @@ import (
 	"time"
 )
 
-var currentRecoveryRetention = time.Duration(0)
-
-const defaultRecoveryRetention = 30 * 24 * time.Hour
-
-func SetRecoveryRetention(retention time.Duration) {
-	currentRecoveryRetention = retention
-}
-
-func recoveryRetentionOrDefault() time.Duration {
-	if currentRecoveryRetention > 0 {
-		return currentRecoveryRetention
-	}
-	return defaultRecoveryRetention
-}
-
 type sqliteRecoveryEventRepo struct {
-	db *sql.DB
+	db        *sql.DB
+	retention time.Duration
+}
+
+func (r *sqliteRecoveryEventRepo) retentionOrDefault() time.Duration {
+	return r.retention
 }
 
 func (r *sqliteRecoveryEventRepo) Put(ctx context.Context, e RecoveryEvent) error {
@@ -44,7 +34,7 @@ func (r *sqliteRecoveryEventRepo) Put(ctx context.Context, e RecoveryEvent) erro
 		return fmt.Errorf("store: recovery event insert: %w", err)
 	}
 
-	cutoff := time.Now().Add(-recoveryRetentionOrDefault()).Unix()
+	cutoff := time.Now().Add(-r.retentionOrDefault()).Unix()
 	if _, err := tx.ExecContext(ctx, `DELETE FROM recovery_event WHERE created_at < ?`, cutoff); err != nil {
 		return fmt.Errorf("store: recovery event prune: %w", err)
 	}

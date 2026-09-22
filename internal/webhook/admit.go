@@ -68,10 +68,8 @@ func admitDelivery(ep config.EndpointConfig, policy admissionPolicy, envelope We
 		if len(rule.Actions) > 0 && !containsFold(rule.Actions, action) {
 			continue
 		}
-		for _, blocked := range rule.Unless {
-			if strings.EqualFold(strings.TrimSpace(blocked), action) {
-				return false, fmt.Sprintf("skipped: %s %s is excluded by rule", eventType, action)
-			}
+		if containsFold(rule.Unless, action) {
+			continue
 		}
 		if len(rule.ReviewState) > 0 && !containsFold(rule.ReviewState, reviewState) {
 			continue
@@ -88,13 +86,13 @@ func admitDelivery(ep config.EndpointConfig, policy admissionPolicy, envelope We
 			status := strings.ToLower(stringValue(envelope["status"]))
 			want := strings.ToLower(strings.TrimSpace(rule.CheckStatus))
 			if action != want || (status != "" && status != want) {
-				return false, fmt.Sprintf("skipped: check_suite status is %s.%s (only %s is admitted)", action, status, want)
+				continue
 			}
 		}
 		if rule.CheckApp != "" {
 			appName := stringValue(envelope["app_name"])
 			if !strings.EqualFold(appName, rule.CheckApp) {
-				return false, fmt.Sprintf("skipped: check_suite app %q is not %s", appName, rule.CheckApp)
+				continue
 			}
 		}
 		if rule.Merged != nil && boolValue(envelope["merged"]) != *rule.Merged {

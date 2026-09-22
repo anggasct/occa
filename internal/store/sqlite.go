@@ -440,10 +440,7 @@ func OpenWithRetention(path, defaultWorkdir string, usage UsageRetention, recove
 	s.permissionRules = &sqlitePermissionRuleRepo{db: db}
 	s.usage = &sqliteUsageRepo{db: db, retention: usage.Retention, maxRows: usage.MaxRows}
 	s.webhookDeliveries = &sqliteWebhookDeliveryRepo{db: db}
-	s.recoveryEvents = &sqliteRecoveryEventRepo{db: db}
-	if recoveryRetention > 0 {
-		SetRecoveryRetention(recoveryRetention)
-	}
+	s.recoveryEvents = &sqliteRecoveryEventRepo{db: db, retention: recoveryRetention}
 	return s, nil
 }
 

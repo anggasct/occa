@@ -193,3 +193,28 @@ func TestUnknownFieldFails(t *testing.T) {
 		t.Fatalf("Load must fail on unknown admit field")
 	}
 }
+
+func TestUnknownPolicyKeyFails(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "")
+	base := fullRuntimeYAML()
+	withBogus := strings.Replace(base, "  runtime:", "    bogus_policy_key: 1\n  runtime:", 1)
+	webhooks := "webhooks:\n" + withBogus + fullEndpointYAML(`      admit:
+        - event: pull_request
+          actions: [opened]
+`)
+	if _, err := Load(writeFullConfig(t, t.TempDir(), webhooks)); err == nil || !strings.Contains(err.Error(), "bogus_policy_key") {
+		t.Fatalf("Load error = %v, want bogus_policy_key failure", err)
+	}
+}
+
+func TestUnknownRuntimeKeyFails(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "")
+	withBogus := fullRuntimeYAML() + "    bogus_runtime_key: 1\n"
+	webhooks := "webhooks:\n" + withBogus + fullEndpointYAML(`      admit:
+        - event: pull_request
+          actions: [opened]
+`)
+	if _, err := Load(writeFullConfig(t, t.TempDir(), webhooks)); err == nil || !strings.Contains(err.Error(), "bogus_runtime_key") {
+		t.Fatalf("Load error = %v, want bogus_runtime_key failure", err)
+	}
+}

@@ -184,6 +184,9 @@ func (m *WorkspaceManager) ResolveWorkspace(ctx context.Context, req WorkspaceRe
 }
 
 func (m *WorkspaceManager) resolveIsolated(ctx context.Context, root string, req WorkspaceRequest) (*WorkspaceLease, error) {
+	if m.isolatedTTL() <= 0 {
+		return nil, fmt.Errorf("%w: isolated workspace TTL is not configured", ErrWorkspaceUnavailable)
+	}
 	if req.Key.HeadRevision == "" {
 		return nil, fmt.Errorf("%w: %s mode requires an exact head revision and the event did not provide one", ErrRevisionRequired, config.WorkspaceModeIsolated)
 	}

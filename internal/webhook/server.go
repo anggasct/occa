@@ -639,7 +639,7 @@ func (s *Server) resolveWorkspace(item dispatchItem) (*WorkspaceLease, error) {
 }
 
 func (s *Server) failWorkspace(item dispatchItem, receipt *store.WebhookDelivery, err error) {
-	envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, false, "", item.ep.CommentTrigger)
+	envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", item.ep.CommentTrigger)
 	workCtx := &WebhookWorkContext{
 		Key:        ExtractExecutionKey(item.body),
 		DeliveryID: item.deliveryID,
@@ -717,7 +717,7 @@ func (s *Server) beginExecution(item dispatchItem) *store.WebhookDelivery {
 
 	if s.shouldSkip(ep, item.eventType) {
 		reason := "configured event skip"
-		envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, true, reason, ep.CommentTrigger)
+		envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, true, reason, ep.CommentTrigger)
 		summary := redactAuditSummary(formatAuditSummary(envelope, ep.Workflow, "SKIP", reason), ep.Secret)
 		ok, tErr := s.deliveries.Transition(ctx, receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived, store.WebhookStatusAccepted, store.WebhookStatusProcessing}, store.WebhookStatusSkipped, summary)
 		if tErr != nil {
@@ -807,7 +807,7 @@ func (s *Server) failAbandonedReceipt(receipt *store.WebhookDelivery, reason str
 // transition (or retry grant) is recorded.
 func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64, deliveryID, eventType string, attempt int, lease *WorkspaceLease, allowRetryIncomplete func() bool) error {
 	key := ExtractExecutionKey(body)
-	envelope := normalizeWebhook(body, eventType, deliveryID, false, "", ep.CommentTrigger)
+	envelope := normalizeWebhook(body, eventType, deliveryID, s.verdicts, false, "", ep.CommentTrigger)
 
 	workCtx := &WebhookWorkContext{
 		Key:          key,

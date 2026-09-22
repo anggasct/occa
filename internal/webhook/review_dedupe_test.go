@@ -47,7 +47,7 @@ func reviewEnvelope(eventType, state, body, commit string) WebhookEnvelope {
 		"repository":     "o/r",
 		"pr_number":      "7",
 		"review_state":   state,
-		"review_verdict": reviewVerdict(body),
+		"review_verdict": resolveVerdict(body, testVerdicts()),
 		"review_commit":  commit,
 		"review_url":     "",
 		"comment_body":   body,

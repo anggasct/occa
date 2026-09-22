@@ -10,7 +10,7 @@ import (
 
 type WebhookEnvelope map[string]any
 
-func normalizeWebhook(body []byte, eventType, deliveryID string, skipped bool, skipReason string, commentTriggers ...[]string) WebhookEnvelope {
+func normalizeWebhook(body []byte, eventType, deliveryID string, verdicts map[string][]string, skipped bool, skipReason string, commentTriggers ...[]string) WebhookEnvelope {
 	payload := make(map[string]any)
 	var decoded any
 	if json.Unmarshal(body, &decoded) == nil {
@@ -79,7 +79,7 @@ func normalizeWebhook(body []byte, eventType, deliveryID string, skipped bool, s
 				envelope["review_state"] = stringValue(review["state"])
 				envelope["review_user"] = userName(review["user"])
 				envelope["comment_body"] = stringValue(review["body"])
-				envelope["review_verdict"] = reviewVerdict(stringValue(review["body"]))
+				envelope["review_verdict"] = resolveVerdict(stringValue(review["body"]), verdicts)
 				envelope["review_commit"] = stringValue(review["commit_id"])
 				envelope["review_url"] = stringValue(review["html_url"])
 				envelope["has_findings"] = hasActionableFindings(stringValue(review["body"]))
@@ -370,17 +370,6 @@ func reviewDedupeKey(envelope WebhookEnvelope) string {
 	body := normalizedReviewBody(stringValue(envelope["comment_body"]))
 	sum := sha256.Sum256([]byte(repo + "\n" + pr + "\n" + commit + "\n" + state + "\n" + body))
 	return hex.EncodeToString(sum[:])
-}
-
-func reviewVerdict(body string) string {
-	return reviewVerdictWith(map[string][]string{
-		"approved":        {"approved"},
-		"request_changes": {"request changes", "request_changes"},
-	}, body)
-}
-
-func reviewVerdictWith(verdicts map[string][]string, body string) string {
-	return resolveVerdict(body, verdicts)
 }
 
 func hasActionableFindings(body string) bool {

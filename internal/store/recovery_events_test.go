@@ -52,7 +52,8 @@ func TestRecoveryEventPutAndList(t *testing.T) {
 
 func TestRecoveryEventPrunesOldRows(t *testing.T) {
 	dir := t.TempDir()
-	s, err := OpenWithDefaultWorkdir(filepath.Join(dir, "test.db"), "")
+	retention := 30 * 24 * time.Hour
+	s, err := OpenWithRetention(filepath.Join(dir, "test.db"), "", UsageRetention{}, retention)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -62,7 +63,7 @@ func TestRecoveryEventPrunesOldRows(t *testing.T) {
 	old := RecoveryEvent{
 		Platform: "telegram", ChannelID: "c", Workdir: "/w",
 		Trigger: RecoveryTriggerProcessExit, Outcome: RecoveryOutcomeFailed,
-		CreatedAt: time.Now().Add(-defaultRecoveryRetention - time.Hour).Unix(),
+		CreatedAt: time.Now().Add(-retention - time.Hour).Unix(),
 	}
 	if err := repo.Put(context.Background(), old); err != nil {
 		t.Fatalf("put old: %v", err)

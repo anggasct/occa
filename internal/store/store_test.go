@@ -7,12 +7,16 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func tempStore(t *testing.T) *SQLiteStore {
 	t.Helper()
 	dir := t.TempDir()
-	s, err := OpenWithDefaultWorkdir(filepath.Join(dir, "test.db"), "")
+	s, err := OpenWithRetention(filepath.Join(dir, "test.db"), "", UsageRetention{
+		Retention: 90 * 24 * time.Hour,
+		MaxRows:   100000,
+	}, 30*24*time.Hour)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

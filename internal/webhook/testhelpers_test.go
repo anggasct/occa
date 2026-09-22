@@ -17,6 +17,10 @@ func testPolicy() config.WebhookPolicy {
 	}
 }
 
+func testVerdicts() map[string][]string {
+	return policyFromConfig(testPolicy()).verdicts
+}
+
 func testRuntime() config.WebhookRuntime {
 	return config.WebhookRuntime{
 		MaxBodySize:            config.ByteSize(10 * 1024 * 1024),
