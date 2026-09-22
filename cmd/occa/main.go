@@ -87,6 +87,9 @@ func main() {
 	if len(os.Args) >= 2 && os.Args[1] == "db" {
 		os.Exit(runDBCommand(os.Args[2:]))
 	}
+	if len(os.Args) >= 3 && os.Args[1] == "webhooks" && os.Args[2] == "check-config" {
+		os.Exit(runWebhooksCheckConfig(os.Args[3:]))
+	}
 
 	var configPath string
 	flag.StringVar(&configPath, "config", "", "path to config file (default ~/.occa/config.yaml)")
@@ -115,7 +118,10 @@ func main() {
 	}
 	slog.SetDefault(slog.New(logging.NewRedactHandler(handler, telegramToken, discordToken)))
 
-	db, dbLock, err := openStoreWithLock(cfg.Database.Path, cfg.Agent.DefaultWorkdir)
+	db, dbLock, err := openStoreWithLock(cfg.Database.Path, cfg.Agent.DefaultWorkdir, store.UsageRetention{
+		Retention: cfg.Webhooks.Runtime.UsageRetention,
+		MaxRows:   cfg.Webhooks.Runtime.UsageMaxRows,
+	}, cfg.Webhooks.Runtime.RecoveryEventRetention)
 	if err != nil {
 		slog.Error("failed to lock or open store", "error", err)
 		os.Exit(1)
@@ -351,7 +357,7 @@ func main() {
 			}
 			return errors.New("channel adapter unavailable")
 		})
-		webhookSrv.SetWorkspaceResolver(webhook.NewWorkspaceManager())
+		webhookSrv.SetWorkspaceResolver(webhook.NewWorkspaceManagerWithTTL(cfg.Webhooks.Runtime.IsolatedWorkspaceTTL))
 		webhookSrv.SetSessionStore(db.SessionRepo())
 		if err := webhookSrv.Start(ctx); err != nil {
 			slog.Error("failed to start webhook server", "error", err)
@@ -422,12 +428,12 @@ func healthSecrets(cfg config.Config, telegramToken, discordToken string) []stri
 	return secrets
 }
 
-func openStoreWithLock(dbPath, defaultWorkdir string) (*store.SQLiteStore, *store.DBLock, error) {
+func openStoreWithLock(dbPath, defaultWorkdir string, usage store.UsageRetention, recoveryRetention time.Duration) (*store.SQLiteStore, *store.DBLock, error) {
 	dbLock, err := store.LockDB(dbPath)
 	if err != nil {
 		return nil, nil, err
 	}
-	db, err := store.OpenWithDefaultWorkdir(dbPath, defaultWorkdir)
+	db, err := store.OpenWithRetention(dbPath, defaultWorkdir, usage, recoveryRetention)
 	if err != nil {
 		_ = dbLock.Unlock()
 		return nil, nil, err

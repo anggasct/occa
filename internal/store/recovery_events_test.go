@@ -62,7 +62,7 @@ func TestRecoveryEventPrunesOldRows(t *testing.T) {
 	old := RecoveryEvent{
 		Platform: "telegram", ChannelID: "c", Workdir: "/w",
 		Trigger: RecoveryTriggerProcessExit, Outcome: RecoveryOutcomeFailed,
-		CreatedAt: time.Now().Add(-recoveryEventRetention - time.Hour).Unix(),
+		CreatedAt: time.Now().Add(-defaultRecoveryRetention - time.Hour).Unix(),
 	}
 	if err := repo.Put(context.Background(), old); err != nil {
 		t.Fatalf("put old: %v", err)

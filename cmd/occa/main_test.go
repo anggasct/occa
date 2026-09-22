@@ -172,7 +172,7 @@ func TestOpenStoreWithLockSerializesStartupAndRestore(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "occa.db")
 
-	first, firstLock, err := openStoreWithLock(dbPath, "")
+	first, firstLock, err := openStoreWithLock(dbPath, "", store.UsageRetention{}, 0)
 	if err != nil {
 		t.Fatalf("first startup: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestOpenStoreWithLockSerializesStartupAndRestore(t *testing.T) {
 		t.Fatalf("restore during initialized service = %v, want ErrDBInUse", err)
 	}
 
-	second, secondLock, err := openStoreWithLock(dbPath, "")
+	second, secondLock, err := openStoreWithLock(dbPath, "", store.UsageRetention{}, 0)
 	if second != nil || secondLock != nil {
 		if second != nil {
 			_ = second.Close()
@@ -211,7 +211,7 @@ func TestOpenStoreWithLockReleasesAfterInitializationFailure(t *testing.T) {
 		t.Fatalf("create invalid database path: %v", err)
 	}
 
-	db, lock, err := openStoreWithLock(dbPath, "")
+	db, lock, err := openStoreWithLock(dbPath, "", store.UsageRetention{}, 0)
 	if db != nil || lock != nil {
 		t.Fatal("failed startup returned resources")
 	}

@@ -11,7 +11,7 @@ webhooks:
       path: /webhooks/github-acme-review
       auth: github_hmac_sha256
       secret: <your-webhook-secret>
-      workflow: github_reviewer
+      workflow: review
       platform: discord
       channel_id: '<channel-id>'
       prompt_file: webhooks/example-review.md
@@ -38,5 +38,9 @@ webhooks:
 - **Untrusted input.** Webhook fields, review bodies, commit messages and branch names are
   untrusted data. Say so in your prompt, and never let a prompt print secrets, signatures
   or tokens.
-- **Event selection.** The endpoint's configuration and the workflow gate decide which
-  deliveries execute at all; per-endpoint `skip_events` skips specific event types.
+- **Event selection.** The endpoint's ordered `admit` rules decide which
+  deliveries execute at all; no matching rule means no execution. Rule vocabulary:
+  `event`, `actions`, `review_state`, `review_verdict`, `unless`, `require`
+  (`comment_trigger`, `comment_trigger_configured`, `pr_open`, `pr_resolvable`,
+  `approved_without_findings`), `check_status`, `check_app`, `merged`.
+  `workflow` names only the pipeline (`review` | `fix` | `merge` | `merged` | `custom`).

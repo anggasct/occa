@@ -303,8 +303,12 @@ func issueCommentEventBody(t *testing.T, prNumber int, commentBody string) []byt
 
 func TestCommentTriggerRateCap(t *testing.T) {
 	ep := reviewGuardEndpoint()
-	ep.Workflow = "github_reviewer"
+	ep.Workflow = "review"
 	ep.CommentTrigger = []string{"please re-review"}
+	ep.Admit = []config.AdmitRule{
+		{Event: "issue_comment", Actions: []string{"created"}, Require: []string{"comment_trigger", "pr_open"}},
+	}
+	ep.Limits = &config.EndpointLimits{MaxRunsPerPR: 3, Window: time.Hour}
 	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{ep})
 
 	bodyPR7 := issueCommentEventBody(t, 7, "please re-review this PR")
@@ -351,7 +355,12 @@ func TestCommentTriggerRateCap(t *testing.T) {
 		t.Fatalf("different PR spawned %d turns, want 4", count)
 	}
 
-	srv.reviewDedupeNow = func() time.Time { return time.Now().Add(2 * time.Hour) }
+	srv.triggerLimits[ep.Name] = config.EndpointLimits{MaxRunsPerPR: 3, Window: time.Minute}
+	for _, delID := range []string{"del-1", "del-2", "del-3"} {
+		if _, err := st.DB().Exec(`UPDATE webhook_delivery SET updated_at = ? WHERE endpoint = ? AND delivery_id = ?`, time.Now().Add(-time.Hour).Unix(), ep.Name, delID); err != nil {
+			t.Fatalf("backdate trigger rows: %v", err)
+		}
+	}
 	id5 := seedReviewDelivery(t, st.WebhookDeliveryRepo(), ep.Name, "del-5")
 	if err := srv.executeDelivery(ep, bodyPR7, id5, "del-5", "issue_comment", 1, nil, nil); err != nil {
 		t.Fatalf("expired window executeDelivery: %v", err)

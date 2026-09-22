@@ -19,6 +19,7 @@ func takeoverTestEndpoint() config.EndpointConfig {
 		Workflow:  "github_fix",
 		ThreadID:  "thread-1",
 		Prompt:    "do it",
+		Admit:     defaultCatchAllAdmit(),
 	}
 }
 
@@ -142,7 +143,9 @@ func newTakeoverServer(t *testing.T, exec Executor, st *store.SQLiteStore) *Serv
 	t.Helper()
 	cfg := config.WebhookConfig{
 		Bind:      "127.0.0.1:0",
-		Endpoints: []config.EndpointConfig{takeoverTestEndpoint()},
+		Policy:    testPolicy(),
+		Runtime:   testRuntime(),
+		Endpoints: withAdmitDefaults([]config.EndpointConfig{takeoverTestEndpoint()}),
 	}
 	srv := New(cfg, exec, st.WebhookDeliveryRepo())
 	srv.SetChannelStore(st.ChannelRepo())

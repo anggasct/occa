@@ -1,0 +1,137 @@
+agent:
+  binary: opencode
+  port_range: 4096-4116
+  max_instances: 5
+  idle_timeout: 20m
+  default_workdir: "~"
+  auto_install: false
+database:
+  path: ~/.occa/occa.db
+logging:
+  format: text
+discord:
+  allowed_sender_ids:
+    - '<discord-user-id>'
+telegram:
+  allowed_sender_ids:
+    - '<telegram-user-id>'
+webhooks:
+  bind: 127.0.0.1:8787
+  policy:
+    trust_review_logins: []
+    verdicts:
+      approved: ['approved']
+      request_changes: ['request changes', 'request_changes']
+  runtime:
+    max_body_size: 10MB
+    max_concurrent_events: 16
+    max_queued_per_key: 8
+    processing_timeout: 30m
+    claim_grace: 32m
+    retry_after: 30s
+    workspace_retry_backoff: [30s, 60s, 120s]
+    retention: 720h
+    retention_keep: 500
+    prune_interval: 10m
+    dispatcher_idle_ttl: 1h
+    http_read_header_timeout: 10s
+    http_read_timeout: 30s
+    http_write_timeout: 30s
+    http_idle_timeout: 2m
+    review_dedupe_window: 60m
+    isolated_workspace_ttl: 24h
+    usage_retention: 2160h
+    usage_max_rows: 100000
+    recovery_event_retention: 720h
+  endpoints:
+    - name: github-acme-review
+      path: /webhooks/github-acme-review
+      auth: github_hmac_sha256
+      secret: <your-webhook-secret>
+      workflow: review
+      platform: discord
+      channel_id: '<channel-id>'
+      prompt_file: webhooks/example-review.md
+      comment_trigger: ['please re-review']
+      thread: true
+      repository: github.com/acme/widget
+      workspace:
+        type: none
+      admit:
+        - event: pull_request
+          actions: [opened, reopened, ready_for_review]
+        - event: issue_comment
+          actions: [created]
+          require: [comment_trigger, pr_open]
+      limits:
+        max_runs_per_pr: 3
+        window: 60m
+    - name: github-acme-review-fix
+      path: /webhooks/github-acme-review-fix
+      auth: github_hmac_sha256
+      secret: <your-webhook-secret>
+      workflow: fix
+      platform: discord
+      channel_id: '<channel-id>'
+      prompt_file: webhooks/example-review.md
+      comment_trigger: ['please fix ci']
+      thread: true
+      repository: github.com/acme/widget
+      workspace:
+        type: git
+        path: /home/operator/projects/widget
+        mode: mutable
+      admit:
+        - event: pull_request_review
+          actions: [submitted]
+          review_state: [changes_requested]
+        - event: pull_request_review
+          actions: [submitted]
+          review_state: [commented]
+          review_verdict: [request_changes]
+        - event: issue_comment
+          actions: [created]
+          require: [comment_trigger, pr_open]
+      limits:
+        max_runs_per_pr: 3
+        window: 60m
+    - name: github-acme-merge
+      path: /webhooks/github-acme-merge
+      auth: github_hmac_sha256
+      secret: <your-webhook-secret>
+      workflow: merge
+      platform: discord
+      channel_id: '<channel-id>'
+      prompt_file: webhooks/example-review.md
+      thread: true
+      workspace:
+        type: none
+      admit:
+        - event: pull_request_review
+          actions: [submitted]
+          review_state: [approved]
+        - event: pull_request_review
+          actions: [submitted]
+          review_state: [commented]
+          review_verdict: [approved]
+          require: [approved_without_findings]
+        - event: check_suite
+          actions: [completed]
+          check_status: completed
+          check_app: GitHub Actions
+          require: [pr_open, pr_resolvable]
+    - name: github-acme-merged
+      path: /webhooks/github-acme-merged
+      auth: github_hmac_sha256
+      secret: <your-webhook-secret>
+      workflow: merged
+      platform: discord
+      channel_id: '<channel-id>'
+      prompt_file: webhooks/example-review.md
+      thread: true
+      workspace:
+        type: none
+      admit:
+        - event: pull_request
+          actions: [closed]
+          merged: true

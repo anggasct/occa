@@ -18,14 +18,42 @@ func TestWebhookPromptFileLoadsRelativeToConfigDirectory(t *testing.T) {
 		t.Fatalf("write prompt file: %v", err)
 	}
 	path := writeConfig(t, dir, `webhooks:
+  policy:
+    trust_review_logins: []
+    verdicts:
+      approved: ['approved']
+      request_changes: ['request changes', 'request_changes']
+  runtime:
+    max_body_size: 10MB
+    max_concurrent_events: 16
+    max_queued_per_key: 8
+    processing_timeout: 30m
+    claim_grace: 32m
+    retry_after: 30s
+    workspace_retry_backoff: [30s, 60s, 120s]
+    retention: 720h
+    retention_keep: 500
+    prune_interval: 10m
+    dispatcher_idle_ttl: 1h
+    http_read_header_timeout: 10s
+    http_read_timeout: 30s
+    http_write_timeout: 30s
+    http_idle_timeout: 2m
+    review_dedupe_window: 60m
+    isolated_workspace_ttl: 24h
+    usage_retention: 2160h
+    usage_max_rows: 100000
+    recovery_event_retention: 720h
   endpoints:
     - name: reviewer
       path: /review
-      workflow: github_reviewer
+      workflow: review
       secret: secret
       platform: discord
       channel_id: channel
       prompt_file: webhooks/review.md
+      admit:
+        - event: ping
       workspace:
         type: none
 `)
@@ -119,6 +147,32 @@ func TestWebhookPromptFileValidation(t *testing.T) {
 				tt.prepare(t, dir)
 			}
 			content := fmt.Sprintf(`webhooks:
+  policy:
+    trust_review_logins: []
+    verdicts:
+      approved: ['approved']
+      request_changes: ['request changes', 'request_changes']
+  runtime:
+    max_body_size: 10MB
+    max_concurrent_events: 16
+    max_queued_per_key: 8
+    processing_timeout: 30m
+    claim_grace: 32m
+    retry_after: 30s
+    workspace_retry_backoff: [30s, 60s, 120s]
+    retention: 720h
+    retention_keep: 500
+    prune_interval: 10m
+    dispatcher_idle_ttl: 1h
+    http_read_header_timeout: 10s
+    http_read_timeout: 30s
+    http_write_timeout: 30s
+    http_idle_timeout: 2m
+    review_dedupe_window: 60m
+    isolated_workspace_ttl: 24h
+    usage_retention: 2160h
+    usage_max_rows: 100000
+    recovery_event_retention: 720h
   endpoints:
     - name: reviewer
       path: /review
@@ -127,6 +181,8 @@ func TestWebhookPromptFileValidation(t *testing.T) {
       channel_id: channel
       prompt: %q
       prompt_file: %q
+      admit:
+        - event: ping
       workspace:
         type: none
 `, tt.prompt, tt.promptFile)
@@ -141,6 +197,32 @@ func TestWebhookPromptFileValidation(t *testing.T) {
 func TestWebhookUnknownWorkflowFailsConfigLoad(t *testing.T) {
 	t.Setenv("OCCA_ADMIN_ID", "admin123")
 	path := writeConfig(t, t.TempDir(), `webhooks:
+  policy:
+    trust_review_logins: []
+    verdicts:
+      approved: ['approved']
+      request_changes: ['request changes', 'request_changes']
+  runtime:
+    max_body_size: 10MB
+    max_concurrent_events: 16
+    max_queued_per_key: 8
+    processing_timeout: 30m
+    claim_grace: 32m
+    retry_after: 30s
+    workspace_retry_backoff: [30s, 60s, 120s]
+    retention: 720h
+    retention_keep: 500
+    prune_interval: 10m
+    dispatcher_idle_ttl: 1h
+    http_read_header_timeout: 10s
+    http_read_timeout: 30s
+    http_write_timeout: 30s
+    http_idle_timeout: 2m
+    review_dedupe_window: 60m
+    isolated_workspace_ttl: 24h
+    usage_retention: 2160h
+    usage_max_rows: 100000
+    recovery_event_retention: 720h
   endpoints:
     - name: invalid
       path: /invalid
@@ -149,6 +231,8 @@ func TestWebhookUnknownWorkflowFailsConfigLoad(t *testing.T) {
       platform: discord
       channel_id: channel
       prompt: inline
+      admit:
+        - event: ping
       workspace:
         type: none
 `)
@@ -161,6 +245,32 @@ func TestWebhookUnknownWorkflowFailsConfigLoad(t *testing.T) {
 func TestWebhookInlinePromptRemainsCompatibleWithoutWorkflow(t *testing.T) {
 	t.Setenv("OCCA_ADMIN_ID", "admin123")
 	path := writeConfig(t, t.TempDir(), `webhooks:
+  policy:
+    trust_review_logins: []
+    verdicts:
+      approved: ['approved']
+      request_changes: ['request changes', 'request_changes']
+  runtime:
+    max_body_size: 10MB
+    max_concurrent_events: 16
+    max_queued_per_key: 8
+    processing_timeout: 30m
+    claim_grace: 32m
+    retry_after: 30s
+    workspace_retry_backoff: [30s, 60s, 120s]
+    retention: 720h
+    retention_keep: 500
+    prune_interval: 10m
+    dispatcher_idle_ttl: 1h
+    http_read_header_timeout: 10s
+    http_read_timeout: 30s
+    http_write_timeout: 30s
+    http_idle_timeout: 2m
+    review_dedupe_window: 60m
+    isolated_workspace_ttl: 24h
+    usage_retention: 2160h
+    usage_max_rows: 100000
+    recovery_event_retention: 720h
   endpoints:
     - name: legacy
       path: /legacy
@@ -168,6 +278,8 @@ func TestWebhookInlinePromptRemainsCompatibleWithoutWorkflow(t *testing.T) {
       platform: discord
       channel_id: channel
       prompt: inline prompt
+      admit:
+        - event: ping
       workspace:
         type: none
 `)

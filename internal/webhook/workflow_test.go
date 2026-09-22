@@ -132,7 +132,7 @@ func TestWebhookWorkflowGateMatrix(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.workflow+"/"+tt.event, func(t *testing.T) {
-			allowed, _ := workflowAllows(tt.workflow, normalizeWebhook([]byte(tt.body), tt.event, "d", false, "", tt.triggers))
+			allowed, _ := legacyWorkflowAllows(tt.workflow, normalizeWebhook([]byte(tt.body), tt.event, "d", false, "", tt.triggers))
 			if allowed != tt.allowed {
 				t.Fatalf("workflowAllows = %v, want %v", allowed, tt.allowed)
 			}
@@ -143,7 +143,7 @@ func TestWebhookWorkflowGateMatrix(t *testing.T) {
 // A pull_request synchronize push produces no execution packet.
 func TestWebhookGateRejectsSynchronizeAction(t *testing.T) {
 	for _, workflow := range []string{"github_reviewer", "github_fix", "github_merge", "github_merged", ""} {
-		allowed, reason := workflowAllows(workflow, normalizeWebhook(
+		allowed, reason := legacyWorkflowAllows(workflow, normalizeWebhook(
 			[]byte(`{"action":"synchronize","pull_request":{"number":9,"state":"open"}}`), "pull_request", "d", false, ""))
 		if workflow != "github_reviewer" {
 			continue // other workflows already reject every pull_request action
@@ -182,7 +182,7 @@ func TestWebhookGateSkipsReReviewOnClosedOrMergedPR(t *testing.T) {
 			if got := envelope["pr_state"]; got != wantState {
 				t.Fatalf("pr_state = %v, want %q", got, wantState)
 			}
-			allowed, reason := workflowAllows("github_reviewer", envelope)
+			allowed, reason := legacyWorkflowAllows("github_reviewer", envelope)
 			if allowed != tt.allowed {
 				t.Fatalf("workflowAllows = %v, want %v (pr_state=%v)", allowed, tt.allowed, envelope["pr_state"])
 			}
@@ -223,11 +223,19 @@ func TestWebhookMergeSkipsFormalFindingsSelfReview(t *testing.T) {
 		Name:      "github",
 		Path:      "/github",
 		Secret:    "secret",
-		Workflow:  "github_merge",
+		Workflow:  "merge",
 		Platform:  "telegram",
 		ChannelID: "chat",
 		Prompt:    "must not run",
+		Admit:     goldenMergeRules(),
 	}})
+	srv.policy = policyFromConfig(config.WebhookPolicy{
+		TrustReviewLogins: []string{"kumasct"},
+		Verdicts: map[string][]string{
+			"approved":        {"approved"},
+			"request_changes": {"request changes", "request_changes"},
+		},
+	})
 	audit := make(chan string, 1)
 	srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
 		audit <- text
@@ -261,11 +269,19 @@ func TestWebhookMergeAllowsNoBlockingFindingsSelfReview(t *testing.T) {
 		Name:      "github",
 		Path:      "/github",
 		Secret:    "secret",
-		Workflow:  "github_merge",
+		Workflow:  "merge",
 		Platform:  "telegram",
 		ChannelID: "chat",
 		Prompt:    "must run",
+		Admit:     goldenMergeRules(),
 	}})
+	srv.policy = policyFromConfig(config.WebhookPolicy{
+		TrustReviewLogins: []string{"kumasct"},
+		Verdicts: map[string][]string{
+			"approved":        {"approved"},
+			"request_changes": {"request changes", "request_changes"},
+		},
+	})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleRequest)
 	ts := httptest.NewServer(mux)
@@ -345,7 +361,19 @@ func TestWebhookWorkflowMismatchSkipsAndNotifiesWithoutExecutor(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.workflow, func(t *testing.T) {
-			srv, exec, st := newTestServerFull(t, []config.EndpointConfig{{Name: "github", Path: "/github", Secret: "secret", Workflow: tt.workflow, Platform: "telegram", ChannelID: "chat", Prompt: "must not run", CommentTrigger: []string{"please re-review"}}})
+			ep := config.EndpointConfig{Name: "github", Path: "/github", Secret: "secret", Workflow: "custom", Platform: "telegram", ChannelID: "chat", Prompt: "must not run", CommentTrigger: []string{"please re-review"}}
+			switch tt.workflow {
+			case "github_reviewer":
+				ep.Admit = goldenReviewerRules()
+				ep.Limits = &config.EndpointLimits{MaxRunsPerPR: 3, Window: time.Hour}
+			case "github_fix":
+				ep.Admit = goldenFixRules()
+			case "github_merge":
+				ep.Admit = goldenMergedRules()
+			case "github_merged":
+				ep.Admit = []config.AdmitRule{{Event: "issue_comment"}}
+			}
+			srv, exec, st := newTestServerFull(t, []config.EndpointConfig{ep})
 			var mu sync.Mutex
 			var notifications []string
 			srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
@@ -737,9 +765,9 @@ func TestWebhookCheckSuiteGateMatrix(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			envelope := normalizeWebhook([]byte(tt.body), tt.event, "del-cs", false, "")
-			allowed, _ := workflowAllows(tt.workflow, envelope)
+			allowed, _ := legacyWorkflowAllows(tt.workflow, envelope)
 			if allowed != tt.allowed {
-				t.Fatalf("workflowAllows(%s, check_suite) = %v, want %v", tt.workflow, allowed, tt.allowed)
+				t.Fatalf("legacyWorkflowAllows(%s, check_suite) = %v, want %v", tt.workflow, allowed, tt.allowed)
 			}
 		})
 	}
@@ -748,7 +776,7 @@ func TestWebhookCheckSuiteGateMatrix(t *testing.T) {
 func TestCommentDeliveryRejectedWhenTriggerNotConfigured(t *testing.T) {
 	body := `{"action":"created","repository":{"full_name":"o/r"},"issue":{"number":5,"state":"open","pull_request":{"html_url":"https://github.com/o/r/pull/5"}},"comment":{"body":"please re-review"}}`
 	envelope := normalizeWebhook([]byte(body), "issue_comment", "del-1", false, "")
-	allowed, reason := workflowAllows("github_reviewer", envelope)
+	allowed, reason := legacyWorkflowAllows("github_reviewer", envelope)
 	if allowed {
 		t.Fatal("workflowAllows accepted comment delivery with unconfigured comment trigger")
 	}
@@ -760,10 +788,13 @@ func TestCommentDeliveryRejectedWhenTriggerNotConfigured(t *testing.T) {
 		Name:      "github",
 		Path:      "/github",
 		Secret:    "secret",
-		Workflow:  "github_reviewer",
+		Workflow:  "review",
 		Platform:  "telegram",
 		ChannelID: "chat",
 		Prompt:    "must not run",
+		Admit: []config.AdmitRule{
+			{Event: "pull_request", Actions: []string{"opened", "reopened", "ready_for_review"}},
+		},
 	}})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleRequest)
@@ -781,8 +812,8 @@ func TestCommentDeliveryRejectedWhenTriggerNotConfigured(t *testing.T) {
 	if err != nil || receipt == nil {
 		t.Fatalf("failed to get receipt: %v", err)
 	}
-	if !strings.Contains(receipt.ErrorSummary, "comment trigger not configured") {
-		t.Fatalf("receipt summary = %q, want comment trigger not configured", receipt.ErrorSummary)
+	if !strings.Contains(receipt.ErrorSummary, "admitted no rule") {
+		t.Fatalf("receipt summary = %q, want admitted-no-rule", receipt.ErrorSummary)
 	}
 }
 
@@ -795,7 +826,7 @@ func TestCustomCommentTriggerCaseInsensitive(t *testing.T) {
 	if got := stringValue(envCustom["comment_trigger"]); got != customTrigger {
 		t.Fatalf("comment_trigger = %q, want %q", got, customTrigger)
 	}
-	allowed, _ := workflowAllows("github_reviewer", envCustom)
+	allowed, _ := legacyWorkflowAllows("github_reviewer", envCustom)
 	if !allowed {
 		t.Fatal("workflowAllows rejected case-insensitive custom trigger match")
 	}
@@ -805,7 +836,7 @@ func TestCustomCommentTriggerCaseInsensitive(t *testing.T) {
 	if got := stringValue(envHistorical["comment_trigger"]); got != "" {
 		t.Fatalf("comment_trigger = %q, want empty for unconfigured historical trigger", got)
 	}
-	allowedHistorical, _ := workflowAllows("github_reviewer", envHistorical)
+	allowedHistorical, _ := legacyWorkflowAllows("github_reviewer", envHistorical)
 	if allowedHistorical {
 		t.Fatal("workflowAllows accepted unconfigured historical trigger phrase")
 	}

@@ -373,18 +373,14 @@ func reviewDedupeKey(envelope WebhookEnvelope) string {
 }
 
 func reviewVerdict(body string) string {
-	for _, line := range strings.Split(body, "\n") {
-		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "- "))
-		line = strings.TrimSpace(strings.Trim(line, "*_` "))
-		line = strings.ReplaceAll(line, "**", "")
-		lower := strings.ToLower(strings.TrimSpace(line))
-		for _, verdict := range []string{"approved", "request_changes"} {
-			if lower == verdict || strings.HasPrefix(lower, "verdict: "+verdict) || strings.HasPrefix(lower, "verdict:"+verdict) {
-				return verdict
-			}
-		}
-	}
-	return ""
+	return reviewVerdictWith(map[string][]string{
+		"approved":        {"approved"},
+		"request_changes": {"request changes", "request_changes"},
+	}, body)
+}
+
+func reviewVerdictWith(verdicts map[string][]string, body string) string {
+	return resolveVerdict(body, verdicts)
 }
 
 func hasActionableFindings(body string) bool {
