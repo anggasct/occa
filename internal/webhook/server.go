@@ -28,26 +28,9 @@ import (
 )
 
 const (
-	maxWebhookBodySize         int64 = 10 * 1024 * 1024
-	maxConcurrentWebhookEvents       = 16
-	maxQueuedPerKey                  = 8
-
 	maxDeliveryIDRunes   = 128
 	maxEventTypeRunes    = 64
 	maxErrorSummaryRunes = 240
-
-	retentionKeep     = 500
-	retentionAge      = 30 * 24 * time.Hour
-	pruneInterval     = 10 * time.Minute
-	processingTimeout = 30 * time.Minute
-	claimGrace        = processingTimeout + 2*time.Minute
-	dispatcherIdleTTL = time.Hour
-	retryAfterSeconds = 30
-
-	readHeaderTimeout = 10 * time.Second
-	readTimeout       = 30 * time.Second
-	writeTimeout      = 30 * time.Second
-	idleTimeout       = 2 * time.Minute
 )
 
 // DeliveryStore is the durable receipt backend the server drives. The full
@@ -85,6 +68,8 @@ type Server struct {
 	bind                  string
 	bindAddr              string
 	endpoints             map[string]config.EndpointConfig
+	policy                admissionPolicy
+	verdicts              map[string][]string
 	executor              Executor
 	notifier              Notifier
 	editor                Editor
@@ -100,10 +85,18 @@ type Server struct {
 	dispatchWG            sync.WaitGroup
 	shutdownCtx           context.Context
 	shutdownCancel        context.CancelFunc
+	maxBodySize           int64
+	maxQueuedPerKey       int
+	retryAfter            time.Duration
+	retentionAge          time.Duration
+	retentionKeep         int
+	claimGrace            time.Duration
+	claimGraceSeconds     int64
 	processingTimeout     time.Duration
 	dispatcherIdleTTL     time.Duration
 	workspaceRetryBackoff []time.Duration
 	workspaceRetrySleep   func(ctx context.Context, d time.Duration) bool
+	isolatedWorkspaceTTL  time.Duration
 	pruneMu               sync.Mutex
 	lastPrune             time.Time
 	pruneInterval         time.Duration
@@ -114,40 +107,61 @@ type Server struct {
 	listening             atomic.Bool
 	reviewDedupeWindow    time.Duration
 	reviewDedupeNow       func() time.Time
+	triggerLimits         map[string]config.EndpointLimits
+	usageRetention        time.Duration
+	usageMaxRows          int
+	recoveryRetention     time.Duration
 }
 
 func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) *Server {
-	endpoints := make(map[string]config.EndpointConfig)
+	endpoints := make(map[string]config.EndpointConfig, len(cfg.Endpoints))
+	triggerLimits := make(map[string]config.EndpointLimits, len(cfg.Endpoints))
 	for _, ep := range cfg.Endpoints {
 		ep.Auth = strings.TrimSpace(strings.ToLower(ep.Auth))
 		ep.Workflow = strings.TrimSpace(strings.ToLower(ep.Workflow))
 		endpoints[ep.Path] = ep
+		if ep.Limits != nil {
+			triggerLimits[ep.Name] = *ep.Limits
+		}
 	}
+	rt := cfg.Runtime
+	policy := policyFromConfig(cfg.Policy)
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
-	return &Server{
-		bind:              cfg.Bind,
-		endpoints:         endpoints,
-		executor:          executor,
-		deliveries:        deliveries,
-		eventSlots:        make(chan struct{}, maxConcurrentWebhookEvents),
-		dispatchers:       make(map[string]*dispatcher),
-		shutdownCtx:       shutdownCtx,
-		shutdownCancel:    shutdownCancel,
-		processingTimeout: processingTimeout,
-		dispatcherIdleTTL: dispatcherIdleTTL,
-		workspaceRetryBackoff: []time.Duration{
-			30 * time.Second,
-			60 * time.Second,
-			120 * time.Second,
-		},
-		workspaceRetrySleep: sleepWithContext,
-		pruneInterval:       pruneInterval,
-		readHeaderTimeout:   readHeaderTimeout,
-		readTimeout:         readTimeout,
-		writeTimeout:        writeTimeout,
-		idleTimeout:         idleTimeout,
-		reviewDedupeWindow:  60 * time.Minute,
+	srv := &Server{
+		bind:                  cfg.Bind,
+		endpoints:             endpoints,
+		policy:                policy,
+		verdicts:              policy.verdicts,
+		executor:              executor,
+		deliveries:            deliveries,
+		dispatchers:           make(map[string]*dispatcher),
+		shutdownCtx:           shutdownCtx,
+		shutdownCancel:        shutdownCancel,
+		maxBodySize:           int64(rt.MaxBodySize),
+		maxQueuedPerKey:       rt.MaxQueuedPerKey,
+		retryAfter:            rt.RetryAfter,
+		retentionAge:          rt.Retention,
+		retentionKeep:         rt.RetentionKeep,
+		claimGrace:            rt.ClaimGrace,
+		claimGraceSeconds:     int64(rt.ClaimGrace / time.Second),
+		processingTimeout:     rt.ProcessingTimeout,
+		dispatcherIdleTTL:     rt.DispatcherIdleTTL,
+		workspaceRetryBackoff: rt.WorkspaceRetryBackoff,
+		workspaceRetrySleep:   sleepWithContext,
+		isolatedWorkspaceTTL:  rt.IsolatedWorkspaceTTL,
+		pruneInterval:         rt.PruneInterval,
+		readHeaderTimeout:     rt.HTTPReadHeaderTimeout,
+		readTimeout:           rt.HTTPReadTimeout,
+		writeTimeout:          rt.HTTPWriteTimeout,
+		idleTimeout:           rt.HTTPIdleTimeout,
+		reviewDedupeWindow:    rt.ReviewDedupeWindow,
+		triggerLimits:         triggerLimits,
+		usageRetention:        rt.UsageRetention,
+		usageMaxRows:          rt.UsageMaxRows,
+		recoveryRetention:     rt.RecoveryEventRetention,
 	}
+	srv.eventSlots = make(chan struct{}, rt.MaxConcurrentEvents)
+	return srv
 }
 
 func (s *Server) reviewDedupeCutoff() int64 {
@@ -156,6 +170,17 @@ func (s *Server) reviewDedupeCutoff() int64 {
 		now = s.reviewDedupeNow()
 	}
 	return now.Add(-s.reviewDedupeWindow).Unix()
+}
+
+func (s *Server) maxConcurrentEvents() int { return cap(s.eventSlots) }
+
+func (s *Server) queueCap() int {
+	s.dispatchMu.Lock()
+	defer s.dispatchMu.Unlock()
+	for _, d := range s.dispatchers {
+		return cap(d.ch)
+	}
+	return s.maxQueuedPerKey
 }
 
 func (s *Server) SetWorkspaceResolver(r WorkspaceResolver) {
@@ -195,12 +220,12 @@ func (s *Server) SetChannelStore(c ChannelStore) {
 // bounds table growth at startup.
 func (s *Server) recoverStale(ctx context.Context) {
 	now := time.Now()
-	if failed, err := s.deliveries.FailStale(ctx, now.Add(-claimGrace).Unix(), "interrupted by restart"); err != nil {
+	if failed, err := s.deliveries.FailStale(ctx, now.Add(-s.claimGrace).Unix(), "interrupted by restart"); err != nil {
 		slog.Error("webhook: restart recovery failed", "error", err)
 	} else if failed > 0 {
 		slog.Info("webhook: restart recovery", "failed_deliveries", failed)
 	}
-	if pruned, err := s.deliveries.Prune(ctx, now.Add(-retentionAge).Unix(), retentionKeep); err != nil {
+	if pruned, err := s.deliveries.Prune(ctx, now.Add(-s.retentionAge).Unix(), s.retentionKeep); err != nil {
 		slog.Error("webhook: prune failed", "error", err)
 	} else if pruned > 0 {
 		slog.Info("webhook: pruned old deliveries", "pruned", pruned)
@@ -219,7 +244,7 @@ func (s *Server) pruneIfDue() {
 	s.lastPrune = time.Now()
 	s.pruneMu.Unlock()
 
-	pruned, err := s.deliveries.Prune(context.Background(), time.Now().Add(-retentionAge).Unix(), retentionKeep)
+	pruned, err := s.deliveries.Prune(context.Background(), time.Now().Add(-s.retentionAge).Unix(), s.retentionKeep)
 	if err != nil {
 		if errors.Is(err, sql.ErrConnDone) || strings.Contains(err.Error(), "database is closed") {
 			return
@@ -324,12 +349,12 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.ContentLength > maxWebhookBodySize {
+	if r.ContentLength > s.maxBodySize {
 		http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
 		return
 	}
 
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBodySize))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.maxBodySize))
 	if err != nil {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
@@ -375,7 +400,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			"delivery_id", deliveryID,
 			"event_type", eventType,
 		)
-		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
+		w.Header().Set("Retry-After", strconv.Itoa(int(s.retryAfter/time.Second)))
 		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
 		return
 	}
@@ -401,7 +426,7 @@ func (s *Server) enqueue(ep config.EndpointConfig, key WebhookExecutionKey, item
 	defer s.dispatchMu.Unlock()
 	d, ok := s.dispatchers[lockKey]
 	if !ok || d.exiting {
-		d = &dispatcher{server: s, key: lockKey, ch: make(chan dispatchItem, maxQueuedPerKey)}
+		d = &dispatcher{server: s, key: lockKey, ch: make(chan dispatchItem, s.maxQueuedPerKey)}
 		s.dispatchers[lockKey] = d
 		s.dispatchWG.Add(1)
 		go d.run(s.shutdownCtx)
@@ -614,7 +639,7 @@ func (s *Server) resolveWorkspace(item dispatchItem) (*WorkspaceLease, error) {
 }
 
 func (s *Server) failWorkspace(item dispatchItem, receipt *store.WebhookDelivery, err error) {
-	envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, false, "", item.ep.CommentTrigger)
+	envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", item.ep.CommentTrigger)
 	workCtx := &WebhookWorkContext{
 		Key:        ExtractExecutionKey(item.body),
 		DeliveryID: item.deliveryID,
@@ -673,11 +698,11 @@ func (s *Server) beginExecution(item dispatchItem) *store.WebhookDelivery {
 			s.logDuplicate(item, receipt.Status)
 			return nil
 		case receipt.Status == store.WebhookStatusReceived:
-		case time.Now().Unix()-receipt.UpdatedAt < int64(claimGrace.Seconds()):
+		case time.Now().Unix()-receipt.UpdatedAt < s.claimGraceSeconds:
 			s.logDuplicate(item, receipt.Status)
 			return nil
 		default:
-			ok, tErr := s.deliveries.ClaimStale(ctx, receipt.ID, time.Now().Add(-claimGrace).Unix())
+			ok, tErr := s.deliveries.ClaimStale(ctx, receipt.ID, time.Now().Add(-s.claimGrace).Unix())
 			if tErr != nil {
 				slog.Error("webhook: stale claim failed", "endpoint", ep.Name, "delivery_id", item.deliveryID, "error", tErr)
 				return nil
@@ -692,7 +717,7 @@ func (s *Server) beginExecution(item dispatchItem) *store.WebhookDelivery {
 
 	if s.shouldSkip(ep, item.eventType) {
 		reason := "configured event skip"
-		envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, true, reason, ep.CommentTrigger)
+		envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, true, reason, ep.CommentTrigger)
 		summary := redactAuditSummary(formatAuditSummary(envelope, ep.Workflow, "SKIP", reason), ep.Secret)
 		ok, tErr := s.deliveries.Transition(ctx, receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived, store.WebhookStatusAccepted, store.WebhookStatusProcessing}, store.WebhookStatusSkipped, summary)
 		if tErr != nil {
@@ -782,7 +807,7 @@ func (s *Server) failAbandonedReceipt(receipt *store.WebhookDelivery, reason str
 // transition (or retry grant) is recorded.
 func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64, deliveryID, eventType string, attempt int, lease *WorkspaceLease, allowRetryIncomplete func() bool) error {
 	key := ExtractExecutionKey(body)
-	envelope := normalizeWebhook(body, eventType, deliveryID, false, "", ep.CommentTrigger)
+	envelope := normalizeWebhook(body, eventType, deliveryID, s.verdicts, false, "", ep.CommentTrigger)
 
 	workCtx := &WebhookWorkContext{
 		Key:          key,
@@ -819,7 +844,7 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		}
 	}()
 
-	if allowed, reason := workflowAllows(ep.Workflow, envelope); !allowed {
+	if allowed, reason := admitDelivery(ep, s.policy, envelope); !allowed {
 		s.markSkipped(id, ep, envelope, reason)
 		return nil
 	}
@@ -841,10 +866,17 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 	if stringValue(envelope["event_type"]) == "issue_comment" && stringValue(envelope["comment_trigger"]) != "" && id != 0 {
 		triggerKey := commentTriggerKey(envelope)
 		if triggerKey != "" {
-			count, err := s.deliveries.CountReviewDeliveries(context.Background(), ep.Name, triggerKey, s.reviewDedupeCutoff())
+			limit, ok := s.triggerLimits[ep.Name]
+			if !ok {
+				slog.Error("webhook: comment trigger without configured limits", "endpoint", ep.Name, "delivery_id", deliveryID)
+				s.markSkipped(id, ep, envelope, "trigger rate cap")
+				return nil
+			}
+			windowCutoff := time.Now().Add(-limit.Window).Unix()
+			count, err := s.deliveries.CountReviewDeliveries(context.Background(), ep.Name, triggerKey, windowCutoff)
 			if err != nil {
 				slog.Warn("webhook: review trigger count lookup failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
-			} else if count >= 3 {
+			} else if count >= limit.MaxRunsPerPR {
 				slog.Info("webhook: review delivery trigger rate cap reached", "endpoint", ep.Name, "delivery_id", deliveryID, "trigger_key", triggerKey, "count", count)
 				s.markSkipped(id, ep, envelope, "trigger rate cap")
 				return nil

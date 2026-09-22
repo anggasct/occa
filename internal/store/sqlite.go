@@ -394,6 +394,10 @@ type SQLiteStore struct {
 }
 
 func OpenWithDefaultWorkdir(path, defaultWorkdir string) (*SQLiteStore, error) {
+	return OpenWithRetention(path, defaultWorkdir, UsageRetention{}, 0)
+}
+
+func OpenWithRetention(path, defaultWorkdir string, usage UsageRetention, recoveryRetention time.Duration) (*SQLiteStore, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("store: open: %w", err)
@@ -434,9 +438,9 @@ func OpenWithDefaultWorkdir(path, defaultWorkdir string) (*SQLiteStore, error) {
 	s.progressNotices = &sqliteProgressNoticeRepo{db: db}
 	s.threadConfigs = &sqliteThreadConfigRepo{db: db}
 	s.permissionRules = &sqlitePermissionRuleRepo{db: db}
-	s.usage = &sqliteUsageRepo{db: db}
+	s.usage = &sqliteUsageRepo{db: db, retention: usage.Retention, maxRows: usage.MaxRows}
 	s.webhookDeliveries = &sqliteWebhookDeliveryRepo{db: db}
-	s.recoveryEvents = &sqliteRecoveryEventRepo{db: db}
+	s.recoveryEvents = &sqliteRecoveryEventRepo{db: db, retention: recoveryRetention}
 	return s, nil
 }
 

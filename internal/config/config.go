@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"log/slog"
 	"net"
@@ -53,6 +54,8 @@ type LoggingConfig struct {
 
 type WebhookConfig struct {
 	Bind      string           `yaml:"bind"`
+	Policy    WebhookPolicy    `yaml:"policy"`
+	Runtime   WebhookRuntime   `yaml:"runtime"`
 	Endpoints []EndpointConfig `yaml:"endpoints"`
 }
 
@@ -74,6 +77,9 @@ type EndpointConfig struct {
 	ProgressCard   bool              `yaml:"progress_card,omitempty"`
 	Model          string            `yaml:"model,omitempty"`
 	CommentTrigger []string          `yaml:"comment_trigger,omitempty"`
+	Admit          []AdmitRule       `yaml:"admit"`
+	Limits         *EndpointLimits   `yaml:"limits,omitempty"`
+	VerifyEndpoint string            `yaml:"verify_endpoint,omitempty"`
 }
 
 func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
@@ -95,9 +101,14 @@ func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
 		ProgressCard   *bool             `yaml:"progress_card,omitempty"`
 		Model          string            `yaml:"model,omitempty"`
 		CommentTrigger []string          `yaml:"comment_trigger,omitempty"`
+		Admit          []AdmitRule       `yaml:"admit"`
+		Limits         *EndpointLimits   `yaml:"limits,omitempty"`
+		VerifyEndpoint string            `yaml:"verify_endpoint,omitempty"`
 	}
 	var raw rawEndpoint
-	if err := node.Decode(&raw); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(mustEncodeNode(node)))
+	dec.KnownFields(true)
+	if err := dec.Decode(&raw); err != nil {
 		return err
 	}
 	e.Name = raw.Name
@@ -116,6 +127,9 @@ func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
 	e.Thread = raw.Thread
 	e.Model = strings.TrimSpace(raw.Model)
 	e.CommentTrigger = raw.CommentTrigger
+	e.Admit = raw.Admit
+	e.Limits = raw.Limits
+	e.VerifyEndpoint = strings.TrimSpace(raw.VerifyEndpoint)
 	if raw.ProgressCard != nil {
 		e.ProgressCard = *raw.ProgressCard
 	} else {
@@ -272,8 +286,12 @@ func loadFileConfig(configPath string) (fileConfig, error) {
 		if err != nil {
 			return fileConfig{}, fmt.Errorf("config: read %s: %w", configPath, err)
 		}
-		if err := yaml.Unmarshal(data, &fc); err != nil {
-			return fileConfig{}, fmt.Errorf("config: parse %s: %w", configPath, err)
+		if len(bytes.TrimSpace(data)) > 0 {
+			dec := yaml.NewDecoder(bytes.NewReader(data))
+			dec.KnownFields(true)
+			if err := dec.Decode(&fc); err != nil {
+				return fileConfig{}, fmt.Errorf("config: parse %s: %w", configPath, err)
+			}
 		}
 	} else if explicit {
 		return fileConfig{}, fmt.Errorf("config: file not found: %s", configPath)
@@ -390,6 +408,16 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 		if !isLoopbackBind(fc.Webhooks.Bind) {
 			return Config{}, fmt.Errorf("config: webhooks.bind must be a loopback host:port (127.0.0.1, localhost, or ::1), got %q", fc.Webhooks.Bind)
 		}
+		runtime, err := validateWebhookRuntime(fc.Webhooks.Runtime)
+		if err != nil {
+			return Config{}, err
+		}
+		fc.Webhooks.Runtime = runtime
+		policy, err := validateWebhookPolicy(fc.Webhooks.Policy)
+		if err != nil {
+			return Config{}, err
+		}
+		fc.Webhooks.Policy = policy
 		paths := make(map[string]struct{}, len(fc.Webhooks.Endpoints))
 		for i := range fc.Webhooks.Endpoints {
 			endpoint := &fc.Webhooks.Endpoints[i]
@@ -403,10 +431,13 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 			}
 			if endpoint.Workflow != "" {
 				switch endpoint.Workflow {
-				case "github_reviewer", "github_fix", "github_merge", "github_merged":
+				case "review", "fix", "merge", "merged", "custom":
 				default:
 					return Config{}, fmt.Errorf("config: webhooks.endpoints[%d].workflow is unsupported: %q", i, endpoint.Workflow)
 				}
+			}
+			if len(endpoint.SkipEvents) > 0 {
+				return Config{}, fmt.Errorf("config: webhooks.endpoints[%d].skip_events is removed; express the exclusion with admit rules", i)
 			}
 			switch endpoint.Auth {
 			case "", "legacy_bearer", "github_hmac_sha256":
@@ -440,6 +471,12 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 				}
 			}
 			endpoint.CommentTrigger = triggers
+			if err := validateAdmitRules(endpoint.Name, endpoint.Admit, fc.Webhooks.Policy); err != nil {
+				return Config{}, err
+			}
+			if err := validateEndpointLimits(endpoint.Name, endpoint.Limits, endpoint.Admit); err != nil {
+				return Config{}, err
+			}
 			if _, exists := paths[endpoint.Path]; exists {
 				return Config{}, fmt.Errorf("config: webhooks.endpoints[%d].path duplicates %q", i, endpoint.Path)
 			}

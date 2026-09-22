@@ -75,23 +75,58 @@ file.
 
 ### Webhook configuration
 
-Webhooks ingest events from GitHub and trigger workflows. For reviewer endpoints (`workflow: github_reviewer`), configure `comment_trigger` to admit re-reviews from PR comments:
+Admission is config, not code: every endpoint declares ordered `admit` rules, and the binary refuses to start when any endpoint misses `admit`, when `policy`/`runtime` keys are missing, or when a comment-trigger endpoint has no `limits`. `workflow` selects a pipeline only (`review` | `fix` | `merge` | `merged` | `custom`) and implies no admission policy. Copy `config.example.yaml` as the starting template and validate with `occa webhooks check-config --config <path>`.
 
 ```yaml
 webhooks:
   bind: 127.0.0.1:8787
+  policy:
+    trust_review_logins: []
+    verdicts:
+      approved: ['approved']
+      request_changes: ['request changes', 'request_changes']
+  runtime:
+    max_body_size: 10MB
+    max_concurrent_events: 16
+    max_queued_per_key: 8
+    processing_timeout: 30m
+    claim_grace: 32m
+    retry_after: 30s
+    workspace_retry_backoff: [30s, 60s, 120s]
+    retention: 720h
+    retention_keep: 500
+    prune_interval: 10m
+    dispatcher_idle_ttl: 1h
+    http_read_header_timeout: 10s
+    http_read_timeout: 30s
+    http_write_timeout: 30s
+    http_idle_timeout: 2m
+    review_dedupe_window: 60m
+    isolated_workspace_ttl: 24h
+    usage_retention: 2160h
+    usage_max_rows: 100000
+    recovery_event_retention: 720h
   endpoints:
     - name: github-review
       path: /github-review
       secret: <webhook-secret>
-      workflow: github_reviewer
+      workflow: review
       platform: discord
       channel_id: "<your-channel-id>"
       prompt_file: webhooks/example-review.md
       comment_trigger: ["<your-trigger-phrase>"]
+      admit:
+        - event: pull_request
+          actions: [opened, reopened, ready_for_review]
+        - event: issue_comment
+          actions: [created]
+          require: [comment_trigger, pr_open]
+      limits:
+        max_runs_per_pr: 3
+        window: 60m
 ```
 
-`comment_trigger` is an optional list of case-insensitive substrings matched against comment bodies. When unset or empty, the comment trigger path is closed (`skipped: comment trigger not configured`), and only pull request lifecycle events (`opened`, `reopened`, `ready_for_review`) can start a review. Existing installations that rely on comment-triggered re-reviews must add this key to their endpoint configuration.
+`comment_trigger` is a per-endpoint list of case-insensitive substrings matched against comment bodies. An endpoint with no matching rule executes nothing; the loop guards stay (per-PR trigger cap via `limits`, rate limits, prompt-level "never post a trigger phrase").
 
 ## Database backup and restore
 

@@ -7,10 +7,10 @@ import (
 	"time"
 )
 
-const (
-	usageRetention = 90 * 24 * time.Hour
-	usageMaxRows   = 100000
-)
+type UsageRetention struct {
+	Retention time.Duration
+	MaxRows   int
+}
 
 type UsageSnapshot struct {
 	Platform   string
@@ -82,7 +82,17 @@ type UsageStore interface {
 }
 
 type sqliteUsageRepo struct {
-	db *sql.DB
+	db        *sql.DB
+	retention time.Duration
+	maxRows   int
+}
+
+func (r *sqliteUsageRepo) retentionOrDefault() time.Duration {
+	return r.retention
+}
+
+func (r *sqliteUsageRepo) maxRowsOrDefault() int {
+	return r.maxRows
 }
 
 func (r *sqliteUsageRepo) RecordSnapshot(ctx context.Context, snapshot UsageSnapshot) error {
@@ -149,12 +159,14 @@ func (r *sqliteUsageRepo) RecordSnapshot(ctx context.Context, snapshot UsageSnap
 		return fmt.Errorf("store: usage record: insert: %w", err)
 	}
 
-	cutoff := snapshot.RecordedAt - int64(usageRetention/time.Second)
+	cutoff := snapshot.RecordedAt - int64(r.retentionOrDefault()/time.Second)
 	if _, err := tx.ExecContext(ctx, `DELETE FROM usage_projection WHERE recorded_at < ?`, cutoff); err != nil {
 		return fmt.Errorf("store: usage record: retention: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM usage_projection WHERE id NOT IN (SELECT id FROM usage_projection ORDER BY recorded_at DESC, id DESC LIMIT ?)`, usageMaxRows); err != nil {
-		return fmt.Errorf("store: usage record: row cap: %w", err)
+	if maxRows := r.maxRowsOrDefault(); maxRows > 0 {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM usage_projection WHERE id NOT IN (SELECT id FROM usage_projection ORDER BY recorded_at DESC, id DESC LIMIT ?)`, maxRows); err != nil {
+			return fmt.Errorf("store: usage record: row cap: %w", err)
+		}
 	}
 	return tx.Commit()
 }

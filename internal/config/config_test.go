@@ -284,7 +284,7 @@ func TestWebhookLoopbackValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.bind, func(t *testing.T) {
-			yaml := fmt.Sprintf("webhooks:\n  bind: %q\n  endpoints:\n    - name: test\n      path: /test\n      secret: s\n      platform: telegram\n      channel_id: c1\n      prompt: p\n      workspace:\n        type: none\n", tt.bind)
+			yaml := fmt.Sprintf("webhooks:\n  policy:\n    trust_review_logins: []\n    verdicts:\n      approved: ['approved']\n      request_changes: ['request_changes']\n  runtime:\n    max_body_size: 10MB\n    max_concurrent_events: 16\n    max_queued_per_key: 8\n    processing_timeout: 30m\n    claim_grace: 32m\n    retry_after: 30s\n    workspace_retry_backoff: [30s, 60s, 120s]\n    retention: 720h\n    retention_keep: 500\n    prune_interval: 10m\n    dispatcher_idle_ttl: 1h\n    http_read_header_timeout: 10s\n    http_read_timeout: 30s\n    http_write_timeout: 30s\n    http_idle_timeout: 2m\n    review_dedupe_window: 60m\n    isolated_workspace_ttl: 24h\n    usage_retention: 2160h\n    usage_max_rows: 100000\n    recovery_event_retention: 720h\n  bind: %q\n  endpoints:\n    - name: test\n      path: /test\n      secret: s\n      platform: telegram\n      channel_id: c1\n      prompt: p\n      admit:\n        - event: ping\n      workspace:\n        type: none\n", tt.bind)
 			path := writeConfig(t, t.TempDir(), yaml)
 			_, err := Load(path)
 			if tt.wantErr && err == nil {
@@ -312,12 +312,40 @@ func TestWebhookNoEndpointsSkipsValidation(t *testing.T) {
 func TestWebhookEmptySecretValidation(t *testing.T) {
 	t.Setenv("OCCA_ADMIN_ID", "admin123")
 	path := writeConfig(t, t.TempDir(), `webhooks:
+  policy:
+    trust_review_logins: []
+    verdicts:
+      approved: ['approved']
+      request_changes: ['request changes', 'request_changes']
+  runtime:
+    max_body_size: 10MB
+    max_concurrent_events: 16
+    max_queued_per_key: 8
+    processing_timeout: 30m
+    claim_grace: 32m
+    retry_after: 30s
+    workspace_retry_backoff: [30s, 60s, 120s]
+    retention: 720h
+    retention_keep: 500
+    prune_interval: 10m
+    dispatcher_idle_ttl: 1h
+    http_read_header_timeout: 10s
+    http_read_timeout: 30s
+    http_write_timeout: 30s
+    http_idle_timeout: 2m
+    review_dedupe_window: 60m
+    isolated_workspace_ttl: 24h
+    usage_retention: 2160h
+    usage_max_rows: 100000
+    recovery_event_retention: 720h
   endpoints:
     - name: test
       path: /test
       platform: telegram
       channel_id: c1
       prompt: p
+      admit:
+        - event: ping
       workspace:
         type: none
 `)
@@ -334,6 +362,32 @@ func TestWebhookEmptySecretValidation(t *testing.T) {
 func TestWebhookDuplicatePathValidation(t *testing.T) {
 	t.Setenv("OCCA_ADMIN_ID", "admin123")
 	path := writeConfig(t, t.TempDir(), `webhooks:
+  policy:
+    trust_review_logins: []
+    verdicts:
+      approved: ['approved']
+      request_changes: ['request changes', 'request_changes']
+  runtime:
+    max_body_size: 10MB
+    max_concurrent_events: 16
+    max_queued_per_key: 8
+    processing_timeout: 30m
+    claim_grace: 32m
+    retry_after: 30s
+    workspace_retry_backoff: [30s, 60s, 120s]
+    retention: 720h
+    retention_keep: 500
+    prune_interval: 10m
+    dispatcher_idle_ttl: 1h
+    http_read_header_timeout: 10s
+    http_read_timeout: 30s
+    http_write_timeout: 30s
+    http_idle_timeout: 2m
+    review_dedupe_window: 60m
+    isolated_workspace_ttl: 24h
+    usage_retention: 2160h
+    usage_max_rows: 100000
+    recovery_event_retention: 720h
   endpoints:
     - name: first
       path: /same
@@ -341,6 +395,8 @@ func TestWebhookDuplicatePathValidation(t *testing.T) {
       platform: telegram
       channel_id: c1
       prompt: p
+      admit:
+        - event: ping
       workspace:
         type: none
     - name: second
@@ -349,6 +405,8 @@ func TestWebhookDuplicatePathValidation(t *testing.T) {
       platform: telegram
       channel_id: c2
       prompt: p
+      admit:
+        - event: ping
       workspace:
         type: none
 `)
@@ -374,6 +432,32 @@ func TestWebhookAuthModeValidation(t *testing.T) {
 		{
 			name: "explicit github_hmac_sha256 passes",
 			yaml: `webhooks:
+  policy:
+    trust_review_logins: []
+    verdicts:
+      approved: ['approved']
+      request_changes: ['request changes', 'request_changes']
+  runtime:
+    max_body_size: 10MB
+    max_concurrent_events: 16
+    max_queued_per_key: 8
+    processing_timeout: 30m
+    claim_grace: 32m
+    retry_after: 30s
+    workspace_retry_backoff: [30s, 60s, 120s]
+    retention: 720h
+    retention_keep: 500
+    prune_interval: 10m
+    dispatcher_idle_ttl: 1h
+    http_read_header_timeout: 10s
+    http_read_timeout: 30s
+    http_write_timeout: 30s
+    http_idle_timeout: 2m
+    review_dedupe_window: 60m
+    isolated_workspace_ttl: 24h
+    usage_retention: 2160h
+    usage_max_rows: 100000
+    recovery_event_retention: 720h
   endpoints:
     - name: gh
       path: /gh
@@ -382,6 +466,8 @@ func TestWebhookAuthModeValidation(t *testing.T) {
       platform: discord
       channel_id: c1
       prompt: p
+      admit:
+        - event: ping
       workspace:
         type: none`,
 			wantErr: false,
@@ -389,6 +475,32 @@ func TestWebhookAuthModeValidation(t *testing.T) {
 		{
 			name: "whitespace padded github_hmac_sha256 normalized",
 			yaml: `webhooks:
+  policy:
+    trust_review_logins: []
+    verdicts:
+      approved: ['approved']
+      request_changes: ['request changes', 'request_changes']
+  runtime:
+    max_body_size: 10MB
+    max_concurrent_events: 16
+    max_queued_per_key: 8
+    processing_timeout: 30m
+    claim_grace: 32m
+    retry_after: 30s
+    workspace_retry_backoff: [30s, 60s, 120s]
+    retention: 720h
+    retention_keep: 500
+    prune_interval: 10m
+    dispatcher_idle_ttl: 1h
+    http_read_header_timeout: 10s
+    http_read_timeout: 30s
+    http_write_timeout: 30s
+    http_idle_timeout: 2m
+    review_dedupe_window: 60m
+    isolated_workspace_ttl: 24h
+    usage_retention: 2160h
+    usage_max_rows: 100000
+    recovery_event_retention: 720h
   endpoints:
     - name: gh-padded
       path: /gh-padded
@@ -397,6 +509,8 @@ func TestWebhookAuthModeValidation(t *testing.T) {
       platform: discord
       channel_id: c1
       prompt: p
+      admit:
+        - event: ping
       workspace:
         type: none`,
 			wantErr: false,
@@ -404,6 +518,32 @@ func TestWebhookAuthModeValidation(t *testing.T) {
 		{
 			name: "explicit legacy_bearer passes",
 			yaml: `webhooks:
+  policy:
+    trust_review_logins: []
+    verdicts:
+      approved: ['approved']
+      request_changes: ['request changes', 'request_changes']
+  runtime:
+    max_body_size: 10MB
+    max_concurrent_events: 16
+    max_queued_per_key: 8
+    processing_timeout: 30m
+    claim_grace: 32m
+    retry_after: 30s
+    workspace_retry_backoff: [30s, 60s, 120s]
+    retention: 720h
+    retention_keep: 500
+    prune_interval: 10m
+    dispatcher_idle_ttl: 1h
+    http_read_header_timeout: 10s
+    http_read_timeout: 30s
+    http_write_timeout: 30s
+    http_idle_timeout: 2m
+    review_dedupe_window: 60m
+    isolated_workspace_ttl: 24h
+    usage_retention: 2160h
+    usage_max_rows: 100000
+    recovery_event_retention: 720h
   endpoints:
     - name: legacy
       path: /legacy
@@ -412,6 +552,8 @@ func TestWebhookAuthModeValidation(t *testing.T) {
       platform: discord
       channel_id: c1
       prompt: p
+      admit:
+        - event: ping
       workspace:
         type: none`,
 			wantErr: false,
@@ -419,6 +561,32 @@ func TestWebhookAuthModeValidation(t *testing.T) {
 		{
 			name: "unsupported auth mode fails",
 			yaml: `webhooks:
+  policy:
+    trust_review_logins: []
+    verdicts:
+      approved: ['approved']
+      request_changes: ['request changes', 'request_changes']
+  runtime:
+    max_body_size: 10MB
+    max_concurrent_events: 16
+    max_queued_per_key: 8
+    processing_timeout: 30m
+    claim_grace: 32m
+    retry_after: 30s
+    workspace_retry_backoff: [30s, 60s, 120s]
+    retention: 720h
+    retention_keep: 500
+    prune_interval: 10m
+    dispatcher_idle_ttl: 1h
+    http_read_header_timeout: 10s
+    http_read_timeout: 30s
+    http_write_timeout: 30s
+    http_idle_timeout: 2m
+    review_dedupe_window: 60m
+    isolated_workspace_ttl: 24h
+    usage_retention: 2160h
+    usage_max_rows: 100000
+    recovery_event_retention: 720h
   endpoints:
     - name: invalid
       path: /invalid
@@ -427,6 +595,8 @@ func TestWebhookAuthModeValidation(t *testing.T) {
       platform: discord
       channel_id: c1
       prompt: p
+      admit:
+        - event: ping
       workspace:
         type: none`,
 			wantErr:   true,
@@ -435,6 +605,32 @@ func TestWebhookAuthModeValidation(t *testing.T) {
 		{
 			name: "github_hmac_sha256 with empty secret fails",
 			yaml: `webhooks:
+  policy:
+    trust_review_logins: []
+    verdicts:
+      approved: ['approved']
+      request_changes: ['request changes', 'request_changes']
+  runtime:
+    max_body_size: 10MB
+    max_concurrent_events: 16
+    max_queued_per_key: 8
+    processing_timeout: 30m
+    claim_grace: 32m
+    retry_after: 30s
+    workspace_retry_backoff: [30s, 60s, 120s]
+    retention: 720h
+    retention_keep: 500
+    prune_interval: 10m
+    dispatcher_idle_ttl: 1h
+    http_read_header_timeout: 10s
+    http_read_timeout: 30s
+    http_write_timeout: 30s
+    http_idle_timeout: 2m
+    review_dedupe_window: 60m
+    isolated_workspace_ttl: 24h
+    usage_retention: 2160h
+    usage_max_rows: 100000
+    recovery_event_retention: 720h
   endpoints:
     - name: gh
       path: /gh
@@ -443,6 +639,8 @@ func TestWebhookAuthModeValidation(t *testing.T) {
       platform: discord
       channel_id: c1
       prompt: p
+      admit:
+        - event: ping
       workspace:
         type: none`,
 			wantErr:   true,
@@ -538,6 +736,38 @@ func TestLoadSenderAllowlistValidation(t *testing.T) {
 	}
 }
 
+func testWebhookConfigYAML(endpoints string) string {
+	return `webhooks:
+  policy:
+    trust_review_logins: []
+    verdicts:
+      approved: ['approved']
+      request_changes: ['request changes', 'request_changes']
+  runtime:
+    max_body_size: 10MB
+    max_concurrent_events: 16
+    max_queued_per_key: 8
+    processing_timeout: 30m
+    claim_grace: 32m
+    retry_after: 30s
+    workspace_retry_backoff: [30s, 60s, 120s]
+    retention: 720h
+    retention_keep: 500
+    prune_interval: 10m
+    dispatcher_idle_ttl: 1h
+    http_read_header_timeout: 10s
+    http_read_timeout: 30s
+    http_write_timeout: 30s
+    http_idle_timeout: 2m
+    review_dedupe_window: 60m
+    isolated_workspace_ttl: 24h
+    usage_retention: 2160h
+    usage_max_rows: 100000
+    recovery_event_retention: 720h
+  endpoints:
+` + endpoints
+}
+
 func TestEndpointWorkspaceValidation(t *testing.T) {
 	t.Setenv("OCCA_ADMIN_ID", "admin123")
 	cases := []struct {
@@ -558,7 +788,7 @@ func TestEndpointWorkspaceValidation(t *testing.T) {
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			yaml := "webhooks:\n  endpoints:\n    - name: test\n      path: /test\n      secret: s\n      platform: telegram\n      channel_id: c1\n      prompt: p\n" + tt.workspace
+			yaml := testWebhookConfigYAML("    - name: test\n      path: /test\n      secret: s\n      platform: telegram\n      channel_id: c1\n      prompt: p\n      admit:\n        - event: ping\n" + tt.workspace)
 			if tt.repo != "" {
 				yaml += "      repository: " + tt.repo + "\n"
 			}
@@ -573,7 +803,7 @@ func TestEndpointWorkspaceValidation(t *testing.T) {
 func TestEndpointWorkspaceGitBindingNormalizes(t *testing.T) {
 	t.Setenv("OCCA_ADMIN_ID", "admin123")
 	dir := t.TempDir()
-	yaml := "webhooks:\n  endpoints:\n    - name: gh\n      path: /gh\n      secret: s\n      platform: telegram\n      channel_id: c1\n      prompt: p\n      repository: https://GitHub.com/TestOwner/MyRepo.git\n      workspace:\n        type: git\n        path: relative/checkout\n        mode: isolated\n"
+	yaml := testWebhookConfigYAML("    - name: gh\n      path: /gh\n      secret: s\n      platform: telegram\n      channel_id: c1\n      prompt: p\n      admit:\n        - event: ping\n      repository: https://GitHub.com/TestOwner/MyRepo.git\n      workspace:\n        type: git\n        path: relative/checkout\n        mode: isolated\n")
 	path := writeConfig(t, dir, yaml)
 	cfg, err := Load(path)
 	if err != nil {
@@ -595,7 +825,7 @@ func TestEndpointWorkspaceGitBindingNormalizes(t *testing.T) {
 func TestEndpointPathIngressPrefixRejected(t *testing.T) {
 	t.Setenv("OCCA_ADMIN_ID", "admin123")
 	for _, p := range []string{"/occa", "/occa/gh", "/gh?x=1", "/a/../b", "gh"} {
-		yaml := "webhooks:\n  endpoints:\n    - name: test\n      path: " + strconv.Quote(p) + "\n      secret: s\n      platform: telegram\n      channel_id: c1\n      prompt: p\n      workspace:\n        type: none\n"
+		yaml := testWebhookConfigYAML("    - name: test\n      path: " + strconv.Quote(p) + "\n      secret: s\n      platform: telegram\n      channel_id: c1\n      prompt: p\n      admit:\n        - event: ping\n      workspace:\n        type: none\n")
 		path := writeConfig(t, t.TempDir(), yaml)
 		if _, err := Load(path); err == nil {
 			t.Fatalf("path %q must fail validation", p)
@@ -606,6 +836,32 @@ func TestEndpointPathIngressPrefixRejected(t *testing.T) {
 func TestEndpointThreadAndProgressCardConfig(t *testing.T) {
 	t.Setenv("OCCA_ADMIN_ID", "admin123")
 	yaml := `webhooks:
+  policy:
+    trust_review_logins: []
+    verdicts:
+      approved: ['approved']
+      request_changes: ['request changes', 'request_changes']
+  runtime:
+    max_body_size: 10MB
+    max_concurrent_events: 16
+    max_queued_per_key: 8
+    processing_timeout: 30m
+    claim_grace: 32m
+    retry_after: 30s
+    workspace_retry_backoff: [30s, 60s, 120s]
+    retention: 720h
+    retention_keep: 500
+    prune_interval: 10m
+    dispatcher_idle_ttl: 1h
+    http_read_header_timeout: 10s
+    http_read_timeout: 30s
+    http_write_timeout: 30s
+    http_idle_timeout: 2m
+    review_dedupe_window: 60m
+    isolated_workspace_ttl: 24h
+    usage_retention: 2160h
+    usage_max_rows: 100000
+    recovery_event_retention: 720h
   endpoints:
     - name: ep-defaults
       path: /defaults
@@ -613,6 +869,8 @@ func TestEndpointThreadAndProgressCardConfig(t *testing.T) {
       platform: discord
       channel_id: c1
       prompt: p
+      admit:
+        - event: ping
       workspace:
         type: none
     - name: ep-threaded
@@ -623,6 +881,8 @@ func TestEndpointThreadAndProgressCardConfig(t *testing.T) {
       prompt: p
       thread: true
       progress_card: true
+      admit:
+        - event: ping
       workspace:
         type: none
 `
@@ -651,6 +911,32 @@ func TestEndpointThreadAndProgressCardConfig(t *testing.T) {
 func TestEndpointProgressCardAliasAndThreadID(t *testing.T) {
 	t.Setenv("OCCA_ADMIN_ID", "admin123")
 	yaml := `webhooks:
+  policy:
+    trust_review_logins: []
+    verdicts:
+      approved: ['approved']
+      request_changes: ['request changes', 'request_changes']
+  runtime:
+    max_body_size: 10MB
+    max_concurrent_events: 16
+    max_queued_per_key: 8
+    processing_timeout: 30m
+    claim_grace: 32m
+    retry_after: 30s
+    workspace_retry_backoff: [30s, 60s, 120s]
+    retention: 720h
+    retention_keep: 500
+    prune_interval: 10m
+    dispatcher_idle_ttl: 1h
+    http_read_header_timeout: 10s
+    http_read_timeout: 30s
+    http_write_timeout: 30s
+    http_idle_timeout: 2m
+    review_dedupe_window: 60m
+    isolated_workspace_ttl: 24h
+    usage_retention: 2160h
+    usage_max_rows: 100000
+    recovery_event_retention: 720h
   endpoints:
     - name: ep-thread-alias
       path: /thread-alias
@@ -660,6 +946,8 @@ func TestEndpointProgressCardAliasAndThreadID(t *testing.T) {
       thread_id: '555'
       prompt: p
       thread: true
+      admit:
+        - event: ping
       workspace:
         type: none
     - name: ep-explicit-progress-card-false
@@ -670,6 +958,8 @@ func TestEndpointProgressCardAliasAndThreadID(t *testing.T) {
       prompt: p
       thread: true
       progress_card: false
+      admit:
+        - event: ping
       workspace:
         type: none
     - name: ep-explicit-progress-card-true
@@ -679,6 +969,8 @@ func TestEndpointProgressCardAliasAndThreadID(t *testing.T) {
       channel_id: '-1003'
       prompt: p
       progress_card: true
+      admit:
+        - event: ping
       workspace:
         type: none
 `
@@ -772,6 +1064,32 @@ func TestWebhookEndpointModelValidation(t *testing.T) {
 				modelLine = fmt.Sprintf("      model: %q\n", tt.model)
 			}
 			yaml := fmt.Sprintf(`webhooks:
+  policy:
+    trust_review_logins: []
+    verdicts:
+      approved: ['approved']
+      request_changes: ['request changes', 'request_changes']
+  runtime:
+    max_body_size: 10MB
+    max_concurrent_events: 16
+    max_queued_per_key: 8
+    processing_timeout: 30m
+    claim_grace: 32m
+    retry_after: 30s
+    workspace_retry_backoff: [30s, 60s, 120s]
+    retention: 720h
+    retention_keep: 500
+    prune_interval: 10m
+    dispatcher_idle_ttl: 1h
+    http_read_header_timeout: 10s
+    http_read_timeout: 30s
+    http_write_timeout: 30s
+    http_idle_timeout: 2m
+    review_dedupe_window: 60m
+    isolated_workspace_ttl: 24h
+    usage_retention: 2160h
+    usage_max_rows: 100000
+    recovery_event_retention: 720h
   endpoints:
     - name: test
       path: /test
@@ -779,6 +1097,8 @@ func TestWebhookEndpointModelValidation(t *testing.T) {
       platform: telegram
       channel_id: c1
 %s      prompt: p
+      admit:
+        - event: ping
       workspace:
         type: none
 `, modelLine)
@@ -810,6 +1130,32 @@ func TestWebhookEndpointCommentTrigger(t *testing.T) {
 	t.Setenv("OCCA_ADMIN_ID", "admin123")
 
 	yaml := `webhooks:
+  policy:
+    trust_review_logins: []
+    verdicts:
+      approved: ['approved']
+      request_changes: ['request changes', 'request_changes']
+  runtime:
+    max_body_size: 10MB
+    max_concurrent_events: 16
+    max_queued_per_key: 8
+    processing_timeout: 30m
+    claim_grace: 32m
+    retry_after: 30s
+    workspace_retry_backoff: [30s, 60s, 120s]
+    retention: 720h
+    retention_keep: 500
+    prune_interval: 10m
+    dispatcher_idle_ttl: 1h
+    http_read_header_timeout: 10s
+    http_read_timeout: 30s
+    http_write_timeout: 30s
+    http_idle_timeout: 2m
+    review_dedupe_window: 60m
+    isolated_workspace_ttl: 24h
+    usage_retention: 2160h
+    usage_max_rows: 100000
+    recovery_event_retention: 720h
   endpoints:
     - name: with-trigger
       path: /with-trigger
@@ -820,6 +1166,8 @@ func TestWebhookEndpointCommentTrigger(t *testing.T) {
       comment_trigger:
         - "please re-review"
         - "  run checks  "
+      admit:
+        - event: ping
       workspace:
         type: none
     - name: without-trigger
@@ -828,6 +1176,8 @@ func TestWebhookEndpointCommentTrigger(t *testing.T) {
       platform: telegram
       channel_id: c2
       prompt: p
+      admit:
+        - event: ping
       workspace:
         type: none
 `

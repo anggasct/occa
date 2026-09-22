@@ -41,7 +41,20 @@ type WorkspaceResolver interface {
 	ResolveWorkspace(ctx context.Context, req WorkspaceRequest) (*WorkspaceLease, error)
 }
 
-const defaultIsolatedTTL = 24 * time.Hour
+func NewWorkspaceManager() *WorkspaceManager {
+	return &WorkspaceManager{
+		runner: &defaultGitRunner{},
+		Now:    time.Now,
+	}
+}
+
+func NewWorkspaceManagerWithTTL(ttl time.Duration) *WorkspaceManager {
+	return &WorkspaceManager{
+		runner:      &defaultGitRunner{},
+		Now:         time.Now,
+		IsolatedTTL: ttl,
+	}
+}
 
 type WorkspaceManager struct {
 	runner      gitRunner
@@ -50,14 +63,6 @@ type WorkspaceManager struct {
 	repoLocks   sync.Map
 	Now         func() time.Time
 	IsolatedTTL time.Duration
-}
-
-func NewWorkspaceManager() *WorkspaceManager {
-	return &WorkspaceManager{
-		runner:      &defaultGitRunner{},
-		Now:         time.Now,
-		IsolatedTTL: defaultIsolatedTTL,
-	}
 }
 
 type WorkspaceLease struct {
@@ -179,6 +184,9 @@ func (m *WorkspaceManager) ResolveWorkspace(ctx context.Context, req WorkspaceRe
 }
 
 func (m *WorkspaceManager) resolveIsolated(ctx context.Context, root string, req WorkspaceRequest) (*WorkspaceLease, error) {
+	if m.isolatedTTL() <= 0 {
+		return nil, fmt.Errorf("%w: isolated workspace TTL is not configured", ErrWorkspaceUnavailable)
+	}
 	if req.Key.HeadRevision == "" {
 		return nil, fmt.Errorf("%w: %s mode requires an exact head revision and the event did not provide one", ErrRevisionRequired, config.WorkspaceModeIsolated)
 	}
@@ -229,10 +237,7 @@ func (m *WorkspaceManager) resolveIsolated(ctx context.Context, root string, req
 }
 
 func (m *WorkspaceManager) isolatedTTL() time.Duration {
-	if m.IsolatedTTL > 0 {
-		return m.IsolatedTTL
-	}
-	return defaultIsolatedTTL
+	return m.IsolatedTTL
 }
 
 func (m *WorkspaceManager) resolveMutable(ctx context.Context, root string, req WorkspaceRequest) (*WorkspaceLease, error) {
