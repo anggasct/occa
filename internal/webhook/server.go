@@ -108,9 +108,6 @@ type Server struct {
 	reviewDedupeWindow    time.Duration
 	reviewDedupeNow       func() time.Time
 	triggerLimits         map[string]config.EndpointLimits
-	usageRetention        time.Duration
-	usageMaxRows          int
-	recoveryRetention     time.Duration
 }
 
 func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) *Server {
@@ -156,9 +153,6 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 		idleTimeout:           rt.HTTPIdleTimeout,
 		reviewDedupeWindow:    rt.ReviewDedupeWindow,
 		triggerLimits:         triggerLimits,
-		usageRetention:        rt.UsageRetention,
-		usageMaxRows:          rt.UsageMaxRows,
-		recoveryRetention:     rt.RecoveryEventRetention,
 	}
 	srv.eventSlots = make(chan struct{}, rt.MaxConcurrentEvents)
 	return srv

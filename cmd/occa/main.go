@@ -119,9 +119,9 @@ func main() {
 	slog.SetDefault(slog.New(logging.NewRedactHandler(handler, telegramToken, discordToken)))
 
 	db, dbLock, err := openStoreWithLock(cfg.Database.Path, cfg.Agent.DefaultWorkdir, store.UsageRetention{
-		Retention: cfg.Webhooks.Runtime.UsageRetention,
-		MaxRows:   cfg.Webhooks.Runtime.UsageMaxRows,
-	}, cfg.Webhooks.Runtime.RecoveryEventRetention)
+		Retention: cfg.Runtime.Store.UsageRetention,
+		MaxRows:   cfg.Runtime.Store.UsageMaxRows,
+	}, cfg.Runtime.Store.RecoveryEventRetention)
 	if err != nil {
 		slog.Error("failed to lock or open store", "error", err)
 		os.Exit(1)
@@ -134,7 +134,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	manager, err := process.DefaultManager(cfg.Agent)
+	manager, err := process.DefaultManager(cfg.Agent, process.Config{
+		ReadinessTimeout: cfg.Runtime.Process.ReadinessTimeout,
+		StopGrace:        cfg.Runtime.Process.StopGrace,
+		ControlTimeout:   cfg.Runtime.Process.ControlTimeout,
+	})
 	if err != nil {
 		slog.Error("failed to start process manager", "error", err)
 		os.Exit(1)
@@ -151,10 +155,18 @@ func main() {
 	menu := rt.MenuCommands()
 	var channels []channel.Channel
 	if telegramToken != "" {
-		channels = append(channels, telegram.New(telegramToken, menu))
+		channels = append(channels, telegram.New(telegramToken, menu, telegram.Config{
+			DownloadTimeout: cfg.Runtime.Channels.Telegram.DownloadTimeout,
+			MaxDownloadSize: int64(cfg.Runtime.Channels.Telegram.MaxDownloadSize),
+			InitTimeout:     cfg.Runtime.Channels.Telegram.InitTimeout,
+			InitAttempts:    cfg.Runtime.Channels.Telegram.InitAttempts,
+		}))
 	}
 	if discordToken != "" {
-		da := discord.NewWithPolicy(discordToken, menu, discord.AllowlistPolicy{AllowedSenderIDs: cfg.Discord.AllowedSenderIDs})
+		da := discord.NewWithPolicy(discordToken, menu, discord.AllowlistPolicy{AllowedSenderIDs: cfg.Discord.AllowedSenderIDs}, discord.Config{
+			DownloadTimeout: cfg.Runtime.Channels.Discord.DownloadTimeout,
+			MaxDownloadSize: int64(cfg.Runtime.Channels.Discord.MaxDownloadSize),
+		})
 		da.SetAutoThreadPolicy(func(channelID string) (bool, error) {
 			ch, err := db.ChannelRepo().Get(context.Background(), "discord", channelID)
 			if err != nil {
@@ -241,7 +253,7 @@ func main() {
 		}
 	}
 
-	sched := scheduler.New(db.ScheduleRepo(), executor)
+	sched := scheduler.New(db.ScheduleRepo(), executor, cfg.Runtime.Scheduler.StopGrace)
 	if err := sched.Start(ctx); err != nil {
 		// Do not serve scheduling (or the rest of the app) after a failed
 		// pending-row sweep / schedule load: a half-initialized scheduler
@@ -310,12 +322,29 @@ func main() {
 		}
 		slog.Warn("loop: no channel adapter", "platform", conv.Platform)
 	}
-	looper := loop.New(loopExecutor, loopNotify, rt.LoopBusy)
+	looper := loop.New(loopExecutor, loopNotify, rt.LoopBusy, loop.Config{
+		MinInterval:        cfg.Runtime.Loop.MinInterval,
+		MaxInterval:        cfg.Runtime.Loop.MaxInterval,
+		MinDuration:        cfg.Runtime.Loop.MinDuration,
+		MaxDuration:        cfg.Runtime.Loop.MaxDuration,
+		IterationTimeout:   cfg.Runtime.Loop.IterationTimeout,
+		MaxWallAge:         cfg.Runtime.Loop.MaxWallAge,
+		MinCount:           cfg.Runtime.Loop.MinCount,
+		MaxCount:           cfg.Runtime.Loop.MaxCount,
+		MaxPromptRunes:     cfg.Runtime.Loop.MaxPromptRunes,
+		MaxPerConversation: cfg.Runtime.Loop.MaxPerConversation,
+		MaxGlobal:          cfg.Runtime.Loop.MaxGlobal,
+	})
 	rt.SetLooper(looper)
 	defer looper.StopAll()
 
-	attrib := attribution.NewStore()
-	mcpSrv := mcpserver.New(sched, attrib)
+	attrib := attribution.NewStore(cfg.Runtime.Router.AttributionTTL)
+	mcpSrv := mcpserver.New(sched, attrib, mcpserver.Config{
+		ReadHeaderTimeout: cfg.Runtime.MCP.ReadHeaderTimeout,
+		ReadTimeout:       cfg.Runtime.MCP.ReadTimeout,
+		WriteTimeout:      cfg.Runtime.MCP.WriteTimeout,
+		IdleTimeout:       cfg.Runtime.MCP.IdleTimeout,
+	})
 	if err := mcpSrv.Start(ctx); err != nil {
 		slog.Error("failed to start mcp server", "error", err)
 	}

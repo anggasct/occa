@@ -52,6 +52,7 @@ func healthyReporter() *Reporter {
 		WithWebhook(fakeWebhook{addr: "127.0.0.1:8787", healthy: true}),
 		WithVersion("1.0.0"),
 		WithExpectedSchema(8),
+		WithProbeTimeout(1500*time.Millisecond),
 	)
 }
 
@@ -245,6 +246,7 @@ func TestRecordErrorRedactsSecrets(t *testing.T) {
 	rep := New(
 		WithStore(fakeStore{ver: 8}),
 		WithAgent(fakeAgent{pid: 1, ok: true}),
+		WithProbeTimeout(1500*time.Millisecond),
 		WithLastError(NewLastError(scrub)),
 	)
 	rep.RecordError("relay: got 401 with " + secret + "\nnext line")
@@ -269,6 +271,7 @@ func TestRecordErrorScrubsBeforeTruncating(t *testing.T) {
 	rep := New(
 		WithStore(fakeStore{ver: 8}),
 		WithAgent(fakeAgent{pid: 1, ok: true}),
+		WithProbeTimeout(1500*time.Millisecond),
 		WithLastError(NewLastError(scrub)),
 	)
 	rep.RecordError(strings.Repeat("x", maxLastErrorRunes-15) + secret + " trailing detail")
@@ -286,7 +289,7 @@ func TestRecordErrorScrubsBeforeTruncating(t *testing.T) {
 }
 
 func TestRecordErrorTruncates(t *testing.T) {
-	rep := New(WithStore(fakeStore{ver: 8}), WithAgent(fakeAgent{pid: 1, ok: true}))
+	rep := New(WithStore(fakeStore{ver: 8}), WithAgent(fakeAgent{pid: 1, ok: true}), WithProbeTimeout(1500*time.Millisecond))
 	rep.RecordError(strings.Repeat("x", 1000))
 	report := rep.Run(context.Background())
 	if len([]rune(report.LastError)) > maxLastErrorRunes+1 {

@@ -22,6 +22,7 @@ type entry struct {
 
 type Manager struct {
 	cfg     config.AgentConfig
+	procCfg Config
 	mu      sync.Mutex
 	pool    map[string]*entry
 	ports   *portAllocator
@@ -51,12 +52,17 @@ func NewManager(cfg config.AgentConfig, factory instanceFactory) (*Manager, erro
 	return m, nil
 }
 
-func DefaultManager(cfg config.AgentConfig) (*Manager, error) {
-	factory := productionFactory(cfg.Binary, defaultReadinessTimeout, defaultStopGrace)
+func DefaultManager(cfg config.AgentConfig, procCfg Config) (*Manager, error) {
+	factory := productionFactory(cfg.Binary, procCfg)
 	factory = wrapWithAutoInstall(factory, cfg.Binary, cfg.AutoInstall, func(ctx context.Context, _ string) error {
 		return installOpenCode(ctx)
 	})
-	return NewManager(cfg, factory)
+	m, err := NewManager(cfg, factory)
+	if err != nil {
+		return nil, err
+	}
+	m.procCfg = procCfg
+	return m, nil
 }
 
 func reapInterval(idle time.Duration) time.Duration {

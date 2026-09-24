@@ -43,7 +43,7 @@ func TestRegisterCommandsSendsSetMyCommands(t *testing.T) {
 		_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
 	})
 
-	a := &Adapter{bot: bot, menu: []channel.MenuCommand{
+	a := &Adapter{maxDownloadSize: 10 * 1024 * 1024, bot: bot, menu: []channel.MenuCommand{
 		{Alias: "help", Description: "Show available commands"},
 		{Alias: "session", Description: "Manage sessions", HasArgs: true},
 	}}
@@ -144,7 +144,7 @@ func TestRegisterCommandsSkipsWhenMenuEmpty(t *testing.T) {
 		_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
 	})
 
-	a := &Adapter{bot: bot}
+	a := &Adapter{maxDownloadSize: 10 * 1024 * 1024, bot: bot}
 	a.registerCommands()
 
 	if called {
@@ -158,7 +158,7 @@ func TestRegisterCommandsFailureDoesNotPanic(t *testing.T) {
 		_, _ = w.Write([]byte(`{"ok":false,"description":"boom"}`))
 	})
 
-	a := &Adapter{bot: bot, menu: []channel.MenuCommand{{Alias: "help", Description: "x"}}}
+	a := &Adapter{maxDownloadSize: 10 * 1024 * 1024, bot: bot, menu: []channel.MenuCommand{{Alias: "help", Description: "x"}}}
 	a.registerCommands() // must not panic despite the failed request
 }
 
@@ -231,7 +231,7 @@ func TestFetchFileTimeout(t *testing.T) {
 	}))
 	defer blocked.Close()
 
-	a := &Adapter{downloadClient: &http.Client{Timeout: 200 * time.Millisecond}}
+	a := &Adapter{maxDownloadSize: 10 * 1024 * 1024, downloadClient: &http.Client{Timeout: 200 * time.Millisecond}}
 	start := time.Now()
 	data, err := a.fetchFile(blocked.URL)
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
@@ -248,7 +248,7 @@ func TestFetchFileSucceeds(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	a := &Adapter{downloadClient: &http.Client{Timeout: 5 * time.Second}}
+	a := &Adapter{maxDownloadSize: 10 * 1024 * 1024, downloadClient: &http.Client{Timeout: 5 * time.Second}}
 	data, err := a.fetchFile(ts.URL)
 	if err != nil {
 		t.Fatalf("fetchFile: %v", err)
@@ -262,7 +262,7 @@ func TestNormalizeCarriesTopicThreadID(t *testing.T) {
 	bot := fakeTelegramServer(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"ok":true,"result":{}}`))
 	})
-	a := &Adapter{bot: bot}
+	a := &Adapter{maxDownloadSize: 10 * 1024 * 1024, bot: bot}
 
 	update := tgbotapi.Update{
 		Message: &tgbotapi.Message{
@@ -293,7 +293,7 @@ func TestNormalizeSetsSourceRef(t *testing.T) {
 	bot := fakeTelegramServer(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"ok":true,"result":{}}`))
 	})
-	a := &Adapter{bot: bot}
+	a := &Adapter{maxDownloadSize: 10 * 1024 * 1024, bot: bot}
 
 	update := tgbotapi.Update{
 		Message: &tgbotapi.Message{
@@ -475,7 +475,7 @@ func TestAdapterSendAndReplyNotification(t *testing.T) {
 		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":42}}`))
 	})
 
-	a := &Adapter{bot: bot}
+	a := &Adapter{maxDownloadSize: 10 * 1024 * 1024, bot: bot}
 
 	// Plain send
 	msgID, err := a.SendNotification("-1001234", "hello world")
@@ -537,7 +537,7 @@ func TestAdapterEditNotification(t *testing.T) {
 		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":42}}`))
 	})
 
-	a := &Adapter{bot: bot}
+	a := &Adapter{maxDownloadSize: 10 * 1024 * 1024, bot: bot}
 
 	// Successful edit
 	if err := a.EditNotification("-1001234:777", "42", "updated text"); err != nil {

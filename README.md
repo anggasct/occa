@@ -103,9 +103,6 @@ webhooks:
     http_idle_timeout: 2m
     review_dedupe_window: 60m
     isolated_workspace_ttl: 24h
-    usage_retention: 2160h
-    usage_max_rows: 100000
-    recovery_event_retention: 720h
   endpoints:
     - name: github-review
       path: /github-review
@@ -124,6 +121,74 @@ webhooks:
       limits:
         max_runs_per_pr: 3
         window: 60m
+runtime:
+  loop:
+    min_interval: 30s
+    max_interval: 1h
+    max_duration: 4h
+    min_duration: 1m
+    iteration_timeout: 10m
+    max_wall_age: 4h
+    min_count: 2
+    max_count: 60
+    max_prompt_runes: 1000
+    max_per_conversation: 1
+    max_global: 20
+  relay:
+    discovery_timeout: 5s
+    client_timeout: 3m
+    max_attachment_size: 10MB
+    max_event_line_bytes: 1114112
+    webhook_abort_timeout: 5s
+    verify_timeout: 15s
+    stall_freshness: 2m
+    no_event_timeout: 15m
+  router:
+    context_stale_after: 15m
+    progress_quiet_threshold: 90s
+    max_queued_messages: 5
+    max_picker_sessions: 6
+    max_picker_pages: 5
+    model_browser_ttl: 30m
+    model_browser_page: 10
+    model_browser_nav_rows: 100
+    model_browser_cap: 1000
+    agent_browser_ttl: 30m
+    agent_browser_cap: 256
+    question_tombstone_ttl: 10m
+    permission_tombstone_ttl: 10m
+    attribution_ttl: 30s
+    recovery_budget: 60s
+    recovery_base_backoff: 10s
+    recovery_max_backoff: 40s
+    usage_page_size: 5
+    usage_default_window: 168h
+  channels:
+    discord:
+      download_timeout: 60s
+      max_download_size: 10MB
+    telegram:
+      download_timeout: 60s
+      max_download_size: 10MB
+      init_timeout: 15s
+      init_attempts: 3
+  mcp:
+    read_header_timeout: 10s
+    read_timeout: 30s
+    write_timeout: 5m
+    idle_timeout: 2m
+  process:
+    readiness_timeout: 30s
+    stop_grace: 5s
+    control_timeout: 2s
+  scheduler:
+    stop_grace: 5s
+  health:
+    probe_timeout: 1500ms
+  store:
+    usage_retention: 2160h
+    usage_max_rows: 100000
+    recovery_event_retention: 720h
 ```
 
 `comment_trigger` is a per-endpoint list of case-insensitive substrings matched against comment bodies. An endpoint with no matching rule executes nothing; the loop guards stay (per-PR trigger cap via `limits`, rate limits, prompt-level "never post a trigger phrase").

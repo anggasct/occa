@@ -20,22 +20,27 @@ import (
 )
 
 type Adapter struct {
-	bot            *tgbotapi.BotAPI
-	token          string
-	menu           []channel.MenuCommand
-	downloadClient *http.Client
-	connected      atomic.Bool
+	bot             *tgbotapi.BotAPI
+	token           string
+	menu            []channel.MenuCommand
+	downloadClient  *http.Client
+	connected       atomic.Bool
+	maxDownloadSize int64
+	initTimeout     time.Duration
+	initAttempts    int
 }
 
-const (
-	defaultDownloadTimeout = 60 * time.Second
-	initBotMaxAttempts     = 3
-	initBotTimeout         = 15 * time.Second
-	initBotBackoff         = 3 * time.Second
-)
+type Config struct {
+	DownloadTimeout time.Duration
+	MaxDownloadSize int64
+	InitTimeout     time.Duration
+	InitAttempts    int
+}
 
-func New(token string, menu []channel.MenuCommand) *Adapter {
-	return &Adapter{token: token, menu: menu, downloadClient: &http.Client{Timeout: defaultDownloadTimeout}}
+const initBotBackoff = 3 * time.Second
+
+func New(token string, menu []channel.MenuCommand, cfg Config) *Adapter {
+	return &Adapter{token: token, menu: menu, downloadClient: &http.Client{Timeout: cfg.DownloadTimeout}, maxDownloadSize: cfg.MaxDownloadSize, initTimeout: cfg.InitTimeout, initAttempts: cfg.InitAttempts}
 }
 
 // initBotWithRetry creates the Telegram bot, retrying transient getMe
@@ -50,16 +55,16 @@ func New(token string, menu []channel.MenuCommand) *Adapter {
 // client timeout there cuts every poll (observed 2026-08-11: continuous
 // "getUpdates failed, retrying" every ~18s = 15s timeout + 3s sleep), so
 // bot.Client is reset to an unbounded client once init succeeds.
-func initBotWithRetry(token, apiEndpoint string, client *http.Client, attemptDelay time.Duration) (*tgbotapi.BotAPI, error) {
+func initBotWithRetry(token, apiEndpoint string, client *http.Client, attemptDelay time.Duration, maxAttempts int) (*tgbotapi.BotAPI, error) {
 	var lastErr error
-	for attempt := 1; attempt <= initBotMaxAttempts; attempt++ {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		bot, err := tgbotapi.NewBotAPIWithClient(token, apiEndpoint, client)
 		if err == nil {
 			bot.Client = &http.Client{}
 			return bot, nil
 		}
 		lastErr = err
-		if attempt < initBotMaxAttempts {
+		if attempt < maxAttempts {
 			slog.Warn("telegram: init bot failed, retrying", "attempt", attempt, "error", err)
 			time.Sleep(attemptDelay * time.Duration(attempt))
 		}
@@ -77,7 +82,7 @@ func (a *Adapter) Connected() (bool, string) {
 }
 
 func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessage)) error {
-	bot, err := initBotWithRetry(a.token, tgbotapi.APIEndpoint, &http.Client{Timeout: initBotTimeout}, initBotBackoff)
+	bot, err := initBotWithRetry(a.token, tgbotapi.APIEndpoint, &http.Client{Timeout: a.initTimeout}, initBotBackoff, a.initAttempts)
 	if err != nil {
 		return fmt.Errorf("telegram: init bot: %w", err)
 	}
@@ -505,8 +510,6 @@ func (a *Adapter) downloadAttachments(msg *tgbotapi.Message) []channel.Attachmen
 	return attachments
 }
 
-const maxDownloadSize = 10 * 1024 * 1024
-
 func (a *Adapter) downloadFile(fileID, filename, mimeType string) *channel.Attachment {
 	file, err := a.bot.GetFile(tgbotapi.FileConfig{FileID: fileID})
 	if err != nil {
@@ -541,7 +544,7 @@ func (a *Adapter) fetchFile(url string) ([]byte, error) {
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	return io.ReadAll(io.LimitReader(resp.Body, maxDownloadSize+1))
+	return io.ReadAll(io.LimitReader(resp.Body, a.maxDownloadSize+1))
 }
 
 type replyContext struct {

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/anggasct/occa/internal/loop"
 	"github.com/anggasct/occa/internal/store"
@@ -36,7 +37,12 @@ func newLoopFixture() *loopFixture {
 	overrides.overrides["telegram:chat1:user2"] = &store.UserOverride{
 		ChannelID: "chat1", Platform: "telegram", UserID: "user2",
 	}
-	r.SetLooper(loop.New(f.execute, f.notify, f.isBusy))
+	r.SetLooper(loop.New(f.execute, f.notify, f.isBusy, loop.Config{
+		MinInterval: 30 * time.Second, MaxInterval: time.Hour,
+		MinDuration: time.Minute, MaxDuration: 4 * time.Hour,
+		IterationTimeout: 10 * time.Minute, MaxWallAge: 4 * time.Hour,
+		MinCount: 2, MaxCount: 60, MaxPromptRunes: 1000, MaxPerConversation: 1, MaxGlobal: 20,
+	}))
 	f.r = r
 	f.reply = reply
 	f.overides = overrides

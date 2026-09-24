@@ -39,7 +39,7 @@ func newUnconnectedSession(t *testing.T) *discordgo.Session {
 }
 
 func TestConfigureDoesNotReadGatewayState(t *testing.T) {
-	a := New("fake-token", nil)
+	a := New("fake-token", nil, Config{DownloadTimeout: 60 * 1000000000, MaxDownloadSize: 10 * 1024 * 1024})
 	a.configure(newUnconnectedSession(t), func(channel.IncomingMessage) {})
 
 	if a.selfID() != "" {
@@ -48,7 +48,7 @@ func TestConfigureDoesNotReadGatewayState(t *testing.T) {
 }
 
 func TestReadyPopulatesBotIdentity(t *testing.T) {
-	a := New("fake-token", nil)
+	a := New("fake-token", nil, Config{DownloadTimeout: 60 * 1000000000, MaxDownloadSize: 10 * 1024 * 1024})
 	a.onReady(&discordgo.Ready{User: &discordgo.User{ID: "bot-42"}})
 
 	if a.selfID() != "bot-42" {
@@ -57,7 +57,7 @@ func TestReadyPopulatesBotIdentity(t *testing.T) {
 }
 
 func TestReadyWithoutUserIsIgnored(t *testing.T) {
-	a := New("fake-token", nil)
+	a := New("fake-token", nil, Config{DownloadTimeout: 60 * 1000000000, MaxDownloadSize: 10 * 1024 * 1024})
 	a.onReady(&discordgo.Ready{})
 
 	if a.selfID() != "" {
@@ -66,7 +66,7 @@ func TestReadyWithoutUserIsIgnored(t *testing.T) {
 }
 
 func TestMessageBeforeReadyIsStillDelivered(t *testing.T) {
-	a := New("fake-token", nil)
+	a := New("fake-token", nil, Config{DownloadTimeout: 60 * 1000000000, MaxDownloadSize: 10 * 1024 * 1024})
 	a.channelLookup = func(string) (*discordgo.Channel, error) {
 		return &discordgo.Channel{Type: discordgo.ChannelTypeGuildText}, nil
 	}
@@ -84,7 +84,7 @@ func TestMessageBeforeReadyIsStillDelivered(t *testing.T) {
 }
 
 func TestOwnMessageDroppedOnceIdentityKnown(t *testing.T) {
-	a := New("fake-token", nil)
+	a := New("fake-token", nil, Config{DownloadTimeout: 60 * 1000000000, MaxDownloadSize: 10 * 1024 * 1024})
 	a.onReady(&discordgo.Ready{User: &discordgo.User{ID: "bot-42"}})
 
 	delivered := 0
@@ -287,7 +287,7 @@ func TestApplicationCommandInteractionReconstructsAliasedText(t *testing.T) {
 		return jsonResponse(200, "{}"), nil
 	}}}
 
-	a := New("fake-token", nil)
+	a := New("fake-token", nil, Config{DownloadTimeout: 60 * 1000000000, MaxDownloadSize: 10 * 1024 * 1024})
 	interaction := &discordgo.InteractionCreate{Interaction: &discordgo.Interaction{
 		ID:        "int-1",
 		Token:     "int-token",
@@ -314,7 +314,7 @@ func TestApplicationCommandInteractionReconstructsAliasedText(t *testing.T) {
 }
 
 func TestIdentityWriteAndReadAreConcurrencySafe(t *testing.T) {
-	a := New("fake-token", nil)
+	a := New("fake-token", nil, Config{DownloadTimeout: 60 * 1000000000, MaxDownloadSize: 10 * 1024 * 1024})
 	a.channelLookup = func(string) (*discordgo.Channel, error) {
 		return &discordgo.Channel{Type: discordgo.ChannelTypeGuildText}, nil
 	}
@@ -336,7 +336,7 @@ func TestIdentityWriteAndReadAreConcurrencySafe(t *testing.T) {
 }
 
 func TestAllowlistedBotAdmission(t *testing.T) {
-	a := NewWithPolicy("fake-token", nil, AllowlistPolicy{AllowedSenderIDs: []string{"trusted-bot"}})
+	a := NewWithPolicy("fake-token", nil, AllowlistPolicy{AllowedSenderIDs: []string{"trusted-bot"}}, Config{DownloadTimeout: 60 * 1000000000, MaxDownloadSize: 10 * 1024 * 1024})
 	a.onReady(&discordgo.Ready{User: &discordgo.User{ID: "occa-bot"}})
 	a.channelLookup = func(string) (*discordgo.Channel, error) {
 		return &discordgo.Channel{Type: discordgo.ChannelTypeGuildText}, nil
@@ -400,7 +400,7 @@ func TestAllowlistedBotThreadAdmission(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			a := NewWithPolicy("fake-token", nil, AllowlistPolicy{AllowedSenderIDs: []string{trustedBotID}})
+			a := NewWithPolicy("fake-token", nil, AllowlistPolicy{AllowedSenderIDs: []string{trustedBotID}}, Config{DownloadTimeout: 60 * 1000000000, MaxDownloadSize: 10 * 1024 * 1024})
 			a.setBotID(occaBotID)
 			a.channelLookup = func(string) (*discordgo.Channel, error) {
 				return &discordgo.Channel{Type: tt.channelType, ParentID: tt.parentID}, nil
@@ -440,7 +440,7 @@ func TestAllowlistedBotThreadAdmission(t *testing.T) {
 }
 
 func TestRoleMentionNeverCountsAsOccaMention(t *testing.T) {
-	a := NewWithPolicy("fake-token", nil, AllowlistPolicy{AllowedSenderIDs: []string{"human"}})
+	a := NewWithPolicy("fake-token", nil, AllowlistPolicy{AllowedSenderIDs: []string{"human"}}, Config{DownloadTimeout: 60 * 1000000000, MaxDownloadSize: 10 * 1024 * 1024})
 	a.channelLookup = func(string) (*discordgo.Channel, error) {
 		return &discordgo.Channel{Type: discordgo.ChannelTypeGuildText}, nil
 	}

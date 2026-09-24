@@ -27,6 +27,7 @@ func runWebhooksCheckConfig(args []string) int {
 		return 1
 	}
 	rt := cfg.Webhooks.Runtime
+	st := cfg.Runtime.Store
 	fmt.Println("webhooks policy:")
 	fmt.Printf("  trust_review_logins: [%s]\n", strings.Join(cfg.Webhooks.Policy.TrustReviewLogins, ", "))
 	for verdict, phrases := range cfg.Webhooks.Policy.Verdicts {
@@ -46,8 +47,26 @@ func runWebhooksCheckConfig(args []string) int {
 	fmt.Printf("  http: read_header=%s read=%s write=%s idle=%s\n", rt.HTTPReadHeaderTimeout, rt.HTTPReadTimeout, rt.HTTPWriteTimeout, rt.HTTPIdleTimeout)
 	fmt.Printf("  review_dedupe_window: %s\n", rt.ReviewDedupeWindow)
 	fmt.Printf("  isolated_workspace_ttl: %s\n", rt.IsolatedWorkspaceTTL)
-	fmt.Printf("  usage_retention: %s max_rows=%d\n", rt.UsageRetention, rt.UsageMaxRows)
-	fmt.Printf("  recovery_event_retention: %s\n", rt.RecoveryEventRetention)
+	fmt.Printf("runtime store:\n")
+	fmt.Printf("  usage_retention: %s max_rows=%d\n", st.UsageRetention, st.UsageMaxRows)
+	fmt.Printf("  recovery_event_retention: %s\n", st.RecoveryEventRetention)
+	fmt.Printf("runtime loop:\n")
+	lp := cfg.Runtime.Loop
+	fmt.Printf("  min_interval=%s max_interval=%s max_duration=%s min_duration=%s iteration_timeout=%s max_wall_age=%s min_count=%d max_count=%d max_prompt_runes=%d max_per_conversation=%d max_global=%d\n", lp.MinInterval, lp.MaxInterval, lp.MaxDuration, lp.MinDuration, lp.IterationTimeout, lp.MaxWallAge, lp.MinCount, lp.MaxCount, lp.MaxPromptRunes, lp.MaxPerConversation, lp.MaxGlobal)
+	fmt.Printf("runtime relay:\n")
+	rl := cfg.Runtime.Relay
+	fmt.Printf("  discovery=%s client=%s max_attachment=%d max_line=%d abort=%s verify=%s stall=%s no_event=%s\n", rl.DiscoveryTimeout, rl.ClientTimeout, int64(rl.MaxAttachmentSize), rl.MaxEventLineBytes, rl.WebhookAbortTimeout, rl.VerifyTimeout, rl.StallFreshness, rl.NoEventTimeout)
+	fmt.Printf("runtime router:\n")
+	ro := cfg.Runtime.Router
+	fmt.Printf("  stale_after=%s quiet=%s queued=%d picker=%d/%d model_ttl=%s page=%d nav=%d cap=%d agent_ttl=%s agent_cap=%d q_ttl=%s p_ttl=%s attrib=%s recovery=%s/%s/%s usage_page=%d usage_window=%s\n", ro.ContextStaleAfter, ro.ProgressQuietThreshold, ro.MaxQueuedMessages, ro.MaxPickerSessions, ro.MaxPickerPages, ro.ModelBrowserTTL, ro.ModelBrowserPage, ro.ModelBrowserNavRows, ro.ModelBrowserCap, ro.AgentBrowserTTL, ro.AgentBrowserCap, ro.QuestionTombstoneTTL, ro.PermissionTombstoneTTL, ro.AttributionTTL, ro.RecoveryBudget, ro.RecoveryBaseBackoff, ro.RecoveryMaxBackoff, ro.UsagePageSize, ro.UsageDefaultWindow)
+	fmt.Printf("runtime channels:\n")
+	ch := cfg.Runtime.Channels
+	fmt.Printf("  discord: download=%s max=%d\n", ch.Discord.DownloadTimeout, int64(ch.Discord.MaxDownloadSize))
+	fmt.Printf("  telegram: download=%s max=%d init=%s attempts=%d\n", ch.Telegram.DownloadTimeout, int64(ch.Telegram.MaxDownloadSize), ch.Telegram.InitTimeout, ch.Telegram.InitAttempts)
+	fmt.Printf("runtime mcp/process/scheduler/health:\n")
+	fmt.Printf("  mcp: %s %s %s %s\n", cfg.Runtime.MCP.ReadHeaderTimeout, cfg.Runtime.MCP.ReadTimeout, cfg.Runtime.MCP.WriteTimeout, cfg.Runtime.MCP.IdleTimeout)
+	fmt.Printf("  process: readiness=%s grace=%s control=%s\n", cfg.Runtime.Process.ReadinessTimeout, cfg.Runtime.Process.StopGrace, cfg.Runtime.Process.ControlTimeout)
+	fmt.Printf("  scheduler: grace=%s health_probe=%s\n", cfg.Runtime.Scheduler.StopGrace, cfg.Runtime.Health.ProbeTimeout)
 	for _, ep := range cfg.Webhooks.Endpoints {
 		fmt.Printf("endpoint %s (%s workflow=%s): %d admit rule(s)", ep.Name, ep.Path, ep.Workflow, len(ep.Admit))
 		if ep.Limits != nil {

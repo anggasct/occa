@@ -18,7 +18,9 @@ const (
 	StatusUnhealthy Status = "unhealthy"
 )
 
-const defaultProbeTimeout = 1500 * time.Millisecond
+type Config struct {
+	ProbeTimeout time.Duration
+}
 
 type Probe struct {
 	Name   string
@@ -103,9 +105,8 @@ func WithLastError(l *LastError) Option {
 
 func New(opts ...Option) *Reporter {
 	r := &Reporter{
-		probeTimeout: defaultProbeTimeout,
-		startedAt:    time.Now(),
-		lastErr:      NewLastError(nil),
+		startedAt: time.Now(),
+		lastErr:   NewLastError(nil),
 	}
 	for _, opt := range opts {
 		opt(r)

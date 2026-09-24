@@ -20,7 +20,6 @@ import (
 )
 
 const (
-	maxDownloadSize        = 10 * 1024 * 1024
 	maxButtonLabelRunes    = 80
 	maxDiscordActionRows   = 5
 	maxButtonsPerActionRow = 5
@@ -34,36 +33,41 @@ type AllowlistPolicy struct {
 	AllowedSenderIDs []string
 }
 
+type Config struct {
+	DownloadTimeout time.Duration
+	MaxDownloadSize int64
+}
+
 type Adapter struct {
-	session        *discordgo.Session
-	token          string
-	menu           []channel.MenuCommand
-	allowedSenders map[string]struct{}
-	botID          atomic.Value
-	appID          atomic.Value
-	channelLookup  func(string) (*discordgo.Channel, error)
-	downloadClient *http.Client
-	autoThread     ThreadPolicy
-	ownedThread    OwnedThreadCheck
-	connected      atomic.Bool
+	session         *discordgo.Session
+	token           string
+	menu            []channel.MenuCommand
+	allowedSenders  map[string]struct{}
+	botID           atomic.Value
+	appID           atomic.Value
+	channelLookup   func(string) (*discordgo.Channel, error)
+	downloadClient  *http.Client
+	maxDownloadSize int64
+	autoThread      ThreadPolicy
+	ownedThread     OwnedThreadCheck
+	connected       atomic.Bool
 
 	threadsMu   sync.Mutex
 	threads     map[string]struct{}
 	parentCache map[string]string
 }
 
-const defaultDownloadTimeout = 60 * time.Second
-
-func New(token string, menu []channel.MenuCommand) *Adapter {
-	return NewWithPolicy(token, menu, AllowlistPolicy{})
+func New(token string, menu []channel.MenuCommand, cfg Config) *Adapter {
+	return NewWithPolicy(token, menu, AllowlistPolicy{}, cfg)
 }
 
-func NewWithPolicy(token string, menu []channel.MenuCommand, policy AllowlistPolicy) *Adapter {
+func NewWithPolicy(token string, menu []channel.MenuCommand, policy AllowlistPolicy, cfg Config) *Adapter {
 	a := &Adapter{
-		token:          token,
-		menu:           menu,
-		downloadClient: &http.Client{Timeout: defaultDownloadTimeout},
-		allowedSenders: make(map[string]struct{}, len(policy.AllowedSenderIDs)),
+		token:           token,
+		menu:            menu,
+		downloadClient:  &http.Client{Timeout: cfg.DownloadTimeout},
+		allowedSenders:  make(map[string]struct{}, len(policy.AllowedSenderIDs)),
+		maxDownloadSize: cfg.MaxDownloadSize,
 	}
 	for _, id := range policy.AllowedSenderIDs {
 		if id = strings.TrimSpace(id); id != "" {
@@ -637,7 +641,7 @@ func (a *Adapter) downloadAttachments(m *discordgo.Message) []channel.Attachment
 			slog.Warn("discord: download attachment failed", "filename", da.Filename, "error", err)
 			continue
 		}
-		data, err := io.ReadAll(io.LimitReader(resp.Body, maxDownloadSize+1))
+		data, err := io.ReadAll(io.LimitReader(resp.Body, a.maxDownloadSize+1))
 		resp.Body.Close()
 		if err != nil {
 			slog.Warn("discord: read attachment failed", "filename", da.Filename, "error", err)

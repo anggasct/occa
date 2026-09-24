@@ -22,10 +22,11 @@ import (
 // not ready" from other spawn failures.
 var ErrReadinessTimeout = errors.New("process: agent not ready within timeout")
 
-const (
-	defaultReadinessTimeout = 30 * time.Second
-	defaultStopGrace        = 5 * time.Second
-)
+type Config struct {
+	ReadinessTimeout time.Duration
+	StopGrace        time.Duration
+	ControlTimeout   time.Duration
+}
 
 type instanceFactory func(ctx context.Context, workdir string, port int) (*Instance, error)
 
@@ -53,13 +54,10 @@ func (i *Instance) End() { i.inflight.Add(-1) }
 func (i *Instance) begin()       { i.inflight.Add(1); i.Touch() }
 func (i *Instance) isIdle() bool { return i.inflight.Load() == 0 }
 
-func productionFactory(binary string, readinessTimeout, stopGrace time.Duration) instanceFactory {
-	if readinessTimeout <= 0 {
-		readinessTimeout = defaultReadinessTimeout
-	}
-	if stopGrace <= 0 {
-		stopGrace = defaultStopGrace
-	}
+func productionFactory(binary string, cfg Config) instanceFactory {
+	readinessTimeout := cfg.ReadinessTimeout
+	stopGrace := cfg.StopGrace
+	controlTimeout := cfg.ControlTimeout
 	return func(ctx context.Context, workdir string, port int) (*Instance, error) {
 		addr := fmt.Sprintf("http://127.0.0.1:%d", port)
 		if err := ensurePortFree(ctx, port, stopGrace); err != nil {
@@ -96,7 +94,7 @@ func productionFactory(binary string, readinessTimeout, stopGrace time.Duration)
 			close(waitDone)
 		}()
 
-		if err := waitReady(ctx, addr, readinessTimeout); err != nil {
+		if err := waitReady(ctx, addr, readinessTimeout, controlTimeout); err != nil {
 			inst.stop()
 			return nil, fmt.Errorf("process: readiness for %q: %w", workdir, err)
 		}
@@ -119,12 +117,12 @@ func openCodeCommand(binary string, port int, workdir string) *exec.Cmd {
 	return cmd
 }
 
-func waitReady(ctx context.Context, addr string, timeout time.Duration) error {
+func waitReady(ctx context.Context, addr string, timeout, controlTimeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	url := addr + "/global/health"
-	client := &http.Client{Timeout: 2 * time.Second}
+	client := &http.Client{Timeout: controlTimeout}
 	healthy := func() bool {
 		resp, err := client.Get(url)
 		if err != nil {

@@ -41,26 +41,23 @@ type WebhookPolicy struct {
 }
 
 type WebhookRuntime struct {
-	MaxBodySize            byteSize        `yaml:"max_body_size"`
-	MaxConcurrentEvents    int             `yaml:"max_concurrent_events"`
-	MaxQueuedPerKey        int             `yaml:"max_queued_per_key"`
-	ProcessingTimeout      time.Duration   `yaml:"processing_timeout"`
-	ClaimGrace             time.Duration   `yaml:"claim_grace"`
-	RetryAfter             time.Duration   `yaml:"retry_after"`
-	WorkspaceRetryBackoff  []time.Duration `yaml:"workspace_retry_backoff"`
-	Retention              time.Duration   `yaml:"retention"`
-	RetentionKeep          int             `yaml:"retention_keep"`
-	PruneInterval          time.Duration   `yaml:"prune_interval"`
-	DispatcherIdleTTL      time.Duration   `yaml:"dispatcher_idle_ttl"`
-	HTTPReadHeaderTimeout  time.Duration   `yaml:"http_read_header_timeout"`
-	HTTPReadTimeout        time.Duration   `yaml:"http_read_timeout"`
-	HTTPWriteTimeout       time.Duration   `yaml:"http_write_timeout"`
-	HTTPIdleTimeout        time.Duration   `yaml:"http_idle_timeout"`
-	ReviewDedupeWindow     time.Duration   `yaml:"review_dedupe_window"`
-	IsolatedWorkspaceTTL   time.Duration   `yaml:"isolated_workspace_ttl"`
-	UsageRetention         time.Duration   `yaml:"usage_retention"`
-	UsageMaxRows           int             `yaml:"usage_max_rows"`
-	RecoveryEventRetention time.Duration   `yaml:"recovery_event_retention"`
+	MaxBodySize           byteSize        `yaml:"max_body_size"`
+	MaxConcurrentEvents   int             `yaml:"max_concurrent_events"`
+	MaxQueuedPerKey       int             `yaml:"max_queued_per_key"`
+	ProcessingTimeout     time.Duration   `yaml:"processing_timeout"`
+	ClaimGrace            time.Duration   `yaml:"claim_grace"`
+	RetryAfter            time.Duration   `yaml:"retry_after"`
+	WorkspaceRetryBackoff []time.Duration `yaml:"workspace_retry_backoff"`
+	Retention             time.Duration   `yaml:"retention"`
+	RetentionKeep         int             `yaml:"retention_keep"`
+	PruneInterval         time.Duration   `yaml:"prune_interval"`
+	DispatcherIdleTTL     time.Duration   `yaml:"dispatcher_idle_ttl"`
+	HTTPReadHeaderTimeout time.Duration   `yaml:"http_read_header_timeout"`
+	HTTPReadTimeout       time.Duration   `yaml:"http_read_timeout"`
+	HTTPWriteTimeout      time.Duration   `yaml:"http_write_timeout"`
+	HTTPIdleTimeout       time.Duration   `yaml:"http_idle_timeout"`
+	ReviewDedupeWindow    time.Duration   `yaml:"review_dedupe_window"`
+	IsolatedWorkspaceTTL  time.Duration   `yaml:"isolated_workspace_ttl"`
 }
 
 var knownRequireFlags = map[string]bool{
@@ -249,15 +246,6 @@ func validateWebhookRuntime(runtime WebhookRuntime) (WebhookRuntime, error) {
 	}
 	if runtime.IsolatedWorkspaceTTL <= 0 {
 		return WebhookRuntime{}, missing("isolated_workspace_ttl")
-	}
-	if runtime.UsageRetention <= 0 {
-		return WebhookRuntime{}, missing("usage_retention")
-	}
-	if runtime.UsageMaxRows <= 0 {
-		return WebhookRuntime{}, missing("usage_max_rows")
-	}
-	if runtime.RecoveryEventRetention <= 0 {
-		return WebhookRuntime{}, missing("recovery_event_retention")
 	}
 	return runtime, nil
 }

@@ -2411,7 +2411,7 @@ func TestPassthroughContainsNoScheduleToken(t *testing.T) {
 
 func TestResponseWiringScheduleAttribution(t *testing.T) {
 	r, client, reply := newTestRouter()
-	attrib := attribution.NewStore()
+	attrib := attribution.NewStore(30 * time.Second)
 	r.SetAttributionStore(attrib)
 
 	cronExpr := "0 9 * * 1-5"

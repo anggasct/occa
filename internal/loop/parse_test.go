@@ -6,22 +6,30 @@ import (
 	"time"
 )
 
+func testParseConfig() Config {
+	return Config{MinInterval: 30 * 1000000000, MaxInterval: 3600000000000, MinDuration: 60 * 1000000000, MaxDuration: 4 * 3600 * 1000000000, IterationTimeout: 10 * 60 * 1000000000, MaxWallAge: 4 * 3600 * 1000000000, MinCount: 2, MaxCount: 60, MaxPromptRunes: 1000, MaxPerConversation: 1, MaxGlobal: 20}
+}
+
+func ParseRequestWithTestConfig(args string) (Request, error) {
+	return ParseRequest(args, testParseConfig())
+}
+
 func TestParseRequestValid(t *testing.T) {
-	req, err := ParseRequest("every 2m x15 check PR status")
+	req, err := ParseRequestWithTestConfig("every 2m x15 check PR status")
 	if err != nil {
 		t.Fatalf("ParseRequest: %v", err)
 	}
 	if req.Interval != 2*time.Minute || req.Count != 15 || req.Prompt != "check PR status" {
 		t.Errorf("parsed = %+v", req)
 	}
-	req, err = ParseRequest("every 30s for 1h watch deploy")
+	req, err = ParseRequestWithTestConfig("every 30s for 1h watch deploy")
 	if err != nil {
 		t.Fatalf("ParseRequest: %v", err)
 	}
 	if req.Interval != 30*time.Second || req.Length != time.Hour || req.Prompt != "watch deploy" {
 		t.Errorf("parsed = %+v", req)
 	}
-	req, err = ParseRequest("every 2m x3 for real check")
+	req, err = ParseRequestWithTestConfig("every 2m x3 for real check")
 	if err != nil {
 		t.Fatalf("prompt starting with non-duration for: %v", err)
 	}
@@ -31,7 +39,7 @@ func TestParseRequestValid(t *testing.T) {
 }
 
 func TestParseRequestInvalid(t *testing.T) {
-	long := strings.Repeat("a", MaxPromptRunes+1)
+	long := strings.Repeat("a", 1001)
 	cases := map[string]string{
 		"":                       "empty",
 		"every":                  "bare",
@@ -54,15 +62,15 @@ func TestParseRequestInvalid(t *testing.T) {
 		"every 2m for 1h x3 hi":  "both ends (duration then count)",
 	}
 	for args, name := range cases {
-		if _, err := ParseRequest(args); err == nil {
+		if _, err := ParseRequestWithTestConfig(args); err == nil {
 			t.Errorf("%s (%q): expected error, got nil", name, args)
 		}
 	}
 }
 
 func TestParsePromptBoundary(t *testing.T) {
-	exact := strings.Repeat("b", MaxPromptRunes)
-	req, err := ParseRequest("every 1m x2 " + exact)
+	exact := strings.Repeat("b", 1000)
+	req, err := ParseRequest("every 1m x2 "+exact, testParseConfig())
 	if err != nil {
 		t.Fatalf("1000-rune prompt rejected: %v", err)
 	}

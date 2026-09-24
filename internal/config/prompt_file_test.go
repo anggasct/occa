@@ -41,9 +41,6 @@ func TestWebhookPromptFileLoadsRelativeToConfigDirectory(t *testing.T) {
     http_idle_timeout: 2m
     review_dedupe_window: 60m
     isolated_workspace_ttl: 24h
-    usage_retention: 2160h
-    usage_max_rows: 100000
-    recovery_event_retention: 720h
   endpoints:
     - name: reviewer
       path: /review
@@ -170,9 +167,6 @@ func TestWebhookPromptFileValidation(t *testing.T) {
     http_idle_timeout: 2m
     review_dedupe_window: 60m
     isolated_workspace_ttl: 24h
-    usage_retention: 2160h
-    usage_max_rows: 100000
-    recovery_event_retention: 720h
   endpoints:
     - name: reviewer
       path: /review
@@ -220,9 +214,6 @@ func TestWebhookUnknownWorkflowFailsConfigLoad(t *testing.T) {
     http_idle_timeout: 2m
     review_dedupe_window: 60m
     isolated_workspace_ttl: 24h
-    usage_retention: 2160h
-    usage_max_rows: 100000
-    recovery_event_retention: 720h
   endpoints:
     - name: invalid
       path: /invalid
@@ -268,9 +259,6 @@ func TestWebhookInlinePromptRemainsCompatibleWithoutWorkflow(t *testing.T) {
     http_idle_timeout: 2m
     review_dedupe_window: 60m
     isolated_workspace_ttl: 24h
-    usage_retention: 2160h
-    usage_max_rows: 100000
-    recovery_event_retention: 720h
   endpoints:
     - name: legacy
       path: /legacy

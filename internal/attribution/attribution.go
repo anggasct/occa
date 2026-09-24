@@ -19,7 +19,9 @@ import (
 	"time"
 )
 
-const ttl = 30 * time.Second
+type Config struct {
+	TTL time.Duration
+}
 
 type entry struct {
 	platform  string
@@ -32,10 +34,11 @@ type entry struct {
 type Store struct {
 	mu    sync.Mutex
 	items map[string][]entry
+	ttl   time.Duration
 }
 
-func NewStore() *Store {
-	return &Store{items: make(map[string][]entry)}
+func NewStore(ttl time.Duration) *Store {
+	return &Store{items: make(map[string][]entry), ttl: ttl}
 }
 
 // Fingerprint returns the correlation key for a schedule request: the SHA-256
@@ -61,7 +64,7 @@ func (s *Store) Put(fingerprint, platform, channelID string) {
 			kept = append(kept, it)
 		}
 	}
-	s.items[fingerprint] = append(kept, entry{platform: platform, channelID: channelID, expires: now.Add(ttl)})
+	s.items[fingerprint] = append(kept, entry{platform: platform, channelID: channelID, expires: now.Add(s.ttl)})
 }
 
 // Pop removes and returns the oldest unconsumed conversation for the

@@ -31,7 +31,7 @@ func TestProductionFactorySetsPdeathSig(t *testing.T) {
 func TestWaitReadyTimeoutWrapsSentinel(t *testing.T) {
 	// Port 1 is never served locally; readiness must fail fast with the
 	// sentinel so callers can classify readiness timeouts distinctly.
-	err := waitReady(context.Background(), "http://127.0.0.1:1", 50*time.Millisecond)
+	err := waitReady(context.Background(), "http://127.0.0.1:1", 50*time.Millisecond, 10*time.Millisecond)
 	if err == nil {
 		t.Fatal("waitReady unexpectedly succeeded")
 	}

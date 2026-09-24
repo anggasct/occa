@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/anggasct/occa/internal/health"
 )
@@ -27,6 +28,7 @@ func TestHealthCommandRepliesWhenConfigured(t *testing.T) {
 		health.WithAgent(testHealthAgent{}),
 		health.WithVersion("1.2.3"),
 		health.WithExpectedSchema(8),
+		health.WithProbeTimeout(1500*time.Millisecond),
 	))
 	if err := r.Route(context.Background(), msg("/health", reply)); err != nil {
 		t.Fatalf("Route: %v", err)
