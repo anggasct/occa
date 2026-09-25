@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/anggasct/occa/internal/attribution"
 	"github.com/anggasct/occa/internal/scheduler"
@@ -90,9 +91,9 @@ func (f *fakeStore) SweepPending(_ context.Context) (int64, error) {
 func newTestServer() (*Server, *fakeStore, *attribution.Store) {
 	repo := &fakeStore{}
 	executor := func(ctx context.Context, platform, channelID, prompt string) {}
-	sched := scheduler.New(repo, executor)
-	attrib := attribution.NewStore()
-	srv := New(sched, attrib)
+	sched := scheduler.New(repo, executor, 5*time.Second)
+	attrib := attribution.NewStore(30 * time.Second)
+	srv := New(sched, attrib, Config{ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 5 * time.Minute, IdleTimeout: 2 * time.Minute})
 	return srv, repo, attrib
 }
 

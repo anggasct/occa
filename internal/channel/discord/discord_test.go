@@ -101,7 +101,7 @@ func TestDownloadAttachmentTimeout(t *testing.T) {
 	}))
 	defer blocked.Close()
 
-	a := &Adapter{downloadClient: &http.Client{Timeout: 200 * time.Millisecond}}
+	a := &Adapter{maxDownloadSize: 10 * 1024 * 1024, downloadClient: &http.Client{Timeout: 200 * time.Millisecond}}
 	start := time.Now()
 	atts := a.downloadAttachments(&discordgo.Message{
 		Attachments: []*discordgo.MessageAttachment{
@@ -122,7 +122,7 @@ func TestDownloadAttachmentSucceeds(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	a := &Adapter{downloadClient: &http.Client{Timeout: 5 * time.Second}}
+	a := &Adapter{maxDownloadSize: 10 * 1024 * 1024, downloadClient: &http.Client{Timeout: 5 * time.Second}}
 	atts := a.downloadAttachments(&discordgo.Message{
 		Attachments: []*discordgo.MessageAttachment{
 			{Filename: "ok.txt", ContentType: "text/plain", URL: ts.URL},
@@ -689,7 +689,7 @@ func TestInteractionMessagesHaveNoSourceRef(t *testing.T) {
 		return jsonResponse(200, "{}"), nil
 	}}}
 
-	a := New("fake-token", nil)
+	a := New("fake-token", nil, Config{DownloadTimeout: 60 * 1000000000, MaxDownloadSize: 10 * 1024 * 1024})
 	interaction := &discordgo.InteractionCreate{Interaction: &discordgo.Interaction{
 		ID:        "int-1",
 		Token:     "int-token",

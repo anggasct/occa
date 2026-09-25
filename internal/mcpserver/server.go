@@ -17,15 +17,31 @@ import (
 )
 
 type Server struct {
-	sched     *scheduler.Scheduler
-	attrib    *attribution.Store
-	mcpServer *mcp.Server
-	httpSrv   *http.Server
-	port      int
+	sched             *scheduler.Scheduler
+	attrib            *attribution.Store
+	mcpServer         *mcp.Server
+	httpSrv           *http.Server
+	port              int
+	readHeaderTimeout time.Duration
+	readTimeout       time.Duration
+	writeTimeout      time.Duration
+	idleTimeout       time.Duration
 }
 
-func New(sched *scheduler.Scheduler, attrib *attribution.Store) *Server {
-	s := &Server{sched: sched, attrib: attrib}
+type Config struct {
+	ReadHeaderTimeout time.Duration
+	ReadTimeout       time.Duration
+	WriteTimeout      time.Duration
+	IdleTimeout       time.Duration
+}
+
+func New(sched *scheduler.Scheduler, attrib *attribution.Store, cfg Config) *Server {
+	s := &Server{sched: sched, attrib: attrib,
+		readHeaderTimeout: cfg.ReadHeaderTimeout,
+		readTimeout:       cfg.ReadTimeout,
+		writeTimeout:      cfg.WriteTimeout,
+		idleTimeout:       cfg.IdleTimeout,
+	}
 
 	mcpServer := mcp.NewServer(&mcp.Implementation{
 		Name:    "occa",
@@ -137,10 +153,10 @@ func (s *Server) Start(ctx context.Context) error {
 	// for server-to-client messages over SSE.
 	s.httpSrv = &http.Server{
 		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      5 * time.Minute,
-		IdleTimeout:       2 * time.Minute,
+		ReadHeaderTimeout: s.readHeaderTimeout,
+		ReadTimeout:       s.readTimeout,
+		WriteTimeout:      s.writeTimeout,
+		IdleTimeout:       s.idleTimeout,
 	}
 
 	go func() {

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/relay"
@@ -450,7 +451,7 @@ func TestWebhookExecutorWithThread(t *testing.T) {
 
 	agentClient := &mockRelayClient{events: events}
 	manager := &mockAgentManager{client: agentClient}
-	exec := newWebhookExecutor([]channel.Channel{discordCh}, manager, mockChannelStore{}, "/tmp")
+	exec := newWebhookExecutor([]channel.Channel{discordCh}, manager, mockChannelStore{}, "/tmp", relay.Config{NoEventTimeout: 15 * time.Minute, WebhookAbortTimeout: 5 * time.Second, VerifyTimeout: 15 * time.Second})
 
 	workCtx := &webhook.WebhookWorkContext{
 		Thread:     true,
@@ -539,7 +540,7 @@ func TestWebhookExecutorThreadCreationFallback(t *testing.T) {
 		},
 	}
 	manager := &mockAgentManager{client: agentClient}
-	exec := newWebhookExecutor([]channel.Channel{discordCh}, manager, mockChannelStore{}, "/tmp")
+	exec := newWebhookExecutor([]channel.Channel{discordCh}, manager, mockChannelStore{}, "/tmp", relay.Config{NoEventTimeout: 15 * time.Minute, WebhookAbortTimeout: 5 * time.Second, VerifyTimeout: 15 * time.Second})
 
 	workCtx := &webhook.WebhookWorkContext{
 		Thread:     true,
@@ -579,7 +580,7 @@ func TestWebhookExecutorWithoutThread(t *testing.T) {
 		},
 	}
 	manager := &mockAgentManager{client: agentClient}
-	exec := newWebhookExecutor([]channel.Channel{discordCh}, manager, mockChannelStore{}, "/tmp")
+	exec := newWebhookExecutor([]channel.Channel{discordCh}, manager, mockChannelStore{}, "/tmp", relay.Config{NoEventTimeout: 15 * time.Minute, WebhookAbortTimeout: 5 * time.Second, VerifyTimeout: 15 * time.Second})
 
 	workCtx := &webhook.WebhookWorkContext{
 		Thread:     false,
@@ -626,7 +627,7 @@ func TestWebhookExecutorTelegramProgressCard(t *testing.T) {
 
 	agentClient := &mockRelayClient{events: events}
 	manager := &mockAgentManager{client: agentClient}
-	exec := newWebhookExecutor([]channel.Channel{tgCh}, manager, mockChannelStore{}, "/tmp")
+	exec := newWebhookExecutor([]channel.Channel{tgCh}, manager, mockChannelStore{}, "/tmp", relay.Config{NoEventTimeout: 15 * time.Minute, WebhookAbortTimeout: 5 * time.Second, VerifyTimeout: 15 * time.Second})
 
 	workCtx := &webhook.WebhookWorkContext{
 		ProgressCard: true,
@@ -692,7 +693,7 @@ func TestWebhookExecutorTelegramTopicDispatch(t *testing.T) {
 
 	agentClient := &mockRelayClient{events: events}
 	manager := &mockAgentManager{client: agentClient}
-	exec := newWebhookExecutor([]channel.Channel{tgCh}, manager, mockChannelStore{}, "/tmp")
+	exec := newWebhookExecutor([]channel.Channel{tgCh}, manager, mockChannelStore{}, "/tmp", relay.Config{NoEventTimeout: 15 * time.Minute, WebhookAbortTimeout: 5 * time.Second, VerifyTimeout: 15 * time.Second})
 
 	workCtx := &webhook.WebhookWorkContext{
 		ProgressCard: true,
@@ -738,7 +739,7 @@ func TestWebhookExecutorTelegramExplicitFalseProgressCard(t *testing.T) {
 
 	agentClient := &mockRelayClient{events: events}
 	manager := &mockAgentManager{client: agentClient}
-	exec := newWebhookExecutor([]channel.Channel{tgCh}, manager, mockChannelStore{}, "/tmp")
+	exec := newWebhookExecutor([]channel.Channel{tgCh}, manager, mockChannelStore{}, "/tmp", relay.Config{NoEventTimeout: 15 * time.Minute, WebhookAbortTimeout: 5 * time.Second, VerifyTimeout: 15 * time.Second})
 
 	workCtx := &webhook.WebhookWorkContext{
 		Thread:       true,

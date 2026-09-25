@@ -657,7 +657,7 @@ func TestQuestionWizardPlatformRenderingOnAdvance(t *testing.T) {
 	client := &questionClient{}
 	reply := &questionReply{}
 	h := &questionPromptHandler{
-		broker: newQuestionBroker(),
+		broker: newQuestionBroker(10 * time.Minute),
 		split: func(text string) []string {
 			chunks, _ := rnd.Render(text, render.Telegram)
 			return chunks
@@ -709,7 +709,7 @@ func TestQuestionWizardPromptClampedToSingleMessage(t *testing.T) {
 	client := &questionClient{}
 	reply := &questionReply{}
 	h := &questionPromptHandler{
-		broker: newQuestionBroker(),
+		broker: newQuestionBroker(10 * time.Minute),
 		split: func(text string) []string {
 			limit := 200
 			var chunks []string

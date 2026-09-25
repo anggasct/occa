@@ -15,12 +15,7 @@ import (
 	"github.com/anggasct/occa/internal/store"
 )
 
-const (
-	recoveryBudget         = 60 * time.Second
-	recoveryBaseBackoff    = 10 * time.Second
-	recoveryMaxBackoff     = 40 * time.Second
-	recoveryDetailMaxRunes = 200
-)
+const recoveryDetailMaxRunes = 200
 
 const (
 	recoveryResumedMessage      = "🔄 The agent was restarted and your session resumed — context kept. Your last message may not have completed; send it again if needed. See /status."
@@ -55,12 +50,12 @@ type recoveryCoordinator struct {
 	maxDelay  time.Duration
 }
 
-func newRecoveryCoordinator() *recoveryCoordinator {
+func newRecoveryCoordinator(baseDelay, maxDelay time.Duration) *recoveryCoordinator {
 	return &recoveryCoordinator{
 		states:    make(map[string]*workdirRecovery),
 		now:       time.Now,
-		baseDelay: recoveryBaseBackoff,
-		maxDelay:  recoveryMaxBackoff,
+		baseDelay: baseDelay,
+		maxDelay:  maxDelay,
 	}
 }
 
@@ -169,9 +164,6 @@ func (r *Router) recoverAfterFailure(ctx context.Context, msg channel.IncomingMe
 	workdir := inst.Workdir()
 	corrID := newRecoveryID()
 	budget := r.recoveryBudget
-	if budget <= 0 {
-		budget = recoveryBudget
-	}
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
 	defer cancel()
 	started := time.Now()

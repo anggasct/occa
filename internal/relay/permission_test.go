@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/render"
@@ -148,7 +149,7 @@ func TestReplyPermission(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewHTTPClient(srv.URL)
+	c := NewHTTPClient(srv.URL, testConfig())
 	err := c.ReplyPermission(context.Background(), "per-456", PermissionOnce)
 	if err != nil {
 		t.Fatalf("ReplyPermission: %v", err)
@@ -169,7 +170,7 @@ func TestReplyPermissionAlways(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewHTTPClient(srv.URL)
+	c := NewHTTPClient(srv.URL, testConfig())
 	err := c.ReplyPermission(context.Background(), "per-789", PermissionAlways)
 	if err != nil {
 		t.Fatalf("ReplyPermission: %v", err)
@@ -187,7 +188,7 @@ func TestReplyPermissionReject(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewHTTPClient(srv.URL)
+	c := NewHTTPClient(srv.URL, testConfig())
 	err := c.ReplyPermission(context.Background(), "per-000", PermissionReject)
 	if err != nil {
 		t.Fatalf("ReplyPermission: %v", err)
@@ -200,7 +201,7 @@ func TestReplyPermissionReject(t *testing.T) {
 func TestStreamerPermissionPrompt(t *testing.T) {
 	reply := newFakeReplyContext()
 	renderer := render.New()
-	s := NewStreamer(reply, renderer, render.Telegram)
+	s := NewStreamer(reply, renderer, render.Telegram, 15*time.Minute)
 	s.SetPermissionPromptHandler(testPermissionPromptHandler{reply: reply})
 
 	events := make(chan Event, 10)

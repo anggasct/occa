@@ -11,7 +11,7 @@ import (
 
 func TestStreamerStopButtonLifecycleTool(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	s.SetStopCallbackData("stop:sess-123")
 	s.workingEditInterval = -1
 
@@ -46,7 +46,7 @@ func TestStreamerStopButtonLifecycleTool(t *testing.T) {
 
 func TestStreamerStopButtonLifecycleReasoning(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	s.SetStopCallbackData("stop:sess-456")
 	s.workingEditInterval = -1
 
@@ -80,7 +80,7 @@ func TestStreamerStopButtonLifecycleReasoning(t *testing.T) {
 
 func TestStreamerStopButtonClearedOnContextCanceled(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	s.SetStopCallbackData("stop:sess-789")
 	s.workingEditInterval = -1
 
@@ -118,7 +118,7 @@ func TestStreamerStopButtonClearedOnContextCanceled(t *testing.T) {
 
 func TestStreamerStopButtonOmittedWhenNotConfigured(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 
 	events := make(chan Event, 5)
 	events <- Event{Type: EventTool, Delta: "bash"}
@@ -139,7 +139,7 @@ func TestStreamerStopButtonOmittedWhenNotConfigured(t *testing.T) {
 
 func TestStreamerStopButtonClearedOnTimeout(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	s.SetStopCallbackData("stop:sess-timeout")
 	s.workingEditInterval = -1
 	s.noEventTimeout = 30 * time.Millisecond
@@ -167,7 +167,7 @@ func TestStreamerStopButtonClearedOnTimeout(t *testing.T) {
 
 func TestStreamerStopButtonClearedOnClosedChannel(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	s.SetStopCallbackData("stop:sess-closed")
 	s.workingEditInterval = -1
 

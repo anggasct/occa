@@ -33,7 +33,7 @@ func (m *Manager) ReapOrphans(ctx context.Context) (int, error) {
 			slog.Warn("agent orphan sweep: port in use by a foreign process", "port", port)
 			continue
 		}
-		if err := killPID(pid); err != nil {
+		if err := killPIDWithGrace(pid, m.procCfg.StopGrace); err != nil {
 			return reaped, fmt.Errorf("reap orphan opencode on port %d (pid %d): %w", port, pid, err)
 		}
 		reaped++
@@ -52,7 +52,7 @@ func ensurePortFree(ctx context.Context, port int, stopGrace time.Duration) erro
 	if !ok {
 		return fmt.Errorf("port %d in use by a foreign process", port)
 	}
-	if err := killPID(pid); err != nil {
+	if err := killPIDWithGrace(pid, stopGrace); err != nil {
 		return fmt.Errorf("kill orphan opencode pid %d on port %d: %w", pid, port, err)
 	}
 	deadline := time.Now().Add(stopGrace)
@@ -186,14 +186,14 @@ func openCodeServeOnPort(argv []string, port int) bool {
 	return hasServe && hasPort
 }
 
-func killPID(pid int) error {
+func killPIDWithGrace(pid int, stopGrace time.Duration) error {
 	if !processAlive(pid) {
 		return nil
 	}
 	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return err
 	}
-	deadline := time.Now().Add(defaultStopGrace)
+	deadline := time.Now().Add(stopGrace)
 	for processAlive(pid) {
 		if time.Now().After(deadline) {
 			if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {

@@ -208,7 +208,7 @@ func newResponseRouter(client relay.Client) (*Router, *fakeStore) {
 		overrideRepo: overrides,
 		scheduleRepo: &fakeScheduleRepo{},
 	}
-	r := NewWithAllowlists(&fakeInstanceProvider{client: client}, st, "/default-workdir", "", []string{"user1", "user2", "alice", "bob"}, []string{"user1", "user2", "alice", "bob"})
+	r := NewWithAllowlists(&fakeInstanceProvider{client: client}, st, "/default-workdir", "", []string{"user1", "user2", "alice", "bob"}, []string{"user1", "user2", "alice", "bob"}, testRouterConfig())
 	return r, st
 }
 
@@ -499,7 +499,7 @@ func TestResponseTimeoutTriggersRecoveryAndReplies(t *testing.T) {
 		overrideRepo: overrides,
 		scheduleRepo: &fakeScheduleRepo{},
 	}
-	r := NewWithAllowlists(provider, st, "/default-workdir", "", []string{"user1", "user2", "alice", "bob", "admin1", "admin"}, []string{"user1", "user2", "alice", "bob", "admin1", "admin"})
+	r := NewWithAllowlists(provider, st, "/default-workdir", "", []string{"user1", "user2", "alice", "bob", "admin1", "admin"}, []string{"user1", "user2", "alice", "bob", "admin1", "admin"}, testRouterConfig())
 	reply := newResponseReply()
 
 	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "hello", reply)); err != nil {
@@ -536,7 +536,7 @@ func TestResponseCoordinatorAllowsDifferentChannels(t *testing.T) {
 	r := NewWithAllowlists(&responseProvider{clients: map[string]relay.Client{
 		"/default-workdir": first,
 		"/chat2":           second,
-	}}, st, "/default-workdir", "", []string{"user1"}, []string{"user1"})
+	}}, st, "/default-workdir", "", []string{"user1"}, []string{"user1"}, testRouterConfig())
 
 	firstReply := newResponseReply()
 	secondReply := newResponseReply()
@@ -798,7 +798,7 @@ func TestProgressTickerNilNoticesRepoSkipsPersist(t *testing.T) {
 }
 
 func TestResponseCoordinatorQueueMethods(t *testing.T) {
-	coord := newResponseCoordinator()
+	coord := newResponseCoordinator(5)
 	key := responseKey{platform: "telegram", channelID: "chat1", userID: "user1"}
 	msg := channel.IncomingMessage{Text: "test"}
 	ctx := context.Background()
@@ -1095,7 +1095,7 @@ func TestResponseTimeoutPermissionCopy(t *testing.T) {
 }
 
 func TestCoordinatorCancelMatchingIsolation(t *testing.T) {
-	c := newResponseCoordinator()
+	c := newResponseCoordinator(5)
 
 	ctx1, cancel1 := context.WithCancel(context.Background())
 	ctx2, cancel2 := context.WithCancel(context.Background())

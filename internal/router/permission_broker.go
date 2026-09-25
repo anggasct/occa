@@ -20,7 +20,6 @@ import (
 
 const (
 	permissionBatchWindow    = 1500 * time.Millisecond
-	permissionTombstoneTTL   = 10 * time.Minute
 	permissionRetryMessage   = "⚠️ Could not submit the permission choice. Try again."
 	permissionExpiredMessage = "⌛ Permission request expired."
 	permissionNotSavedLabel  = "✅ Always allowed (rule not saved — server issue, tell architect)"
@@ -78,12 +77,13 @@ type pendingBatch struct {
 }
 
 type permissionBroker struct {
-	mu          sync.Mutex
-	records     map[string]*permissionRecord
-	batches     map[pendingBatchKey]*pendingBatch
-	nextBatchID uint64
-	rules       store.PermissionRuleRepo
-	window      time.Duration
+	mu           sync.Mutex
+	records      map[string]*permissionRecord
+	batches      map[pendingBatchKey]*pendingBatch
+	nextBatchID  uint64
+	rules        store.PermissionRuleRepo
+	window       time.Duration
+	tombstoneTTL time.Duration
 }
 
 type permissionPromptHandler struct {
@@ -99,12 +99,13 @@ type permissionPromptHandler struct {
 	reply     channel.ReplyContext
 }
 
-func newPermissionBroker(rules store.PermissionRuleRepo) *permissionBroker {
+func newPermissionBroker(rules store.PermissionRuleRepo, tombstoneTTL time.Duration) *permissionBroker {
 	return &permissionBroker{
-		records: make(map[string]*permissionRecord),
-		batches: make(map[pendingBatchKey]*pendingBatch),
-		rules:   rules,
-		window:  permissionBatchWindow,
+		records:      make(map[string]*permissionRecord),
+		batches:      make(map[pendingBatchKey]*pendingBatch),
+		rules:        rules,
+		window:       permissionBatchWindow,
+		tombstoneTTL: tombstoneTTL,
 	}
 }
 
@@ -365,7 +366,7 @@ func (b *permissionBroker) handle(ctx context.Context, msg channel.IncomingMessa
 			record.state = permissionExpired
 			record.terminal = permissionExpiredMessage
 			record.client = nil
-			record.expiresAt = time.Now().Add(permissionTombstoneTTL)
+			record.expiresAt = time.Now().Add(b.tombstoneTTL)
 		}
 		b.mu.Unlock()
 		slog.Info("permission callback rejected", "platform", msg.Platform, "channel_id", msg.ChannelID, "outcome", "scope_mismatch")
@@ -470,7 +471,7 @@ func (b *permissionBroker) expireOwner(owner *permissionOwner) {
 		record.state = permissionExpired
 		record.terminal = permissionExpiredMessage
 		record.client = nil
-		record.expiresAt = now.Add(permissionTombstoneTTL)
+		record.expiresAt = now.Add(b.tombstoneTTL)
 		expired = append(expired, record)
 		origins = append(origins, record.origin)
 	}
@@ -515,7 +516,7 @@ func (b *permissionBroker) resolve(record *permissionRecord, attempt uint64, ter
 	record.state = permissionResolved
 	record.terminal = terminal
 	record.client = nil
-	record.expiresAt = time.Now().Add(permissionTombstoneTTL)
+	record.expiresAt = time.Now().Add(b.tombstoneTTL)
 	return true
 }
 

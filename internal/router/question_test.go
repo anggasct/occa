@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/anggasct/occa/internal/channel"
@@ -128,7 +129,7 @@ func (r *questionReply) EditWithButtons(_ channel.MessageRef, text string, butto
 
 func newQuestionTestHandler(client relay.Client, reply *questionReply) *questionPromptHandler {
 	return &questionPromptHandler{
-		broker:    newQuestionBroker(),
+		broker:    newQuestionBroker(10 * time.Minute),
 		client:    client,
 		platform:  "telegram",
 		channelID: "chat-1",

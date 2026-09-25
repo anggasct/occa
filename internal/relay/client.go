@@ -25,8 +25,6 @@ var (
 	ErrUnsupported        = errors.New("operation not supported by agent backend")
 )
 
-const maxAttachmentSize = 10 * 1024 * 1024
-
 type Attachment struct {
 	Filename string
 	MimeType string
@@ -308,14 +306,18 @@ type CommandInfo struct {
 }
 
 type HTTPClient struct {
-	base string
-	http *http.Client
+	base          string
+	http          *http.Client
+	maxAttachment int64
+	maxLineBytes  int
 }
 
-func NewHTTPClient(base string) *HTTPClient {
+func NewHTTPClient(base string, cfg Config) *HTTPClient {
 	return &HTTPClient{
-		base: base,
-		http: &http.Client{Timeout: 3 * time.Minute},
+		base:          base,
+		http:          &http.Client{Timeout: cfg.ClientTimeout},
+		maxAttachment: cfg.MaxAttachmentBytes,
+		maxLineBytes:  cfg.MaxEventLineBytes,
 	}
 }
 
@@ -596,7 +598,7 @@ func (c *HTTPClient) ListMessages(ctx context.Context, sessionID string) ([]Mess
 
 func (c *HTTPClient) SendMessage(ctx context.Context, sessionID, text string, model *ModelRef, attachments []Attachment) error {
 	for _, a := range attachments {
-		if len(a.Data) > maxAttachmentSize {
+		if int64(len(a.Data)) > c.maxAttachment {
 			return fmt.Errorf("relay: %w: %s (%d bytes)", ErrAttachmentTooLarge, a.Filename, len(a.Data))
 		}
 	}
@@ -893,7 +895,7 @@ func (c *HTTPClient) Events(ctx context.Context, sessionID string) (<-chan Event
 		// session's events regardless of the session_id query param. The
 		// decoder filters by sessionID client-side so concurrent sessions
 		// cannot complete or pollute this turn.
-		err := readSSE(ctx, resp.Body, ch, sessionID)
+		err := readSSE(ctx, resp.Body, ch, sessionID, c.maxLineBytes)
 		if err != nil && ctx.Err() == nil {
 			slog.Warn("relay: event stream read failed", "session_id", sessionID, "error", err)
 		}

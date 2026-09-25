@@ -51,7 +51,7 @@ func TestDiscoverSuccess(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			got, err := Discover(context.Background(), srv.URL)
+			got, err := Discover(context.Background(), srv.URL, 5*time.Second)
 			if err != nil {
 				t.Fatalf("Discover: %v", err)
 			}
@@ -66,7 +66,7 @@ func TestDiscoverSuccess(t *testing.T) {
 }
 
 func TestDiscoverUnreachable(t *testing.T) {
-	_, err := Discover(context.Background(), "http://127.0.0.1:1")
+	_, err := Discover(context.Background(), "http://127.0.0.1:1", 5*time.Second)
 	if err == nil {
 		t.Fatal("expected error for unreachable agent")
 	}
@@ -86,7 +86,7 @@ func TestDiscoverMissingEndpoints(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := Discover(context.Background(), srv.URL)
+	got, err := Discover(context.Background(), srv.URL, 5*time.Second)
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestDiscoverNon200(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := Discover(context.Background(), srv.URL)
+	_, err := Discover(context.Background(), srv.URL, 5*time.Second)
 	if err == nil {
 		t.Fatal("expected error for non-200 response")
 	}
@@ -117,7 +117,7 @@ func TestDiscoverTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	_, err := Discover(ctx, srv.URL)
+	_, err := Discover(ctx, srv.URL, 5*time.Second)
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}

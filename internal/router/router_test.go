@@ -1039,7 +1039,7 @@ func newTestRouterWithAccess() (*Router, *fakeRelayClient, *fakeReplyCtx, *fakeO
 		scheduleRepo: &fakeScheduleRepo{},
 	}
 	provider := &fakeInstanceProvider{client: client}
-	r := NewWithAllowlists(provider, st, "/default-workdir", "", []string{"user1", "user2", "alice", "bob", "admin1", "admin"}, []string{"user1", "user2", "alice", "bob", "admin1", "admin"})
+	r := NewWithAllowlists(provider, st, "/default-workdir", "", []string{"user1", "user2", "alice", "bob", "admin1", "admin"}, []string{"user1", "user2", "alice", "bob", "admin1", "admin"}, testRouterConfig())
 	reply := &fakeReplyCtx{}
 	return r, client, reply, overrideRepo
 }
@@ -1965,7 +1965,7 @@ func TestEnvAliasGrantsAnyPlatform(t *testing.T) {
 		scheduleRepo: &fakeScheduleRepo{},
 	}
 	provider := &fakeInstanceProvider{client: client}
-	r := New(provider, st, "/default-workdir", "owner1")
+	r := New(provider, st, "/default-workdir", "owner1", testRouterConfig())
 	for _, platform := range []string{"telegram", "discord"} {
 		reply := &fakeReplyCtx{}
 		m := channel.IncomingMessage{
@@ -2172,7 +2172,7 @@ func TestEnvAliasFirstMessage(t *testing.T) {
 		scheduleRepo: &fakeScheduleRepo{},
 	}
 	provider := &fakeInstanceProvider{client: client}
-	r := New(provider, st, "/default-workdir", "admin123")
+	r := New(provider, st, "/default-workdir", "admin123", testRouterConfig())
 	reply := &fakeReplyCtx{}
 
 	err := r.Route(context.Background(), msgFrom("admin123", "hello admin", reply))
@@ -2204,7 +2204,7 @@ func TestEnvAliasStaysAuthorizedAcrossMessages(t *testing.T) {
 		scheduleRepo: &fakeScheduleRepo{},
 	}
 	provider := &fakeInstanceProvider{client: client}
-	r := New(provider, st, "/default-workdir", "admin123")
+	r := New(provider, st, "/default-workdir", "admin123", testRouterConfig())
 	reply := &fakeReplyCtx{}
 
 	for i := range 3 {
@@ -2229,7 +2229,7 @@ func TestBootstrapAdminDoesNotWeakenDenyForOthers(t *testing.T) {
 		scheduleRepo: &fakeScheduleRepo{},
 	}
 	provider := &fakeInstanceProvider{client: client}
-	r := New(provider, st, "/default-workdir", "admin123")
+	r := New(provider, st, "/default-workdir", "admin123", testRouterConfig())
 	reply := &fakeReplyCtx{}
 
 	err := r.Route(context.Background(), msgFrom("stranger", "hello", reply))
@@ -2411,7 +2411,7 @@ func TestPassthroughContainsNoScheduleToken(t *testing.T) {
 
 func TestResponseWiringScheduleAttribution(t *testing.T) {
 	r, client, reply := newTestRouter()
-	attrib := attribution.NewStore()
+	attrib := attribution.NewStore(30 * time.Second)
 	r.SetAttributionStore(attrib)
 
 	cronExpr := "0 9 * * 1-5"
@@ -2853,8 +2853,8 @@ func TestSessionPickerBoundedToMax(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Route /session: %v", err)
 	}
-	if len(reply.buttons) == 0 || len(reply.buttons[0]) != maxPickerSessions+1 {
-		t.Fatalf("expected %d buttons (6 session + 1 nav), got %d", maxPickerSessions+1, len(reply.buttons[0]))
+	if len(reply.buttons) == 0 || len(reply.buttons[0]) != 7 {
+		t.Fatalf("expected %d buttons (6 session + 1 nav), got %d", 7, len(reply.buttons[0]))
 	}
 }
 

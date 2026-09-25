@@ -21,7 +21,7 @@ func newSQLiteBackedRouter(t *testing.T, adminID string, discordSenders, telegra
 	t.Cleanup(func() { _ = st.Close() })
 
 	client := &fakeRelayClient{sessionID: "sess-new"}
-	r := NewWithAllowlists(&fakeInstanceProvider{client: client}, st, "/default-workdir", adminID, discordSenders, telegramSenders)
+	r := NewWithAllowlists(&fakeInstanceProvider{client: client}, st, "/default-workdir", adminID, discordSenders, telegramSenders, testRouterConfig())
 	return r, client, &fakeReplyCtx{}, st
 }
 

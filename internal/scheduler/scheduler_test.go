@@ -87,7 +87,7 @@ func (f *failingSweepStore) SweepPending(_ context.Context) (int64, error) {
 func TestSchedulerAddAndRemove(t *testing.T) {
 	repo := &fakeScheduleStore{nextID: 0}
 	executor := func(ctx context.Context, platform, channelID, prompt string) {}
-	s := New(repo, executor)
+	s := New(repo, executor, 5*time.Second)
 
 	id, err := s.AddSchedule(context.Background(), store.Schedule{
 		Platform:       "telegram",
@@ -119,7 +119,7 @@ func TestSchedulerAddAndRemove(t *testing.T) {
 func TestSchedulerInvalidCron(t *testing.T) {
 	repo := &fakeScheduleStore{}
 	executor := func(ctx context.Context, platform, channelID, prompt string) {}
-	s := New(repo, executor)
+	s := New(repo, executor, 5*time.Second)
 
 	_, err := s.AddSchedule(context.Background(), store.Schedule{
 		Platform:       "telegram",
@@ -144,7 +144,7 @@ func TestSchedulerStartReloadsFromStore(t *testing.T) {
 		},
 	}
 	executor := func(ctx context.Context, platform, channelID, prompt string) {}
-	s := New(repo, executor)
+	s := New(repo, executor, 5*time.Second)
 
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -159,7 +159,7 @@ func TestSchedulerStartReloadsFromStore(t *testing.T) {
 // newSecondsScheduler gives tests a second-resolution cron for fast firing;
 // production keeps the 5-field standard grammar.
 func newSecondsScheduler(repo store.ScheduleRepo, executor Executor) *Scheduler {
-	s := New(repo, executor)
+	s := New(repo, executor, 5*time.Second)
 	s.cron = cron.New(cron.WithSeconds())
 	return s
 }
@@ -210,7 +210,7 @@ func TestStopWaitsForRunningJobThenCancels(t *testing.T) {
 
 func TestStopWithoutJobsReturns(t *testing.T) {
 	repo := &fakeScheduleStore{nextID: 0}
-	s := New(repo, func(ctx context.Context, platform, channelID, prompt string) {})
+	s := New(repo, func(ctx context.Context, platform, channelID, prompt string) {}, 5*time.Second)
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -299,7 +299,7 @@ func TestSchedulerStartSweepsPending(t *testing.T) {
 			{ID: 2, Platform: "telegram", ChannelID: "c1", CronExpression: "0 9 * * 1-5", Prompt: "active", Enabled: true},
 		},
 	}
-	s := New(repo, func(ctx context.Context, platform, channelID, prompt string) {})
+	s := New(repo, func(ctx context.Context, platform, channelID, prompt string) {}, 5*time.Second)
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -312,7 +312,7 @@ func TestSchedulerStartSweepsPending(t *testing.T) {
 
 func TestSchedulerStartSweepErrorFailsStartup(t *testing.T) {
 	repo := &failingSweepStore{fakeScheduleStore: &fakeScheduleStore{nextID: 0}}
-	s := New(repo, func(ctx context.Context, platform, channelID, prompt string) {})
+	s := New(repo, func(ctx context.Context, platform, channelID, prompt string) {}, 5*time.Second)
 	if err := s.Start(context.Background()); err == nil {
 		t.Fatal("expected Start to fail when the pending-row sweep errors")
 	}
@@ -323,7 +323,7 @@ func TestAttributeScheduleListFailureCleansUp(t *testing.T) {
 	// row was stamped with platform/channel, the attributed row must not
 	// survive as an enabled schedule.
 	repo := &fakeScheduleStore{failList: true}
-	s := New(repo, func(ctx context.Context, platform, channelID, prompt string) {})
+	s := New(repo, func(ctx context.Context, platform, channelID, prompt string) {}, 5*time.Second)
 
 	id, err := repo.Create(context.Background(), &store.Schedule{
 		Platform: "", ChannelID: "", CronExpression: "0 9 * * 1-5",

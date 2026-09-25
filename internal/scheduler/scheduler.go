@@ -11,9 +11,11 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
-const defaultStopGrace = 5 * time.Second
-
 type Executor func(ctx context.Context, platform, channelID, prompt string)
+
+type Config struct {
+	StopGrace time.Duration
+}
 
 type Scheduler struct {
 	cron      *cron.Cron
@@ -32,13 +34,13 @@ type jobRef struct {
 	cancel context.CancelFunc
 }
 
-func New(st store.ScheduleRepo, executor Executor) *Scheduler {
+func New(st store.ScheduleRepo, executor Executor, stopGrace time.Duration) *Scheduler {
 	return &Scheduler{
 		cron:      cron.New(),
 		store:     st,
 		executor:  executor,
 		entryIDs:  make(map[int64]cron.EntryID),
-		stopGrace: defaultStopGrace,
+		stopGrace: stopGrace,
 	}
 }
 

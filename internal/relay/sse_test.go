@@ -16,7 +16,7 @@ func TestReadSSELargeLineDelivered(t *testing.T) {
 	big := strings.Repeat("x", 1024*1024)
 	ch := make(chan Event, 8)
 	go func() {
-		_ = readSSE(context.Background(), strings.NewReader("event: message.part.delta\ndata: "+big+"\n\n"), ch, "")
+		_ = readSSE(context.Background(), strings.NewReader("event: message.part.delta\ndata: "+big+"\n\n"), ch, "", 1024*1024+64*1024)
 	}()
 
 	ev := <-ch
@@ -26,10 +26,12 @@ func TestReadSSELargeLineDelivered(t *testing.T) {
 }
 
 func TestReadSSELineOverLimitIsTypedError(t *testing.T) {
-	huge := strings.Repeat("y", MaxEventLineBytes+1)
+	huge := strings.Repeat("y", (1024*1024+64*1024)+1)
 	ch := make(chan Event, 8)
 	done := make(chan error, 1)
-	go func() { done <- readSSE(context.Background(), strings.NewReader("data: "+huge+"\n\n"), ch, "") }()
+	go func() {
+		done <- readSSE(context.Background(), strings.NewReader("data: "+huge+"\n\n"), ch, "", 1024*1024+64*1024)
+	}()
 
 	err := <-done
 	if err == nil {
@@ -64,7 +66,7 @@ func TestReadSSEMidStreamFailureDeliversPriorEvents(t *testing.T) {
 	ch := make(chan Event, 8)
 	reader := &failingReader{}
 	done := make(chan error, 1)
-	go func() { done <- readSSE(context.Background(), reader, ch, "") }()
+	go func() { done <- readSSE(context.Background(), reader, ch, "", 1024*1024+64*1024) }()
 
 	ev := <-ch
 	if ev.Type != "delta" || ev.Delta != "partial" {
@@ -82,7 +84,7 @@ func TestReadSSEMidStreamFailureDeliversPriorEvents(t *testing.T) {
 
 func TestReadSSECleanEOFNoError(t *testing.T) {
 	ch := make(chan Event, 8)
-	if err := readSSE(context.Background(), strings.NewReader("data: {\"type\":\"session.idle\"}\n\n"), ch, ""); err != nil {
+	if err := readSSE(context.Background(), strings.NewReader("data: {\"type\":\"session.idle\"}\n\n"), ch, "", 1024*1024+64*1024); err != nil {
 		t.Fatalf("clean EOF must not error: %v", err)
 	}
 	if ev := <-ch; ev.Type != "done" {
@@ -96,7 +98,7 @@ func TestReadSSECancelIsNotReadFailure(t *testing.T) {
 	pr, pw := io.Pipe()
 
 	done := make(chan error, 1)
-	go func() { done <- readSSE(ctx, pr, ch, "") }()
+	go func() { done <- readSSE(ctx, pr, ch, "", 1024*1024+64*1024) }()
 
 	cancel()
 	_ = pw.Close() // unblock the pending read
@@ -126,7 +128,7 @@ func TestEventsLargeLineThroughHTTPServer(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	client := NewHTTPClient(ts.URL)
+	client := NewHTTPClient(ts.URL, testConfig())
 	events, err := client.Events(context.Background(), "sess-1")
 	if err != nil {
 		t.Fatalf("Events: %v", err)
@@ -677,7 +679,9 @@ func TestReadSSESessionScopedDropsForeignTerminal(t *testing.T) {
 
 	ch := make(chan Event, 8)
 	done := make(chan error, 1)
-	go func() { done <- readSSE(context.Background(), strings.NewReader(stream), ch, "ses-own") }()
+	go func() {
+		done <- readSSE(context.Background(), strings.NewReader(stream), ch, "ses-own", 1024*1024+64*1024)
+	}()
 
 	if err := <-done; err != nil {
 		t.Fatalf("readSSE: %v", err)
@@ -710,7 +714,9 @@ func TestReadSSESessionScopedMalformedEventDoesNotStrand(t *testing.T) {
 
 	ch := make(chan Event, 8)
 	done := make(chan error, 1)
-	go func() { done <- readSSE(context.Background(), strings.NewReader(stream), ch, "ses-own") }()
+	go func() {
+		done <- readSSE(context.Background(), strings.NewReader(stream), ch, "ses-own", 1024*1024+64*1024)
+	}()
 
 	if err := <-done; err != nil {
 		t.Fatalf("readSSE: %v", err)

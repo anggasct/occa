@@ -113,12 +113,12 @@ func TestStreamerUnificationInteractiveVsWebhookDiscord(t *testing.T) {
 	}
 
 	reply := newRecordReplyContext()
-	interactiveStreamer := relay.NewStreamer(reply, render.New(), render.Discord)
+	interactiveStreamer := relay.NewStreamer(reply, render.New(), render.Discord, 15*time.Minute)
 	runStreamerScript(t, interactiveStreamer, events)
 
 	backend := newRecordWebhookBackend()
 	webhookSink := NewWebhookSink("thread-1", "discord", backend.Send, backend.Edit)
-	webhookStreamer := relay.NewStreamerWithSink(webhookSink, render.New(), render.Discord)
+	webhookStreamer := relay.NewStreamerWithSink(webhookSink, render.New(), render.Discord, 15*time.Minute)
 	runStreamerScript(t, webhookStreamer, events)
 
 	if !reflect.DeepEqual(reply.sends, backend.sends) {
@@ -149,12 +149,12 @@ func TestStreamerUnificationInteractiveVsWebhookTelegram(t *testing.T) {
 	}
 
 	reply := newRecordReplyContext()
-	interactiveStreamer := relay.NewStreamer(reply, render.New(), render.Telegram)
+	interactiveStreamer := relay.NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	runStreamerScript(t, interactiveStreamer, events)
 
 	backend := newRecordWebhookBackend()
 	webhookSink := NewWebhookSink("-10012345:777", "telegram", backend.Send, backend.Edit)
-	webhookStreamer := relay.NewStreamerWithSink(webhookSink, render.New(), render.Telegram)
+	webhookStreamer := relay.NewStreamerWithSink(webhookSink, render.New(), render.Telegram, 15*time.Minute)
 	runStreamerScript(t, webhookStreamer, events)
 
 	if !reflect.DeepEqual(reply.sends, backend.sends) {
@@ -195,7 +195,7 @@ func TestWebhookTurnRootCardFirstTerminalCardLast(t *testing.T) {
 	}
 
 	sink := NewWebhookSink(channelID, "discord", backend.Send, backend.Edit)
-	streamer := relay.NewStreamerWithSink(sink, render.New(), render.Discord)
+	streamer := relay.NewStreamerWithSink(sink, render.New(), render.Discord, 15*time.Minute)
 
 	events := []relay.Event{
 		{Type: relay.EventReasoning},
@@ -242,7 +242,7 @@ func TestWebhookTurnRootCardFirstTerminalCardLast(t *testing.T) {
 func TestWebhookStreamerClampOnOversizedOutput(t *testing.T) {
 	backend := newRecordWebhookBackend()
 	sink := NewWebhookSink("thread-clamp", "discord", backend.Send, backend.Edit)
-	streamer := relay.NewStreamerWithSink(sink, render.New(), render.Discord)
+	streamer := relay.NewStreamerWithSink(sink, render.New(), render.Discord, 15*time.Minute)
 
 	oversized := strings.Repeat("Huge output line. ", 200)
 	events := []relay.Event{
@@ -303,7 +303,7 @@ func (c *fakeHeadlessClient) AbortSession(ctx context.Context, sessionID string)
 func TestWebhookTurnHeadlessPolicyCompletesWithoutButtons(t *testing.T) {
 	backend := newRecordWebhookBackend()
 	sink := NewWebhookSink("thread-headless", "discord", backend.Send, backend.Edit)
-	streamer := relay.NewStreamerWithSink(sink, render.New(), render.Discord)
+	streamer := relay.NewStreamerWithSink(sink, render.New(), render.Discord, 15*time.Minute)
 	streamer.SetWorkingEditInterval(-1)
 
 	client := &fakeHeadlessClient{
@@ -331,14 +331,16 @@ func TestWebhookTurnHeadlessPolicyCompletesWithoutButtons(t *testing.T) {
 	}
 
 	turn := relay.WebhookTurn{
-		Client:       client,
-		Prompt:       "Run task",
-		Platform:     "discord",
-		ChannelID:    "thread-headless",
-		DeliveryID:   "del-headless-1",
-		ExecutionKey: "key-1",
-		Attempt:      1,
-		Streamer:     streamer,
+		Client:        client,
+		Prompt:        "Run task",
+		Platform:      "discord",
+		ChannelID:     "thread-headless",
+		DeliveryID:    "del-headless-1",
+		ExecutionKey:  "key-1",
+		Attempt:       1,
+		AbortTimeout:  5 * time.Second,
+		VerifyTimeout: 15 * time.Second,
+		Streamer:      streamer,
 	}
 
 	res, err := turn.Run(context.Background())

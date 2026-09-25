@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/render"
@@ -52,7 +53,7 @@ func (h *mockEditHandle) EditWithButtons(ctx context.Context, text string, butto
 
 func TestStreamerWithCustomSink(t *testing.T) {
 	sink := &mockSink{}
-	s := NewStreamerWithSink(sink, render.New(), render.Telegram)
+	s := NewStreamerWithSink(sink, render.New(), render.Telegram, 15*time.Minute)
 
 	events := make(chan Event, 2)
 	events <- Event{Type: EventDelta, Delta: "hello sink"}

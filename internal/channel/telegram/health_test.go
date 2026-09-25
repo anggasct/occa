@@ -3,14 +3,14 @@ package telegram
 import "testing"
 
 func TestAdapterConnectedInitiallyFalse(t *testing.T) {
-	a := New("token", nil)
+	a := New("token", nil, Config{DownloadTimeout: 60 * 1000000000, MaxDownloadSize: 10 * 1024 * 1024})
 	if ok, detail := a.Connected(); ok {
 		t.Fatalf("Connected() = true,false before Start (detail %q)", detail)
 	}
 }
 
 func TestAdapterConnectedAfterInit(t *testing.T) {
-	a := New("token", nil)
+	a := New("token", nil, Config{DownloadTimeout: 60 * 1000000000, MaxDownloadSize: 10 * 1024 * 1024})
 	a.connected.Store(true)
 	if ok, _ := a.Connected(); !ok {
 		t.Fatal("Connected() = false after successful init")
@@ -18,7 +18,7 @@ func TestAdapterConnectedAfterInit(t *testing.T) {
 }
 
 func TestAdapterStopMarksDisconnected(t *testing.T) {
-	a := New("token", nil)
+	a := New("token", nil, Config{DownloadTimeout: 60 * 1000000000, MaxDownloadSize: 10 * 1024 * 1024})
 	a.connected.Store(true)
 	if err := a.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)

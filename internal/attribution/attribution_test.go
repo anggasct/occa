@@ -6,7 +6,7 @@ import (
 )
 
 func TestStorePutPopFIFO(t *testing.T) {
-	s := NewStore()
+	s := NewStore(30 * time.Second)
 	fp := Fingerprint("0 9 * * 1-5", "run tests", "weekdays at 9am")
 
 	s.Put(fp, "telegram", "c1")
@@ -26,7 +26,7 @@ func TestStorePutPopFIFO(t *testing.T) {
 }
 
 func TestStorePopDifferentFingerprintMiss(t *testing.T) {
-	s := NewStore()
+	s := NewStore(30 * time.Second)
 	s.Put(Fingerprint("0 9 * * 1-5", "a", "b"), "telegram", "c1")
 	if _, _, ok := s.Pop(Fingerprint("0 9 * * 1-5", "a", "c")); ok {
 		t.Fatal("expected miss for a different fingerprint")
@@ -34,7 +34,7 @@ func TestStorePopDifferentFingerprintMiss(t *testing.T) {
 }
 
 func TestStoreTTLExpiry(t *testing.T) {
-	s := NewStore()
+	s := NewStore(30 * time.Second)
 	fp := Fingerprint("0 9 * * 1-5", "run tests", "weekdays at 9am")
 	s.Put(fp, "telegram", "c1")
 

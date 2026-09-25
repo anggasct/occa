@@ -138,14 +138,15 @@ func emptyEvents() func() <-chan Event {
 func runWebhookTurn(t *testing.T, client *fakeWebhookTurnClient, ctx context.Context) (WebhookTurnResult, error) {
 	t.Helper()
 	turn := WebhookTurn{
-		Client:       client,
-		Prompt:       "analyze",
-		Platform:     "telegram",
-		ChannelID:    "chat-1",
-		DeliveryID:   "delivery-9",
-		ExecutionKey: "owner/repo:main",
-		Attempt:      1,
-		AbortTimeout: 50 * time.Millisecond,
+		Client:        client,
+		Prompt:        "analyze",
+		Platform:      "telegram",
+		ChannelID:     "chat-1",
+		DeliveryID:    "delivery-9",
+		ExecutionKey:  "owner/repo:main",
+		Attempt:       1,
+		AbortTimeout:  50 * time.Millisecond,
+		VerifyTimeout: 15 * time.Second,
 	}
 	return turn.Run(ctx)
 }

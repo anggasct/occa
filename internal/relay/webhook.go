@@ -10,13 +10,6 @@ import (
 	"time"
 )
 
-const defaultWebhookAbortTimeout = 5 * time.Second
-
-// verifyTimeout bounds the ListMessages call of the success sanity gate. It
-// runs after the terminal event already arrived, so a short deadline keeps a
-// hung agent read from stalling the delivery past its processing window.
-const verifyTimeout = 15 * time.Second
-
 var (
 	ErrWebhookSessionCreate      = errors.New("webhook session create failed")
 	ErrWebhookEventStream        = errors.New("webhook session event stream failed")
@@ -25,24 +18,19 @@ var (
 	ErrWebhookResponseIncomplete = errors.New("webhook response incomplete")
 )
 
-// WebhookTurn owns the agent-session lifecycle of one webhook delivery
-// attempt. It creates a fresh session, subscribes to that session's event
-// stream before the prompt is sent, and consumes only that stream, so no
-// other session's events can complete the turn. The session is never looked
-// up, resumed, or persisted; every failed, cancelled, or panicked exit aborts
-// it exactly once under a bounded cleanup deadline.
 type WebhookTurn struct {
-	Client       Client
-	Prompt       string
-	Model        *ModelRef
-	Platform     string
-	ChannelID    string
-	DeliveryID   string
-	ExecutionKey string
-	Attempt      int
-	AbortTimeout time.Duration
-	OnEvent      func(ev Event)
-	Streamer     *Streamer
+	Client        Client
+	Prompt        string
+	Model         *ModelRef
+	Platform      string
+	ChannelID     string
+	DeliveryID    string
+	ExecutionKey  string
+	Attempt       int
+	AbortTimeout  time.Duration
+	VerifyTimeout time.Duration
+	OnEvent       func(ev Event)
+	Streamer      *Streamer
 }
 
 type WebhookTurnResult struct {
@@ -56,9 +44,6 @@ type WebhookTurnResult struct {
 func (t WebhookTurn) Run(ctx context.Context) (res WebhookTurnResult, err error) {
 	if t.Client == nil {
 		return WebhookTurnResult{}, errors.New("relay: webhook turn: nil client")
-	}
-	if t.AbortTimeout <= 0 {
-		t.AbortTimeout = defaultWebhookAbortTimeout
 	}
 
 	sessionID, err := t.Client.CreateSession(ctx)
@@ -178,7 +163,7 @@ func (t WebhookTurn) verify(sessionID, output string) error {
 	if strings.TrimSpace(output) == "" {
 		return fmt.Errorf("%w: empty output buffer at terminal event", ErrWebhookResponseIncomplete)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), verifyTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), t.VerifyTimeout)
 	defer cancel()
 	messages, err := t.Client.ListMessages(ctx, sessionID)
 	if err != nil {

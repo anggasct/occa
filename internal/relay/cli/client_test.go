@@ -80,7 +80,7 @@ func drainEvents(t *testing.T, ch <-chan relay.Event) []relay.Event {
 
 func TestCreateSessionMintsPlaceholderWithoutSpawning(t *testing.T) {
 	runner := &fakeRunner{}
-	c := New("claude")
+	c := New("claude", 1024*1024+64*1024)
 	c.run = runner.runner()
 
 	sid, err := c.CreateSession(context.Background())
@@ -107,7 +107,7 @@ func TestSendMessageParsesJSONLAndResumes(t *testing.T) {
 {"type":"result","subtype":"success","result":"second turn","session_id":"real-1"}`,
 		},
 	}
-	c := New("claude")
+	c := New("claude", 1024*1024+64*1024)
 	c.run = runner.runner()
 
 	events, err := c.Events(context.Background(), "sess-a")
@@ -146,7 +146,7 @@ func TestSendMessageParsesJSONLAndResumes(t *testing.T) {
 
 func TestSendMessageModelFlag(t *testing.T) {
 	runner := &fakeRunner{outputs: []string{`{"type":"result","session_id":"r1"}`}}
-	c := New("claude")
+	c := New("claude", 1024*1024+64*1024)
 	c.run = runner.runner()
 
 	events, _ := c.Events(context.Background(), "sess")
@@ -163,7 +163,7 @@ func TestSendMessageModelFlag(t *testing.T) {
 
 func TestSendMessageRejectsAttachments(t *testing.T) {
 	runner := &fakeRunner{}
-	c := New("claude")
+	c := New("claude", 1024*1024+64*1024)
 	c.run = runner.runner()
 
 	err := c.SendMessage(context.Background(), "sess", "hi", nil, []relay.Attachment{{Filename: "a.txt"}})
@@ -183,7 +183,7 @@ func TestNonZeroExitSurfacesStderrEvent(t *testing.T) {
 		waits:   []error{errors.New("exit status 1")},
 		stderrs: []string{"tool denied: write /tmp/x"},
 	}
-	c := New("claude")
+	c := New("claude", 1024*1024+64*1024)
 	c.run = runner.runner()
 
 	events, _ := c.Events(context.Background(), "sess")
@@ -201,7 +201,7 @@ func TestNonZeroExitSurfacesStderrEvent(t *testing.T) {
 
 func TestEmptyOutputIsErrorNotSilence(t *testing.T) {
 	runner := &fakeRunner{outputs: []string{""}}
-	c := New("claude")
+	c := New("claude", 1024*1024+64*1024)
 	c.run = runner.runner()
 
 	events, _ := c.Events(context.Background(), "sess")
@@ -219,7 +219,7 @@ func TestEmptyOutputIsErrorNotSilence(t *testing.T) {
 
 func TestEmptyOutputCarriesStderrNotice(t *testing.T) {
 	runner := &fakeRunner{outputs: []string{""}, stderrs: []string{"tool soft-denied: read /etc/passwd"}}
-	c := New("claude")
+	c := New("claude", 1024*1024+64*1024)
 	c.run = runner.runner()
 
 	events, _ := c.Events(context.Background(), "sess")
@@ -234,7 +234,7 @@ func TestEmptyOutputCarriesStderrNotice(t *testing.T) {
 
 func TestRunCommandPassesThroughAsPrompt(t *testing.T) {
 	runner := &fakeRunner{outputs: []string{`{"type":"result","session_id":"r1"}`}}
-	c := New("claude")
+	c := New("claude", 1024*1024+64*1024)
 	c.run = runner.runner()
 
 	events, _ := c.Events(context.Background(), "sess")
@@ -251,7 +251,7 @@ func TestRunCommandPassesThroughAsPrompt(t *testing.T) {
 
 func TestSpawnFailureReturnsErrorAndClosesStream(t *testing.T) {
 	runner := &fakeRunner{spawnErr: errors.New("exec: claude not found")}
-	c := New("claude")
+	c := New("claude", 1024*1024+64*1024)
 	c.run = runner.runner()
 
 	events, _ := c.Events(context.Background(), "sess")
@@ -266,7 +266,7 @@ func TestSpawnFailureReturnsErrorAndClosesStream(t *testing.T) {
 }
 
 func TestReplyPermissionUnsupported(t *testing.T) {
-	c := New("claude")
+	c := New("claude", 1024*1024+64*1024)
 	if err := c.ReplyPermission(context.Background(), "req", relay.PermissionOnce); err == nil {
 		t.Fatal("expected unsupported error")
 	}
@@ -294,7 +294,7 @@ func TestLargeLineDeliveredUpToCeiling(t *testing.T) {
 	big := strings.Repeat("x", 100*1024)
 	line := `{"type":"stream_event","event":{"type":"content_block_delta","delta":{"text":"` + big + `"}}}`
 	runner := &fakeRunner{outputs: []string{line + "\n" + `{"type":"result","session_id":"r1"}` + "\n"}}
-	c := New("claude")
+	c := New("claude", 1024*1024+64*1024)
 	c.run = runner.runner()
 
 	events, _ := c.Events(context.Background(), "sess")
@@ -308,10 +308,10 @@ func TestLargeLineDeliveredUpToCeiling(t *testing.T) {
 }
 
 func TestOverCeilingLineSurfacesErrorEvent(t *testing.T) {
-	huge := strings.Repeat("y", relay.MaxEventLineBytes+1)
+	huge := strings.Repeat("y", (1024*1024+64*1024)+1)
 	line := `{"type":"stream_event","event":{"type":"content_block_delta","delta":{"text":"` + huge + `"}}}`
 	runner := &fakeRunner{outputs: []string{line + "\n"}}
-	c := New("claude")
+	c := New("claude", 1024*1024+64*1024)
 	c.run = runner.runner()
 
 	events, _ := c.Events(context.Background(), "sess")
@@ -329,7 +329,7 @@ func TestOverCeilingLineSurfacesErrorEvent(t *testing.T) {
 
 func TestNonSuccessResultSubtypeIsError(t *testing.T) {
 	runner := &fakeRunner{outputs: []string{`{"type":"result","subtype":"error_limit","session_id":"r1"}` + "\n"}}
-	c := New("claude")
+	c := New("claude", 1024*1024+64*1024)
 	c.run = runner.runner()
 
 	events, _ := c.Events(context.Background(), "sess")
@@ -350,7 +350,7 @@ func min(a, b int) int {
 }
 
 func TestListCommandsReturnsEmpty(t *testing.T) {
-	c := New("claude")
+	c := New("claude", 1024*1024+64*1024)
 	commands, err := c.ListCommands(context.Background())
 	if err != nil {
 		t.Fatalf("ListCommands: %v", err)
@@ -361,7 +361,7 @@ func TestListCommandsReturnsEmpty(t *testing.T) {
 }
 
 func TestListAgentsReturnsUnsupported(t *testing.T) {
-	c := New("claude")
+	c := New("claude", 1024*1024+64*1024)
 	agents, err := c.ListAgents(context.Background())
 	if !errors.Is(err, relay.ErrUnsupported) {
 		t.Fatalf("expected ErrUnsupported, got %v", err)
@@ -372,7 +372,7 @@ func TestListAgentsReturnsUnsupported(t *testing.T) {
 }
 
 func TestSwitchAgentReturnsUnsupported(t *testing.T) {
-	c := New("claude")
+	c := New("claude", 1024*1024+64*1024)
 	err := c.SwitchAgent(context.Background(), "s1", "reviewer")
 	if !errors.Is(err, relay.ErrUnsupported) {
 		t.Fatalf("expected ErrUnsupported, got %v", err)

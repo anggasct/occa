@@ -103,7 +103,7 @@ func (f *flakyCardSink) SendTyping(ctx context.Context) error {
 
 func TestStreamerPerPhaseCardsStepCarry(t *testing.T) {
 	reply := &auditingReply{fakeReplyContext: newFakeReplyContext()}
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	s.SetStopCallbackData("stop:turn-1")
 	s.workingEditInterval = -1
 
@@ -160,7 +160,7 @@ func TestStreamerPerPhaseCardsStepCarry(t *testing.T) {
 
 func TestStreamerStepMonotonicAcrossPhases(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	s.workingEditInterval = -1
 
 	events := make(chan Event, 12)
@@ -218,7 +218,7 @@ func TestStreamerStepMonotonicAcrossPhases(t *testing.T) {
 func TestStreamerSupersededCardStripsStopButton(t *testing.T) {
 	reply := newFakeReplyContext()
 	sink := &flakyCardSink{reply: reply, failSends: 1}
-	s := NewStreamerWithSink(sink, render.New(), render.Telegram)
+	s := NewStreamerWithSink(sink, render.New(), render.Telegram, 15*time.Minute)
 	s.SetStopCallbackData("stop:turn-2")
 	s.workingEditInterval = -1
 
@@ -261,7 +261,7 @@ func TestStreamerSupersededCardStripsStopButton(t *testing.T) {
 func TestStreamerStreamEndStripsAllTurnCards(t *testing.T) {
 	reply := newFakeReplyContext()
 	sink := &flakyCardSink{reply: reply, failSends: 1}
-	s := NewStreamerWithSink(sink, render.New(), render.Telegram)
+	s := NewStreamerWithSink(sink, render.New(), render.Telegram, 15*time.Minute)
 	s.SetStopCallbackData("stop:turn-3")
 	s.workingEditInterval = -1
 
@@ -291,7 +291,7 @@ func TestStreamerStreamEndStripsAllTurnCards(t *testing.T) {
 
 func TestStreamerReasoningFreezesOnPhaseCard(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	s.workingEditInterval = -1
 
 	var now atomic.Int64
@@ -398,7 +398,7 @@ func (h *countingQuestionHandler) Prompt(_ context.Context, req QuestionRequest)
 
 func TestStreamerPromptsDuringInterleavedTurn(t *testing.T) {
 	reply := &auditingReply{fakeReplyContext: newFakeReplyContext()}
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	s.SetStopCallbackData("stop:turn-4")
 	s.workingEditInterval = -1
 

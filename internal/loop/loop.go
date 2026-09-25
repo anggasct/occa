@@ -10,21 +10,21 @@ import (
 	"unicode/utf8"
 )
 
-const (
-	MinInterval    = 30 * time.Second
-	MaxInterval    = time.Hour
-	MinCount       = 2
-	MaxCount       = 60
-	MinDuration    = time.Minute
-	MaxDuration    = 4 * time.Hour
-	MaxPromptRunes = 1000
-	MaxPerConv     = 1
-	MaxGlobal      = 20
+const PromptPrefixRunes = 40
 
-	iterationTimeout  = 10 * time.Minute
-	maxWallAge        = 4 * time.Hour
-	promptPrefixRunes = 40
-)
+type Config struct {
+	MinInterval        time.Duration
+	MaxInterval        time.Duration
+	MinDuration        time.Duration
+	MaxDuration        time.Duration
+	IterationTimeout   time.Duration
+	MaxWallAge         time.Duration
+	MinCount           int
+	MaxCount           int
+	MaxPromptRunes     int
+	MaxPerConversation int
+	MaxGlobal          int
+}
 
 type Conversation struct {
 	Platform  string
@@ -92,6 +92,7 @@ type Looper struct {
 	busy BusyFunc
 	now  func() time.Time
 	tick func(time.Duration) Ticker
+	cfg  Config
 
 	mu    sync.Mutex
 	base  context.Context
@@ -110,7 +111,11 @@ func WithTicker(tick func(time.Duration) Ticker) Option {
 	return func(l *Looper) { l.tick = tick }
 }
 
-func New(exec Executor, note Notifier, busy BusyFunc, opts ...Option) *Looper {
+func WithConfig(cfg Config) Option {
+	return func(l *Looper) { l.cfg = cfg }
+}
+
+func New(exec Executor, note Notifier, busy BusyFunc, cfg Config, opts ...Option) *Looper {
 	if exec == nil {
 		exec = func(context.Context, Conversation, string) (string, error) { return "", nil }
 	}
@@ -127,6 +132,7 @@ func New(exec Executor, note Notifier, busy BusyFunc, opts ...Option) *Looper {
 		busy:  busy,
 		now:   time.Now,
 		tick:  func(d time.Duration) Ticker { return realTicker{time.NewTicker(d)} },
+		cfg:   cfg,
 		base:  base,
 		stop:  stop,
 		loops: make(map[int64]*entry),
@@ -140,7 +146,7 @@ func New(exec Executor, note Notifier, busy BusyFunc, opts ...Option) *Looper {
 var ErrGlobalLimit = fmt.Errorf("loop: too many active loops")
 
 func (l *Looper) Create(conv Conversation, req Request) (Info, error) {
-	if err := check(req); err != nil {
+	if err := l.check(req); err != nil {
 		return Info{}, err
 	}
 	l.mu.Lock()
@@ -157,7 +163,7 @@ func (l *Looper) Create(conv Conversation, req Request) (Info, error) {
 			live++
 		}
 	}
-	if live >= MaxGlobal {
+	if live >= l.cfg.MaxGlobal {
 		l.mu.Unlock()
 		return Info{}, ErrGlobalLimit
 	}
@@ -172,7 +178,7 @@ func (l *Looper) Create(conv Conversation, req Request) (Info, error) {
 	}
 	if req.Count > 0 {
 		e.remaining = req.Count
-		e.deadline = now.Add(maxWallAge)
+		e.deadline = now.Add(l.cfg.MaxWallAge)
 	} else {
 		e.deadline = now.Add(req.Length)
 	}
@@ -194,26 +200,34 @@ func fingerprint(conv Conversation) string {
 	return conv.Platform + ":" + conv.ChannelID + ":" + conv.ThreadID + ":" + conv.UserID
 }
 
-func check(req Request) error {
-	if req.Interval < MinInterval || req.Interval > MaxInterval {
-		return fmt.Errorf("loop: interval %s outside %s-%s", req.Interval, MinInterval, MaxInterval)
+func (l *Looper) check(req Request) error {
+	return checkRequest(req, l.cfg)
+}
+
+func (l *Looper) Config() Config {
+	return l.cfg
+}
+
+func checkRequest(req Request, cfg Config) error {
+	if req.Interval < cfg.MinInterval || req.Interval > cfg.MaxInterval {
+		return fmt.Errorf("loop: interval %s outside %s-%s", req.Interval, cfg.MinInterval, cfg.MaxInterval)
 	}
 	if req.Prompt == "" {
 		return fmt.Errorf("loop: empty prompt")
 	}
-	if utf8.RuneCountInString(req.Prompt) > MaxPromptRunes {
-		return fmt.Errorf("loop: prompt exceeds %d characters", MaxPromptRunes)
+	if utf8.RuneCountInString(req.Prompt) > cfg.MaxPromptRunes {
+		return fmt.Errorf("loop: prompt exceeds %d characters", cfg.MaxPromptRunes)
 	}
 	hasCount := req.Count > 0
 	hasLength := req.Length > 0
 	if hasCount == hasLength {
 		return fmt.Errorf("loop: need exactly one of count or duration")
 	}
-	if hasCount && (req.Count < MinCount || req.Count > MaxCount) {
-		return fmt.Errorf("loop: count %d outside %d-%d", req.Count, MinCount, MaxCount)
+	if hasCount && (req.Count < cfg.MinCount || req.Count > cfg.MaxCount) {
+		return fmt.Errorf("loop: count %d outside %d-%d", req.Count, cfg.MinCount, cfg.MaxCount)
 	}
-	if hasLength && (req.Length < MinDuration || req.Length > MaxDuration) {
-		return fmt.Errorf("loop: duration %s outside %s-%s", req.Length, MinDuration, MaxDuration)
+	if hasLength && (req.Length < cfg.MinDuration || req.Length > cfg.MaxDuration) {
+		return fmt.Errorf("loop: duration %s outside %s-%s", req.Length, cfg.MinDuration, cfg.MaxDuration)
 	}
 	return nil
 }
@@ -271,7 +285,7 @@ func (l *Looper) fire(id int64) {
 	conv, prompt := e.conv, e.prompt
 	l.mu.Unlock()
 
-	execCtx, cancel := context.WithTimeout(e.ctx, iterationTimeout)
+	execCtx, cancel := context.WithTimeout(e.ctx, l.cfg.IterationTimeout)
 	out, execErr := l.exec(execCtx, conv, prompt)
 	cancel()
 

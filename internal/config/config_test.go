@@ -12,6 +12,12 @@ import (
 
 func writeConfig(t *testing.T, dir, content string) string {
 	t.Helper()
+	if content != "" && !strings.Contains(content, "\nruntime:\n") {
+		content += "\n" + validRuntimeYAML()
+	}
+	if content == "" {
+		content = validRuntimeYAML()
+	}
 	path := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -284,7 +290,7 @@ func TestWebhookLoopbackValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.bind, func(t *testing.T) {
-			yaml := fmt.Sprintf("webhooks:\n  policy:\n    trust_review_logins: []\n    verdicts:\n      approved: ['approved']\n      request_changes: ['request_changes']\n  runtime:\n    max_body_size: 10MB\n    max_concurrent_events: 16\n    max_queued_per_key: 8\n    processing_timeout: 30m\n    claim_grace: 32m\n    retry_after: 30s\n    workspace_retry_backoff: [30s, 60s, 120s]\n    retention: 720h\n    retention_keep: 500\n    prune_interval: 10m\n    dispatcher_idle_ttl: 1h\n    http_read_header_timeout: 10s\n    http_read_timeout: 30s\n    http_write_timeout: 30s\n    http_idle_timeout: 2m\n    review_dedupe_window: 60m\n    isolated_workspace_ttl: 24h\n    usage_retention: 2160h\n    usage_max_rows: 100000\n    recovery_event_retention: 720h\n  bind: %q\n  endpoints:\n    - name: test\n      path: /test\n      secret: s\n      platform: telegram\n      channel_id: c1\n      prompt: p\n      admit:\n        - event: ping\n      workspace:\n        type: none\n", tt.bind)
+			yaml := fmt.Sprintf("webhooks:\n  policy:\n    trust_review_logins: []\n    verdicts:\n      approved: ['approved']\n      request_changes: ['request_changes']\n  runtime:\n    max_body_size: 10MB\n    max_concurrent_events: 16\n    max_queued_per_key: 8\n    processing_timeout: 30m\n    claim_grace: 32m\n    retry_after: 30s\n    workspace_retry_backoff: [30s, 60s, 120s]\n    retention: 720h\n    retention_keep: 500\n    prune_interval: 10m\n    dispatcher_idle_ttl: 1h\n    http_read_header_timeout: 10s\n    http_read_timeout: 30s\n    http_write_timeout: 30s\n    http_idle_timeout: 2m\n    review_dedupe_window: 60m\n    isolated_workspace_ttl: 24h\n  bind: %q\n  endpoints:\n    - name: test\n      path: /test\n      secret: s\n      platform: telegram\n      channel_id: c1\n      prompt: p\n      admit:\n        - event: ping\n      workspace:\n        type: none\n", tt.bind)
 			path := writeConfig(t, t.TempDir(), yaml)
 			_, err := Load(path)
 			if tt.wantErr && err == nil {
@@ -335,9 +341,6 @@ func TestWebhookEmptySecretValidation(t *testing.T) {
     http_idle_timeout: 2m
     review_dedupe_window: 60m
     isolated_workspace_ttl: 24h
-    usage_retention: 2160h
-    usage_max_rows: 100000
-    recovery_event_retention: 720h
   endpoints:
     - name: test
       path: /test
@@ -385,9 +388,6 @@ func TestWebhookDuplicatePathValidation(t *testing.T) {
     http_idle_timeout: 2m
     review_dedupe_window: 60m
     isolated_workspace_ttl: 24h
-    usage_retention: 2160h
-    usage_max_rows: 100000
-    recovery_event_retention: 720h
   endpoints:
     - name: first
       path: /same
@@ -455,9 +455,6 @@ func TestWebhookAuthModeValidation(t *testing.T) {
     http_idle_timeout: 2m
     review_dedupe_window: 60m
     isolated_workspace_ttl: 24h
-    usage_retention: 2160h
-    usage_max_rows: 100000
-    recovery_event_retention: 720h
   endpoints:
     - name: gh
       path: /gh
@@ -498,9 +495,6 @@ func TestWebhookAuthModeValidation(t *testing.T) {
     http_idle_timeout: 2m
     review_dedupe_window: 60m
     isolated_workspace_ttl: 24h
-    usage_retention: 2160h
-    usage_max_rows: 100000
-    recovery_event_retention: 720h
   endpoints:
     - name: gh-padded
       path: /gh-padded
@@ -541,9 +535,6 @@ func TestWebhookAuthModeValidation(t *testing.T) {
     http_idle_timeout: 2m
     review_dedupe_window: 60m
     isolated_workspace_ttl: 24h
-    usage_retention: 2160h
-    usage_max_rows: 100000
-    recovery_event_retention: 720h
   endpoints:
     - name: legacy
       path: /legacy
@@ -584,9 +575,6 @@ func TestWebhookAuthModeValidation(t *testing.T) {
     http_idle_timeout: 2m
     review_dedupe_window: 60m
     isolated_workspace_ttl: 24h
-    usage_retention: 2160h
-    usage_max_rows: 100000
-    recovery_event_retention: 720h
   endpoints:
     - name: invalid
       path: /invalid
@@ -628,9 +616,6 @@ func TestWebhookAuthModeValidation(t *testing.T) {
     http_idle_timeout: 2m
     review_dedupe_window: 60m
     isolated_workspace_ttl: 24h
-    usage_retention: 2160h
-    usage_max_rows: 100000
-    recovery_event_retention: 720h
   endpoints:
     - name: gh
       path: /gh
@@ -761,9 +746,6 @@ func testWebhookConfigYAML(endpoints string) string {
     http_idle_timeout: 2m
     review_dedupe_window: 60m
     isolated_workspace_ttl: 24h
-    usage_retention: 2160h
-    usage_max_rows: 100000
-    recovery_event_retention: 720h
   endpoints:
 ` + endpoints
 }
@@ -859,9 +841,6 @@ func TestEndpointThreadAndProgressCardConfig(t *testing.T) {
     http_idle_timeout: 2m
     review_dedupe_window: 60m
     isolated_workspace_ttl: 24h
-    usage_retention: 2160h
-    usage_max_rows: 100000
-    recovery_event_retention: 720h
   endpoints:
     - name: ep-defaults
       path: /defaults
@@ -934,9 +913,6 @@ func TestEndpointProgressCardAliasAndThreadID(t *testing.T) {
     http_idle_timeout: 2m
     review_dedupe_window: 60m
     isolated_workspace_ttl: 24h
-    usage_retention: 2160h
-    usage_max_rows: 100000
-    recovery_event_retention: 720h
   endpoints:
     - name: ep-thread-alias
       path: /thread-alias
@@ -1087,9 +1063,6 @@ func TestWebhookEndpointModelValidation(t *testing.T) {
     http_idle_timeout: 2m
     review_dedupe_window: 60m
     isolated_workspace_ttl: 24h
-    usage_retention: 2160h
-    usage_max_rows: 100000
-    recovery_event_retention: 720h
   endpoints:
     - name: test
       path: /test
@@ -1153,9 +1126,6 @@ func TestWebhookEndpointCommentTrigger(t *testing.T) {
     http_idle_timeout: 2m
     review_dedupe_window: 60m
     isolated_workspace_ttl: 24h
-    usage_retention: 2160h
-    usage_max_rows: 100000
-    recovery_event_retention: 720h
   endpoints:
     - name: with-trigger
       path: /with-trigger

@@ -63,7 +63,7 @@ func (f *fakeSpawner) factory() instanceFactory {
 			workdir: workdir,
 			addr:    srv.URL,
 			port:    port,
-			client:  relay.NewHTTPClient(srv.URL),
+			client:  relay.NewHTTPClient(srv.URL, relay.Config{ClientTimeout: 3 * time.Minute, MaxAttachmentBytes: 10 * 1024 * 1024, MaxEventLineBytes: 1024*1024 + 64*1024}),
 			stop: func() {
 				srv.Close()
 				f.mu.Lock()

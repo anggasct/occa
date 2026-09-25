@@ -171,7 +171,7 @@ func waitForSends(reply *permissionReply) {
 }
 
 func fastPermissionBroker() *permissionBroker {
-	broker := newPermissionBroker(nil)
+	broker := newPermissionBroker(nil, 10*time.Minute)
 	broker.window = 15 * time.Millisecond
 	return broker
 }

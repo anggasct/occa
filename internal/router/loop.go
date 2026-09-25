@@ -72,7 +72,7 @@ func (r *Router) handleLoops(_ context.Context, msg channel.IncomingMessage, arg
 }
 
 func (r *Router) createLoop(msg channel.IncomingMessage, args string) string {
-	req, err := loop.ParseRequest(args)
+	req, err := loop.ParseRequest(args, r.loops.Config())
 	if err != nil {
 		return loop.Usage
 	}
@@ -119,7 +119,7 @@ func (r *Router) listLoops(msg channel.IncomingMessage) string {
 		if info.Total == 0 {
 			left = loop.FormatLeft(info.Deadline.Sub(now))
 		}
-		fmt.Fprintf(&sb, "• [%d] every %s, %s — %s\n", info.ID, loop.FormatInterval(info.Interval), left, loop.TruncateRunes(info.Prompt, 40))
+		fmt.Fprintf(&sb, "• [%d] every %s, %s — %s\n", info.ID, loop.FormatInterval(info.Interval), left, loop.TruncateRunes(info.Prompt, loop.PromptPrefixRunes))
 	}
 	return strings.TrimRight(sb.String(), "\n")
 }

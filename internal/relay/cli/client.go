@@ -24,19 +24,21 @@ type runResult struct {
 type runner func(ctx context.Context, binary string, args []string) (*runResult, error)
 
 type Client struct {
-	binary  string
-	run     runner
-	mu      sync.Mutex
-	realIDs map[string]string
-	streams map[string]chan relay.Event
+	binary       string
+	maxLineBytes int
+	run          runner
+	mu           sync.Mutex
+	realIDs      map[string]string
+	streams      map[string]chan relay.Event
 }
 
-func New(binary string) *Client {
+func New(binary string, maxLineBytes int) *Client {
 	return &Client{
-		binary:  binary,
-		run:     execRunner,
-		realIDs: make(map[string]string),
-		streams: make(map[string]chan relay.Event),
+		binary:       binary,
+		maxLineBytes: maxLineBytes,
+		run:          execRunner,
+		realIDs:      make(map[string]string),
+		streams:      make(map[string]chan relay.Event),
 	}
 }
 
@@ -165,7 +167,7 @@ func (c *Client) stream(ctx context.Context, sessionID string, ch chan<- relay.E
 	p := &parser{}
 	events := 0
 	scanner := bufio.NewScanner(res.stdout)
-	scanner.Buffer(make([]byte, 64*1024), relay.MaxEventLineBytes+1)
+	scanner.Buffer(make([]byte, 64*1024), c.maxLineBytes+1)
 	for scanner.Scan() {
 		if ev := p.parseLine(scanner.Bytes()); ev != nil {
 			events++
