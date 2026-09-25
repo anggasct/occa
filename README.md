@@ -193,6 +193,10 @@ runtime:
 
 `comment_trigger` is a per-endpoint list of case-insensitive substrings matched against comment bodies. An endpoint with no matching rule executes nothing; the loop guards stay (per-PR trigger cap via `limits`, rate limits, prompt-level "never post a trigger phrase").
 
+Everything under `runtime` is required tuning: the network, durability, capacity and pagination values the binary sizes itself with. The same fail-closed contract applies — no built-in defaults, no fallbacks — so a missing or unknown key, or a cross-field violation (e.g. `min_interval > max_duration`), refuses startup naming the block and key. Copy `config.example.yaml` as the starting template and validate with `occa webhooks check-config --config <path>`.
+
+Not every number is tuning. Pacing that shapes a single interaction (typing tick, working-edit backoff ladder, progress ticker), poll tickers that only sample a configured deadline, and hard platform API limits (Discord action-row and button caps, Telegram message limits) stay in code by design. The in-code residue is a fixed allowlist — 15 duration literals for shutdown drain waits, typing/edit cadence, Telegram init backoff, the agent-browser retry delay, the progress ticker, readiness/reap poll pacing and permission-prompt coalescing — and CI fails any change whose duration literals over `internal/` and `cmd/` do not match that allowlist exactly, so tuning cannot quietly reappear in code.
+
 ## Database backup and restore
 
 Use the operator commands to protect the SQLite store during upgrades:
