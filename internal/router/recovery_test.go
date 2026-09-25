@@ -137,7 +137,7 @@ func newRecoveryTestRouter(provider InstanceProvider, client *fakeRelayClient, s
 		scheduleRepo:   &fakeScheduleRepo{},
 		recoveryEvents: recoveryRepo,
 	}
-	return NewWithAllowlists(provider, st, "/default-workdir", "", []string{"user1", "user2", "user3"}, []string{"user1", "user2", "user3"}), recoveryRepo
+	return NewWithAllowlists(provider, st, "/default-workdir", "", []string{"user1", "user2", "user3"}, []string{"user1", "user2", "user3"}, testRouterConfig()), recoveryRepo
 }
 
 func waitForRecoveryEvents(t *testing.T, repo *fakeRecoveryEventRepo, want int) []store.RecoveryEvent {
@@ -155,7 +155,7 @@ func waitForRecoveryEvents(t *testing.T, repo *fakeRecoveryEventRepo, want int) 
 }
 
 func TestRecoveryCoordinatorSingleFlight(t *testing.T) {
-	c := newRecoveryCoordinator()
+	c := newRecoveryCoordinator(10*time.Second, 40*time.Second)
 	if ok, reason := c.beginAttempt("/w"); !ok {
 		t.Fatalf("first beginAttempt refused: %s", reason)
 	}
@@ -170,7 +170,7 @@ func TestRecoveryCoordinatorSingleFlight(t *testing.T) {
 
 func TestRecoveryCoordinatorSuppressedTriggersLeaveBackoffUnchanged(t *testing.T) {
 	now := time.Unix(1000, 0)
-	c := newRecoveryCoordinator()
+	c := newRecoveryCoordinator(10*time.Second, 40*time.Second)
 	c.now = func() time.Time { return now }
 	c.baseDelay = 10 * time.Second
 
@@ -191,7 +191,7 @@ func TestRecoveryCoordinatorSuppressedTriggersLeaveBackoffUnchanged(t *testing.T
 
 func TestRecoveryCoordinatorBackoff(t *testing.T) {
 	now := time.Unix(1000, 0)
-	c := newRecoveryCoordinator()
+	c := newRecoveryCoordinator(10*time.Second, 40*time.Second)
 	c.now = func() time.Time { return now }
 	c.baseDelay = 10 * time.Second
 	c.maxDelay = 40 * time.Second

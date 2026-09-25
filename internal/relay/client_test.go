@@ -25,7 +25,7 @@ func TestCreateSession(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewHTTPClient(srv.URL)
+	c := NewHTTPClient(srv.URL, testConfig())
 	id, err := c.CreateSession(context.Background())
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
@@ -44,7 +44,7 @@ func TestSendMessage(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewHTTPClient(srv.URL)
+	c := NewHTTPClient(srv.URL, testConfig())
 	err := c.SendMessage(context.Background(), "s1", "hello", nil, nil)
 	if err != nil {
 		t.Fatalf("SendMessage: %v", err)
@@ -61,7 +61,7 @@ func TestSendMessageWithModel(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewHTTPClient(srv.URL)
+	c := NewHTTPClient(srv.URL, testConfig())
 	err := c.SendMessage(context.Background(), "s1", "hello", &ModelRef{ProviderID: "openai", ID: "gpt-4o"}, nil)
 	if err != nil {
 		t.Fatalf("SendMessage: %v", err)
@@ -86,7 +86,7 @@ func TestProviders(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	providers, err := NewHTTPClient(srv.URL).Providers(context.Background())
+	providers, err := NewHTTPClient(srv.URL, testConfig()).Providers(context.Background())
 	if err != nil {
 		t.Fatalf("Providers: %v", err)
 	}
@@ -108,14 +108,14 @@ func TestProvidersPreservesSentinelCauses(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		_, err := NewHTTPClient(srv.URL).Providers(context.Background())
+		_, err := NewHTTPClient(srv.URL, testConfig()).Providers(context.Background())
 		if !errors.Is(err, ErrNotFound) {
 			t.Fatalf("expected ErrNotFound, got: %v", err)
 		}
 	})
 
 	t.Run("unreachable", func(t *testing.T) {
-		_, err := NewHTTPClient("http://127.0.0.1:1").Providers(context.Background())
+		_, err := NewHTTPClient("http://127.0.0.1:1", testConfig()).Providers(context.Background())
 		if !errors.Is(err, ErrUnreachable) {
 			t.Fatalf("expected ErrUnreachable, got: %v", err)
 		}
@@ -132,7 +132,7 @@ func TestListCommands(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	commands, err := NewHTTPClient(srv.URL).ListCommands(context.Background())
+	commands, err := NewHTTPClient(srv.URL, testConfig()).ListCommands(context.Background())
 	if err != nil {
 		t.Fatalf("ListCommands: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestListCommands(t *testing.T) {
 }
 
 func TestListCommandsUnreachable(t *testing.T) {
-	_, err := NewHTTPClient("http://127.0.0.1:1").ListCommands(context.Background())
+	_, err := NewHTTPClient("http://127.0.0.1:1", testConfig()).ListCommands(context.Background())
 	if !errors.Is(err, ErrUnreachable) {
 		t.Fatalf("expected ErrUnreachable, got %v", err)
 	}
@@ -163,7 +163,7 @@ func TestRunCommand(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewHTTPClient(srv.URL)
+	c := NewHTTPClient(srv.URL, testConfig())
 	err := c.RunCommand(context.Background(), "s1", "/plan build a thing")
 	if err != nil {
 		t.Fatalf("RunCommand: %v", err)
@@ -182,7 +182,7 @@ func TestRunCommandNoArgs(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewHTTPClient(srv.URL)
+	c := NewHTTPClient(srv.URL, testConfig())
 	if err := c.RunCommand(context.Background(), "s1", "/review"); err != nil {
 		t.Fatalf("RunCommand: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestRunCommandNoArgs(t *testing.T) {
 }
 
 func TestUnreachable(t *testing.T) {
-	c := NewHTTPClient("http://127.0.0.1:1")
+	c := NewHTTPClient("http://127.0.0.1:1", testConfig())
 	_, err := c.CreateSession(context.Background())
 	if err == nil {
 		t.Fatal("expected error")
@@ -208,7 +208,7 @@ func TestNotFound(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewHTTPClient(srv.URL)
+	c := NewHTTPClient(srv.URL, testConfig())
 	err := c.SendMessage(context.Background(), "bad", "hello", nil, nil)
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got: %v", err)
@@ -228,7 +228,7 @@ func TestEvents(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewHTTPClient(srv.URL)
+	c := NewHTTPClient(srv.URL, testConfig())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -278,7 +278,7 @@ func TestEventsConcurrentSessionsStayIsolated(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewHTTPClient(srv.URL)
+	c := NewHTTPClient(srv.URL, testConfig())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -323,7 +323,7 @@ func TestEventsConcurrentSessionsStayIsolated(t *testing.T) {
 }
 
 func TestWrapTransportErrPreservesCancel(t *testing.T) {
-	c := NewHTTPClient("http://127.0.0.1:1")
+	c := NewHTTPClient("http://127.0.0.1:1", testConfig())
 	err := c.wrapTransportErr(context.Canceled)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("want context.Canceled preserved, got %v", err)
@@ -345,7 +345,7 @@ func TestAnswerQuestionPostsPayload(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewHTTPClient(srv.URL)
+	c := NewHTTPClient(srv.URL, testConfig())
 	if err := c.AnswerQuestion(context.Background(), "que_1", [][]string{{"A"}, {}}); err != nil {
 		t.Fatalf("AnswerQuestion: %v", err)
 	}
@@ -361,7 +361,7 @@ func TestAnswerQuestionPostsPayload(t *testing.T) {
 }
 
 func TestNewHTTPClientTimeout(t *testing.T) {
-	c := NewHTTPClient("http://localhost:8080")
+	c := NewHTTPClient("http://localhost:8080", testConfig())
 	if c.http.Timeout != 3*time.Minute {
 		t.Fatalf("timeout = %v, want 3m", c.http.Timeout)
 	}
@@ -374,7 +374,7 @@ func TestAnswerQuestionErrorBodyReturned(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewHTTPClient(srv.URL)
+	c := NewHTTPClient(srv.URL, testConfig())
 	err := c.AnswerQuestion(context.Background(), "que_1", [][]string{{"A"}})
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -391,7 +391,7 @@ func TestRejectQuestionErrorBodyReturned(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewHTTPClient(srv.URL)
+	c := NewHTTPClient(srv.URL, testConfig())
 	err := c.RejectQuestion(context.Background(), "que_1")
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -422,7 +422,7 @@ func TestSessionExists(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		exists, err := c.SessionExists(context.Background(), "sess-123")
 		if err != nil {
 			t.Fatalf("SessionExists: %v", err)
@@ -441,7 +441,7 @@ func TestSessionExists(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		exists, err := c.SessionExists(context.Background(), "sess-404")
 		if err != nil {
 			t.Fatalf("SessionExists: %v", err)
@@ -457,7 +457,7 @@ func TestSessionExists(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		_, err := c.SessionExists(context.Background(), "sess-500")
 		if err == nil {
 			t.Fatal("expected error for status 500, got nil")
@@ -590,7 +590,7 @@ func TestAbortSession(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		if err := c.AbortSession(context.Background(), "ses_x"); err != nil {
 			t.Fatalf("AbortSession: %v", err)
 		}
@@ -602,7 +602,7 @@ func TestAbortSession(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		err := c.AbortSession(context.Background(), "ses_x")
 		if !errors.Is(err, ErrNotFound) {
 			t.Fatalf("expected ErrNotFound, got %v", err)
@@ -615,7 +615,7 @@ func TestAbortSession(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		err := c.AbortSession(context.Background(), "ses_x")
 		if err == nil {
 			t.Fatal("expected error, got nil")
@@ -656,7 +656,7 @@ func TestGetSession(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		info, err := c.GetSession(context.Background(), "ses-123")
 		if err != nil {
 			t.Fatalf("GetSession: %v", err)
@@ -701,7 +701,7 @@ func TestGetSession(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		info, err := c.GetSession(context.Background(), "ses-123")
 		if err != nil {
 			t.Fatalf("GetSession: %v", err)
@@ -735,7 +735,7 @@ func TestGetSession(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		info, err := c.GetSession(context.Background(), "ses-123")
 		if err != nil {
 			t.Fatalf("GetSession: %v", err)
@@ -767,7 +767,7 @@ func TestGetSession(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		info, err := c.GetSession(context.Background(), "ses-123")
 		if err != nil {
 			t.Fatalf("GetSession: %v", err)
@@ -808,7 +808,7 @@ func TestGetSession(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		info, err := c.GetSession(context.Background(), "ses-123")
 		if err != nil {
 			t.Fatalf("GetSession: %v", err)
@@ -833,7 +833,7 @@ func TestGetSession(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		_, err := c.GetSession(context.Background(), "ses-404")
 		if !errors.Is(err, ErrNotFound) {
 			t.Fatalf("expected ErrNotFound, got %v", err)
@@ -886,7 +886,7 @@ func TestSummarizeSession(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		if err := c.SummarizeSession(context.Background(), "ses_x", "openai", "gpt-4o"); err != nil {
 			t.Fatalf("SummarizeSession: %v", err)
 		}
@@ -901,7 +901,7 @@ func TestSummarizeSession(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		err := c.SummarizeSession(context.Background(), "ses_404", "openai", "gpt-4o")
 		if !errors.Is(err, ErrNotFound) {
 			t.Fatalf("expected ErrNotFound, got %v", err)
@@ -915,7 +915,7 @@ func TestSummarizeSession(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		err := c.SummarizeSession(context.Background(), "ses_500", "openai", "gpt-4o")
 		if err == nil || !strings.Contains(err.Error(), "unconnected provider") {
 			t.Fatalf("expected error containing unconnected provider, got %v", err)
@@ -935,7 +935,7 @@ func TestRevertMessage(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		if err := c.RevertMessage(context.Background(), "ses_x", "msg-123"); err != nil {
 			t.Fatalf("RevertMessage: %v", err)
 		}
@@ -950,7 +950,7 @@ func TestRevertMessage(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		err := c.RevertMessage(context.Background(), "ses_404", "msg-123")
 		if !errors.Is(err, ErrNotFound) {
 			t.Fatalf("expected ErrNotFound, got %v", err)
@@ -964,7 +964,7 @@ func TestRevertMessage(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		err := c.RevertMessage(context.Background(), "ses_500", "msg-123")
 		if err == nil || !strings.Contains(err.Error(), "revert failed") {
 			t.Fatalf("expected error containing revert failed, got %v", err)
@@ -982,7 +982,7 @@ func TestUnrevertSession(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		if err := c.UnrevertSession(context.Background(), "ses_x"); err != nil {
 			t.Fatalf("UnrevertSession: %v", err)
 		}
@@ -994,7 +994,7 @@ func TestUnrevertSession(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		err := c.UnrevertSession(context.Background(), "ses_404")
 		if !errors.Is(err, ErrNotFound) {
 			t.Fatalf("expected ErrNotFound, got %v", err)
@@ -1008,7 +1008,7 @@ func TestUnrevertSession(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		err := c.UnrevertSession(context.Background(), "ses_500")
 		if err == nil || !strings.Contains(err.Error(), "unrevert failed") {
 			t.Fatalf("expected error containing unrevert failed, got %v", err)
@@ -1031,7 +1031,7 @@ func TestListMessages(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		msgs, err := c.ListMessages(context.Background(), "ses_x")
 		if err != nil {
 			t.Fatalf("ListMessages: %v", err)
@@ -1050,7 +1050,7 @@ func TestListMessages(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		_, err := c.ListMessages(context.Background(), "ses_404")
 		if !errors.Is(err, ErrNotFound) {
 			t.Fatalf("expected ErrNotFound, got %v", err)
@@ -1063,7 +1063,7 @@ func TestListMessages(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		_, err := c.ListMessages(context.Background(), "ses_500")
 		if err == nil || !strings.Contains(err.Error(), "unexpected status 500") {
 			t.Fatalf("expected error containing unexpected status 500, got %v", err)
@@ -1088,7 +1088,7 @@ func TestListAgents(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		agents, err := c.ListAgents(context.Background())
 		if err != nil {
 			t.Fatalf("ListAgents: %v", err)
@@ -1116,7 +1116,7 @@ func TestListAgents(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		_, err := c.ListAgents(context.Background())
 		if err == nil || !strings.Contains(err.Error(), "unexpected status 500") {
 			t.Fatalf("expected error containing unexpected status 500, got %v", err)
@@ -1142,7 +1142,7 @@ func TestSwitchAgent(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		if err := c.SwitchAgent(context.Background(), "sess-1", "reviewer"); err != nil {
 			t.Fatalf("SwitchAgent: %v", err)
 		}
@@ -1166,7 +1166,7 @@ func TestSwitchAgent(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		if err := c.SwitchAgent(context.Background(), "sess-1", "reviewer"); err != nil {
 			t.Fatalf("SwitchAgent: %v", err)
 		}
@@ -1181,7 +1181,7 @@ func TestSwitchAgent(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		err := c.SwitchAgent(context.Background(), "sess-1", "unknown-agent")
 		if !errors.Is(err, ErrNotFound) {
 			t.Fatalf("expected ErrNotFound, got %v", err)
@@ -1194,7 +1194,7 @@ func TestSwitchAgent(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		err := c.SwitchAgent(context.Background(), "sess-1", "reviewer")
 		if err == nil || !strings.Contains(err.Error(), "unexpected status 500") {
 			t.Fatalf("expected error containing unexpected status 500, got %v", err)
@@ -1209,7 +1209,7 @@ func TestSwitchAgent(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		err := c.SwitchAgent(context.Background(), "sess-1", "reviewer")
 		if err == nil || !strings.Contains(err.Error(), "unexpected content type") {
 			t.Fatalf("expected content type error, got %v", err)
@@ -1224,7 +1224,7 @@ func TestSwitchAgent(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := NewHTTPClient(srv.URL)
+		c := NewHTTPClient(srv.URL, testConfig())
 		err := c.SwitchAgent(context.Background(), "sess-1", "reviewer")
 		if err == nil || !strings.Contains(err.Error(), "invalid JSON response") {
 			t.Fatalf("expected invalid JSON error, got %v", err)
@@ -1246,7 +1246,7 @@ func TestGetSession_Agent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewHTTPClient(srv.URL)
+	c := NewHTTPClient(srv.URL, testConfig())
 	info, err := c.GetSession(context.Background(), "sess-1")
 	if err != nil {
 		t.Fatalf("GetSession: %v", err)

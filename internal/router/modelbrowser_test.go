@@ -419,8 +419,8 @@ func TestModelBrowserRowLayout(t *testing.T) {
 	itemIdx := 0
 	for _, b := range buttons {
 		if modelNavLabel(b.Label) {
-			if b.Row != modelBrowserNavRow {
-				t.Fatalf("nav button %q row = %d, want %d", b.Label, b.Row, modelBrowserNavRow)
+			if b.Row != 100 {
+				t.Fatalf("nav button %q row = %d, want %d", b.Label, b.Row, 100)
 			}
 			continue
 		}
@@ -469,8 +469,8 @@ func TestModelBrowserRowLayoutDiscord(t *testing.T) {
 	if len(rows) > 5 {
 		t.Fatalf("discord action rows = %d, want <= 5 (%v)", len(rows), rows)
 	}
-	if rows[modelBrowserNavRow] > 5 {
-		t.Fatalf("nav row has %d buttons, want <= 5", rows[modelBrowserNavRow])
+	if rows[100] > 5 {
+		t.Fatalf("nav row has %d buttons, want <= 5", rows[100])
 	}
 }
 

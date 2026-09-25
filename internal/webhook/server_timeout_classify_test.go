@@ -173,7 +173,7 @@ func TestNonTimeoutFailureKeepsExistingSummary(t *testing.T) {
 }
 
 func TestTimeoutSummaryNilWorkContext(t *testing.T) {
-	if got := timeoutSummary(30*time.Minute, nil); got != "timed out after 30m0s" {
+	if got := timeoutSummary(30*time.Minute, 2*time.Minute, nil); got != "timed out after 30m0s" {
 		t.Fatalf("timeoutSummary(nil) = %q, want canned budget line", got)
 	}
 }

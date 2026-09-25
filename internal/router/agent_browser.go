@@ -27,8 +27,6 @@ const (
 	agentsPerPage       = 6
 	agentsMaxPages      = 5
 	maxTruncatedDescLen = 60
-	agentBrowserTTL     = 30 * time.Minute
-	agentBrowserCap     = 256
 )
 
 var hiddenInternalAgents = map[string]bool{
@@ -59,12 +57,16 @@ type agentBrowserBroker struct {
 	mu          sync.Mutex
 	tokens      map[string]agentBrowseAction
 	ownerTokens map[string][]string
+	ttl         time.Duration
+	capSize     int
 }
 
-func newAgentBrowserBroker() *agentBrowserBroker {
+func newAgentBrowserBroker(ttl time.Duration, capSize int) *agentBrowserBroker {
 	return &agentBrowserBroker{
 		tokens:      make(map[string]agentBrowseAction),
 		ownerTokens: make(map[string][]string),
+		ttl:         ttl,
+		capSize:     capSize,
 	}
 }
 
@@ -90,7 +92,7 @@ func (b *agentBrowserBroker) register(action agentBrowseAction) (string, error) 
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if len(b.tokens) >= agentBrowserCap {
+	if len(b.tokens) >= b.capSize {
 		var oldest string
 		var oldestAt time.Time
 		for t, a := range b.tokens {
@@ -114,7 +116,7 @@ func (b *agentBrowserBroker) lookup(token string) (agentBrowseAction, bool) {
 	if !ok {
 		return agentBrowseAction{}, false
 	}
-	if time.Since(action.createdAt) > agentBrowserTTL {
+	if time.Since(action.createdAt) > b.ttl {
 		delete(b.tokens, token)
 		return agentBrowseAction{}, false
 	}

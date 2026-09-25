@@ -17,8 +17,6 @@ import (
 
 const busyResponseMessage = "⚠️ A response is already running in this conversation. Wait for it to finish or check /status."
 
-const maxQueuedMessages = 5
-
 type queuedMessage struct {
 	ctx context.Context
 	msg channel.IncomingMessage
@@ -36,15 +34,17 @@ type responseKey struct {
 }
 
 type responseCoordinator struct {
-	mu     sync.Mutex
-	active map[responseKey]context.CancelFunc
-	queues map[responseKey][]queuedMessage
+	mu        sync.Mutex
+	active    map[responseKey]context.CancelFunc
+	queues    map[responseKey][]queuedMessage
+	maxQueued int
 }
 
-func newResponseCoordinator() *responseCoordinator {
+func newResponseCoordinator(maxQueued int) *responseCoordinator {
 	return &responseCoordinator{
-		active: make(map[responseKey]context.CancelFunc),
-		queues: make(map[responseKey][]queuedMessage),
+		active:    make(map[responseKey]context.CancelFunc),
+		queues:    make(map[responseKey][]queuedMessage),
+		maxQueued: maxQueued,
 	}
 }
 
@@ -65,7 +65,7 @@ func (c *responseCoordinator) enqueue(key responseKey, ctx context.Context, msg 
 		return 0, false
 	}
 	q := c.queues[key]
-	if len(q) >= maxQueuedMessages {
+	if len(q) >= c.maxQueued {
 		return 0, false
 	}
 	q = append(q, queuedMessage{ctx: ctx, msg: msg})
@@ -210,7 +210,7 @@ func (r *Router) runResponse(
 		notices = r.store.ProgressNoticeRepo()
 	}
 
-	go startProgressTicker(ctx, msg.ReplyCtx, progressActivityCh, progressStopCh, progressTickerInterval, progressQuietThreshold, notices, key.platform, key.channelID, key.threadID, nil)
+	go startProgressTicker(ctx, msg.ReplyCtx, progressActivityCh, progressStopCh, progressTickerInterval, r.progressQuietThreshold, notices, key.platform, key.channelID, key.threadID, nil)
 
 	observedEvents := make(chan relay.Event, 64)
 	go func() {
@@ -235,15 +235,12 @@ func (r *Router) runResponse(
 		dispatchDone <- dispatch(ctx)
 	}()
 	go func() {
-		streamer := relay.NewStreamer(msg.ReplyCtx, r.renderer, render.PlatformFor(msg.Platform))
+		streamer := relay.NewStreamer(msg.ReplyCtx, r.renderer, render.PlatformFor(msg.Platform), r.streamerNoEventTimeout)
 		streamer.SetPermissionPromptHandler(permissionHandler)
 		streamer.SetQuestionPromptHandler(questionHandler)
 		streamer.SetPermissionPendingFunc(func() bool {
 			return r.permissions.HasPendingFor(owner)
 		})
-		if r.streamerNoEventTimeout > 0 {
-			streamer.SetNoEventTimeout(r.streamerNoEventTimeout)
-		}
 		if r.attrib != nil {
 			streamer.SetScheduleAttributionHandler(func(input map[string]any) error {
 				cronExpr, _ := input["cron_expression"].(string)
@@ -381,10 +378,7 @@ func progressNotice(seconds int64) string {
 	return fmt.Sprintf("⏳ Still working... (%dm)", minutes)
 }
 
-var (
-	progressQuietThreshold = 90 * time.Second
-	progressTickerInterval = 15 * time.Second
-)
+var progressTickerInterval = 15 * time.Second
 
 func startProgressTicker(
 	ctx context.Context,

@@ -204,6 +204,10 @@ func (l *Looper) check(req Request) error {
 	return checkRequest(req, l.cfg)
 }
 
+func (l *Looper) Config() Config {
+	return l.cfg
+}
+
 func checkRequest(req Request, cfg Config) error {
 	if req.Interval < cfg.MinInterval || req.Interval > cfg.MaxInterval {
 		return fmt.Errorf("loop: interval %s outside %s-%s", req.Interval, cfg.MinInterval, cfg.MaxInterval)

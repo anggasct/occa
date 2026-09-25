@@ -24,7 +24,7 @@ func toolNoticesOf(msgs []string) []string {
 func runToolEvents(t *testing.T, events ...Event) []string {
 	t.Helper()
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 
 	ch := make(chan Event, len(events)+1)
 	for _, e := range events {
@@ -52,7 +52,7 @@ func TestToolBubbleEditsInPlace(t *testing.T) {
 
 func TestToolBubbleConsolidatesAcrossSegments(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	s.workingEditInterval = -1
 
 	events := make(chan Event, 8)
@@ -89,7 +89,7 @@ func TestToolBubbleConsolidatesAcrossSegments(t *testing.T) {
 
 func TestToolBubbleDistinctTools(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	events := make(chan Event, 3)
 	events <- Event{Type: EventTool, Delta: "glob"}
 	events <- Event{Type: EventTool, Delta: "grep"}
@@ -110,7 +110,7 @@ func TestToolBubbleDistinctTools(t *testing.T) {
 
 func TestToolBubbleSingleProgressCard(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	events := make(chan Event, 10)
 	for _, name := range []string{"a", "b", "c", "d", "e", "f", "g", "h"} {
 		events <- Event{Type: EventTool, Delta: name}
@@ -132,7 +132,7 @@ func TestToolBubbleSingleProgressCard(t *testing.T) {
 
 func TestToolBubbleEmptySegmentStartsNewCard(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	s.workingEditInterval = -1
 
 	events := make(chan Event, 10)
@@ -245,7 +245,7 @@ func TestToolBubbleWithContext(t *testing.T) {
 	runTest := func(t *testing.T, wantIntermediate string, events ...Event) {
 		t.Helper()
 		reply := newFakeReplyContext()
-		s := NewStreamer(reply, render.New(), render.Telegram)
+		s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 		s.workingEditInterval = -1
 
 		ch := make(chan Event, len(events)+1)
@@ -297,7 +297,7 @@ func TestToolBubbleWithContext(t *testing.T) {
 
 func TestToolBubbleContiguousRunGrouping(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 
 	events := make(chan Event, 5)
 	events <- Event{Type: EventTool, Delta: "bash"}
@@ -322,7 +322,7 @@ func TestToolBubbleContiguousRunGrouping(t *testing.T) {
 
 func TestTerminalRollupResolvesWorkingBubble(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 
 	events := make(chan Event, 10)
 	for _, name := range []string{"a", "b", "c", "d", "e", "f"} {
@@ -352,7 +352,7 @@ func TestTerminalRollupResolvesWorkingBubble(t *testing.T) {
 
 func TestTerminalRollupErrorPrefixAndCountOrdering(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 
 	events := make(chan Event, 12)
 	for _, name := range []string{"bash", "bash", "read", "grep", "edit", "write", "deploy"} {
@@ -377,7 +377,7 @@ func TestTerminalRollupErrorPrefixAndCountOrdering(t *testing.T) {
 
 func TestTerminalRollupOverflowListsEightTypes(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 
 	events := make(chan Event, 12)
 	for _, name := range []string{"a", "b", "c", "d", "e", "f", "g", "h", "i"} {
@@ -402,7 +402,7 @@ func TestTerminalRollupOverflowListsEightTypes(t *testing.T) {
 
 func TestTerminalRollupCountsAcrossPhases(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 
 	events := make(chan Event, 20)
 	events <- Event{Type: EventTool, Delta: "bash"}
@@ -431,7 +431,7 @@ func TestTerminalRollupCountsAcrossPhases(t *testing.T) {
 
 func TestSingleProgressCardResolvesRollup(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 
 	events := make(chan Event, 10)
 	events <- Event{Type: EventTool, Delta: "glob"}
@@ -459,7 +459,7 @@ func TestSingleProgressCardResolvesRollup(t *testing.T) {
 
 func TestWorkingBubbleSingleMessageAndPendingFlush(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	var now atomic.Int64
 	now.Store(int64(100 * time.Second))
 	s.now = func() time.Time { return time.Unix(0, now.Load()) }
@@ -498,7 +498,7 @@ func TestWorkingBubbleSingleMessageAndPendingFlush(t *testing.T) {
 
 func TestWorkingBubbleEditThrottle(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	now := time.Unix(200, 0)
 	s.now = func() time.Time { return now }
 	working := workingState{
@@ -523,7 +523,7 @@ func TestWorkingBubbleEditThrottle(t *testing.T) {
 
 func TestWorkingStepCarriesAcrossPhases(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	s.workingEditInterval = -1
 
 	events := make(chan Event, 20)
@@ -586,7 +586,7 @@ func TestWorkingFlushesOnTerminalEvents(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			reply := newFakeReplyContext()
-			s := NewStreamer(reply, render.New(), render.Telegram)
+			s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 			if tc.configure != nil {
 				tc.configure(s)
 			}
@@ -629,7 +629,7 @@ func TestWorkingFlushesOnTerminalEvents(t *testing.T) {
 
 func TestTypingHeartbeat(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	s.typingInterval = 10 * time.Millisecond
 
 	ch := make(chan Event, 8)

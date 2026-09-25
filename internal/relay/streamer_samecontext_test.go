@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/anggasct/occa/internal/render"
 )
@@ -10,7 +11,7 @@ import (
 func TestStreamerToolSamePartSkipsIdenticalEdit(t *testing.T) {
 	reply := newFakeReplyContext()
 	renderer := render.New()
-	s := NewStreamer(reply, renderer, render.Telegram)
+	s := NewStreamer(reply, renderer, render.Telegram, 15*time.Minute)
 	s.workingEditInterval = -1
 
 	events := make(chan Event, 10)

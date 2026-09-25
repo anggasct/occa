@@ -14,7 +14,6 @@ import (
 
 const (
 	usageCallbackPrefix = "usage:"
-	usagePageSize       = 5
 	usageMaxPages       = 5
 )
 
@@ -124,19 +123,19 @@ func (r *Router) usageView(ctx context.Context, msg channel.IncomingMessage, per
 			return usageHeader(period) + "\nNo active session usage yet.", usageButtons(period, 1, 1), nil
 		}
 	}
-	query.Since = usageSince(period, time.Now().UTC())
-	query.Limit = usagePageSize
-	query.Offset = (clampUsagePage(page) - 1) * usagePageSize
+	query.Since = r.usageSince(period, time.Now().UTC())
+	query.Limit = r.usagePageSize
+	query.Offset = (clampUsagePage(page) - 1) * r.usagePageSize
 
 	report, err := repo.Query(ctx, query)
 	if err != nil {
 		return "", nil, fmt.Errorf("usage query: %w", err)
 	}
-	pages := usagePages(report.BreakdownTotal)
+	pages := r.usagePages(report.BreakdownTotal)
 	page = clampUsagePage(page)
 	if page > pages {
 		page = pages
-		query.Offset = (page - 1) * usagePageSize
+		query.Offset = (page - 1) * r.usagePageSize
 		report, err = repo.Query(ctx, query)
 		if err != nil {
 			return "", nil, fmt.Errorf("usage query page: %w", err)
@@ -213,10 +212,10 @@ func usagePeriodLabel(period usagePeriod) string {
 	}
 }
 
-func usageSince(period usagePeriod, now time.Time) int64 {
+func (r *Router) usageSince(period usagePeriod, now time.Time) int64 {
 	switch period {
 	case usageSeven:
-		return now.Add(-7 * 24 * time.Hour).Unix()
+		return now.Add(-r.usageDefaultWindow).Unix()
 	case usageSession:
 		return 0
 	default:
@@ -225,11 +224,11 @@ func usageSince(period usagePeriod, now time.Time) int64 {
 	}
 }
 
-func usagePages(total int) int {
+func (r *Router) usagePages(total int) int {
 	if total <= 0 {
 		return 1
 	}
-	pages := (total + usagePageSize - 1) / usagePageSize
+	pages := (total + r.usagePageSize - 1) / r.usagePageSize
 	if pages > usageMaxPages {
 		return usageMaxPages
 	}

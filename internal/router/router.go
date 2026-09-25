@@ -22,14 +22,8 @@ import (
 var ErrDenied = errors.New("access denied")
 
 const (
-	maxPickerSessions   = 6
-	maxPickerPages      = 5
 	accessDeniedMessage = "⚠️ Access denied. Your sender ID is not in this platform's allowlist."
 	accessVerifyMessage = "⚠️ Unable to verify access. Try again."
-	// contextMeterStaleAfter is the maximum age of the last completed assistant
-	// request before /status stops presenting its occupancy as live: stale
-	// current-window data renders unavailable instead of a misleading percentage.
-	contextMeterStaleAfter = 15 * time.Minute
 )
 
 type Command struct {
@@ -98,6 +92,12 @@ type Router struct {
 	recoveryBudget         time.Duration
 	renderer               render.Renderer
 	streamerNoEventTimeout time.Duration
+	contextStaleAfter      time.Duration
+	progressQuietThreshold time.Duration
+	maxPickerSessions      int
+	maxPickerPages         int
+	usagePageSize          int
+	usageDefaultWindow     time.Duration
 	threadParentOf         func(threadID string) (string, error)
 	rootCardEditor         func(ctx context.Context, platform, channelID, messageID, text string) error
 }
@@ -119,28 +119,36 @@ func (r *Router) SetAttributionStore(s *attribution.Store) {
 	r.attrib = s
 }
 
-func New(instances InstanceProvider, st store.Store, defaultWorkdir string, adminID string) *Router {
-	return NewWithAllowlists(instances, st, defaultWorkdir, adminID, nil, nil)
+func New(instances InstanceProvider, st store.Store, defaultWorkdir string, adminID string, cfg Config) *Router {
+	return NewWithAllowlists(instances, st, defaultWorkdir, adminID, nil, nil, cfg)
 }
 
-func NewWithAllowlists(instances InstanceProvider, st store.Store, defaultWorkdir, adminID string, discordSenders, telegramSenders []string) *Router {
+func NewWithAllowlists(instances InstanceProvider, st store.Store, defaultWorkdir, adminID string, discordSenders, telegramSenders []string, cfg Config) *Router {
 	r := &Router{
-		commands:        make(map[string]Command),
-		instances:       instances,
-		store:           st,
-		defaultWorkdir:  defaultWorkdir,
-		adminID:         strings.TrimSpace(adminID),
-		discordSenders:  append([]string(nil), discordSenders...),
-		telegramSenders: append([]string(nil), telegramSenders...),
-		startedAt:       time.Now(),
-		responses:       newResponseCoordinator(),
-		permissions:     newPermissionBroker(st.PermissionRuleRepo()),
-		questions:       newQuestionBroker(),
-		modelBrowser:    newModelBrowserBroker(),
-		agentBrowser:    newAgentBrowserBroker(),
-		agentTracker:    newAgentTracker(),
-		recovery:        newRecoveryCoordinator(),
-		renderer:        render.New(),
+		commands:               make(map[string]Command),
+		instances:              instances,
+		store:                  st,
+		defaultWorkdir:         defaultWorkdir,
+		adminID:                strings.TrimSpace(adminID),
+		discordSenders:         append([]string(nil), discordSenders...),
+		telegramSenders:        append([]string(nil), telegramSenders...),
+		startedAt:              time.Now(),
+		responses:              newResponseCoordinator(cfg.MaxQueuedMessages),
+		permissions:            newPermissionBroker(st.PermissionRuleRepo(), cfg.PermissionTombstoneTTL),
+		questions:              newQuestionBroker(cfg.QuestionTombstoneTTL),
+		modelBrowser:           newModelBrowserBroker(cfg.ModelBrowserTTL, cfg.ModelBrowserPage, cfg.ModelBrowserNavRows, cfg.ModelBrowserCap),
+		agentBrowser:           newAgentBrowserBroker(cfg.AgentBrowserTTL, cfg.AgentBrowserCap),
+		agentTracker:           newAgentTracker(),
+		recovery:               newRecoveryCoordinator(cfg.RecoveryBaseBackoff, cfg.RecoveryMaxBackoff),
+		recoveryBudget:         cfg.RecoveryBudget,
+		renderer:               render.New(),
+		streamerNoEventTimeout: cfg.StreamerNoEventTimeout,
+		contextStaleAfter:      cfg.ContextStaleAfter,
+		progressQuietThreshold: cfg.ProgressQuietThreshold,
+		maxPickerSessions:      cfg.MaxPickerSessions,
+		maxPickerPages:         cfg.MaxPickerPages,
+		usagePageSize:          cfg.UsagePageSize,
+		usageDefaultWindow:     cfg.UsageDefaultWindow,
 	}
 	r.registerDefaults()
 	return r
@@ -780,7 +788,7 @@ func (r *Router) handleStatus(ctx context.Context, msg channel.IncomingMessage, 
 		fresh := sessInfo.ContextSource == relay.ContextSourceMessageTail &&
 			sessInfo.ContextTokens > 0 &&
 			!sessInfo.ContextUpdatedAt.IsZero() &&
-			time.Since(sessInfo.ContextUpdatedAt) <= contextMeterStaleAfter
+			time.Since(sessInfo.ContextUpdatedAt) <= r.contextStaleAfter
 		switch {
 		case fresh:
 			if providerID != "" && modelID != "" {
@@ -872,19 +880,19 @@ func relativeAge(createdAt int64) string {
 	return fmt.Sprintf("%dd ago", days)
 }
 
-func sessionPickerTotalPages(totalSessions int) int {
+func (r *Router) sessionPickerTotalPages(totalSessions int) int {
 	if totalSessions <= 0 {
 		return 1
 	}
-	pages := (totalSessions + maxPickerSessions - 1) / maxPickerSessions
-	if pages > maxPickerPages {
-		pages = maxPickerPages
+	pages := (totalSessions + r.maxPickerSessions - 1) / r.maxPickerSessions
+	if pages > r.maxPickerPages {
+		pages = r.maxPickerPages
 	}
 	return pages
 }
 
-func sessionPickerPageBounds(totalSessions, page int) (start int, end int, clampedPage int) {
-	totalPages := sessionPickerTotalPages(totalSessions)
+func (r *Router) sessionPickerPageBounds(totalSessions, page int) (start int, end int, clampedPage int) {
+	totalPages := r.sessionPickerTotalPages(totalSessions)
 	clampedPage = page
 	if clampedPage < 1 {
 		clampedPage = 1
@@ -897,11 +905,11 @@ func sessionPickerPageBounds(totalSessions, page int) (start int, end int, clamp
 		return 0, 0, clampedPage
 	}
 
-	start = (clampedPage - 1) * maxPickerSessions
+	start = (clampedPage - 1) * r.maxPickerSessions
 	if start > totalSessions {
 		start = totalSessions
 	}
-	end = start + maxPickerSessions
+	end = start + r.maxPickerSessions
 	if end > totalSessions {
 		end = totalSessions
 	}
@@ -918,8 +926,8 @@ func (r *Router) buildSessionPickerPage(ctx context.Context, msg channel.Incomin
 		return "No sessions yet.", nil, nil
 	}
 
-	totalPages := sessionPickerTotalPages(len(sessions))
-	start, end, clampedPage := sessionPickerPageBounds(len(sessions), page)
+	totalPages := r.sessionPickerTotalPages(len(sessions))
+	start, end, clampedPage := r.sessionPickerPageBounds(len(sessions), page)
 
 	var header string
 	if len(headerOverride) > 0 && headerOverride[0] != "" {
@@ -1128,8 +1136,8 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 		if matched == nil {
 			if num, err := strconv.Atoi(target); err == nil && num >= 1 {
 				maxBrowsable := len(sessions)
-				if maxBrowsable > maxPickerPages*maxPickerSessions {
-					maxBrowsable = maxPickerPages * maxPickerSessions
+				if maxBrowsable > r.maxPickerPages*r.maxPickerSessions {
+					maxBrowsable = r.maxPickerPages * r.maxPickerSessions
 				}
 				if num <= maxBrowsable {
 					matched = &sessions[num-1]

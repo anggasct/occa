@@ -76,7 +76,7 @@ func TestStopSignalsProcessGroup(t *testing.T) {
 	t.Setenv("GO_HELPER_PID_FILE", pidFile)
 	t.Setenv("GO_HELPER_MODE", "parent-with-child")
 
-	factory := productionFactory(os.Args[0], Config{ReadinessTimeout: 5 * time.Second, StopGrace: 1 * time.Second, ControlTimeout: 2 * time.Second})
+	factory := productionFactory(os.Args[0], Config{ReadinessTimeout: 5 * time.Second, StopGrace: 1 * time.Second, ControlTimeout: 2 * time.Second, ClientTimeout: 3 * time.Minute, MaxAttachmentBytes: 10 * 1024 * 1024, MaxEventLineBytes: 1024*1024 + 64*1024})
 	inst, err := factory(context.Background(), t.TempDir(), freePort(t))
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
@@ -113,7 +113,7 @@ func TestStopGracefulBeforeKill(t *testing.T) {
 	t.Setenv("GO_HELPER_MARKER", marker)
 	t.Setenv("GO_HELPER_MODE", "exit-on-term")
 
-	factory := productionFactory(os.Args[0], Config{ReadinessTimeout: 5 * time.Second, StopGrace: 30 * time.Second, ControlTimeout: 2 * time.Second})
+	factory := productionFactory(os.Args[0], Config{ReadinessTimeout: 5 * time.Second, StopGrace: 30 * time.Second, ControlTimeout: 2 * time.Second, ClientTimeout: 3 * time.Minute, MaxAttachmentBytes: 10 * 1024 * 1024, MaxEventLineBytes: 1024*1024 + 64*1024})
 	inst, err := factory(context.Background(), t.TempDir(), freePort(t))
 	if err != nil {
 		t.Fatalf("spawn: %v", err)

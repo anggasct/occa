@@ -250,3 +250,39 @@ func TestLoopStopHandlerDirect(t *testing.T) {
 		t.Errorf("direct stop = %q", got)
 	}
 }
+
+func TestLoopValidationUsesLooperConfig(t *testing.T) {
+	f := &loopFixture{}
+	r, _, reply, overrides := newTestRouterWithAccess()
+	overrides.overrides["telegram:chat1:user1"] = &store.UserOverride{
+		ChannelID: "chat1", Platform: "telegram", UserID: "user1",
+	}
+	custom := loop.Config{
+		MinInterval: 5 * time.Second, MaxInterval: 10 * time.Minute,
+		MinDuration: 10 * time.Second, MaxDuration: 30 * time.Minute,
+		IterationTimeout: time.Minute, MaxWallAge: time.Hour,
+		MinCount: 2, MaxCount: 5, MaxPromptRunes: 50, MaxPerConversation: 1, MaxGlobal: 5,
+	}
+	r.SetLooper(loop.New(f.execute, f.notify, f.isBusy, custom))
+	f.r = r
+	f.reply = reply
+	f.overides = overrides
+	if _, err := loop.ParseRequest("every 10s x3 custom bounds probe", custom); err != nil {
+		t.Fatalf("ParseRequest with custom bounds: %v", err)
+	}
+	if _, err := loop.ParseRequest("every 10s x3 custom bounds probe", loop.Config{
+		MinInterval: 30 * time.Second, MaxInterval: time.Hour,
+		MinDuration: time.Minute, MaxDuration: 4 * time.Hour,
+		IterationTimeout: 10 * time.Minute, MaxWallAge: 4 * time.Hour,
+		MinCount: 2, MaxCount: 60, MaxPromptRunes: 1000, MaxPerConversation: 1, MaxGlobal: 20,
+	}); err == nil {
+		t.Fatal("default bounds accepted 10s interval, want rejection proving custom differs")
+	}
+	f.route(t, "/loop every 10s x3 custom bounds probe")
+	if got := f.lastSend(); !strings.Contains(got, "Loop 1") {
+		t.Fatalf("custom-bounds route = %q, want Loop 1 confirming validation agreed with looper", got)
+	}
+	if n := len(f.r.loops.List(loopConv(msg("x", f.reply)))); n != 1 {
+		t.Fatalf("loops = %d, want 1 proving creation agreed with validation", n)
+	}
+}

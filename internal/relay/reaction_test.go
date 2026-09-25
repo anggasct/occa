@@ -54,7 +54,7 @@ func waitReactions(t *testing.T, r *fakeReactionSetter, want int) {
 
 func TestStreamerReactionDone(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	reactions := &fakeReactionSetter{}
 	s.SetReactionSetter(reactions)
 
@@ -74,7 +74,7 @@ func TestStreamerReactionDone(t *testing.T) {
 
 func TestStreamerReactionErrorState(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	reactions := &fakeReactionSetter{}
 	s.SetReactionSetter(reactions)
 
@@ -98,7 +98,7 @@ func TestStreamerReactionErrorState(t *testing.T) {
 
 func TestStreamerReactionIncompleteState(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	reactions := &fakeReactionSetter{}
 	s.SetReactionSetter(reactions)
 
@@ -117,7 +117,7 @@ func TestStreamerReactionIncompleteState(t *testing.T) {
 
 func TestStreamerReactionTimeoutNoMessage(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	s.noEventTimeout = 30 * time.Millisecond
 	reactions := &fakeReactionSetter{}
 	s.SetReactionSetter(reactions)
@@ -136,7 +136,7 @@ func TestStreamerReactionTimeoutNoMessage(t *testing.T) {
 
 func TestStreamerReactionCancelLeavesProcessing(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	reactions := &fakeReactionSetter{}
 	s.SetReactionSetter(reactions)
 
@@ -161,7 +161,7 @@ func TestStreamerReactionCancelLeavesProcessing(t *testing.T) {
 
 func TestStreamerReactionNoSetterIsNoOp(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 
 	events := make(chan Event, 10)
 	events <- Event{Type: EventDelta, Delta: "hello"}
@@ -179,7 +179,7 @@ func TestStreamerReactionNoSetterIsNoOp(t *testing.T) {
 
 func TestStreamerReactionTargetsSourceMessage(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Discord)
+	s := NewStreamer(reply, render.New(), render.Discord, 15*time.Minute)
 	reactions := &fakeReactionSetter{}
 	s.SetReactionSetter(reactions)
 	s.SetReactionTarget(fakeRef{id: "source-1"})
@@ -206,7 +206,7 @@ func TestStreamerReactionTargetsSourceMessage(t *testing.T) {
 
 func TestStreamerReactionFallsBackToReplyRef(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Discord)
+	s := NewStreamer(reply, render.New(), render.Discord, 15*time.Minute)
 	reactions := &fakeReactionSetter{}
 	s.SetReactionSetter(reactions)
 

@@ -14,10 +14,7 @@ import (
 	"github.com/anggasct/occa/internal/render"
 )
 
-const (
-	noEventTimeout = 15 * time.Minute
-	typingInterval = 4 * time.Second
-)
+const typingInterval = 4 * time.Second
 
 const (
 	taskTimeoutMessage           = "⚠️ Task timed out (no response for 15 minutes). Send a message to resume or check /status."
@@ -96,11 +93,11 @@ type QuestionPromptHandler interface {
 	Prompt(ctx context.Context, request QuestionRequest) error
 }
 
-func NewStreamer(reply channel.ReplyContext, renderer render.Renderer, platform render.Platform) *Streamer {
-	return NewStreamerWithSink(NewChannelSink(reply), renderer, platform)
+func NewStreamer(reply channel.ReplyContext, renderer render.Renderer, platform render.Platform, noEventTimeout time.Duration) *Streamer {
+	return NewStreamerWithSink(NewChannelSink(reply), renderer, platform, noEventTimeout)
 }
 
-func NewStreamerWithSink(sink Sink, renderer render.Renderer, platform render.Platform) *Streamer {
+func NewStreamerWithSink(sink Sink, renderer render.Renderer, platform render.Platform, noEventTimeout time.Duration) *Streamer {
 	return &Streamer{
 		sink:                sink,
 		renderer:            renderer,

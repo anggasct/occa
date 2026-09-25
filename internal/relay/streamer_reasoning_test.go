@@ -11,7 +11,7 @@ import (
 
 func TestStreamerReasoningOnlyWithoutTools(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	s.workingEditInterval = -1
 
 	var now atomic.Int64
@@ -64,7 +64,7 @@ func TestStreamerReasoningOnlyWithoutTools(t *testing.T) {
 
 func TestStreamerReasoningFollowedByTools(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	s.workingEditInterval = -1
 
 	var now atomic.Int64
@@ -120,7 +120,7 @@ func TestStreamerReasoningFollowedByTools(t *testing.T) {
 
 func TestStreamerReasoningInterleavedBetweenTools(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	s.workingEditInterval = -1
 
 	var now atomic.Int64
@@ -176,7 +176,7 @@ func TestStreamerReasoningInterleavedBetweenTools(t *testing.T) {
 
 func TestStreamerReasoningErrorIncludesThoughtDuration(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	s.workingEditInterval = -1
 
 	var now atomic.Int64
@@ -217,7 +217,7 @@ func TestStreamerReasoningErrorIncludesThoughtDuration(t *testing.T) {
 
 func TestStreamerReasoningEditThrottle(t *testing.T) {
 	reply := newFakeReplyContext()
-	s := NewStreamer(reply, render.New(), render.Telegram)
+	s := NewStreamer(reply, render.New(), render.Telegram, 15*time.Minute)
 	now := time.Unix(200, 0)
 	s.now = func() time.Time { return now }
 	working := workingState{

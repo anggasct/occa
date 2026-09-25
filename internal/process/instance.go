@@ -23,9 +23,12 @@ import (
 var ErrReadinessTimeout = errors.New("process: agent not ready within timeout")
 
 type Config struct {
-	ReadinessTimeout time.Duration
-	StopGrace        time.Duration
-	ControlTimeout   time.Duration
+	ReadinessTimeout   time.Duration
+	StopGrace          time.Duration
+	ControlTimeout     time.Duration
+	ClientTimeout      time.Duration
+	MaxAttachmentBytes int64
+	MaxEventLineBytes  int
 }
 
 type instanceFactory func(ctx context.Context, workdir string, port int) (*Instance, error)
@@ -58,6 +61,11 @@ func productionFactory(binary string, cfg Config) instanceFactory {
 	readinessTimeout := cfg.ReadinessTimeout
 	stopGrace := cfg.StopGrace
 	controlTimeout := cfg.ControlTimeout
+	relayCfg := relay.Config{
+		ClientTimeout:      cfg.ClientTimeout,
+		MaxAttachmentBytes: cfg.MaxAttachmentBytes,
+		MaxEventLineBytes:  cfg.MaxEventLineBytes,
+	}
 	return func(ctx context.Context, workdir string, port int) (*Instance, error) {
 		addr := fmt.Sprintf("http://127.0.0.1:%d", port)
 		if err := ensurePortFree(ctx, port, stopGrace); err != nil {
@@ -74,7 +82,7 @@ func productionFactory(binary string, cfg Config) instanceFactory {
 			addr:    addr,
 			port:    port,
 			pid:     cmd.Process.Pid,
-			client:  relay.NewHTTPClient(addr),
+			client:  relay.NewHTTPClient(addr, relayCfg),
 			stop: func() {
 				if cmd.Process == nil {
 					return

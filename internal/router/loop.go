@@ -72,12 +72,7 @@ func (r *Router) handleLoops(_ context.Context, msg channel.IncomingMessage, arg
 }
 
 func (r *Router) createLoop(msg channel.IncomingMessage, args string) string {
-	req, err := loop.ParseRequest(args, loop.Config{
-		MinInterval: 30 * time.Second, MaxInterval: time.Hour,
-		MinDuration: time.Minute, MaxDuration: 4 * time.Hour,
-		IterationTimeout: 10 * time.Minute, MaxWallAge: 4 * time.Hour,
-		MinCount: 2, MaxCount: 60, MaxPromptRunes: 1000, MaxPerConversation: 1, MaxGlobal: 20,
-	})
+	req, err := loop.ParseRequest(args, r.loops.Config())
 	if err != nil {
 		return loop.Usage
 	}

@@ -18,7 +18,6 @@ import (
 )
 
 const (
-	questionTombstoneTTL   = 10 * time.Minute
 	questionExpiredMessage = "⌛ Question request expired."
 	questionAnsweredLabel  = "✅ Answered"
 	questionSkippedLabel   = "❌ Skipped"
@@ -64,8 +63,9 @@ type questionRecord struct {
 }
 
 type questionBroker struct {
-	mu      sync.Mutex
-	records map[string]*questionRecord
+	mu           sync.Mutex
+	records      map[string]*questionRecord
+	tombstoneTTL time.Duration
 }
 
 type questionPromptHandler struct {
@@ -79,8 +79,8 @@ type questionPromptHandler struct {
 	reply     channel.ReplyContext
 }
 
-func newQuestionBroker() *questionBroker {
-	return &questionBroker{records: make(map[string]*questionRecord)}
+func newQuestionBroker(tombstoneTTL time.Duration) *questionBroker {
+	return &questionBroker{records: make(map[string]*questionRecord), tombstoneTTL: tombstoneTTL}
 }
 
 func (h *questionPromptHandler) Prompt(ctx context.Context, request relay.QuestionRequest) error {
@@ -108,7 +108,7 @@ func (h *questionPromptHandler) Prompt(ctx context.Context, request relay.Questi
 		reply:      h.reply,
 		state:      questionPending,
 		createdAt:  time.Now(),
-		expiresAt:  time.Now().Add(questionTombstoneTTL),
+		expiresAt:  time.Now().Add(h.broker.tombstoneTTL),
 	}
 
 	h.broker.mu.Lock()
@@ -225,7 +225,7 @@ func (b *questionBroker) HandleQuestionCallback(ctx context.Context, msg channel
 		return nil
 	}
 	record.state = questionHandling
-	record.expiresAt = now.Add(questionTombstoneTTL)
+	record.expiresAt = now.Add(b.tombstoneTTL)
 	reply := record.reply
 	wizard := len(record.questions) > 1
 	b.mu.Unlock()

@@ -276,7 +276,7 @@ func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelo
 // timeoutSummary renders the timeout-path failure summary: the canned budget
 // line plus the observed-turn classification (stall before first token, stall
 // mid-turn, or long generation), so a FAILED notification names the cause.
-func timeoutSummary(budget time.Duration, workCtx *WebhookWorkContext) string {
+func timeoutSummary(budget, stallFreshness time.Duration, workCtx *WebhookWorkContext) string {
 	summary := "timed out after " + budget.String()
 	if workCtx == nil {
 		return summary
@@ -285,5 +285,5 @@ func timeoutSummary(budget time.Duration, workCtx *WebhookWorkContext) string {
 	if workCtx.Model != nil {
 		model = workCtx.Model.String()
 	}
-	return summary + " — " + relay.ClassifyTimeoutFailure(workCtx.Progress, budget, model)
+	return summary + " — " + relay.ClassifyTimeoutFailure(workCtx.Progress, budget, model, stallFreshness)
 }

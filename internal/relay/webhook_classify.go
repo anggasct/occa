@@ -5,14 +5,6 @@ import (
 	"time"
 )
 
-// StallFreshness is how recent the last stream delta must be for a timed-out
-// turn to count as "work still progressing" rather than a provider stall. Two
-// minutes of silence while streaming means the provider stopped producing.
-const StallFreshness = 2 * time.Minute
-
-// TurnProgress records how far a webhook turn got before it ended. It is the
-// evidence the timeout classifier reads: whether the prompt was sent, whether
-// any output token ever arrived, and how stale the stream was at abort.
 type TurnProgress struct {
 	PromptSentAt time.Time
 	FirstDeltaAt time.Time
@@ -25,7 +17,7 @@ type TurnProgress struct {
 // a token (provider stall before first token); a stale last delta means the
 // stream went silent mid-turn; fresh deltas mean work was still arriving and
 // the budget was simply outgrown.
-func ClassifyTimeoutFailure(progress TurnProgress, budget time.Duration, model string) string {
+func ClassifyTimeoutFailure(progress TurnProgress, budget time.Duration, model string, stallFreshness time.Duration) string {
 	classification := "work exceeded " + budget.String() + " (long generation)"
 	if model != "" {
 		classification += ", model " + model
@@ -34,7 +26,7 @@ func ClassifyTimeoutFailure(progress TurnProgress, budget time.Duration, model s
 	switch {
 	case progress.DeltaCount == 0:
 		return fmt.Sprintf("provider stall before first token (%s, model %s)", elapsedSince(progress.PromptSentAt), modelString(model))
-	case time.Since(progress.LastDeltaAt) >= StallFreshness:
+	case time.Since(progress.LastDeltaAt) >= stallFreshness:
 		return fmt.Sprintf("provider stall mid-turn — no output for %s (model %s)", shortDuration(time.Since(progress.LastDeltaAt)), modelString(model))
 	default:
 		return classification

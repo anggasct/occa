@@ -39,6 +39,7 @@ func newTestServer(t *testing.T, endpoints []config.EndpointConfig) (*Server, *f
 	t.Cleanup(func() { _ = st.Close() })
 	srv := New(cfg, exec.exec, st.WebhookDeliveryRepo())
 	srv.SetChannelStore(st.ChannelRepo())
+	srv.SetStallFreshness(2 * time.Minute)
 	return srv, exec
 }
 
@@ -556,6 +557,7 @@ func newTestServerFull(t *testing.T, endpoints []config.EndpointConfig) (*Server
 	t.Cleanup(func() { _ = st.Close() })
 	srv := New(cfg, exec.exec, st.WebhookDeliveryRepo())
 	srv.SetChannelStore(st.ChannelRepo())
+	srv.SetStallFreshness(2 * time.Minute)
 	return srv, exec, st
 }
 

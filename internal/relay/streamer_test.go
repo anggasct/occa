@@ -133,7 +133,7 @@ func (f *fakeReplyContext) editCountFor(refID string) int {
 func TestStreamerFinalEdit(t *testing.T) {
 	reply := newFakeReplyContext()
 	renderer := render.New()
-	s := NewStreamer(reply, renderer, render.Telegram)
+	s := NewStreamer(reply, renderer, render.Telegram, 15*time.Minute)
 
 	events := make(chan Event, 10)
 	events <- Event{Type: "delta", Delta: "Hello "}
@@ -156,7 +156,7 @@ func TestStreamerFinalEdit(t *testing.T) {
 func TestStreamerUnchangedBufferSkipsEdit(t *testing.T) {
 	reply := newFakeReplyContext()
 	renderer := render.New()
-	s := NewStreamer(reply, renderer, render.Telegram)
+	s := NewStreamer(reply, renderer, render.Telegram, 15*time.Minute)
 
 	events := make(chan Event, 10)
 	events <- Event{Type: "delta", Delta: "same"}
@@ -180,7 +180,7 @@ func TestStreamerUnchangedBufferSkipsEdit(t *testing.T) {
 func TestStreamerChannelClosed(t *testing.T) {
 	reply := newFakeReplyContext()
 	renderer := render.New()
-	s := NewStreamer(reply, renderer, render.Telegram)
+	s := NewStreamer(reply, renderer, render.Telegram, 15*time.Minute)
 
 	events := make(chan Event)
 	close(events)
@@ -197,7 +197,7 @@ func TestStreamerChannelClosed(t *testing.T) {
 func TestStreamerContextCancel(t *testing.T) {
 	reply := newFakeReplyContext()
 	renderer := render.New()
-	s := NewStreamer(reply, renderer, render.Telegram)
+	s := NewStreamer(reply, renderer, render.Telegram, 15*time.Minute)
 
 	events := make(chan Event)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -216,7 +216,7 @@ func TestStreamerContextCancel(t *testing.T) {
 func TestStreamerErrorEvent(t *testing.T) {
 	reply := newFakeReplyContext()
 	renderer := render.New()
-	s := NewStreamer(reply, renderer, render.Telegram)
+	s := NewStreamer(reply, renderer, render.Telegram, 15*time.Minute)
 
 	events := make(chan Event, 5)
 	events <- Event{Type: "delta", Delta: "partial"}
@@ -244,7 +244,7 @@ func TestStreamerErrorEvent(t *testing.T) {
 func TestStreamerMultiMessageOverflow(t *testing.T) {
 	reply := newFakeReplyContext()
 	renderer := render.New()
-	s := NewStreamer(reply, renderer, render.Telegram)
+	s := NewStreamer(reply, renderer, render.Telegram, 15*time.Minute)
 
 	paras := make([]string, 60)
 	for i := range paras {
@@ -299,7 +299,7 @@ func TestStreamerMultiMessageOverflow(t *testing.T) {
 func TestStreamerSingleMessageNoMarker(t *testing.T) {
 	reply := newFakeReplyContext()
 	renderer := render.New()
-	s := NewStreamer(reply, renderer, render.Telegram)
+	s := NewStreamer(reply, renderer, render.Telegram, 15*time.Minute)
 
 	events := make(chan Event, 10)
 	events <- Event{Type: "delta", Delta: "Short response"}
@@ -326,7 +326,7 @@ func TestStreamerSingleMessageNoMarker(t *testing.T) {
 func TestStreamerOnlyLastChunkEdited(t *testing.T) {
 	reply := newFakeReplyContext()
 	renderer := render.New()
-	s := NewStreamer(reply, renderer, render.Telegram)
+	s := NewStreamer(reply, renderer, render.Telegram, 15*time.Minute)
 
 	paras := make([]string, 60)
 	for i := range paras {
@@ -361,7 +361,7 @@ func TestStreamerOnlyLastChunkEdited(t *testing.T) {
 func TestStreamerSegmentsAroundTool(t *testing.T) {
 	reply := newFakeReplyContext()
 	renderer := render.New()
-	s := NewStreamer(reply, renderer, render.Telegram)
+	s := NewStreamer(reply, renderer, render.Telegram, 15*time.Minute)
 
 	events := make(chan Event, 10)
 	events <- Event{Type: EventDelta, Delta: "First block "}
@@ -399,7 +399,7 @@ func TestStreamerSegmentsAroundTool(t *testing.T) {
 func TestStreamerToolOnlyReplySendsNoEmptyMessage(t *testing.T) {
 	reply := newFakeReplyContext()
 	renderer := render.New()
-	s := NewStreamer(reply, renderer, render.Telegram)
+	s := NewStreamer(reply, renderer, render.Telegram, 15*time.Minute)
 
 	events := make(chan Event, 10)
 	events <- Event{Type: EventTool}
@@ -420,7 +420,7 @@ func TestStreamerToolOnlyReplySendsNoEmptyMessage(t *testing.T) {
 func TestStreamerEmptySegmentIsNoOp(t *testing.T) {
 	reply := newFakeReplyContext()
 	renderer := render.New()
-	s := NewStreamer(reply, renderer, render.Telegram)
+	s := NewStreamer(reply, renderer, render.Telegram, 15*time.Minute)
 
 	events := make(chan Event, 10)
 	events <- Event{Type: EventSegment}
@@ -441,7 +441,7 @@ func TestStreamerEmptySegmentIsNoOp(t *testing.T) {
 func TestStreamerFinalEditReconciles(t *testing.T) {
 	reply := newFakeReplyContext()
 	renderer := render.New()
-	s := NewStreamer(reply, renderer, render.Telegram)
+	s := NewStreamer(reply, renderer, render.Telegram, 15*time.Minute)
 
 	paras := make([]string, 60)
 	for i := range paras {
@@ -473,7 +473,7 @@ func TestStreamerFinalEditReconciles(t *testing.T) {
 func TestStreamerEmptyStreamShowsCompletionNotice(t *testing.T) {
 	reply := newFakeReplyContext()
 	renderer := render.New()
-	s := NewStreamer(reply, renderer, render.Telegram)
+	s := NewStreamer(reply, renderer, render.Telegram, 15*time.Minute)
 
 	events := make(chan Event, 10)
 	events <- Event{Type: EventDone}
@@ -492,7 +492,7 @@ func TestStreamerEmptyStreamShowsCompletionNotice(t *testing.T) {
 func TestStreamerScheduleAttributionHandler(t *testing.T) {
 	reply := newFakeReplyContext()
 	renderer := render.New()
-	s := NewStreamer(reply, renderer, render.Telegram)
+	s := NewStreamer(reply, renderer, render.Telegram, 15*time.Minute)
 
 	var called bool
 	var capturedInput map[string]any
@@ -532,7 +532,7 @@ func TestStreamerScheduleAttributionHandler(t *testing.T) {
 func TestStreamerScheduleAttributionLateInput(t *testing.T) {
 	reply := newFakeReplyContext()
 	renderer := render.New()
-	s := NewStreamer(reply, renderer, render.Telegram)
+	s := NewStreamer(reply, renderer, render.Telegram, 15*time.Minute)
 
 	var calls int
 	var capturedInput map[string]any
@@ -568,7 +568,7 @@ func TestStreamerScheduleAttributionLateInput(t *testing.T) {
 func TestStreamerTimeoutGenericCopy(t *testing.T) {
 	reply := newFakeReplyContext()
 	renderer := render.New()
-	s := NewStreamer(reply, renderer, render.Telegram)
+	s := NewStreamer(reply, renderer, render.Telegram, 15*time.Minute)
 	s.noEventTimeout = 20 * time.Millisecond
 
 	events := make(chan Event, 2)
@@ -589,7 +589,7 @@ func TestStreamerTimeoutGenericCopy(t *testing.T) {
 func TestStreamerTimeoutPermissionCopy(t *testing.T) {
 	reply := newFakeReplyContext()
 	renderer := render.New()
-	s := NewStreamer(reply, renderer, render.Telegram)
+	s := NewStreamer(reply, renderer, render.Telegram, 15*time.Minute)
 	s.noEventTimeout = 20 * time.Millisecond
 	s.SetPermissionPendingFunc(func() bool { return true })
 

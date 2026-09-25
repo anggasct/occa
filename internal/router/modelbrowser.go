@@ -17,13 +17,7 @@ import (
 	"github.com/anggasct/occa/internal/relay"
 )
 
-const (
-	modelBrowserNavRow  = 100
-	modelCallbackPrefix = "model:"
-	modelBrowserCap     = 1000
-	modelBrowserTTL     = 30 * time.Minute
-	modelBrowserPage    = 10
-)
+const modelCallbackPrefix = "model:"
 
 // errReplied signals a command handler that already sent its own reply
 // through the reply context; the command dispatcher must not reply again.
@@ -45,12 +39,16 @@ type modelBrowseAction struct {
 // 64 bytes / Discord 100 chars). Entries are TTL-capped like the permission
 // broker; a stale token simply renders the fallback view.
 type modelBrowserBroker struct {
-	mu     sync.Mutex
-	tokens map[string]modelBrowseAction
+	mu      sync.Mutex
+	tokens  map[string]modelBrowseAction
+	ttl     time.Duration
+	page    int
+	navRow  int
+	capSize int
 }
 
-func newModelBrowserBroker() *modelBrowserBroker {
-	return &modelBrowserBroker{tokens: make(map[string]modelBrowseAction)}
+func newModelBrowserBroker(ttl time.Duration, page, navRow, capSize int) *modelBrowserBroker {
+	return &modelBrowserBroker{tokens: make(map[string]modelBrowseAction), ttl: ttl, page: page, navRow: navRow, capSize: capSize}
 }
 
 func (b *modelBrowserBroker) register(action modelBrowseAction) (string, error) {
@@ -63,7 +61,7 @@ func (b *modelBrowserBroker) register(action modelBrowseAction) (string, error) 
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if len(b.tokens) >= modelBrowserCap {
+	if len(b.tokens) >= b.capSize {
 		var oldest string
 		var oldestAt time.Time
 		for t, a := range b.tokens {
@@ -84,7 +82,7 @@ func (b *modelBrowserBroker) lookup(token string) (modelBrowseAction, bool) {
 	if !ok {
 		return modelBrowseAction{}, false
 	}
-	if time.Since(action.createdAt) > modelBrowserTTL {
+	if time.Since(action.createdAt) > b.ttl {
 		delete(b.tokens, token)
 		return modelBrowseAction{}, false
 	}
@@ -345,7 +343,7 @@ func modelItemsPerRow(platform string) int {
 // (and their tokens) are omitted.
 func (r *Router) modelProvidersView(platform string, providers relay.Providers, page int, current string, textOnly bool) (string, []channel.Button, error) {
 	ids := providerIDs(providers)
-	start, end := modelPageBounds(len(ids), page)
+	start, end := modelPageBounds(len(ids), page, r.modelBrowser.page)
 	text := current + "\n\nSelect provider:"
 	if len(ids) == 0 {
 		return text + "\n(no providers available)", nil, nil
@@ -361,7 +359,7 @@ func (r *Router) modelProvidersView(platform string, providers relay.Providers, 
 			buttons = append(buttons, channel.Button{Label: id, Value: modelCallbackPrefix + token, Row: i/modelItemsPerRow(platform) + 1})
 		}
 	}
-	buttons = append(buttons, r.modelNavButtons("providers", "", page, modelTotalPages(len(ids)), textOnly)...)
+	buttons = append(buttons, r.modelNavButtons("providers", "", page, modelTotalPages(len(ids), r.modelBrowser.page), textOnly)...)
 	return text, buttons, nil
 }
 
@@ -384,14 +382,14 @@ func (r *Router) modelModelsViewWithQuery(platform string, providers relay.Provi
 		}
 		ids = SearchModelIDs(p.Models, query)
 	}
-	pages := modelTotalPages(len(ids))
+	pages := modelTotalPages(len(ids), r.modelBrowser.page)
 	if page < 0 {
 		page = 0
 	}
 	if page >= pages {
 		page = pages - 1
 	}
-	start, end := modelPageBounds(len(ids), page)
+	start, end := modelPageBounds(len(ids), page, r.modelBrowser.page)
 	text := prefix + fmt.Sprintf("Provider: %s — select model:", providerID)
 	if query != "" {
 		text = prefix + fmt.Sprintf("Provider: %s — search `%s`\nFound %d models · Page %d/%d", providerID, query, len(ids), page+1, pages)
@@ -421,7 +419,7 @@ func (r *Router) modelModelsViewWithQuery(platform string, providers relay.Provi
 			if err != nil {
 				return "", nil, err
 			}
-			buttons = append(buttons, channel.Button{Label: "⬅️ Providers", Value: modelCallbackPrefix + back, Row: modelBrowserNavRow})
+			buttons = append(buttons, channel.Button{Label: "⬅️ Providers", Value: modelCallbackPrefix + back, Row: r.modelBrowser.navRow})
 		}
 	}
 	if query == "" {
@@ -444,7 +442,7 @@ func (r *Router) modelSearchNavigation(providerID, query string, page, pages int
 	if err != nil {
 		return nil, err
 	}
-	buttons := []channel.Button{{Label: "⬅️ Providers", Value: modelCallbackPrefix + providersToken, Row: modelBrowserNavRow}}
+	buttons := []channel.Button{{Label: "⬅️ Providers", Value: modelCallbackPrefix + providersToken, Row: r.modelBrowser.navRow}}
 	buttons = append(buttons, r.modelNavButtonsWithQuery("models", providerID, page, pages, textOnly, query)...)
 	return buttons, nil
 }
@@ -461,42 +459,42 @@ func (r *Router) modelNavButtonsWithQuery(kind, providerID string, page, pages i
 	if page > 0 {
 		token, err := r.modelBrowser.register(modelBrowseAction{kind: kind, page: page - 1, providerID: providerID, query: query})
 		if err == nil {
-			buttons = append(buttons, channel.Button{Label: "◀️ Prev", Value: modelCallbackPrefix + token, Row: modelBrowserNavRow})
+			buttons = append(buttons, channel.Button{Label: "◀️ Prev", Value: modelCallbackPrefix + token, Row: r.modelBrowser.navRow})
 		}
 	}
 	if page < pages-1 {
 		token, err := r.modelBrowser.register(modelBrowseAction{kind: kind, page: page + 1, providerID: providerID, query: query})
 		if err == nil {
-			buttons = append(buttons, channel.Button{Label: "Next ▶️", Value: modelCallbackPrefix + token, Row: modelBrowserNavRow})
+			buttons = append(buttons, channel.Button{Label: "Next ▶️", Value: modelCallbackPrefix + token, Row: r.modelBrowser.navRow})
 		}
 	}
 	closeToken, err := r.modelBrowser.register(modelBrowseAction{kind: "close", pageKind: kind, page: page, providerID: providerID, query: query})
 	if err == nil {
-		buttons = append(buttons, channel.Button{Label: "✖️ Close", Value: modelCallbackPrefix + closeToken, Row: modelBrowserNavRow})
+		buttons = append(buttons, channel.Button{Label: "✖️ Close", Value: modelCallbackPrefix + closeToken, Row: r.modelBrowser.navRow})
 	}
 	return buttons
 }
 
-func modelPageBounds(total, page int) (int, int) {
+func modelPageBounds(total, page, pageSize int) (int, int) {
 	if total <= 0 {
 		return 0, 0
 	}
-	start := page * modelBrowserPage
+	start := page * pageSize
 	if start > total {
 		start = total
 	}
-	end := start + modelBrowserPage
+	end := start + pageSize
 	if end > total {
 		end = total
 	}
 	return start, end
 }
 
-func modelTotalPages(total int) int {
+func modelTotalPages(total, pageSize int) int {
 	if total <= 0 {
 		return 1
 	}
-	return (total + modelBrowserPage - 1) / modelBrowserPage
+	return (total + pageSize - 1) / pageSize
 }
 
 // providerIDs returns the browsable provider ids: the connected ones when
@@ -549,13 +547,13 @@ func (r *Router) modelVariantsViewWithQuery(platform string, providers relay.Pro
 				if err != nil {
 					return "", nil, err
 				}
-				buttons = append(buttons, channel.Button{Label: "⬅️ Models", Value: modelCallbackPrefix + back, Row: modelBrowserNavRow})
+				buttons = append(buttons, channel.Button{Label: "⬅️ Models", Value: modelCallbackPrefix + back, Row: r.modelBrowser.navRow})
 			}
 			closeToken, err := r.modelBrowser.register(modelBrowseAction{kind: "close", pageKind: "variants", providerID: providerID, modelID: modelID, page: page, query: query})
 			if err != nil {
 				return "", nil, err
 			}
-			buttons = append(buttons, channel.Button{Label: "⬅️ Close", Value: modelCallbackPrefix + closeToken, Row: modelBrowserNavRow})
+			buttons = append(buttons, channel.Button{Label: "⬅️ Close", Value: modelCallbackPrefix + closeToken, Row: r.modelBrowser.navRow})
 		}
 		return text, buttons, nil
 	}
@@ -637,7 +635,7 @@ func (r *Router) modelVariantsViewWithQuery(platform string, providers relay.Pro
 			if err != nil {
 				return "", nil, err
 			}
-			buttons = append(buttons, channel.Button{Label: "⬅️ Models", Value: modelCallbackPrefix + back, Row: modelBrowserNavRow})
+			buttons = append(buttons, channel.Button{Label: "⬅️ Models", Value: modelCallbackPrefix + back, Row: r.modelBrowser.navRow})
 		}
 		closeToken, err := r.modelBrowser.register(modelBrowseAction{
 			kind:       "close",
@@ -650,7 +648,7 @@ func (r *Router) modelVariantsViewWithQuery(platform string, providers relay.Pro
 		if err != nil {
 			return "", nil, err
 		}
-		buttons = append(buttons, channel.Button{Label: "⬅️ Close", Value: modelCallbackPrefix + closeToken, Row: modelBrowserNavRow})
+		buttons = append(buttons, channel.Button{Label: "⬅️ Close", Value: modelCallbackPrefix + closeToken, Row: r.modelBrowser.navRow})
 	}
 
 	return text, buttons, nil

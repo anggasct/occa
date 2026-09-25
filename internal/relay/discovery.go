@@ -31,8 +31,8 @@ func normalizePath(p string) string {
 	return pathParamRegexp.ReplaceAllString(p, "{}")
 }
 
-func Discover(ctx context.Context, baseURL string) (*OpenAPIDoc, error) {
-	client := &http.Client{Timeout: 5 * time.Second}
+func Discover(ctx context.Context, baseURL string, timeout time.Duration) (*OpenAPIDoc, error) {
+	client := &http.Client{Timeout: timeout}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/doc", nil)
 	if err != nil {
 		return nil, fmt.Errorf("relay: discovery: build request: %w", err)

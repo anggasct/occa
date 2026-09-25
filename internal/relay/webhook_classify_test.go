@@ -63,7 +63,7 @@ func TestClassifyTimeoutFailure(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ClassifyTimeoutFailure(tt.progress, tt.budget, tt.model)
+			got := ClassifyTimeoutFailure(tt.progress, tt.budget, tt.model, 2*time.Minute)
 			if got != tt.wantExact {
 				t.Fatalf("ClassifyTimeoutFailure() = %q, want %q", got, tt.wantExact)
 			}

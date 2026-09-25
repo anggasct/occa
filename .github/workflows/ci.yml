@@ -42,6 +42,24 @@ jobs:
           LINT_BASE_REV: ${{ github.event_name == 'pull_request' && 'origin/main' || 'HEAD^' }}
         run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --new-from-rev="$LINT_BASE_REV" ./...
 
+      - name: Tuning literal gate
+        run: |
+          out=$(grep -rnE '[0-9]+ \* time\.(Milli)?[Ss]econd|[0-9]+ \* time\.Minute|[0-9]+ \* time\.Hour' --include='*.go' internal/ cmd/ | grep -v _test.go || true)
+          echo "$out"
+          count=$(printf '%s\n' "$out" | grep -c . || true)
+          test "$count" -eq 15 || (echo "expected 15 mechanism lines, got $count"; exit 1)
+          printf '%s\n' "$out" | grep -q "internal/relay/client.go" && (echo "policy literal in relay/client.go"; exit 1) || true
+          printf '%s\n' "$out" | grep -q "internal/relay/discovery.go" && (echo "policy literal in relay/discovery.go"; exit 1) || true
+          printf '%s\n' "$out" | grep -q "internal/relay/webhook.go" && (echo "policy literal in relay/webhook.go"; exit 1) || true
+          printf '%s\n' "$out" | grep -q "internal/relay/webhook_classify.go" && (echo "policy literal in relay/webhook_classify.go"; exit 1) || true
+          printf '%s\n' "$out" | grep -q "internal/router/loop.go" && (echo "policy literal in router/loop.go"; exit 1) || true
+          printf '%s\n' "$out" | grep -q "internal/router/router.go" && (echo "policy literal in router/router.go"; exit 1) || true
+          printf '%s\n' "$out" | grep -q "internal/router/modelbrowser.go" && (echo "policy literal in router/modelbrowser.go"; exit 1) || true
+          printf '%s\n' "$out" | grep -q "internal/router/recovery.go" && (echo "policy literal in router/recovery.go"; exit 1) || true
+          printf '%s\n' "$out" | grep -q "internal/router/usage.go" && (echo "policy literal in router/usage.go"; exit 1) || true
+          printf '%s\n' "$out" | grep -q "internal/loop/loop.go" && (echo "policy literal in loop/loop.go"; exit 1) || true
+          printf '%s\n' "$out" | grep -q "internal/health/health.go" && (echo "policy literal in health/health.go"; exit 1) || true
+
       - name: Test (race)
         run: go test ./... -race -count=1
 

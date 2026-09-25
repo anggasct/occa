@@ -93,6 +93,7 @@ type Server struct {
 	claimGrace            time.Duration
 	claimGraceSeconds     int64
 	processingTimeout     time.Duration
+	stallFreshness        time.Duration
 	dispatcherIdleTTL     time.Duration
 	workspaceRetryBackoff []time.Duration
 	workspaceRetrySleep   func(ctx context.Context, d time.Duration) bool
@@ -207,6 +208,10 @@ func (s *Server) SetEditor(e Editor) {
 
 func (s *Server) SetChannelStore(c ChannelStore) {
 	s.channels = c
+}
+
+func (s *Server) SetStallFreshness(d time.Duration) {
+	s.stallFreshness = d
 }
 
 // recoverStale marks deliveries a previous process left in flight as failed so
@@ -977,7 +982,7 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		s.linkRootCard(ep, workCtx, deliveryID, card)
 		return nil
 	case errors.Is(err, context.DeadlineExceeded), ctx.Err() == context.DeadlineExceeded:
-		s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary(timeoutSummary(s.processingTimeout, workCtx), maxErrorSummaryRunes, ep.Secret), workCtx)
+		s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary(timeoutSummary(s.processingTimeout, s.stallFreshness, workCtx), maxErrorSummaryRunes, ep.Secret), workCtx)
 	default:
 		// Self-heal coordination: an incomplete response is not written
 		// terminal yet. The dispatcher owns the one-shot decision; when it

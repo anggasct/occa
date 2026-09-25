@@ -10,14 +10,9 @@ import (
 	"strings"
 )
 
-// MaxEventLineBytes bounds a single stream line: 1 MB of data payload plus
-// line overhead. Agent output that embeds file content routinely exceeds
-// bufio's 64 KB default.
-const MaxEventLineBytes = 1024*1024 + 64*1024
-
-func readSSE(ctx context.Context, r io.Reader, ch chan<- Event, sessionID string) error {
+func readSSE(ctx context.Context, r io.Reader, ch chan<- Event, sessionID string, maxLineBytes int) error {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), MaxEventLineBytes+1)
+	scanner.Buffer(make([]byte, 64*1024), maxLineBytes+1)
 	decoder := newEventDecoderFor(sessionID)
 	var eventType, data string
 	var hasFields bool

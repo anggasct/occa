@@ -97,7 +97,7 @@ func TestUsageCallbackPaginatesAndKeepsScope(t *testing.T) {
 	if len(reply.edits) != 1 || len(usage.queries) != 1 {
 		t.Fatalf("edits=%d queries=%d", len(reply.edits), len(usage.queries))
 	}
-	if usage.queries[0].Offset != usagePageSize || usage.queries[0].Since == 0 || !usage.queries[0].ChannelWide {
+	if usage.queries[0].Offset != 5 || usage.queries[0].Since == 0 || !usage.queries[0].ChannelWide {
 		t.Fatalf("callback query = %+v", usage.queries[0])
 	}
 }

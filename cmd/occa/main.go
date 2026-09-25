@@ -135,9 +135,12 @@ func main() {
 	defer stop()
 
 	manager, err := process.DefaultManager(cfg.Agent, process.Config{
-		ReadinessTimeout: cfg.Runtime.Process.ReadinessTimeout,
-		StopGrace:        cfg.Runtime.Process.StopGrace,
-		ControlTimeout:   cfg.Runtime.Process.ControlTimeout,
+		ReadinessTimeout:   cfg.Runtime.Process.ReadinessTimeout,
+		StopGrace:          cfg.Runtime.Process.StopGrace,
+		ControlTimeout:     cfg.Runtime.Process.ControlTimeout,
+		ClientTimeout:      cfg.Runtime.Relay.ClientTimeout,
+		MaxAttachmentBytes: int64(cfg.Runtime.Relay.MaxAttachmentSize),
+		MaxEventLineBytes:  cfg.Runtime.Relay.MaxEventLineBytes,
 	})
 	if err != nil {
 		slog.Error("failed to start process manager", "error", err)
@@ -148,9 +151,29 @@ func main() {
 	reaped, err := manager.ReapOrphans(ctx)
 	slog.Info("agent orphan sweep complete", "reaped", reaped, "error", err)
 
-	rt := router.NewWithAllowlists(managerProvider{manager}, db, cfg.Agent.DefaultWorkdir, cfg.AdminID, cfg.Discord.AllowedSenderIDs, cfg.Telegram.AllowedSenderIDs)
+	rt := router.NewWithAllowlists(managerProvider{manager}, db, cfg.Agent.DefaultWorkdir, cfg.AdminID, cfg.Discord.AllowedSenderIDs, cfg.Telegram.AllowedSenderIDs, router.Config{
+		ContextStaleAfter:      cfg.Runtime.Router.ContextStaleAfter,
+		ProgressQuietThreshold: cfg.Runtime.Router.ProgressQuietThreshold,
+		MaxQueuedMessages:      cfg.Runtime.Router.MaxQueuedMessages,
+		MaxPickerSessions:      cfg.Runtime.Router.MaxPickerSessions,
+		MaxPickerPages:         cfg.Runtime.Router.MaxPickerPages,
+		ModelBrowserTTL:        cfg.Runtime.Router.ModelBrowserTTL,
+		ModelBrowserPage:       cfg.Runtime.Router.ModelBrowserPage,
+		ModelBrowserNavRows:    cfg.Runtime.Router.ModelBrowserNavRows,
+		ModelBrowserCap:        cfg.Runtime.Router.ModelBrowserCap,
+		AgentBrowserTTL:        cfg.Runtime.Router.AgentBrowserTTL,
+		AgentBrowserCap:        cfg.Runtime.Router.AgentBrowserCap,
+		QuestionTombstoneTTL:   cfg.Runtime.Router.QuestionTombstoneTTL,
+		PermissionTombstoneTTL: cfg.Runtime.Router.PermissionTombstoneTTL,
+		RecoveryBudget:         cfg.Runtime.Router.RecoveryBudget,
+		RecoveryBaseBackoff:    cfg.Runtime.Router.RecoveryBaseBackoff,
+		RecoveryMaxBackoff:     cfg.Runtime.Router.RecoveryMaxBackoff,
+		UsagePageSize:          cfg.Runtime.Router.UsagePageSize,
+		UsageDefaultWindow:     cfg.Runtime.Router.UsageDefaultWindow,
+		StreamerNoEventTimeout: cfg.Runtime.Relay.NoEventTimeout,
+	})
 
-	discoverAgent(ctx, manager, cfg.Agent.DefaultWorkdir)
+	discoverAgent(ctx, manager, cfg.Agent.DefaultWorkdir, cfg.Runtime.Relay.DiscoveryTimeout)
 
 	menu := rt.MenuCommands()
 	var channels []channel.Channel
@@ -357,10 +380,15 @@ func main() {
 
 	var webhookSrv *webhook.Server
 	if len(cfg.Webhooks.Endpoints) > 0 {
-		webhookExecutor := newWebhookExecutor(channels, managerProvider{m: manager}, db.ChannelRepo(), cfg.Agent.DefaultWorkdir)
+		webhookExecutor := newWebhookExecutor(channels, managerProvider{m: manager}, db.ChannelRepo(), cfg.Agent.DefaultWorkdir, relay.Config{
+			NoEventTimeout:      cfg.Runtime.Relay.NoEventTimeout,
+			WebhookAbortTimeout: cfg.Runtime.Relay.WebhookAbortTimeout,
+			VerifyTimeout:       cfg.Runtime.Relay.VerifyTimeout,
+		})
 
 		webhookSrv = webhook.New(cfg.Webhooks, webhookExecutor, db.WebhookDeliveryRepo())
 		webhookSrv.SetChannelStore(db.ChannelRepo())
+		webhookSrv.SetStallFreshness(cfg.Runtime.Relay.StallFreshness)
 		webhookSrv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
 			for _, ch := range channels {
 				if ch.Name() == platform {
@@ -413,6 +441,7 @@ func main() {
 		health.WithWebhook(webhookSrv),
 		health.WithVersion(version),
 		health.WithExpectedSchema(store.SchemaVersion),
+		health.WithProbeTimeout(cfg.Runtime.Health.ProbeTimeout),
 		health.WithLastError(health.NewLastError(logging.NewStringScrubber(healthSecrets(cfg, telegramToken, discordToken)...))),
 	)
 	rt.SetHealthReporter(healthReporter)
@@ -551,7 +580,7 @@ type channelStore interface {
 	Get(ctx context.Context, platform, channelID string) (*store.Channel, error)
 }
 
-func newWebhookExecutor(channels []channel.Channel, manager agentManager, channelRepo channelStore, defaultWorkdir string) webhook.Executor {
+func newWebhookExecutor(channels []channel.Channel, manager agentManager, channelRepo channelStore, defaultWorkdir string, relayCfg relay.Config) webhook.Executor {
 	return func(ctx context.Context, platform, channelID, prompt string, workCtx *webhook.WebhookWorkContext) error {
 		if workCtx == nil {
 			workCtx = &webhook.WebhookWorkContext{}
@@ -621,19 +650,21 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 							return notifyEdit(ch, chID, msgID, text)
 						},
 					)
-					streamer = relay.NewStreamerWithSink(sink, outboundRenderer, render.PlatformFor(platform))
+					streamer = relay.NewStreamerWithSink(sink, outboundRenderer, render.PlatformFor(platform), relayCfg.NoEventTimeout)
 				}
 
 				turn := relay.WebhookTurn{
-					Client:       inst.Client(),
-					Prompt:       prompt,
-					Model:        workCtx.Model,
-					Platform:     platform,
-					ChannelID:    channelID,
-					DeliveryID:   workCtx.DeliveryID,
-					ExecutionKey: workCtx.Key.String(),
-					Attempt:      workCtx.Attempt,
-					Streamer:     streamer,
+					Client:        inst.Client(),
+					Prompt:        prompt,
+					Model:         workCtx.Model,
+					Platform:      platform,
+					ChannelID:     channelID,
+					DeliveryID:    workCtx.DeliveryID,
+					ExecutionKey:  workCtx.Key.String(),
+					Attempt:       workCtx.Attempt,
+					AbortTimeout:  relayCfg.WebhookAbortTimeout,
+					VerifyTimeout: relayCfg.VerifyTimeout,
+					Streamer:      streamer,
 				}
 				result, err := turn.Run(ctx)
 
@@ -712,8 +743,8 @@ func runChannel(ctx context.Context, c channel.Channel, rt messageRouter) {
 	}
 }
 
-func discoverAgent(ctx context.Context, manager *process.Manager, workdir string) {
-	discoverCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+func discoverAgent(ctx context.Context, manager *process.Manager, workdir string, discoveryTimeout time.Duration) {
+	discoverCtx, cancel := context.WithTimeout(ctx, discoveryTimeout)
 	defer cancel()
 
 	inst, err := manager.Instance(discoverCtx, workdir)
@@ -723,7 +754,7 @@ func discoverAgent(ctx context.Context, manager *process.Manager, workdir string
 	}
 	defer inst.End()
 
-	doc, err := relay.Discover(discoverCtx, inst.Addr())
+	doc, err := relay.Discover(discoverCtx, inst.Addr(), discoveryTimeout)
 	if err != nil {
 		slog.Warn("agent discovery failed — will retry per message", "error", err)
 		return
