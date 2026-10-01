@@ -248,3 +248,20 @@ func TestEnrichedCommentRateCapIntact(t *testing.T) {
 		t.Fatalf("capped calls = %d, want 3", exec.callCount())
 	}
 }
+
+func TestPRHeadResolverReusesConfiguredTimeout(t *testing.T) {
+	srv, _, _ := newTestServerFull(t, []config.EndpointConfig{mutableFixEndpoint()})
+	r, ok := srv.prHeadResolver.(*ghPRHeadResolver)
+	if !ok {
+		t.Fatalf("resolver type = %T, want *ghPRHeadResolver", srv.prHeadResolver)
+	}
+	if r.timeout != srv.processingTimeout {
+		t.Fatalf("resolver timeout = %v, want processing timeout %v", r.timeout, srv.processingTimeout)
+	}
+	if r.timeout <= 0 {
+		t.Fatalf("resolver timeout must be positive from configuration")
+	}
+	if (&ghPRHeadResolver{}).timeout != 0 {
+		t.Fatalf("zero-value resolver must carry no default; caller deadline governs")
+	}
+}

@@ -155,7 +155,7 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 		idleTimeout:           rt.HTTPIdleTimeout,
 		reviewDedupeWindow:    rt.ReviewDedupeWindow,
 		triggerLimits:         triggerLimits,
-		prHeadResolver:        &ghPRHeadResolver{},
+		prHeadResolver:        &ghPRHeadResolver{timeout: rt.ProcessingTimeout},
 	}
 	srv.eventSlots = make(chan struct{}, rt.MaxConcurrentEvents)
 	return srv
@@ -689,7 +689,7 @@ func (s *Server) enrichCommentBody(item dispatchItem) ([]byte, error) {
 	}
 	resolver := s.prHeadResolver
 	if resolver == nil {
-		resolver = &ghPRHeadResolver{}
+		resolver = &ghPRHeadResolver{timeout: s.processingTimeout}
 	}
 	head, err := resolver.ResolvePRHead(context.Background(), repo, number)
 	if err != nil {

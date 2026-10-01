@@ -33,11 +33,11 @@ func (r *ghPRHeadResolver) ResolvePRHead(ctx context.Context, repo string, numbe
 		bin = "gh"
 	}
 	timeout := r.timeout
-	if timeout <= 0 {
-		timeout = 15 * time.Second
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, "pr", "view", strconv.Itoa(number), "--repo", repo, "--json", "headRefName,headRefOid,headRepository,baseRefName,isCrossRepository")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
