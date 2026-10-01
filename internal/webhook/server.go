@@ -109,6 +109,7 @@ type Server struct {
 	reviewDedupeWindow    time.Duration
 	reviewDedupeNow       func() time.Time
 	triggerLimits         map[string]config.EndpointLimits
+	prHeadResolver        PRHeadResolver
 }
 
 func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) *Server {
@@ -154,6 +155,7 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 		idleTimeout:           rt.HTTPIdleTimeout,
 		reviewDedupeWindow:    rt.ReviewDedupeWindow,
 		triggerLimits:         triggerLimits,
+		prHeadResolver:        &ghPRHeadResolver{},
 	}
 	srv.eventSlots = make(chan struct{}, rt.MaxConcurrentEvents)
 	return srv
@@ -180,6 +182,10 @@ func (s *Server) queueCap() int {
 
 func (s *Server) SetWorkspaceResolver(r WorkspaceResolver) {
 	s.workspaceResolver = r
+}
+
+func (s *Server) SetPRHeadResolver(r PRHeadResolver) {
+	s.prHeadResolver = r
 }
 
 func (s *Server) SetSessionStore(st TakeoverStore) {
@@ -564,10 +570,21 @@ func (d *dispatcher) handle(item dispatchItem) {
 		return
 	}
 	incompleteRetried := false
+	enriched := false
 	for attempt := 0; ; attempt++ {
 		if !s.acquireEvent(s.shutdownCtx) {
 			s.failAbandonedReceipt(receipt, "shutting down")
 			return
+		}
+		if !enriched {
+			newBody, err := s.enrichCommentBody(item)
+			if err != nil {
+				s.releaseEvent()
+				s.failEnrichment(item, receipt, err)
+				return
+			}
+			item.body = newBody
+			enriched = true
 		}
 		lease, werr := s.resolveWorkspace(item)
 		if werr == nil {
@@ -645,6 +662,60 @@ func (s *Server) failWorkspace(item dispatchItem, receipt *store.WebhookDelivery
 		Attempt:    receipt.Attempt,
 	}
 	summary := redactSummary(err.Error(), maxErrorSummaryRunes, item.ep.Secret)
+	s.failDelivery(item.ep, receipt.ID, item.deliveryID, item.eventType, envelope, summary, workCtx)
+}
+
+func (s *Server) enrichCommentBody(item dispatchItem) ([]byte, error) {
+	ep := item.ep
+	if item.eventType != "issue_comment" {
+		return item.body, nil
+	}
+	if ep.Workspace.Type != config.WorkspaceTypeGit {
+		return item.body, nil
+	}
+	if ExtractExecutionKey(item.body).Branch != "" {
+		return item.body, nil
+	}
+	repo, number, ok := parseIssueCommentPR(item.body)
+	if !ok {
+		return item.body, nil
+	}
+	envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", ep.CommentTrigger)
+	if stringValue(envelope["comment_trigger"]) == "" {
+		return item.body, nil
+	}
+	if allowed, _ := admitDelivery(ep, s.policy, envelope); !allowed {
+		return item.body, nil
+	}
+	resolver := s.prHeadResolver
+	if resolver == nil {
+		resolver = &ghPRHeadResolver{}
+	}
+	head, err := resolver.ResolvePRHead(context.Background(), repo, number)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(head.Branch) == "" || normalizeRevision(head.SHA) == "" || !isValidRepoFullName(strings.TrimSpace(head.HeadRepo)) {
+		return nil, fmt.Errorf("incomplete head identity for %s#%d", repo, number)
+	}
+	if !strings.EqualFold(strings.TrimSpace(head.HeadRepo), repo) {
+		return nil, fmt.Errorf("fork PR %s#%d (head %s) is not supported", repo, number, strings.TrimSpace(head.HeadRepo))
+	}
+	enriched, err := seedEnrichedBody(item.body, head, repo)
+	if err != nil {
+		return nil, err
+	}
+	return enriched, nil
+}
+
+func (s *Server) failEnrichment(item dispatchItem, receipt *store.WebhookDelivery, err error) {
+	envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", item.ep.CommentTrigger)
+	workCtx := &WebhookWorkContext{
+		Key:        ExtractExecutionKey(item.body),
+		DeliveryID: item.deliveryID,
+		Attempt:    receipt.Attempt,
+	}
+	summary := redactSummary("pr head enrichment failed: "+err.Error(), maxErrorSummaryRunes, item.ep.Secret)
 	s.failDelivery(item.ep, receipt.ID, item.deliveryID, item.eventType, envelope, summary, workCtx)
 }
 

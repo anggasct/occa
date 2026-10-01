@@ -103,6 +103,25 @@ func normalizeWebhook(body []byte, eventType, deliveryID string, verdicts map[st
 		}
 		envelope["comment_body"] = stringValue(comment["body"])
 		envelope["review_user"] = userName(comment["user"])
+		if stringValue(envelope["head_branch"]) == "" {
+			if b := stringValue(payload["branch"]); b != "" {
+				envelope["head_branch"] = b
+			} else if b := stringValue(payload["head_branch"]); b != "" {
+				envelope["head_branch"] = b
+			}
+		}
+		if stringValue(envelope["head_sha"]) == "" {
+			if r := stringValue(payload["head_revision"]); r != "" {
+				envelope["head_sha"] = r
+			} else if r := stringValue(payload["head_sha"]); r != "" {
+				envelope["head_sha"] = r
+			}
+		}
+		if stringValue(envelope["base_branch"]) == "" {
+			if b := stringValue(payload["base_branch"]); b != "" {
+				envelope["base_branch"] = b
+			}
+		}
 	case "check_suite":
 		fillCheckSuite(envelope, payload)
 	}
