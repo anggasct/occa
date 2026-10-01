@@ -44,3 +44,10 @@ webhooks:
   (`comment_trigger`, `comment_trigger_configured`, `pr_open`, `pr_resolvable`,
   `approved_without_findings`), `check_status`, `check_app`, `merged`.
   `workflow` names only the pipeline (`review` | `fix` | `merge` | `merged` | `custom`).
+- **Comment-triggered fix runs resolve the PR head.** An `issue_comment` payload
+  carries no branch identity, so an admitted comment trigger on a git-backed
+  endpoint performs one GitHub PR lookup before workspace attach to fill in
+  `head_branch` and the execution key. A failed lookup, or a head repository
+  that differs from the bound repository, fails the delivery with a
+  `pr head enrichment failed:` reason and takes no workspace lease. Comments on
+  non-PR issues stay skipped with no lookup.
