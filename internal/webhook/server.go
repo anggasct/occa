@@ -421,12 +421,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 // retirement completes and can never land in a channel nobody will read. A
 // rejected send (queue full) leaves the dispatcher untouched.
 func (s *Server) enqueue(ep config.EndpointConfig, key WebhookExecutionKey, item dispatchItem) (*dispatcher, bool) {
-	var lockKey string
-	if key.IsZero() {
-		lockKey = "endpoint:" + ep.Platform + "|" + ep.ChannelID
-	} else {
-		lockKey = "key:" + key.String()
-	}
+	lockKey := dispatchLockKey(ep, key, item)
 	s.dispatchMu.Lock()
 	defer s.dispatchMu.Unlock()
 	d, ok := s.dispatchers[lockKey]
@@ -441,6 +436,86 @@ func (s *Server) enqueue(ep config.EndpointConfig, key WebhookExecutionKey, item
 		return d, true
 	default:
 		return nil, false
+	}
+}
+
+func dispatchLockKey(ep config.EndpointConfig, key WebhookExecutionKey, item dispatchItem) string {
+	if !key.IsZero() {
+		return "key:" + key.String()
+	}
+	base := "endpoint:" + ep.Platform + "|" + ep.ChannelID
+	if item.eventType != "issue_comment" {
+		return base
+	}
+	if identity := issueCommentPRIdentity(item.body); identity != "" {
+		return base + "#issue_comment:" + identity
+	}
+	return base
+}
+
+func issueCommentPRIdentity(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	var payload struct {
+		Repository any `json:"repository"`
+		Issue      *struct {
+			Number any `json:"number"`
+		} `json:"issue"`
+	}
+	if json.Unmarshal(body, &payload) != nil || payload.Issue == nil {
+		return ""
+	}
+	number := formatIssueNumber(payload.Issue.Number)
+	if number == "" {
+		return ""
+	}
+	if repo := extractRepoFullName(payload.Repository); repo != "" {
+		return repo + "#" + number
+	}
+	return number
+}
+
+func formatIssueNumber(v any) string {
+	switch n := v.(type) {
+	case float64:
+		if n <= 0 || n != float64(int(n)) {
+			return ""
+		}
+		return strconv.Itoa(int(n))
+	case float32:
+		if n <= 0 || n != float32(int(n)) {
+			return ""
+		}
+		return strconv.Itoa(int(n))
+	case int:
+		if n <= 0 {
+			return ""
+		}
+		return strconv.Itoa(n)
+	case int64:
+		if n <= 0 {
+			return ""
+		}
+		return strconv.FormatInt(n, 10)
+	case json.Number:
+		i, err := n.Int64()
+		if err != nil || i <= 0 {
+			return ""
+		}
+		return strconv.FormatInt(i, 10)
+	case string:
+		trimmed := strings.TrimSpace(n)
+		if trimmed == "" {
+			return ""
+		}
+		i, err := strconv.Atoi(trimmed)
+		if err != nil || i <= 0 {
+			return ""
+		}
+		return strconv.Itoa(i)
+	default:
+		return ""
 	}
 }
 
