@@ -51,6 +51,7 @@ webhooks:
       prompt_file: webhooks/example-review.md
       comment_trigger: ['please re-review']
       thread: true
+      notify_skip: true # SKIP cards post by default; set false to record skips silently.
       repository: github.com/acme/widget
       workspace:
         type: none

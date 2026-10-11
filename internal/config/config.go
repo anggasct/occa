@@ -76,6 +76,7 @@ type EndpointConfig struct {
 	Workspace      EndpointWorkspace `yaml:"workspace"`
 	Thread         bool              `yaml:"thread,omitempty"`
 	ProgressCard   bool              `yaml:"progress_card,omitempty"`
+	NotifySkip     *bool             `yaml:"notify_skip,omitempty"`
 	Model          string            `yaml:"model,omitempty"`
 	CommentTrigger []string          `yaml:"comment_trigger,omitempty"`
 	Admit          []AdmitRule       `yaml:"admit"`
@@ -100,6 +101,7 @@ func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
 		Workspace      EndpointWorkspace `yaml:"workspace"`
 		Thread         bool              `yaml:"thread,omitempty"`
 		ProgressCard   *bool             `yaml:"progress_card,omitempty"`
+		NotifySkip     *bool             `yaml:"notify_skip,omitempty"`
 		Model          string            `yaml:"model,omitempty"`
 		CommentTrigger []string          `yaml:"comment_trigger,omitempty"`
 		Admit          []AdmitRule       `yaml:"admit"`
@@ -131,12 +133,17 @@ func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
 	e.Admit = raw.Admit
 	e.Limits = raw.Limits
 	e.VerifyEndpoint = strings.TrimSpace(raw.VerifyEndpoint)
+	e.NotifySkip = raw.NotifySkip
 	if raw.ProgressCard != nil {
 		e.ProgressCard = *raw.ProgressCard
 	} else {
 		e.ProgressCard = raw.Thread
 	}
 	return nil
+}
+
+func (e EndpointConfig) NotifyOnSkip() bool {
+	return e.NotifySkip == nil || *e.NotifySkip
 }
 
 type EndpointWorkspace struct {
