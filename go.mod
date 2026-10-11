@@ -1,6 +1,6 @@
 module github.com/anggasct/occa
 
-go 1.26.6
+go 1.26.9
 
 require (
 	github.com/bwmarrin/discordgo v0.29.0
