@@ -263,6 +263,10 @@ func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelo
 		}
 	}
 
+	if status == "SKIP" && !ep.NotifyOnSkip() {
+		return
+	}
+
 	summary := redactAuditSummary(formatAuditSummary(envelope, ep.Workflow, status, reason), ep.Secret)
 	if s.notifier == nil {
 		slog.Info("webhook: audit notification skipped", "endpoint", ep.Name, "status", status)
