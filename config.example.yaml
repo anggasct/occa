@@ -69,22 +69,22 @@ webhooks:
       limits:
         max_runs_per_pr: 3 # comment-trigger runs allowed per PR per window
         window: 60m # sliding window for the trigger cap
-    - name: github-acme-review-fix
-      path: /webhooks/github-acme-review-fix
-      auth: github_hmac_sha256
-      secret: <your-webhook-secret>
-      workflow: fix
-      platform: discord
-      channel_id: '<channel-id>'
-      prompt_file: webhooks/example-review.md
-      comment_trigger: ['please fix ci']
-      thread: true
-      repository: github.com/acme/widget
+    - name: github-acme-review-fix # stable key for receipts, limits and logs
+      path: /webhooks/github-acme-review-fix # unique route suffix (no /occa prefix)
+      auth: github_hmac_sha256 # "" | legacy_bearer | github_hmac_sha256
+      secret: <your-webhook-secret> # credential verifying inbound requests
+      workflow: fix # review | fix | merge | merged | custom (pipeline label only)
+      platform: discord # where runs and audit cards go: discord | telegram
+      channel_id: '<channel-id>' # destination chat for runs and audit cards
+      prompt_file: webhooks/example-review.md # agent instruction file (exclusive with prompt)
+      comment_trigger: ['please fix ci'] # comment substrings that trigger a run
+      thread: true # run each delivery in its own thread
+      repository: github.com/acme/widget # owner/repo binding (required for git workspaces)
       workspace:
         type: git # check out the repo for the run
         path: /home/operator/projects/widget # checkout root (relative = vs config dir)
         mode: mutable # isolated (detached worktree) | mutable (branch worktree)
-      admit:
+      admit: # ordered admission rules; first match wins, no match = ignore
         - event: pull_request_review
           actions: [submitted]
           review_state: [changes_requested]
@@ -96,20 +96,20 @@ webhooks:
           actions: [created]
           require: [comment_trigger, pr_open]
       limits:
-        max_runs_per_pr: 3
-        window: 60m
-    - name: github-acme-merge
-      path: /webhooks/github-acme-merge
-      auth: github_hmac_sha256
-      secret: <your-webhook-secret>
-      workflow: merge
-      platform: discord
-      channel_id: '<channel-id>'
-      prompt_file: webhooks/example-review.md
-      thread: true
+        max_runs_per_pr: 3 # comment-trigger runs allowed per PR per window
+        window: 60m # sliding window for the trigger cap
+    - name: github-acme-merge # stable key for receipts, limits and logs
+      path: /webhooks/github-acme-merge # unique route suffix (no /occa prefix)
+      auth: github_hmac_sha256 # "" | legacy_bearer | github_hmac_sha256
+      secret: <your-webhook-secret> # credential verifying inbound requests
+      workflow: merge # review | fix | merge | merged | custom (pipeline label only)
+      platform: discord # where runs and audit cards go: discord | telegram
+      channel_id: '<channel-id>' # destination chat for runs and audit cards
+      prompt_file: webhooks/example-review.md # agent instruction file (exclusive with prompt)
+      thread: true # run each delivery in its own thread
       workspace:
-        type: none
-      admit:
+        type: none # none (no checkout) | git
+      admit: # ordered admission rules; first match wins, no match = ignore
         - event: pull_request_review
           actions: [submitted]
           review_state: [approved]
@@ -123,18 +123,18 @@ webhooks:
           check_status: completed
           check_app: GitHub Actions
           require: [pr_open, pr_resolvable]
-    - name: github-acme-merged
-      path: /webhooks/github-acme-merged
-      auth: github_hmac_sha256
-      secret: <your-webhook-secret>
-      workflow: merged
-      platform: discord
-      channel_id: '<channel-id>'
-      prompt_file: webhooks/example-review.md
-      thread: true
+    - name: github-acme-merged # stable key for receipts, limits and logs
+      path: /webhooks/github-acme-merged # unique route suffix (no /occa prefix)
+      auth: github_hmac_sha256 # "" | legacy_bearer | github_hmac_sha256
+      secret: <your-webhook-secret> # credential verifying inbound requests
+      workflow: merged # review | fix | merge | merged | custom (pipeline label only)
+      platform: discord # where runs and audit cards go: discord | telegram
+      channel_id: '<channel-id>' # destination chat for runs and audit cards
+      prompt_file: webhooks/example-review.md # agent instruction file (exclusive with prompt)
+      thread: true # run each delivery in its own thread
       workspace:
-        type: none
-      admit:
+        type: none # none (no checkout) | git
+      admit: # ordered admission rules; first match wins, no match = ignore
         - event: pull_request
           actions: [closed]
           merged: true
