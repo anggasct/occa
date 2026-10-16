@@ -54,11 +54,23 @@ type LoggingConfig struct {
 }
 
 type WebhookConfig struct {
-	Bind      string           `yaml:"bind"`
-	Policy    WebhookPolicy    `yaml:"policy"`
-	Runtime   WebhookRuntime   `yaml:"runtime"`
-	Endpoints []EndpointConfig `yaml:"endpoints"`
+	Bind              string            `yaml:"bind"`
+	Policy            WebhookPolicy     `yaml:"policy"`
+	Runtime           WebhookRuntime    `yaml:"runtime"`
+	Endpoints         []EndpointConfig  `yaml:"endpoints"`
+	Dispatch          DispatchConfig    `yaml:"dispatch"`
+	StatusIcons       map[string]string `yaml:"status_icons,omitempty"`
+	StatusColors      map[string]int    `yaml:"status_colors,omitempty"`
+	FallbackPollAfter time.Duration     `yaml:"fallback_poll_after,omitempty"`
 }
+
+type DispatchConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Path    string `yaml:"path,omitempty"`
+	Token   string `yaml:"token,omitempty"`
+}
+
+var knownTaskStatuses = []string{"dispatched", "claimed", "pr_opened", "merged", "event", "failed"}
 
 type EndpointConfig struct {
 	Name           string            `yaml:"name"`
@@ -437,6 +449,9 @@ func applyEnv(fc *fileConfig) error {
 	if v := os.Getenv("OCCA_LOG_FORMAT"); v != "" {
 		fc.Logging.Format = v
 	}
+	if v := os.Getenv("OCCA_DISPATCH_TOKEN"); v != "" {
+		fc.Webhooks.Dispatch.Token = v
+	}
 	return nil
 }
 
@@ -501,6 +516,30 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 			return Config{}, err
 		}
 		fc.Webhooks.Policy = policy
+		if err := validateTaskStatusConfig(fc.Webhooks.StatusIcons, fc.Webhooks.StatusColors); err != nil {
+			return Config{}, err
+		}
+		if fc.Webhooks.FallbackPollAfter < 0 {
+			return Config{}, fmt.Errorf("config: webhooks.fallback_poll_after must not be negative")
+		}
+		if fc.Webhooks.FallbackPollAfter == 0 {
+			fallbackDefault, err := time.ParseDuration("10m")
+			if err != nil {
+				return Config{}, fmt.Errorf("config: webhooks.fallback_poll_after default: %w", err)
+			}
+			fc.Webhooks.FallbackPollAfter = fallbackDefault
+		}
+		if fc.Webhooks.Dispatch.Enabled {
+			if strings.TrimSpace(fc.Webhooks.Dispatch.Path) == "" {
+				fc.Webhooks.Dispatch.Path = "/dispatch"
+			}
+			if err := validateEndpointPath(fc.Webhooks.Dispatch.Path); err != nil {
+				return Config{}, fmt.Errorf("config: webhooks.dispatch.path: %w", err)
+			}
+			if strings.TrimSpace(fc.Webhooks.Dispatch.Token) == "" {
+				return Config{}, fmt.Errorf("config: webhooks.dispatch.token must not be empty when dispatch is enabled (or set OCCA_DISPATCH_TOKEN)")
+			}
+		}
 		paths := make(map[string]struct{}, len(fc.Webhooks.Endpoints))
 		for i := range fc.Webhooks.Endpoints {
 			endpoint := &fc.Webhooks.Endpoints[i]
@@ -565,6 +604,11 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 			}
 			paths[endpoint.Path] = struct{}{}
 		}
+		if fc.Webhooks.Dispatch.Enabled {
+			if _, exists := paths[fc.Webhooks.Dispatch.Path]; exists {
+				return Config{}, fmt.Errorf("config: webhooks.dispatch.path duplicates endpoint path %q", fc.Webhooks.Dispatch.Path)
+			}
+		}
 	}
 
 	return Config{
@@ -601,6 +645,40 @@ func validateSenderAllowlist(platform string, ids []string) ([]string, error) {
 		out = append(out, id)
 	}
 	return out, nil
+}
+
+func validateTaskStatusConfig(icons map[string]string, colors map[string]int) error {
+	known := make(map[string]bool, len(knownTaskStatuses))
+	for _, status := range knownTaskStatuses {
+		known[status] = true
+	}
+	for key, icon := range icons {
+		name := strings.TrimSpace(strings.ToLower(key))
+		if !known[name] {
+			return fmt.Errorf("config: webhooks.status_icons key %q is unknown (want one of %s)", key, strings.Join(knownTaskStatuses, ", "))
+		}
+		if strings.TrimSpace(icon) == "" {
+			return fmt.Errorf("config: webhooks.status_icons[%q] must not be empty", key)
+		}
+		if key != name {
+			icons[name] = icon
+			delete(icons, key)
+		}
+	}
+	for key, color := range colors {
+		name := strings.TrimSpace(strings.ToLower(key))
+		if !known[name] {
+			return fmt.Errorf("config: webhooks.status_colors key %q is unknown (want one of %s)", key, strings.Join(knownTaskStatuses, ", "))
+		}
+		if color < 0 || color > 0xFFFFFF {
+			return fmt.Errorf("config: webhooks.status_colors[%q] must be a 24-bit color", key)
+		}
+		if key != name {
+			colors[name] = color
+			delete(colors, key)
+		}
+	}
+	return nil
 }
 
 func validateEndpointPath(p string) error {

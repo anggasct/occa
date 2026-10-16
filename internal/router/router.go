@@ -54,6 +54,7 @@ func (r *Router) MenuCommands() []channel.MenuCommand {
 		{Alias: "loop", Description: "Repeat a prompt on an interval", HasArgs: true},
 		{Alias: "loops", Description: "List active loops in this conversation"},
 		{Alias: "webhooks", Description: "Recent webhook delivery diagnostics"},
+		{Alias: "connect-repo", Description: "Show the 4-hook wiring checklist for owner/repo", HasArgs: true},
 	}
 }
 
@@ -647,6 +648,10 @@ func (r *Router) registerDefaults() {
 	r.commands["webhooks"] = Command{
 		Name:    "webhooks",
 		Handler: r.handleWebhooks,
+	}
+	r.commands["connect-repo"] = Command{
+		Name:    "connect-repo",
+		Handler: r.handleConnectRepo,
 	}
 }
 

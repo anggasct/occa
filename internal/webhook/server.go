@@ -110,6 +110,15 @@ type Server struct {
 	reviewDedupeNow       func() time.Time
 	triggerLimits         map[string]config.EndpointLimits
 	prHeadResolver        PRHeadResolver
+	tasks                 *TaskThreadRegistry
+	dispatchEnabled       bool
+	dispatchPath          string
+	dispatchToken         string
+	dispatchTasks         *DispatchStore
+	fallbackAfter         time.Duration
+	branchChecker         BranchPRChecker
+	statusIcons           map[string]string
+	statusColors          map[string]int
 }
 
 func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) *Server {
@@ -158,6 +167,19 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 		prHeadResolver:        &ghPRHeadResolver{timeout: rt.ProcessingTimeout},
 	}
 	srv.eventSlots = make(chan struct{}, rt.MaxConcurrentEvents)
+	srv.tasks = NewTaskThreadRegistry()
+	srv.tasks.SetStatusConfig(cfg.StatusIcons, cfg.StatusColors)
+	srv.statusIcons = cfg.StatusIcons
+	srv.statusColors = cfg.StatusColors
+	srv.dispatchEnabled = cfg.Dispatch.Enabled
+	srv.dispatchPath = strings.TrimSpace(cfg.Dispatch.Path)
+	if srv.dispatchPath == "" {
+		srv.dispatchPath = defaultDispatchPath
+	}
+	srv.dispatchToken = strings.TrimSpace(cfg.Dispatch.Token)
+	srv.dispatchTasks = NewDispatchStore()
+	srv.fallbackAfter = cfg.FallbackPollAfter
+	srv.branchChecker = ghBranchPRChecker
 	return srv
 }
 
@@ -220,6 +242,30 @@ func (s *Server) SetStallFreshness(d time.Duration) {
 	s.stallFreshness = d
 }
 
+func (s *Server) SetTaskRegistry(t *TaskThreadRegistry) {
+	if t == nil {
+		t = NewTaskThreadRegistry()
+	}
+	s.tasks = t
+}
+
+func (s *Server) TaskRegistry() *TaskThreadRegistry {
+	return s.tasks
+}
+
+func (s *Server) SetBranchChecker(c BranchPRChecker) {
+	if c == nil {
+		c = ghBranchPRChecker
+	}
+	s.branchChecker = c
+}
+
+func (s *Server) SetFallbackPollAfter(d time.Duration) {
+	if d > 0 {
+		s.fallbackAfter = d
+	}
+}
+
 // recoverStale marks deliveries a previous process left in flight as failed so
 // diagnostics never report a phantom running delivery after a crash. Pruning
 // bounds table growth at startup.
@@ -273,6 +319,12 @@ func (s *Server) Start(ctx context.Context) error {
 	s.recoverStale(ctx)
 
 	mux := http.NewServeMux()
+	if s.dispatchEnabled {
+		mux.HandleFunc(s.dispatchPath, s.handleDispatch)
+		if prefixed := "/occa" + s.dispatchPath; prefixed != s.dispatchPath {
+			mux.HandleFunc(prefixed, s.handleDispatch)
+		}
+	}
 	mux.HandleFunc("/", s.handleRequest)
 
 	ln, err := net.Listen("tcp", s.bind)
@@ -965,6 +1017,14 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		Envelope:     envelope,
 		StartTime:    time.Now(),
 	}
+	if repo, branch := TaskRepoBranch(key, envelope); repo != "" && branch != "" {
+		if rec, ok := s.tasks.Lookup(repo, branch); ok && rec.ThreadID != "" {
+			workCtx.ThreadID = rec.ThreadID
+			if rec.RootMessageID != "" {
+				workCtx.RootMessageID = rec.RootMessageID
+			}
+		}
+	}
 	if lease != nil {
 		workCtx.Worktree = lease.Path
 		defer func() {
@@ -1119,6 +1179,8 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 				"execution_key", workCtx.Key.String(),
 				"worktree", workCtx.Worktree,
 			}, sessionLogAttrs(workCtx)...)...)
+		s.recordTaskThread(ep, envelope, workCtx, StatusForWorkflow(ep.Workflow))
+		s.scheduleDeliveryFallback(ep, workCtx)
 		if s.sessions != nil && workCtx.ThreadID != "" && workCtx.SessionID != "" {
 			seed := redactAuditSummary(formatAuditSummary(envelope, ep.Workflow, "COMPLETED", ""), ep.Secret)
 			if err := s.sessions.MarkTakeoverEligible(context.Background(), ep.Platform, ep.ChannelID, workCtx.ThreadID, workCtx.SessionID, workCtx.AgentPID, seed); err != nil {
@@ -1190,6 +1252,8 @@ func (s *Server) linkRootCard(ep config.EndpointConfig, workCtx *WebhookWorkCont
 
 func (s *Server) failDelivery(ep config.EndpointConfig, id int64, deliveryID, eventType string, envelope WebhookEnvelope, summary string, workCtx *WebhookWorkContext) {
 	card := s.terminalCard(ep, envelope, "FAILED", summary, workCtx)
+	s.recordTaskThread(ep, envelope, workCtx, TaskFailed)
+	s.scheduleDeliveryFallback(ep, workCtx)
 	ok, err := s.deliveries.Transition(context.Background(), id, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusFailed, summary)
 	if err != nil {
 		slog.Error("webhook: failed transition", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)

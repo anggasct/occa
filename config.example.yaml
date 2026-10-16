@@ -45,6 +45,25 @@ webhooks:
     http_idle_timeout: 2m # keep-alive idle timeout
     review_dedupe_window: 60m # duplicate pull_request_review suppression window
     isolated_workspace_ttl: 24h # expiry for detached isolated worktrees
+  dispatch: # task entry API (disabled unless enabled: true)
+    enabled: false # POST /dispatch with bearer-token auth; relay posts a 2-line summary + thread
+    path: /dispatch # API route suffix (must not collide with an endpoint path)
+    token: <your-dispatch-token> # or OCCA_DISPATCH_TOKEN env; never commit a real token
+  status_icons: # living task-parent icons by status (defaults shown; change without rebuilding)
+    dispatched: ⏳ # task accepted, waiting for first event
+    claimed: 👀 # review workflow claimed the task
+    pr_opened: 🔨 # fix/merge workflow opened a PR
+    merged: ✅ # merged workflow closed the task
+    event: 📨 # generic webhook event line
+    failed: ❌ # delivery failed (re-dispatch returns to ⏳)
+  status_colors: # embed color per status, as 24-bit decimal (text cards carry the icon; embeds consume the color)
+    dispatched: 3447003 # blue
+    claimed: 3447003 # blue
+    pr_opened: 3066993 # green
+    merged: 10157982 # purple
+    event: 9807270 # grey
+    failed: 15158332 # red
+  fallback_poll_after: 10m # no event this long after dispatch/delivery -> one `gh pr list` poll for the branch
   endpoints:
     - name: github-acme-review # stable key for receipts, limits and logs
       path: /webhooks/github-acme-review # unique route suffix (no /occa prefix)
