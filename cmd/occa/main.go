@@ -380,13 +380,16 @@ func main() {
 
 	var webhookSrv *webhook.Server
 	if len(cfg.Webhooks.Endpoints) > 0 {
+		taskRegistry := webhook.NewTaskThreadRegistry()
+		taskRegistry.SetStatusConfig(cfg.Webhooks.StatusIcons, cfg.Webhooks.StatusColors)
 		webhookExecutor := newWebhookExecutor(channels, managerProvider{m: manager}, db.ChannelRepo(), cfg.Agent.DefaultWorkdir, relay.Config{
 			NoEventTimeout:      cfg.Runtime.Relay.NoEventTimeout,
 			WebhookAbortTimeout: cfg.Runtime.Relay.WebhookAbortTimeout,
 			VerifyTimeout:       cfg.Runtime.Relay.VerifyTimeout,
-		})
+		}, webhook.TaskOptions{Registry: taskRegistry, Icons: cfg.Webhooks.StatusIcons, Colors: cfg.Webhooks.StatusColors})
 
 		webhookSrv = webhook.New(cfg.Webhooks, webhookExecutor, db.WebhookDeliveryRepo())
+		webhookSrv.SetTaskRegistry(taskRegistry)
 		webhookSrv.SetChannelStore(db.ChannelRepo())
 		webhookSrv.SetStallFreshness(cfg.Runtime.Relay.StallFreshness)
 		webhookSrv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
@@ -580,10 +583,14 @@ type channelStore interface {
 	Get(ctx context.Context, platform, channelID string) (*store.Channel, error)
 }
 
-func newWebhookExecutor(channels []channel.Channel, manager agentManager, channelRepo channelStore, defaultWorkdir string, relayCfg relay.Config) webhook.Executor {
+func newWebhookExecutor(channels []channel.Channel, manager agentManager, channelRepo channelStore, defaultWorkdir string, relayCfg relay.Config, opts ...webhook.TaskOptions) webhook.Executor {
 	return func(ctx context.Context, platform, channelID, prompt string, workCtx *webhook.WebhookWorkContext) error {
 		if workCtx == nil {
 			workCtx = &webhook.WebhookWorkContext{}
+		}
+		var taskOpts webhook.TaskOptions
+		if len(opts) > 0 {
+			taskOpts = opts[0]
 		}
 		for _, ch := range channels {
 			if ch.Name() == platform {
@@ -597,12 +604,42 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 					}
 				}
 
+				if taskOpts.Registry != nil {
+					if repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope); repo != "" && branch != "" {
+						if rec, ok := taskOpts.Registry.Lookup(repo, branch); ok && rec.ThreadID != "" {
+							workCtx.ThreadID = rec.ThreadID
+							if rec.RootMessageID != "" {
+								workCtx.RootMessageID = rec.RootMessageID
+							}
+							if platform == "discord" {
+								targetChannelID = rec.ThreadID
+							} else if platform == "telegram" && !strings.Contains(targetChannelID, ":") {
+								targetChannelID = targetChannelID + ":" + rec.ThreadID
+							}
+						}
+					}
+				}
+				taskStatus := webhook.StatusForWorkflow(workCtx.Workflow)
+
 				sender, _ := ch.(channel.MessageSender)
 				editor, _ := ch.(channel.MessageEditor)
 				starter, _ := ch.(channel.ThreadStarter)
 
-				if useThread && starter != nil && sender != nil {
+				reused := workCtx.ThreadID != "" && workCtx.RootMessageID != ""
+				if reused && taskOpts.Registry != nil {
+					if repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope); repo != "" && branch != "" {
+						if _, ok := taskOpts.Registry.Lookup(repo, branch); ok {
+							header := webhook.TaskCardHeader(workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons)
+							if header != "" {
+								_ = notifyEdit(ch, channelID, workCtx.RootMessageID, webhook.FormatWebhookMessage(header))
+							}
+						}
+					}
+				}
+
+				if !reused && useThread && starter != nil && sender != nil {
 					rootCard := webhook.FormatRootCard(workCtx.Envelope, workCtx.Workflow, "RUNNING", "", "", platform)
+					rootCard = webhook.WithTaskHeader(rootCard, workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons)
 					rootMsgID, err := notifySend(ch, channelID, webhook.FormatWebhookMessage(rootCard))
 					if err != nil {
 						slog.Warn("webhook: failed to send root card; falling back to channel", "channel_id", channelID, "error", err)
@@ -615,10 +652,16 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 							workCtx.RootMessageID = rootMsgID
 							workCtx.ThreadID = threadID
 							targetChannelID = threadID
+							if taskOpts.Registry != nil {
+								if repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope); repo != "" && branch != "" {
+									taskOpts.Registry.Upsert(repo, branch, rootMsgID, threadID, taskStatus)
+								}
+							}
 						}
 					}
 				} else if platform == "telegram" && useProgressCard && sender != nil {
 					rootCard := webhook.FormatRootCard(workCtx.Envelope, workCtx.Workflow, "RUNNING", "", workCtx.ThreadID, platform)
+					rootCard = webhook.WithTaskHeader(rootCard, workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons)
 					rootMsgID, err := notifySend(ch, targetChannelID, webhook.FormatWebhookMessage(rootCard))
 					if err != nil {
 						slog.Warn("webhook: failed to send telegram root card; falling back to channel", "channel_id", targetChannelID, "error", err)
@@ -682,6 +725,7 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 				if err != nil {
 					if workCtx.RootMessageID != "" {
 						terminalCard := webhook.FormatTerminalCard(workCtx.Envelope, workCtx.Workflow, "FAILED", err.Error(), workCtx.ThreadID, platform, elapsed)
+						terminalCard = webhook.WithTaskHeader(terminalCard, workCtx.Envelope, workCtx.Workflow, webhook.TaskFailed, taskOpts.Icons)
 						_, _ = notifySend(ch, targetChannelID, webhook.FormatWebhookMessage(terminalCard))
 					} else {
 						switch {
@@ -704,6 +748,7 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 
 				if workCtx.RootMessageID != "" {
 					terminalCard := webhook.FormatTerminalCard(workCtx.Envelope, workCtx.Workflow, "COMPLETED", "", workCtx.ThreadID, platform, elapsed)
+					terminalCard = webhook.WithTaskHeader(terminalCard, workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons)
 					_, _ = notifySend(ch, targetChannelID, webhook.FormatWebhookMessage(terminalCard))
 				} else {
 					output := result.Output

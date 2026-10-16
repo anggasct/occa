@@ -1,0 +1,96 @@
+package config
+
+import (
+	"strings"
+	"testing"
+	"time"
+)
+
+func dispatchWebhooks(extra string) string {
+	return "webhooks:\n" + fullRuntimeYAML() + fullEndpointYAML(`      workflow: custom
+      admit:
+        - event: pull_request
+          actions: [opened]
+`) + extra
+}
+
+func TestDispatchEnabledLoads(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "")
+	t.Setenv("OCCA_DISPATCH_TOKEN", "")
+	webhooks := dispatchWebhooks(`  dispatch:
+    enabled: true
+    token: file-token
+  status_icons:
+    merged: "✅"
+  status_colors:
+    merged: 10157982
+  fallback_poll_after: 5m
+`)
+	cfg, err := Load(writeFullConfig(t, t.TempDir(), webhooks))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Webhooks.Dispatch.Enabled || cfg.Webhooks.Dispatch.Path != "/dispatch" || cfg.Webhooks.Dispatch.Token != "file-token" {
+		t.Errorf("dispatch = %+v", cfg.Webhooks.Dispatch)
+	}
+	if cfg.Webhooks.StatusIcons["merged"] != "✅" || cfg.Webhooks.StatusColors["merged"] != 10157982 {
+		t.Errorf("status config = %v %v", cfg.Webhooks.StatusIcons, cfg.Webhooks.StatusColors)
+	}
+	if cfg.Webhooks.FallbackPollAfter != 5*time.Minute {
+		t.Errorf("fallback = %v", cfg.Webhooks.FallbackPollAfter)
+	}
+}
+
+func TestDispatchTokenRequired(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "")
+	t.Setenv("OCCA_DISPATCH_TOKEN", "")
+	webhooks := dispatchWebhooks(`  dispatch:
+    enabled: true
+`)
+	if _, err := Load(writeFullConfig(t, t.TempDir(), webhooks)); err == nil || !strings.Contains(err.Error(), "dispatch.token") {
+		t.Errorf("missing token must fail, got %v", err)
+	}
+}
+
+func TestDispatchTokenEnvOverride(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "")
+	t.Setenv("OCCA_DISPATCH_TOKEN", "env-token")
+	webhooks := dispatchWebhooks(`  dispatch:
+    enabled: true
+    token: file-token
+`)
+	cfg, err := Load(writeFullConfig(t, t.TempDir(), webhooks))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Webhooks.Dispatch.Token != "env-token" {
+		t.Errorf("token = %q, want env override", cfg.Webhooks.Dispatch.Token)
+	}
+}
+
+func TestDispatchPathCollision(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "")
+	t.Setenv("OCCA_DISPATCH_TOKEN", "tok")
+	webhooks := dispatchWebhooks(`  dispatch:
+    enabled: true
+    path: /test
+    token: tok
+`)
+	if _, err := Load(writeFullConfig(t, t.TempDir(), webhooks)); err == nil || !strings.Contains(err.Error(), "duplicates endpoint path") {
+		t.Errorf("path collision must fail, got %v", err)
+	}
+}
+
+func TestStatusConfigValidation(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "")
+	t.Setenv("OCCA_DISPATCH_TOKEN", "")
+	for _, extra := range []string{
+		"  status_icons:\n    bogus: x\n",
+		"  status_colors:\n    merged: 16777216\n",
+		"  fallback_poll_after: -1m\n",
+	} {
+		if _, err := Load(writeFullConfig(t, t.TempDir(), dispatchWebhooks(extra))); err == nil {
+			t.Errorf("invalid status config must fail: %q", extra)
+		}
+	}
+}

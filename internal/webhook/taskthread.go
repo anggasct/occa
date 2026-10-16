@@ -1,0 +1,324 @@
+package webhook
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os/exec"
+	"strings"
+	"sync"
+	"time"
+	"unicode/utf8"
+
+	"github.com/anggasct/occa/internal/config"
+)
+
+type TaskStatus string
+
+const (
+	TaskDispatched TaskStatus = "dispatched"
+	TaskClaimed    TaskStatus = "claimed"
+	TaskPROpened   TaskStatus = "pr_opened"
+	TaskMerged     TaskStatus = "merged"
+	TaskEvent      TaskStatus = "event"
+	TaskFailed     TaskStatus = "failed"
+)
+
+var DefaultTaskStatusIcons = map[string]string{
+	"dispatched": "⏳",
+	"claimed":    "👀",
+	"pr_opened":  "🔨",
+	"merged":     "✅",
+	"event":      "📨",
+	"failed":     "❌",
+}
+
+var DefaultTaskStatusColors = map[string]int{
+	"dispatched": 0x3498DB,
+	"claimed":    0x3498DB,
+	"pr_opened":  0x2ECC71,
+	"merged":     0x9B59B6,
+	"event":      0x95A5A6,
+	"failed":     0xE74C3C,
+}
+
+var RequiredTaskWorkflows = []string{"review", "fix", "merge", "merged"}
+
+func StatusForWorkflow(workflow string) TaskStatus {
+	switch strings.TrimSpace(strings.ToLower(workflow)) {
+	case "review":
+		return TaskClaimed
+	case "fix", "merge":
+		return TaskPROpened
+	case "merged":
+		return TaskMerged
+	case "custom":
+		return TaskEvent
+	default:
+		return TaskDispatched
+	}
+}
+
+func TaskStatusForAudit(auditStatus, workflow string) TaskStatus {
+	if strings.EqualFold(strings.TrimSpace(auditStatus), "FAILED") {
+		return TaskFailed
+	}
+	return StatusForWorkflow(workflow)
+}
+
+func TaskIcon(status TaskStatus, overrides map[string]string) string {
+	if icon := strings.TrimSpace(overrides[string(status)]); icon != "" {
+		return icon
+	}
+	if icon := DefaultTaskStatusIcons[string(status)]; icon != "" {
+		return icon
+	}
+	return DefaultTaskStatusIcons["event"]
+}
+
+func TaskColor(status TaskStatus, overrides map[string]int) int {
+	if color, ok := overrides[string(status)]; ok && color >= 0 && color <= 0xFFFFFF {
+		return color
+	}
+	if color, ok := DefaultTaskStatusColors[string(status)]; ok {
+		return color
+	}
+	return DefaultTaskStatusColors["event"]
+}
+
+func TaskThreadKey(repo, branch string) string {
+	return strings.ToLower(strings.TrimSpace(repo)) + "#" + strings.TrimSpace(branch)
+}
+
+func TaskRepoBranch(key WebhookExecutionKey, envelope WebhookEnvelope) (string, string) {
+	repo := strings.TrimSpace(key.Repository)
+	branch := strings.TrimSpace(key.Branch)
+	if repo == "" {
+		repo = strings.TrimSpace(stringValue(envelope["repository"]))
+	}
+	if branch == "" {
+		branch = strings.TrimSpace(stringValue(envelope["head_branch"]))
+	}
+	return repo, branch
+}
+
+type TaskThreadRecord struct {
+	Repo          string
+	Branch        string
+	RootMessageID string
+	ThreadID      string
+	Status        TaskStatus
+	Color         int
+	UpdatedAt     time.Time
+}
+
+type TaskThreadRegistry struct {
+	mu      sync.RWMutex
+	records map[string]TaskThreadRecord
+	icons   map[string]string
+	colors  map[string]int
+}
+
+func NewTaskThreadRegistry() *TaskThreadRegistry {
+	return &TaskThreadRegistry{records: make(map[string]TaskThreadRecord)}
+}
+
+func (t *TaskThreadRegistry) SetStatusConfig(icons map[string]string, colors map[string]int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.icons = icons
+	t.colors = colors
+}
+
+func (t *TaskThreadRegistry) Lookup(repo, branch string) (TaskThreadRecord, bool) {
+	if strings.TrimSpace(repo) == "" || strings.TrimSpace(branch) == "" {
+		return TaskThreadRecord{}, false
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	rec, ok := t.records[TaskThreadKey(repo, branch)]
+	return rec, ok
+}
+
+func (t *TaskThreadRegistry) Upsert(repo, branch, rootID, threadID string, status TaskStatus) TaskThreadRecord {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.records == nil {
+		t.records = make(map[string]TaskThreadRecord)
+	}
+	key := TaskThreadKey(repo, branch)
+	prev := t.records[key]
+	if rootID == "" {
+		rootID = prev.RootMessageID
+	}
+	if threadID == "" {
+		threadID = prev.ThreadID
+	}
+	rec := TaskThreadRecord{
+		Repo:          strings.TrimSpace(repo),
+		Branch:        strings.TrimSpace(branch),
+		RootMessageID: rootID,
+		ThreadID:      threadID,
+		Status:        status,
+		Color:         TaskColor(status, t.colors),
+		UpdatedAt:     time.Now(),
+	}
+	t.records[key] = rec
+	return rec
+}
+
+func (t *TaskThreadRegistry) Snapshot() map[string]TaskThreadRecord {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	out := make(map[string]TaskThreadRecord, len(t.records))
+	for k, v := range t.records {
+		out[k] = v
+	}
+	return out
+}
+
+func FormatTaskParent(repo, branch, prNumber string, status TaskStatus, icons map[string]string) string {
+	icon := TaskIcon(status, icons)
+	label := string(status)
+	head := strings.TrimSpace(repo) + "#" + strings.TrimSpace(branch)
+	if prNumber = strings.TrimSpace(prNumber); prNumber != "" {
+		head += " · PR #" + prNumber
+	}
+	return icon + " " + head + " — " + label
+}
+
+func FormatTaskLinks(prURL string) string {
+	if strings.TrimSpace(prURL) == "" {
+		return ""
+	}
+	return "[Open PR](" + strings.TrimSpace(prURL) + ")"
+}
+
+func TaskCardHeader(envelope WebhookEnvelope, workflow string, status TaskStatus, icons map[string]string) string {
+	repo := strings.TrimSpace(stringValue(envelope["repository"]))
+	branch := strings.TrimSpace(stringValue(envelope["head_branch"]))
+	if repo == "" || branch == "" {
+		return ""
+	}
+	prNumber := strings.TrimSpace(stringValue(envelope["pr_number"]))
+	header := FormatTaskParent(repo, branch, prNumber, status, icons)
+	if links := FormatTaskLinks(stringValue(envelope["pr_url"])); links != "" {
+		header += "\n" + links
+	}
+	return header
+}
+
+func WithTaskHeader(card string, envelope WebhookEnvelope, workflow string, status TaskStatus, icons map[string]string) string {
+	if header := TaskCardHeader(envelope, workflow, status, icons); header != "" {
+		return header + "\n" + card
+	}
+	return card
+}
+
+type TaskOptions struct {
+	Registry *TaskThreadRegistry
+	Icons    map[string]string
+	Colors   map[string]int
+}
+
+func (s *Server) recordTaskThread(ep config.EndpointConfig, envelope WebhookEnvelope, workCtx *WebhookWorkContext, status TaskStatus) {
+	if s == nil || s.tasks == nil || workCtx == nil {
+		return
+	}
+	repo, branch := TaskRepoBranch(workCtx.Key, envelope)
+	if repo == "" || branch == "" {
+		return
+	}
+	s.tasks.Upsert(repo, branch, workCtx.RootMessageID, workCtx.ThreadID, status)
+}
+
+func MissingTaskWorkflows(endpoints []config.EndpointConfig, repo string) []string {
+	want := strings.ToLower(strings.TrimSpace(config.RepositoryPath(strings.ToLower(strings.TrimSpace(repo)))))
+	present := make(map[string]bool, len(RequiredTaskWorkflows))
+	for _, ep := range endpoints {
+		if ep.Repository == "" {
+			continue
+		}
+		have := strings.ToLower(strings.TrimSpace(config.RepositoryPath(strings.ToLower(strings.TrimSpace(ep.Repository)))))
+		if have != want {
+			continue
+		}
+		present[strings.TrimSpace(strings.ToLower(ep.Workflow))] = true
+	}
+	var missing []string
+	for _, workflow := range RequiredTaskWorkflows {
+		if !present[workflow] {
+			missing = append(missing, workflow)
+		}
+	}
+	return missing
+}
+
+type BranchPRResult struct {
+	Found  bool
+	Number string
+	URL    string
+	State  string
+}
+
+type BranchPRChecker func(ctx context.Context, repo, branch string) (BranchPRResult, error)
+
+func ghBranchPRChecker(ctx context.Context, repo, branch string) (BranchPRResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gh", "pr", "list", "--repo", repo, "--head", branch, "--json", "number,url,state", "--limit", "1")
+	out, err := cmd.Output()
+	if err != nil {
+		return BranchPRResult{}, fmt.Errorf("webhook: fallback poll gh pr list: %w", err)
+	}
+	return parseBranchPRList(out)
+}
+
+func parseBranchPRList(out []byte) (BranchPRResult, error) {
+	var rows []struct {
+		Number int    `json:"number"`
+		URL    string `json:"url"`
+		State  string `json:"state"`
+	}
+	if err := json.Unmarshal(out, &rows); err != nil {
+		return BranchPRResult{}, fmt.Errorf("webhook: fallback poll decode: %w", err)
+	}
+	if len(rows) == 0 {
+		return BranchPRResult{}, nil
+	}
+	return BranchPRResult{
+		Found:  true,
+		Number: fmt.Sprintf("%d", rows[0].Number),
+		URL:    strings.TrimSpace(rows[0].URL),
+		State:  strings.TrimSpace(rows[0].State),
+	}, nil
+}
+
+func FormatFallbackFinding(repo, branch string, result BranchPRResult) string {
+	head := strings.TrimSpace(repo) + "#" + strings.TrimSpace(branch)
+	if !result.Found {
+		return "📨 Fallback poll: no open PR found for " + head + "."
+	}
+	line := "📨 Fallback poll: PR #" + strings.TrimSpace(result.Number) + " (" + strings.TrimSpace(result.State) + ") for " + head + "."
+	if strings.TrimSpace(result.URL) != "" {
+		line += " " + FormatTaskLinks(result.URL)
+	}
+	return line
+}
+
+func FallbackDue(lastEventAt time.Time, now time.Time, after time.Duration) bool {
+	if after <= 0 {
+		return false
+	}
+	if lastEventAt.IsZero() {
+		return false
+	}
+	return !now.Before(lastEventAt.Add(after))
+}
+
+func clipTaskField(s string, max int) string {
+	if max <= 0 || utf8.RuneCountInString(s) <= max {
+		return s
+	}
+	return string([]rune(s)[:max])
+}

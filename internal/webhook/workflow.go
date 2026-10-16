@@ -254,8 +254,10 @@ func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelo
 			if !wCtx.StartTime.IsZero() {
 				elapsed = time.Since(wCtx.StartTime)
 			}
-			text = redactAuditSummary(terminalRootCard(envelope, ep.Workflow, status, reason, wCtx.ThreadID, ep.Platform, elapsed), ep.Secret)
+			text = terminalRootCard(envelope, ep.Workflow, status, reason, wCtx.ThreadID, ep.Platform, elapsed)
 		}
+		text = WithTaskHeader(text, envelope, ep.Workflow, TaskStatusForAudit(status, ep.Workflow), s.statusIcons)
+		text = redactAuditSummary(text, ep.Secret)
 		if err := s.editor(ctx, ep.Platform, targetChannel, wCtx.RootMessageID, text); err != nil {
 			slog.Warn("webhook: failed to edit root card, falling back to notifier", "endpoint", ep.Name, "error", err)
 		} else {
