@@ -179,9 +179,6 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 	srv.dispatchToken = strings.TrimSpace(cfg.Dispatch.Token)
 	srv.dispatchTasks = NewDispatchStore()
 	srv.fallbackAfter = cfg.FallbackPollAfter
-	if srv.fallbackAfter <= 0 {
-		srv.fallbackAfter = 10 * time.Minute
-	}
 	srv.branchChecker = ghBranchPRChecker
 	return srv
 }
@@ -324,6 +321,9 @@ func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	if s.dispatchEnabled {
 		mux.HandleFunc(s.dispatchPath, s.handleDispatch)
+		if prefixed := "/occa" + s.dispatchPath; prefixed != s.dispatchPath {
+			mux.HandleFunc(prefixed, s.handleDispatch)
+		}
 	}
 	mux.HandleFunc("/", s.handleRequest)
 

@@ -51,14 +51,19 @@ func (r *Router) handleConnectRepo(_ context.Context, _ channel.IncomingMessage,
 		if err != nil {
 			return "", fmt.Errorf("connect-repo secrets: %w", err)
 		}
-		secrets = append(secrets, secret[:16]+"…")
+		secrets = append(secrets, secret)
 	}
-	workflows := []string{"review", "review-fix", "merge", "merged"}
+	hooks := []struct{ workflow, suffix string }{
+		{"review", "review"},
+		{"fix", "review-fix"},
+		{"merge", "merge"},
+		{"merged", "merged"},
+	}
 	lines := []string{
 		"📨 Connect " + repo + " — 4 webhooks, one per workflow:",
 	}
-	for i, workflow := range workflows {
-		lines = append(lines, fmt.Sprintf("• %-10s /webhooks/github-%s-%s  secret %s", workflow, slug, workflow, secrets[i]))
+	for i, hook := range hooks {
+		lines = append(lines, fmt.Sprintf("• %-10s /webhooks/github-%s-%s  secret %s", hook.workflow, slug, hook.suffix, secrets[i]))
 	}
 	lines = append(lines,
 		"",

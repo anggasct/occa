@@ -94,3 +94,31 @@ func TestStatusConfigValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestFallbackPollAfterDefaults(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "")
+	t.Setenv("OCCA_DISPATCH_TOKEN", "")
+	cfg, err := Load(writeFullConfig(t, t.TempDir(), dispatchWebhooks("")))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Webhooks.FallbackPollAfter != 10*time.Minute {
+		t.Errorf("fallback default = %v, want 10m", cfg.Webhooks.FallbackPollAfter)
+	}
+}
+
+func TestStatusConfigKeysNormalized(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "")
+	t.Setenv("OCCA_DISPATCH_TOKEN", "")
+	webhooks := dispatchWebhooks("  status_icons:\n    Merged: \"\U0001F9EA\"\n  status_colors:\n    Merged: 1193046\n")
+	cfg, err := Load(writeFullConfig(t, t.TempDir(), webhooks))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Webhooks.StatusIcons["merged"] != "🧪" {
+		t.Errorf("capitalized icon key must normalize, got %v", cfg.Webhooks.StatusIcons)
+	}
+	if cfg.Webhooks.StatusColors["merged"] != 1193046 {
+		t.Errorf("capitalized color key must normalize, got %v", cfg.Webhooks.StatusColors)
+	}
+}

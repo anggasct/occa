@@ -1,11 +1,13 @@
 package webhook
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -188,5 +190,96 @@ func TestDispatchRequestValidate(t *testing.T) {
 	req.BaseSHA = "ABCDEF1234567"
 	if err := req.Validate(); err != nil {
 		t.Errorf("uppercase sha: %v", err)
+	}
+}
+
+func postDispatchAt(t *testing.T, srv *Server, path, token, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	srv.handleDispatch(rec, req)
+	return rec
+}
+
+func TestHandleDispatchIngressPrefix(t *testing.T) {
+	srv := newDispatchServer(t, dispatchEndpoints("acme/widget"))
+	for _, path := range []string{"/dispatch", "/occa/dispatch"} {
+		if rec := postDispatchAt(t, srv, path, "dispatch-token", validDispatchBody); rec.Code != http.StatusCreated {
+			t.Errorf("%s: status = %d, want 201: %s", path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestScheduleDispatchFallbackFires(t *testing.T) {
+	srv := newDispatchServer(t, dispatchEndpoints("acme/widget"))
+	srv.SetFallbackPollAfter(20 * time.Millisecond)
+	var branchCalls atomic.Int64
+	srv.SetBranchChecker(func(ctx context.Context, repo, branch string) (BranchPRResult, error) {
+		branchCalls.Add(1)
+		return BranchPRResult{}, nil
+	})
+	var findings atomic.Int64
+	srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
+		findings.Add(1)
+		return nil
+	})
+	if rec := postDispatch(t, srv, "dispatch-token", validDispatchBody); rec.Code != http.StatusCreated {
+		t.Fatalf("dispatch status = %d, want 201", rec.Code)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for branchCalls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := branchCalls.Load(); got != 1 {
+		t.Errorf("branch checks = %d, want exactly 1", got)
+	}
+	if got := findings.Load(); got != 1 {
+		t.Errorf("finding posts = %d, want exactly 1", got)
+	}
+}
+
+func TestScheduleDeliveryFallbackTerminalSkips(t *testing.T) {
+	newFallbackServer := func(t *testing.T) (*Server, *atomic.Int64) {
+		t.Helper()
+		srv := newDispatchServer(t, dispatchEndpoints("acme/widget"))
+		srv.SetFallbackPollAfter(20 * time.Millisecond)
+		var calls atomic.Int64
+		srv.SetBranchChecker(func(ctx context.Context, repo, branch string) (BranchPRResult, error) {
+			calls.Add(1)
+			return BranchPRResult{}, nil
+		})
+		srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error { return nil })
+		return srv, &calls
+	}
+	deliveryCtx := func(repo, branch, threadID string) *WebhookWorkContext {
+		return &WebhookWorkContext{
+			Key:      WebhookExecutionKey{Repository: repo, Branch: branch},
+			Envelope: WebhookEnvelope{"repository": repo, "head_branch": branch},
+			ThreadID: threadID,
+		}
+	}
+
+	srv, calls := newFallbackServer(t)
+	srv.tasks.Upsert("acme/widget", "feat/merged", "root-1", "thread-1", TaskMerged)
+	srv.scheduleDeliveryFallback(dispatchEndpoints("acme/widget")[2], deliveryCtx("acme/widget", "feat/merged", "thread-1"))
+	time.Sleep(150 * time.Millisecond)
+	if got := calls.Load(); got != 0 {
+		t.Errorf("merged delivery branch checks = %d, want 0", got)
+	}
+
+	srv2, calls2 := newFallbackServer(t)
+	srv2.tasks.Upsert("acme/widget", "feat/active", "root-2", "thread-2", TaskClaimed)
+	srv2.scheduleDeliveryFallback(dispatchEndpoints("acme/widget")[0], deliveryCtx("acme/widget", "feat/active", "thread-2"))
+	deadline := time.Now().Add(2 * time.Second)
+	for calls2.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := calls2.Load(); got != 1 {
+		t.Errorf("claimed delivery branch checks = %d, want exactly 1", got)
 	}
 }

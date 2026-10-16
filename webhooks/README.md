@@ -137,7 +137,7 @@ webhooks:
 ## /connect-repo owner/repo
 
 Prints the 4-hook wiring checklist for a repository: one endpoint per workflow
-(`review`, `review-fix`, `merge`, `merged`) generated from the endpoint
+(`review`, `fix`, `merge`, `merged`) generated from the endpoint
 template, plus per-hook secrets.
 
 Phase 1 (today, single operator): fine-grained PAT scoped to the repo, e.g.

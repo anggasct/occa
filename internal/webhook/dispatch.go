@@ -205,19 +205,23 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	task := s.dispatchTasks.Create(req)
+	suppressAfter := task.CreatedAt
 	if s.tasks != nil {
-		s.tasks.Upsert(task.Repo, task.Branch, "", "", TaskDispatched)
+		suppressAfter = s.tasks.Upsert(task.Repo, task.Branch, "", "", TaskDispatched).UpdatedAt
 	}
-	s.scheduleDispatchFallback(task)
+	s.scheduleDispatchFallback(task, suppressAfter)
 	writeDispatchJSON(w, http.StatusCreated, map[string]string{"task_id": task.ID})
 }
 
-func (s *Server) scheduleDispatchFallback(task DispatchTask) {
+func (s *Server) scheduleDispatchFallback(task DispatchTask, suppressAfter time.Time) {
 	if s.fallbackAfter <= 0 || s.branchChecker == nil {
 		return
 	}
 	after := s.fallbackAfter
-	stamp := task.CreatedAt
+	stamp := suppressAfter
+	if stamp.IsZero() {
+		stamp = task.CreatedAt
+	}
 	go func() {
 		select {
 		case <-time.After(after):
@@ -244,6 +248,9 @@ func (s *Server) scheduleDeliveryFallback(ep config.EndpointConfig, workCtx *Web
 	if repo == "" || branch == "" {
 		return
 	}
+	if rec, ok := s.tasks.Lookup(repo, branch); ok && isTaskTerminal(rec.Status) {
+		return
+	}
 	after := s.fallbackAfter
 	since := time.Now()
 	threadID := workCtx.ThreadID
@@ -258,8 +265,13 @@ func (s *Server) scheduleDeliveryFallback(ep config.EndpointConfig, workCtx *Web
 			return
 		default:
 		}
-		if rec, ok := s.tasks.Lookup(repo, branch); ok && rec.UpdatedAt.After(since) {
-			return
+		if rec, ok := s.tasks.Lookup(repo, branch); ok {
+			if rec.UpdatedAt.After(since) {
+				return
+			}
+			if isTaskTerminal(rec.Status) {
+				return
+			}
 		}
 		s.pollBranchOnce(repo, branch, ep.Platform, ep.ChannelID, threadID)
 	}()

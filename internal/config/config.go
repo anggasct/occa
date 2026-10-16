@@ -522,6 +522,13 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 		if fc.Webhooks.FallbackPollAfter < 0 {
 			return Config{}, fmt.Errorf("config: webhooks.fallback_poll_after must not be negative")
 		}
+		if fc.Webhooks.FallbackPollAfter == 0 {
+			fallbackDefault, err := time.ParseDuration("10m")
+			if err != nil {
+				return Config{}, fmt.Errorf("config: webhooks.fallback_poll_after default: %w", err)
+			}
+			fc.Webhooks.FallbackPollAfter = fallbackDefault
+		}
 		if fc.Webhooks.Dispatch.Enabled {
 			if strings.TrimSpace(fc.Webhooks.Dispatch.Path) == "" {
 				fc.Webhooks.Dispatch.Path = "/dispatch"
@@ -653,6 +660,10 @@ func validateTaskStatusConfig(icons map[string]string, colors map[string]int) er
 		if strings.TrimSpace(icon) == "" {
 			return fmt.Errorf("config: webhooks.status_icons[%q] must not be empty", key)
 		}
+		if key != name {
+			icons[name] = icon
+			delete(icons, key)
+		}
 	}
 	for key, color := range colors {
 		name := strings.TrimSpace(strings.ToLower(key))
@@ -661,6 +672,10 @@ func validateTaskStatusConfig(icons map[string]string, colors map[string]int) er
 		}
 		if color < 0 || color > 0xFFFFFF {
 			return fmt.Errorf("config: webhooks.status_colors[%q] must be a 24-bit color", key)
+		}
+		if key != name {
+			colors[name] = color
+			delete(colors, key)
 		}
 	}
 	return nil

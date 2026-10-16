@@ -42,6 +42,28 @@ func TestTaskStatusForAudit(t *testing.T) {
 	}
 }
 
+func TestTaskIconCaseInsensitiveOverride(t *testing.T) {
+	overrides := map[string]string{"Merged": "🧪", "DISPATCHED": "🚀"}
+	if got := TaskIcon(TaskMerged, overrides); got != "🧪" {
+		t.Errorf("capitalized icon override = %q, want 🧪", got)
+	}
+	if got := TaskIcon(TaskDispatched, overrides); got != "🚀" {
+		t.Errorf("uppercase icon override = %q, want 🚀", got)
+	}
+	if got := TaskColor(TaskMerged, map[string]int{"Merged": 0x123456}); got != 0x123456 {
+		t.Errorf("capitalized color override = %#x, want 0x123456", got)
+	}
+	reg := NewTaskThreadRegistry()
+	reg.SetStatusConfig(map[string]string{"Merged": "🧪"}, map[string]int{"Merged": 0x123456})
+	rec := reg.Upsert("acme/widget", "feat/x", "root-1", "thread-1", TaskMerged)
+	if rec.Color != 0x123456 {
+		t.Errorf("registry color = %#x, want 0x123456", rec.Color)
+	}
+	if got := TaskIcon(TaskMerged, map[string]string{"Merged": "🧪"}); got != "🧪" {
+		t.Errorf("registry-style override = %q, want 🧪", got)
+	}
+}
+
 func TestTaskIcon(t *testing.T) {
 	if got := TaskIcon(TaskDispatched, nil); got != "⏳" {
 		t.Errorf("dispatched icon = %q, want ⏳", got)

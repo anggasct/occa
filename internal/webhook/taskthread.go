@@ -66,9 +66,28 @@ func TaskStatusForAudit(auditStatus, workflow string) TaskStatus {
 	return StatusForWorkflow(workflow)
 }
 
+func isTaskTerminal(status TaskStatus) bool {
+	switch status {
+	case TaskMerged, TaskFailed:
+		return true
+	}
+	return false
+}
+
+func lookupStatusOverride(keys []string, want TaskStatus) string {
+	for _, k := range keys {
+		if strings.EqualFold(strings.TrimSpace(k), string(want)) {
+			return k
+		}
+	}
+	return ""
+}
+
 func TaskIcon(status TaskStatus, overrides map[string]string) string {
-	if icon := strings.TrimSpace(overrides[string(status)]); icon != "" {
-		return icon
+	if key := lookupStatusOverride(statusOverrideKeys(overrides), status); key != "" {
+		if icon := strings.TrimSpace(overrides[key]); icon != "" {
+			return icon
+		}
 	}
 	if icon := DefaultTaskStatusIcons[string(status)]; icon != "" {
 		return icon
@@ -77,13 +96,31 @@ func TaskIcon(status TaskStatus, overrides map[string]string) string {
 }
 
 func TaskColor(status TaskStatus, overrides map[string]int) int {
-	if color, ok := overrides[string(status)]; ok && color >= 0 && color <= 0xFFFFFF {
-		return color
+	if key := lookupStatusOverride(statusColorKeys(overrides), status); key != "" {
+		if color, ok := overrides[key]; ok && color >= 0 && color <= 0xFFFFFF {
+			return color
+		}
 	}
 	if color, ok := DefaultTaskStatusColors[string(status)]; ok {
 		return color
 	}
 	return DefaultTaskStatusColors["event"]
+}
+
+func statusOverrideKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+func statusColorKeys(m map[string]int) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 func TaskThreadKey(repo, branch string) string {
@@ -126,8 +163,16 @@ func NewTaskThreadRegistry() *TaskThreadRegistry {
 func (t *TaskThreadRegistry) SetStatusConfig(icons map[string]string, colors map[string]int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.icons = icons
-	t.colors = colors
+	normalizedIcons := make(map[string]string, len(icons))
+	for k, v := range icons {
+		normalizedIcons[strings.ToLower(strings.TrimSpace(k))] = v
+	}
+	normalizedColors := make(map[string]int, len(colors))
+	for k, v := range colors {
+		normalizedColors[strings.ToLower(strings.TrimSpace(k))] = v
+	}
+	t.icons = normalizedIcons
+	t.colors = normalizedColors
 }
 
 func (t *TaskThreadRegistry) Lookup(repo, branch string) (TaskThreadRecord, bool) {
