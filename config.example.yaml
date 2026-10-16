@@ -1,69 +1,74 @@
+# OCCA example config — copy as starting template, then validate with:
+#   occa webhooks check-config --config <path>
+# Every key below is required when its section is used (fail-closed: a missing
+# or unknown key refuses startup naming the block and key). Bot tokens are
+# env-only (OCCA_TELEGRAM_TOKEN / OCCA_DISCORD_TOKEN) and never belong here.
 agent:
-  binary: opencode
-  port_range: 4096-4116
-  max_instances: 5
-  idle_timeout: 20m
-  default_workdir: "~"
-  auto_install: false
+  binary: opencode # agent backend executable spawned per working directory
+  port_range: 4096-4116 # TCP port pool for agent instances
+  max_instances: 5 # max concurrent agents; idle LRU evicted past this
+  idle_timeout: 20m # reap agents idle longer than this
+  default_workdir: "~" # fallback session working directory
+  auto_install: false # auto-install the agent binary when missing
 database:
-  path: ~/.occa/occa.db
+  path: ~/.occa/occa.db # SQLite store file (sessions, channels, schedules)
 logging:
-  format: text
+  format: text # text or json log encoding
 discord:
-  allowed_sender_ids:
+  allowed_sender_ids: # Discord user IDs allowed to reach OCCA (deny-by-default)
     - '<discord-user-id>'
 telegram:
-  allowed_sender_ids:
+  allowed_sender_ids: # Telegram user IDs allowed to reach OCCA (deny-by-default)
     - '<telegram-user-id>'
 webhooks:
-  bind: 127.0.0.1:8787
+  bind: 127.0.0.1:8787 # loopback-only listen address (must stay loopback)
   policy:
-    trust_review_logins: []
+    trust_review_logins: [] # logins whose own `commented` review counts as verdict
     verdicts:
-      approved: ['approved']
-      request_changes: ['request changes', 'request_changes']
+      approved: ['approved'] # comment phrases mapping to an approved verdict
+      request_changes: ['request changes', 'request_changes'] # ... to request_changes
   runtime:
-    max_body_size: 10MB
-    max_concurrent_events: 16
-    max_queued_per_key: 8
-    processing_timeout: 30m
-    claim_grace: 32m
-    retry_after: 30s
-    workspace_retry_backoff: [30s, 60s, 120s]
-    retention: 720h
-    retention_keep: 500
-    prune_interval: 10m
-    dispatcher_idle_ttl: 1h
-    http_read_header_timeout: 10s
-    http_read_timeout: 30s
-    http_write_timeout: 30s
-    http_idle_timeout: 2m
-    review_dedupe_window: 60m
-    isolated_workspace_ttl: 24h
+    max_body_size: 10MB # reject larger webhook payloads with 413
+    max_concurrent_events: 16 # global executing-delivery semaphore size
+    max_queued_per_key: 8 # per-endpoint queue depth; overflows answer 429
+    processing_timeout: 30m # per-delivery executor deadline
+    claim_grace: 32m # stale-claim reclaim and restart-recovery window
+    retry_after: 30s # Retry-After seconds sent with queue-full 429s
+    workspace_retry_backoff: [30s, 60s, 120s] # retry delays for leased/dirty workspaces
+    retention: 720h # prune delivery rows older than this
+    retention_keep: 500 # always keep this many recent deliveries per prune
+    prune_interval: 10m # delivery prune and workspace reap cadence
+    dispatcher_idle_ttl: 1h # evict per-key dispatchers idle longer than this
+    http_read_header_timeout: 10s # max time reading request headers
+    http_read_timeout: 30s # max time reading the full request
+    http_write_timeout: 30s # max time writing the response
+    http_idle_timeout: 2m # keep-alive idle timeout
+    review_dedupe_window: 60m # duplicate pull_request_review suppression window
+    isolated_workspace_ttl: 24h # expiry for detached isolated worktrees
   endpoints:
-    - name: github-acme-review
-      path: /webhooks/github-acme-review
-      auth: github_hmac_sha256
-      secret: <your-webhook-secret>
-      workflow: review
-      platform: discord
-      channel_id: '<channel-id>'
-      prompt_file: webhooks/example-review.md
-      comment_trigger: ['please re-review']
-      thread: true
-      notify_skip: true # SKIP cards post by default; set false to record skips silently.
-      repository: github.com/acme/widget
+    - name: github-acme-review # stable key for receipts, limits and logs
+      path: /webhooks/github-acme-review # unique route suffix (no /occa prefix)
+      auth: github_hmac_sha256 # "" | legacy_bearer | github_hmac_sha256
+      secret: <your-webhook-secret> # credential verifying inbound requests
+      workflow: review # review | fix | merge | merged | custom (pipeline label only)
+      platform: discord # where runs and audit cards go: discord | telegram
+      channel_id: '<channel-id>' # destination chat for runs and audit cards
+      prompt_file: webhooks/example-review.md # agent instruction file (exclusive with prompt)
+      comment_trigger: ['please re-review'] # comment substrings that trigger a run
+      thread: true # run each delivery in its own thread
+      notify_skip: true # post SKIP cards; false records skips silently (default true)
+      repository: github.com/acme/widget # owner/repo binding (required for git workspaces)
       workspace:
-        type: none
-      admit:
+        type: none # none (no checkout) | git
+      admit: # ordered admission rules; first match wins, no match = ignore
         - event: pull_request
           actions: [opened, reopened, ready_for_review]
         - event: issue_comment
           actions: [created]
           require: [comment_trigger, pr_open]
       limits:
-        max_runs_per_pr: 3
-        window: 60m
+        max_runs_per_pr: 3 # comment-trigger runs allowed per PR per window
+        window: 60m # sliding window for the trigger cap
     - name: github-acme-review-fix
       path: /webhooks/github-acme-review-fix
       auth: github_hmac_sha256
@@ -76,9 +81,9 @@ webhooks:
       thread: true
       repository: github.com/acme/widget
       workspace:
-        type: git
-        path: /home/operator/projects/widget
-        mode: mutable
+        type: git # check out the repo for the run
+        path: /home/operator/projects/widget # checkout root (relative = vs config dir)
+        mode: mutable # isolated (detached worktree) | mutable (branch worktree)
       admit:
         - event: pull_request_review
           actions: [submitted]
@@ -133,71 +138,73 @@ webhooks:
         - event: pull_request
           actions: [closed]
           merged: true
+# Required tuning: the network, durability, capacity and pagination values the
+# binary sizes itself with. No built-in defaults, no fallbacks.
 runtime:
-  loop:
-    min_interval: 30s
-    max_interval: 1h
-    max_duration: 4h
-    min_duration: 1m
-    iteration_timeout: 10m
-    max_wall_age: 4h
-    min_count: 2
-    max_count: 60
-    max_prompt_runes: 1000
-    max_per_conversation: 1
-    max_global: 20
-  relay:
-    discovery_timeout: 5s
-    client_timeout: 3m
-    max_attachment_size: 10MB
-    max_event_line_bytes: 1114112
-    webhook_abort_timeout: 5s
-    verify_timeout: 15s
-    stall_freshness: 2m
-    no_event_timeout: 15m
-  router:
-    context_stale_after: 15m
-    progress_quiet_threshold: 90s
-    max_queued_messages: 5
-    max_picker_sessions: 6
-    max_picker_pages: 5
-    model_browser_ttl: 30m
-    model_browser_page: 10
-    model_browser_nav_rows: 100
-    model_browser_cap: 1000
-    agent_browser_ttl: 30m
-    agent_browser_cap: 256
-    question_tombstone_ttl: 10m
-    permission_tombstone_ttl: 10m
-    attribution_ttl: 30s
-    recovery_budget: 60s
-    recovery_base_backoff: 10s
-    recovery_max_backoff: 40s
-    usage_page_size: 5
-    usage_default_window: 168h
+  loop: # repeating-prompt loop bounds
+    min_interval: 30s # smallest allowed interval between iterations
+    max_interval: 1h # largest allowed interval between iterations
+    max_duration: 4h # longest allowed time-based loop
+    min_duration: 1m # shortest allowed time-based loop
+    iteration_timeout: 10m # per-iteration execution deadline
+    max_wall_age: 4h # wall-clock deadline for count-based loops
+    min_count: 2 # smallest allowed repeat count
+    max_count: 60 # largest allowed repeat count
+    max_prompt_runes: 1000 # longest allowed loop prompt
+    max_per_conversation: 1 # max concurrent loops per conversation
+    max_global: 20 # max concurrent loops globally
+  relay: # HTTP/SSE client to the agent backend
+    discovery_timeout: 5s # fetching the agent OpenAPI discovery document
+    client_timeout: 3m # agent relay HTTP requests
+    max_attachment_size: 10MB # largest attachment payload accepted
+    max_event_line_bytes: 1114112 # longest SSE line accepted
+    webhook_abort_timeout: 5s # aborting the agent session after a failure
+    verify_timeout: 15s # verifying the completed reply after a webhook turn
+    stall_freshness: 2m # stream silence marking stall vs long generation
+    no_event_timeout: 15m # SSE streams silent longer than this time out
+  router: # command dispatch, pickers, recovery
+    context_stale_after: 15m # cached context older than this counts as stale
+    progress_quiet_threshold: 90s # silence before a progress notice is sent
+    max_queued_messages: 5 # messages buffered per conversation while busy
+    max_picker_sessions: 6 # sessions listed per picker page
+    max_picker_pages: 5 # picker result pages
+    model_browser_ttl: 30m # model-picker callback token lifetime
+    model_browser_page: 10 # models listed per browser page
+    model_browser_nav_rows: 100 # button rows for browser navigation controls
+    model_browser_cap: 1000 # stored tokens; oldest evicted past this
+    agent_browser_ttl: 30m # agent-picker callback token lifetime
+    agent_browser_cap: 256 # stored tokens; oldest evicted past this
+    question_tombstone_ttl: 10m # answered-question record retention
+    permission_tombstone_ttl: 10m # resolved-permission record retention
+    attribution_ttl: 30s # schedule fingerprint-to-conversation entry lifetime
+    recovery_budget: 60s # total deadline for an agent recovery attempt
+    recovery_base_backoff: 10s # first retry delay after a recovery failure
+    recovery_max_backoff: 40s # largest retry delay after a recovery failure
+    usage_page_size: 5 # usage breakdown rows per page
+    usage_default_window: 168h # default usage query lookback
   channels:
     discord:
-      download_timeout: 60s
-      max_download_size: 10MB
+      download_timeout: 60s # Discord attachment downloads
+      max_download_size: 10MB # largest Discord download accepted
     telegram:
-      download_timeout: 60s
-      max_download_size: 10MB
-      init_timeout: 15s
-      init_attempts: 3
-  mcp:
-    read_header_timeout: 10s
-    read_timeout: 30s
-    write_timeout: 5m
-    idle_timeout: 2m
-  process:
-    readiness_timeout: 30s
-    stop_grace: 5s
-    control_timeout: 2s
+      download_timeout: 60s # Telegram file downloads
+      max_download_size: 10MB # largest Telegram download accepted
+      init_timeout: 15s # per-attempt Telegram bot client creation
+      init_attempts: 3 # Telegram bot init retries
+  mcp: # MCP server socket bounds
+    read_header_timeout: 10s # reading HTTP request headers
+    read_timeout: 30s # reading the full request
+    write_timeout: 5m # writing streaming responses (kept generous for SSE)
+    idle_timeout: 2m # idle keep-alive connections
+  process: # agent subprocess lifecycle
+    readiness_timeout: 30s # waiting for the agent health endpoint
+    stop_grace: 5s # grace before SIGKILL when stopping
+    control_timeout: 2s # per-probe timeout while polling readiness
   scheduler:
-    stop_grace: 5s
+    stop_grace: 5s # grace before cancelling running scheduled jobs
   health:
-    probe_timeout: 1500ms
+    probe_timeout: 1500ms # per-probe health-check deadline
   store:
-    usage_retention: 2160h
-    usage_max_rows: 100000
-    recovery_event_retention: 720h
+    usage_retention: 2160h # prune usage snapshots older than this
+    usage_max_rows: 100000 # most usage projection rows retained
+    recovery_event_retention: 720h # prune recovery events older than this

@@ -232,84 +232,84 @@ type fileConfig struct {
 }
 
 const defaultConfigTemplate = `agent:
-  binary: opencode
-  port_range: 4096-4116
-  max_instances: 5
-  idle_timeout: 20m
-  default_workdir: "~"
-  auto_install: false
+  binary: opencode # agent backend executable spawned per working directory
+  port_range: 4096-4116 # TCP port pool for agent instances
+  max_instances: 5 # max concurrent agents; idle LRU evicted past this
+  idle_timeout: 20m # reap agents idle longer than this
+  default_workdir: "~" # fallback session working directory
+  auto_install: false # auto-install the agent binary when missing
 database:
-  path: ~/.occa/occa.db
+  path: ~/.occa/occa.db # SQLite store file (sessions, channels, schedules)
 logging:
-  format: text
+  format: text # text or json log encoding
 runtime:
-  loop:
-    min_interval: 30s
-    max_interval: 1h
-    max_duration: 4h
-    min_duration: 1m
-    iteration_timeout: 10m
-    max_wall_age: 4h
-    min_count: 2
-    max_count: 60
-    max_prompt_runes: 1000
-    max_per_conversation: 1
-    max_global: 20
-  relay:
-    discovery_timeout: 5s
-    client_timeout: 3m
-    max_attachment_size: 10MB
-    max_event_line_bytes: 1114112
-    webhook_abort_timeout: 5s
-    verify_timeout: 15s
-    stall_freshness: 2m
-    no_event_timeout: 15m
-  router:
-    context_stale_after: 15m
-    progress_quiet_threshold: 90s
-    max_queued_messages: 5
-    max_picker_sessions: 6
-    max_picker_pages: 5
-    model_browser_ttl: 30m
-    model_browser_page: 10
-    model_browser_nav_rows: 100
-    model_browser_cap: 1000
-    agent_browser_ttl: 30m
-    agent_browser_cap: 256
-    question_tombstone_ttl: 10m
-    permission_tombstone_ttl: 10m
-    attribution_ttl: 30s
-    recovery_budget: 60s
-    recovery_base_backoff: 10s
-    recovery_max_backoff: 40s
-    usage_page_size: 5
-    usage_default_window: 168h
+  loop: # repeating-prompt loop bounds
+    min_interval: 30s # smallest allowed interval between iterations
+    max_interval: 1h # largest allowed interval between iterations
+    max_duration: 4h # longest allowed time-based loop
+    min_duration: 1m # shortest allowed time-based loop
+    iteration_timeout: 10m # per-iteration execution deadline
+    max_wall_age: 4h # wall-clock deadline for count-based loops
+    min_count: 2 # smallest allowed repeat count
+    max_count: 60 # largest allowed repeat count
+    max_prompt_runes: 1000 # longest allowed loop prompt
+    max_per_conversation: 1 # max concurrent loops per conversation
+    max_global: 20 # max concurrent loops globally
+  relay: # HTTP/SSE client to the agent backend
+    discovery_timeout: 5s # fetching the agent OpenAPI discovery document
+    client_timeout: 3m # agent relay HTTP requests
+    max_attachment_size: 10MB # largest attachment payload accepted
+    max_event_line_bytes: 1114112 # longest SSE line accepted
+    webhook_abort_timeout: 5s # aborting the agent session after a failure
+    verify_timeout: 15s # verifying the completed reply after a webhook turn
+    stall_freshness: 2m # stream silence marking stall vs long generation
+    no_event_timeout: 15m # SSE streams silent longer than this time out
+  router: # command dispatch, pickers, recovery
+    context_stale_after: 15m # cached context older than this counts as stale
+    progress_quiet_threshold: 90s # silence before a progress notice is sent
+    max_queued_messages: 5 # messages buffered per conversation while busy
+    max_picker_sessions: 6 # sessions listed per picker page
+    max_picker_pages: 5 # picker result pages
+    model_browser_ttl: 30m # model-picker callback token lifetime
+    model_browser_page: 10 # models listed per browser page
+    model_browser_nav_rows: 100 # button rows for browser navigation controls
+    model_browser_cap: 1000 # stored tokens; oldest evicted past this
+    agent_browser_ttl: 30m # agent-picker callback token lifetime
+    agent_browser_cap: 256 # stored tokens; oldest evicted past this
+    question_tombstone_ttl: 10m # answered-question record retention
+    permission_tombstone_ttl: 10m # resolved-permission record retention
+    attribution_ttl: 30s # schedule fingerprint-to-conversation entry lifetime
+    recovery_budget: 60s # total deadline for an agent recovery attempt
+    recovery_base_backoff: 10s # first retry delay after a recovery failure
+    recovery_max_backoff: 40s # largest retry delay after a recovery failure
+    usage_page_size: 5 # usage breakdown rows per page
+    usage_default_window: 168h # default usage query lookback
   channels:
     discord:
-      download_timeout: 60s
-      max_download_size: 10MB
+      download_timeout: 60s # Discord attachment downloads
+      max_download_size: 10MB # largest Discord download accepted
     telegram:
-      download_timeout: 60s
-      max_download_size: 10MB
-      init_timeout: 15s
-      init_attempts: 3
-  mcp:
-    read_header_timeout: 10s
-    read_timeout: 30s
-    write_timeout: 5m
-    idle_timeout: 2m
-  process:
-    readiness_timeout: 30s
-    stop_grace: 5s
-    control_timeout: 2s
+      download_timeout: 60s # Telegram file downloads
+      max_download_size: 10MB # largest Telegram download accepted
+      init_timeout: 15s # per-attempt Telegram bot client creation
+      init_attempts: 3 # Telegram bot init retries
+  mcp: # MCP server socket bounds
+    read_header_timeout: 10s # reading HTTP request headers
+    read_timeout: 30s # reading the full request
+    write_timeout: 5m # writing streaming responses (kept generous for SSE)
+    idle_timeout: 2m # idle keep-alive connections
+  process: # agent subprocess lifecycle
+    readiness_timeout: 30s # waiting for the agent health endpoint
+    stop_grace: 5s # grace before SIGKILL when stopping
+    control_timeout: 2s # per-probe timeout while polling readiness
   scheduler:
-    stop_grace: 5s
+    stop_grace: 5s # grace before cancelling running scheduled jobs
   health:
-    probe_timeout: 1500ms
+    probe_timeout: 1500ms # per-probe health-check deadline
   store:
-    usage_retention: 2160h
-    usage_max_rows: 100000
-    recovery_event_retention: 720h
+    usage_retention: 2160h # prune usage snapshots older than this
+    usage_max_rows: 100000 # most usage projection rows retained
+    recovery_event_retention: 720h # prune recovery events older than this
 `
 
 func DefaultConfigPath() (string, error) {
