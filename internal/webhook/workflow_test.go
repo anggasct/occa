@@ -585,7 +585,7 @@ func TestEmitAuditRootCardEditing(t *testing.T) {
 
 	t.Run("failed root card edit falls back to notifier", func(t *testing.T) {
 		var notifierContent string
-		srv := &Server{}
+		srv := &Server{tasks: NewTaskThreadRegistry()}
 		srv.SetEditor(func(ctx context.Context, platform, channelID, messageID, text string) error {
 			return errors.New("discord permission error")
 		})
@@ -605,8 +605,14 @@ func TestEmitAuditRootCardEditing(t *testing.T) {
 		if notifierContent == "" {
 			t.Fatal("notifier was not called on editor failure")
 		}
-		if !strings.Contains(notifierContent, "Status: FAILED") {
-			t.Errorf("fallback notification missing Status: FAILED: %s", notifierContent)
+		if !strings.Contains(notifierContent, "gate checked, run failed, fix running") {
+			t.Errorf("fallback notification must state gate outcome, got: %s", notifierContent)
+		}
+		if strings.Contains(notifierContent, "Delivery:") || strings.Contains(notifierContent, "Model:") {
+			t.Errorf("thread fallback must not leak Delivery/Model, got: %s", notifierContent)
+		}
+		if strings.Contains(notifierContent, "━━━") {
+			t.Errorf("thread fallback must not carry a card separator, got: %s", notifierContent)
 		}
 	})
 

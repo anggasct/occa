@@ -110,12 +110,16 @@ func TestHandleDispatchIdempotentLiveRecord(t *testing.T) {
 	srv := newDispatchServer(t, dispatchEndpoints("acme/widget"))
 	var mu sync.Mutex
 	var parents, threads int
-	srv.SetSender(func(_ context.Context, _, _, _ string) (string, error) {
+	srv.SetSender(func(_ context.Context, _, c, _ string) (string, error) {
 		mu.Lock()
-		parents++
+		if strings.TrimSpace(c) == "chan-1" {
+			parents++
+		}
 		mu.Unlock()
 		return "parent-1", nil
 	})
+	srv.SetNotifier(func(_ context.Context, _, _, _ string) error { return nil })
+	srv.SetEditor(func(_ context.Context, _, _, _ string, _ string) error { return nil })
 	srv.SetThreadStarter(func(_ context.Context, _, _, _, _ string) (string, error) {
 		mu.Lock()
 		threads++
@@ -483,15 +487,21 @@ func TestScheduleDispatchFallbackFires(t *testing.T) {
 	})
 	var mu sync.Mutex
 	var senderPosts []string
+	var senderChannels []string
 	var posts []string
 	var platforms []string
 	var channels []string
-	srv.SetSender(func(_ context.Context, _, _, text string) (string, error) {
+	srv.SetSender(func(_ context.Context, _, c, text string) (string, error) {
 		mu.Lock()
 		senderPosts = append(senderPosts, text)
+		senderChannels = append(senderChannels, c)
 		mu.Unlock()
-		return "parent-123", nil
+		if strings.TrimSpace(c) == "chan-1" {
+			return "parent-123", nil
+		}
+		return "status-1", nil
 	})
+	srv.SetEditor(func(_ context.Context, _, _, _ string, _ string) error { return nil })
 	srv.SetThreadStarter(func(_ context.Context, _, _, _, _ string) (string, error) {
 		return "thread-456", nil
 	})
@@ -513,12 +523,18 @@ func TestScheduleDispatchFallbackFires(t *testing.T) {
 	}
 	taskID := payload["task_id"]
 	mu.Lock()
-	if len(senderPosts) != 1 {
-		mu.Unlock()
-		t.Fatalf("dispatch summary posts = %d, want 1 synchronous post", len(senderPosts))
+	var parentPosts []string
+	for i, text := range senderPosts {
+		if senderChannels[i] == "chan-1" {
+			parentPosts = append(parentPosts, text)
+		}
 	}
-	if !strings.Contains(senderPosts[0], "Dispatched") || !strings.Contains(senderPosts[0], taskID) {
-		t.Errorf("dispatch summary = %q, want Dispatched with %q", senderPosts[0], taskID)
+	if len(parentPosts) != 1 {
+		mu.Unlock()
+		t.Fatalf("dispatch summary posts = %d, want 1 synchronous parent post", len(parentPosts))
+	}
+	if !strings.Contains(parentPosts[0], "Dispatched") || !strings.Contains(parentPosts[0], taskID) {
+		t.Errorf("dispatch summary = %q, want Dispatched with %q", parentPosts[0], taskID)
 	}
 	mu.Unlock()
 	deadline := time.Now().Add(2 * time.Second)
@@ -531,14 +547,20 @@ func TestScheduleDispatchFallbackFires(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(posts) != 1 {
-		t.Fatalf("finding posts = %d, want exactly 1 thread-only fallback", len(posts))
+	foundFallback := false
+	for _, text := range posts {
+		if strings.Contains(text, "Fallback poll") {
+			foundFallback = true
+			if strings.Contains(text, "Dispatched") {
+				t.Errorf("fallback must not repeat dispatch summary: %q", text)
+			}
+		}
+		if strings.Contains(text, "Dispatched acme/widget#feat/x") {
+			continue
+		}
 	}
-	if !strings.Contains(posts[0], "Fallback poll") {
-		t.Errorf("posts missing fallback finding: %q", posts[0])
-	}
-	if strings.Contains(posts[0], "Dispatched") {
-		t.Errorf("fallback must not repeat dispatch summary: %q", posts[0])
+	if !foundFallback {
+		t.Fatalf("fallback finding missing in posts = %v, want Fallback poll", posts)
 	}
 	for i := range platforms {
 		if platforms[i] != "discord" || channels[i] != "thread-456" {
@@ -661,13 +683,17 @@ func TestHandleDispatchConcurrentDuplicatesYieldOneParent(t *testing.T) {
 	srv := newDispatchServer(t, dispatchEndpoints("acme/widget"))
 	var mu sync.Mutex
 	var parents, threads int
-	srv.SetSender(func(_ context.Context, _, _, _ string) (string, error) {
+	srv.SetSender(func(_ context.Context, _, c, _ string) (string, error) {
 		time.Sleep(20 * time.Millisecond)
 		mu.Lock()
-		parents++
+		if strings.TrimSpace(c) == "chan-1" {
+			parents++
+		}
 		mu.Unlock()
 		return "parent-1", nil
 	})
+	srv.SetNotifier(func(_ context.Context, _, _, _ string) error { return nil })
+	srv.SetEditor(func(_ context.Context, _, _, _ string, _ string) error { return nil })
 	srv.SetThreadStarter(func(_ context.Context, _, _, _, _ string) (string, error) {
 		mu.Lock()
 		threads++

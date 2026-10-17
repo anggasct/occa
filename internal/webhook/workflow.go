@@ -281,6 +281,21 @@ func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelo
 				return
 			}
 		} else {
+			if repo, branch := TaskRepoBranch(WebhookExecutionKey{}, envelope); repo != "" && branch != "" && threadID != "" {
+				s.postPhaseBannerIfChanged(ctx, ep.Platform, ep.ChannelID, threadID, repo, branch, ep.Workflow, reason)
+				last := strings.TrimSpace(status)
+				if r := strings.TrimSpace(reason); r != "" {
+					last += ": " + clipTaskField(r, 120)
+				}
+				if outcome := FormatGateOutcome(envelope, ep.Workflow, status); outcome != "" && outcome != "gate checked, "+strings.ToLower(strings.TrimSpace(status)) {
+					last = outcome
+				}
+				stepRun := strings.TrimSpace(ep.Workflow)
+				if short := shortDeliveryID(stringValue(envelope["delivery_id"])); short != "" {
+					stepRun += " run " + short
+				}
+				s.ensureThreadStatus(ctx, ep.Platform, ep.ChannelID, threadID, repo, branch, ep.Workflow, stepRun, last)
+			}
 			if status == "SKIP" && threadID != "" {
 				s.postThreadDetail(ctx, ep, threadID, envelope, status, reason)
 			}
@@ -307,10 +322,12 @@ func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelo
 }
 
 func (s *Server) postThreadDetail(ctx context.Context, ep config.EndpointConfig, threadID string, envelope WebhookEnvelope, status, reason string) {
-	if s.notifier == nil || threadID == "" {
+	if threadID == "" {
 		return
 	}
-	summary := redactAuditSummary(formatAuditSummary(envelope, ep.Workflow, status, reason), ep.Secret)
+	repo, branch := TaskRepoBranch(WebhookExecutionKey{}, envelope)
+	taskStatus := TaskStatusForAudit(status, ep.Workflow)
+	slim := redactAuditSummary(FormatThreadSlimCard(envelope, ep.Workflow, taskStatus, s.statusIcons), ep.Secret)
 	var target string
 	if ep.Platform == "telegram" && !strings.Contains(ep.ChannelID, ":") {
 		target = ep.ChannelID + ":" + threadID
@@ -319,7 +336,25 @@ func (s *Server) postThreadDetail(ctx context.Context, ep config.EndpointConfig,
 	} else {
 		target = auditTargetChannel(ep.Platform, ep.ChannelID, threadID)
 	}
-	if err := s.notifier(ctx, ep.Platform, target, summary); err != nil {
+	if repo != "" && branch != "" {
+		s.postPhaseBannerIfChanged(ctx, ep.Platform, ep.ChannelID, threadID, repo, branch, ep.Workflow, reason)
+		last := strings.TrimSpace(status)
+		if r := strings.TrimSpace(reason); r != "" {
+			last += ": " + clipTaskField(r, 120)
+		}
+		if outcome := FormatGateOutcome(envelope, ep.Workflow, status); outcome != "" && outcome != "gate checked, "+strings.ToLower(status) {
+			last = outcome
+		}
+		stepRun := strings.TrimSpace(ep.Workflow)
+		if short := shortDeliveryID(stringValue(envelope["delivery_id"])); short != "" {
+			stepRun += " run " + short
+		}
+		s.ensureThreadStatus(ctx, ep.Platform, ep.ChannelID, threadID, repo, branch, ep.Workflow, stepRun, last)
+	}
+	if strings.TrimSpace(slim) == "" {
+		return
+	}
+	if err := s.notifyThread(ctx, ep.Platform, target, slim); err != nil {
 		slog.Warn("webhook: thread detail post failed", "endpoint", ep.Name, "status", status, "error", err)
 	}
 }

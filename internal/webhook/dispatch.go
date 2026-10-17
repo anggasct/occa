@@ -478,6 +478,16 @@ func (s *Server) openDispatchThread(task DispatchTask, platform, channelID, root
 	if err := s.editParent(context.Background(), platform, channelID, rootID, summary, buttons); err != nil {
 		slog.Warn("webhook: dispatch parent buttons failed", "repo", task.Repo, "branch", task.Branch, "error", err)
 	}
+	ctx := context.Background()
+	opener := FormatThreadOpener(WebhookEnvelope{"repository": task.Repo, "head_branch": task.Branch}, "dispatch", TaskDispatched, s.statusIcons)
+	if strings.TrimSpace(opener) != "" {
+		_ = s.notifyThread(ctx, platform, threadTargetFor(platform, channelID, threadID), opener)
+	}
+	s.postPhaseBannerIfChanged(ctx, platform, channelID, threadID, task.Repo, task.Branch, "dispatch", "")
+	s.ensureThreadStatus(ctx, platform, channelID, threadID, task.Repo, task.Branch, "dispatch", "dispatch run "+shortDeliveryID(task.ID), "dispatched")
+	if fresh, ok := s.tasks.Lookup(task.Repo, task.Branch); ok {
+		return fresh, true
+	}
 	return rec, true
 }
 

@@ -164,14 +164,16 @@ func TaskRepoBranch(key WebhookExecutionKey, envelope WebhookEnvelope) (string, 
 }
 
 type TaskThreadRecord struct {
-	Repo          string
-	Branch        string
-	RootMessageID string
-	ThreadID      string
-	Status        TaskStatus
-	Color         int
-	UpdatedAt     time.Time
-	SpecPath      string
+	Repo            string
+	Branch          string
+	RootMessageID   string
+	ThreadID        string
+	Status          TaskStatus
+	Color           int
+	UpdatedAt       time.Time
+	SpecPath        string
+	StatusMessageID string
+	Phase           string
 }
 
 type TaskThreadRegistry struct {
@@ -264,17 +266,51 @@ func (t *TaskThreadRegistry) UpsertWithSpec(repo, branch, rootID, threadID strin
 		specPath = strings.TrimSpace(prev.SpecPath)
 	}
 	rec := TaskThreadRecord{
-		Repo:          normalizeRepoKey(repo),
-		Branch:        normalizeBranchKey(branch),
-		RootMessageID: rootID,
-		ThreadID:      threadID,
-		Status:        status,
-		Color:         TaskColor(status, t.colors),
-		UpdatedAt:     time.Now(),
-		SpecPath:      specPath,
+		Repo:            normalizeRepoKey(repo),
+		Branch:          normalizeBranchKey(branch),
+		RootMessageID:   rootID,
+		ThreadID:        threadID,
+		Status:          status,
+		Color:           TaskColor(status, t.colors),
+		UpdatedAt:       time.Now(),
+		SpecPath:        specPath,
+		StatusMessageID: prev.StatusMessageID,
+		Phase:           prev.Phase,
 	}
 	t.records[key] = rec
 	return rec
+}
+
+func (t *TaskThreadRegistry) SetStatusMessage(repo, branch, msgID string) TaskThreadRecord {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.records == nil {
+		t.records = make(map[string]TaskThreadRecord)
+	}
+	key := TaskThreadKey(repo, branch)
+	prev := t.records[key]
+	prev.Repo = normalizeRepoKey(repo)
+	prev.Branch = normalizeBranchKey(branch)
+	prev.StatusMessageID = strings.TrimSpace(msgID)
+	prev.UpdatedAt = time.Now()
+	t.records[key] = prev
+	return prev
+}
+
+func (t *TaskThreadRegistry) SetPhase(repo, branch, phase string) TaskThreadRecord {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.records == nil {
+		t.records = make(map[string]TaskThreadRecord)
+	}
+	key := TaskThreadKey(repo, branch)
+	prev := t.records[key]
+	prev.Repo = normalizeRepoKey(repo)
+	prev.Branch = normalizeBranchKey(branch)
+	prev.Phase = strings.TrimSpace(phase)
+	prev.UpdatedAt = time.Now()
+	t.records[key] = prev
+	return prev
 }
 
 func (t *TaskThreadRegistry) Snapshot() map[string]TaskThreadRecord {

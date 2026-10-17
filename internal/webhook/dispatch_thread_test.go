@@ -13,14 +13,21 @@ func TestHandleDispatchOpensThread(t *testing.T) {
 	srv := newDispatchServer(t, dispatchEndpoints("acme/widget"))
 	var mu sync.Mutex
 	var sent []string
+	var sentChannels []string
 	var threadCalls int
 	var gotChannel, gotParent, gotName string
 	srv.SetSender(func(_ context.Context, p, c, text string) (string, error) {
 		mu.Lock()
 		sent = append(sent, text)
+		sentChannels = append(sentChannels, c)
 		mu.Unlock()
-		return "parent-123", nil
+		if strings.TrimSpace(c) == "chan-1" {
+			return "parent-123", nil
+		}
+		return "status-1", nil
 	})
+	srv.SetNotifier(func(_ context.Context, _, _, _ string) error { return nil })
+	srv.SetEditor(func(_ context.Context, _, _, _ string, _ string) error { return nil })
 	srv.SetThreadStarter(func(_ context.Context, p, c, m, name string) (string, error) {
 		mu.Lock()
 		threadCalls++
@@ -38,8 +45,14 @@ func TestHandleDispatchOpensThread(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(sent) != 1 || !strings.Contains(sent[0], "Dispatched") || !strings.Contains(sent[0], payload["task_id"]) {
-		t.Errorf("parent post = %v, want 1 Dispatched with %q", sent, payload["task_id"])
+	var parents []string
+	for i, text := range sent {
+		if sentChannels[i] == "chan-1" {
+			parents = append(parents, text)
+		}
+	}
+	if len(parents) != 1 || !strings.Contains(parents[0], "Dispatched") || !strings.Contains(parents[0], payload["task_id"]) {
+		t.Errorf("parent post = %v, want 1 Dispatched with %q", parents, payload["task_id"])
 	}
 	if threadCalls != 1 {
 		t.Fatalf("thread starts = %d, want 1", threadCalls)
