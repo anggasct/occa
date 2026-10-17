@@ -127,6 +127,9 @@ func (r *Router) runConnectAutomation(ctx context.Context, msg channel.IncomingM
 	}
 	endpoints := make([]ConnectEndpoint, 0, len(hooks))
 	for i, hook := range hooks {
+		if results[i].err != nil {
+			continue
+		}
 		endpoints = append(endpoints, ConnectEndpoint{
 			Name:      "github-" + slug + "-" + hook.suffix,
 			Path:      "/webhooks/github-" + slug + "-" + hook.suffix,
@@ -138,13 +141,18 @@ func (r *Router) runConnectAutomation(ctx context.Context, msg channel.IncomingM
 			Events:    hook.events,
 		})
 	}
-	appendErr := deps.AppendEndpoints(endpoints)
+	var appendErr error
+	appended := false
 	restartNote := ""
-	if appendErr == nil {
-		if err := deps.Restart(ctx); err != nil {
-			restartNote = "Restart failed: " + strings.TrimSpace(err.Error()) + " — restart occa manually (config has no hot-reload)."
-		} else {
-			restartNote = "Restarted occa (config has no hot-reload, ~5s downtime)."
+	if len(endpoints) > 0 {
+		appendErr = deps.AppendEndpoints(endpoints)
+		if appendErr == nil {
+			appended = true
+			if err := deps.Restart(ctx); err != nil {
+				restartNote = "Restart failed: " + strings.TrimSpace(err.Error()) + " — restart occa manually (config has no hot-reload)."
+			} else {
+				restartNote = "Restarted occa (config has no hot-reload, ~5s downtime)."
+			}
 		}
 	}
 	lines := []string{"📨 Connect " + repo + " — automation:"}
@@ -159,10 +167,12 @@ func (r *Router) runConnectAutomation(ctx context.Context, msg channel.IncomingM
 		}
 		lines = append(lines, "✅ "+res.workflow+" — "+res.hookURL)
 	}
-	if appendErr != nil {
+	if len(endpoints) == 0 {
+		lines = append(lines, "", "⏭️ Config append skipped: no hooks were created; relay not restarted.")
+	} else if appendErr != nil {
 		lines = append(lines, "", "❌ Config append failed: "+strings.TrimSpace(appendErr.Error()))
-	} else {
-		lines = append(lines, "", "✅ Config appended (4 endpoints). "+restartNote)
+	} else if appended {
+		lines = append(lines, "", fmt.Sprintf("✅ Config appended (%d endpoints). %s", len(endpoints), restartNote))
 	}
 	lines = append(lines,
 		"",

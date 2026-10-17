@@ -88,9 +88,12 @@ func appendConnectEndpoints(configPath string, endpoints []ConnectEndpoint) erro
 		return fmt.Errorf("read config: %w", err)
 	}
 	content := string(data)
+	if !strings.Contains(content, "endpoints:") {
+		return fmt.Errorf("config has no endpoints list: refusing to append")
+	}
 	var missing []ConnectEndpoint
 	for _, ep := range endpoints {
-		if strings.Contains(content, ep.Path) {
+		if configHasEndpointPath(content, ep.Path) {
 			continue
 		}
 		missing = append(missing, ep)
@@ -129,6 +132,23 @@ func appendConnectEndpoints(configPath string, endpoints []ConnectEndpoint) erro
 		return fmt.Errorf("write config: %w", err)
 	}
 	return nil
+}
+
+func configHasEndpointPath(content, path string) bool {
+	for line := range strings.Lines(content) {
+		value, ok := strings.CutPrefix(strings.TrimSpace(line), "path:")
+		if !ok {
+			continue
+		}
+		fields := strings.Fields(value)
+		if len(fields) == 0 {
+			continue
+		}
+		if strings.Trim(fields[0], `"'`) == path {
+			return true
+		}
+	}
+	return false
 }
 
 func connectAdmitRules(workflow string) []string {

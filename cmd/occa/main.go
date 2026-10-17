@@ -723,7 +723,7 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 						if _, ok := taskOpts.Registry.Lookup(repo, branch); ok {
 							header := webhook.TaskCardHeader(workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons)
 							if header != "" {
-								buttons := webhook.TaskParentButtons(workCtx.Envelope, repo, branch, workCtx.ThreadID)
+								buttons := webhook.TaskParentButtons(platform, workCtx.Envelope, repo, branch, workCtx.ThreadID)
 								if err := notifyEditWithButtons(ch, channelID, workCtx.RootMessageID, webhook.FormatWebhookMessage(header), buttons); err != nil {
 									slog.Warn("webhook: failed to edit task parent, continuing in thread", "channel_id", channelID, "error", err)
 								}
@@ -751,7 +751,7 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 					rootCard := webhook.FormatRootCard(workCtx.Envelope, workCtx.Workflow, "RUNNING", "", "", platform)
 					rootCard = webhook.WithTaskHeader(rootCard, workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons)
 					repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope)
-					buttons := webhook.TaskParentButtons(workCtx.Envelope, repo, branch, "")
+					buttons := webhook.TaskParentButtons(platform, workCtx.Envelope, repo, branch, "")
 					rootMsgID, err := notifySendWithButtons(ch, channelID, webhook.FormatWebhookMessage(rootCard), buttons)
 					if err != nil {
 						slog.Warn("webhook: failed to send root card; falling back to channel", "channel_id", channelID, "error", err)
@@ -767,7 +767,7 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 							if taskOpts.Registry != nil {
 								if repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope); repo != "" && branch != "" {
 									taskOpts.Registry.Upsert(repo, branch, rootMsgID, threadID, taskStatus)
-									threadButtons := webhook.TaskParentButtons(workCtx.Envelope, repo, branch, threadID)
+									threadButtons := webhook.TaskParentButtons(platform, workCtx.Envelope, repo, branch, threadID)
 									_ = notifyEditWithButtons(ch, channelID, rootMsgID, webhook.FormatWebhookMessage(rootCard), threadButtons)
 								}
 							}

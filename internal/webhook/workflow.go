@@ -273,7 +273,7 @@ func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelo
 		text = WithTaskHeader(text, envelope, ep.Workflow, TaskStatusForAudit(status, ep.Workflow), s.statusIcons)
 		text = redactAuditSummary(text, ep.Secret)
 		repo, branch := TaskRepoBranch(WebhookExecutionKey{}, envelope)
-		buttons := TaskParentButtons(envelope, repo, branch, threadID)
+		buttons := TaskParentButtons(ep.Platform, envelope, repo, branch, threadID)
 		if err := s.editParent(ctx, ep.Platform, targetChannel, rootID, text, buttons); err != nil {
 			slog.Warn("webhook: failed to edit root card, posting detail into thread once", "endpoint", ep.Name, "error", err)
 			if threadID != "" {

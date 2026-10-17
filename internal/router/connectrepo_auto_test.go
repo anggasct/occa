@@ -52,6 +52,91 @@ func TestHandleConnectRepoAutomation(t *testing.T) {
 	}
 }
 
+func TestHandleConnectRepoCreateFailureSkipsFailedHook(t *testing.T) {
+	r := &Router{commands: make(map[string]Command)}
+	r.registerDefaults()
+	var appended []ConnectEndpoint
+	restarted := false
+	r.SetConnectRepoDeps(&ConnectRepoDeps{
+		PublicBaseURL: "https://relay.example.com",
+		CheckAdmin: func(ctx context.Context, repo string) (bool, error) {
+			return true, nil
+		},
+		CreateHook: func(ctx context.Context, repo, hookURL, secret string, events []string) (string, error) {
+			if strings.Contains(hookURL, "review-fix") {
+				return "", errors.New("create boom")
+			}
+			return "hook-id", nil
+		},
+		AppendEndpoints: func(endpoints []ConnectEndpoint) error {
+			appended = append([]ConnectEndpoint(nil), endpoints...)
+			return nil
+		},
+		Restart: func(ctx context.Context) error { restarted = true; return nil },
+		PingHook: func(ctx context.Context, repo, hookID string) error {
+			return nil
+		},
+	})
+	got, err := r.handleConnectRepo(context.Background(), channel.IncomingMessage{Platform: "discord", ChannelID: "chan-1"}, "acme/widget")
+	if err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if !strings.Contains(got, "❌ fix") || !strings.Contains(got, "create boom") {
+		t.Errorf("output must report the failed hook:\n%s", got)
+	}
+	if len(appended) != 3 {
+		t.Fatalf("appended=%d, want 3 (failed hook excluded)", len(appended))
+	}
+	for _, ep := range appended {
+		if ep.Workflow == "fix" || strings.Contains(ep.Path, "review-fix") {
+			t.Errorf("failed hook must not be appended: %+v", ep)
+		}
+	}
+	if !restarted {
+		t.Error("restart must still run when some hooks were created and appended")
+	}
+	if !strings.Contains(got, "✅ Config appended (3 endpoints)") {
+		t.Errorf("output must report 3 appended endpoints:\n%s", got)
+	}
+}
+
+func TestHandleConnectRepoAllCreateFailuresSkipAppendAndRestart(t *testing.T) {
+	r := &Router{commands: make(map[string]Command)}
+	r.registerDefaults()
+	appendCalls := 0
+	restarted := false
+	r.SetConnectRepoDeps(&ConnectRepoDeps{
+		PublicBaseURL: "https://relay.example.com",
+		CheckAdmin: func(ctx context.Context, repo string) (bool, error) {
+			return true, nil
+		},
+		CreateHook: func(ctx context.Context, repo, hookURL, secret string, events []string) (string, error) {
+			return "", errors.New("create boom")
+		},
+		AppendEndpoints: func(endpoints []ConnectEndpoint) error {
+			appendCalls++
+			return nil
+		},
+		Restart: func(ctx context.Context) error { restarted = true; return nil },
+		PingHook: func(ctx context.Context, repo, hookID string) error {
+			return nil
+		},
+	})
+	got, err := r.handleConnectRepo(context.Background(), channel.IncomingMessage{Platform: "discord", ChannelID: "chan-1"}, "acme/widget")
+	if err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if appendCalls != 0 {
+		t.Errorf("AppendEndpoints must not run when no hook was created (calls=%d)", appendCalls)
+	}
+	if restarted {
+		t.Error("Restart must not run when no hook was created")
+	}
+	if !strings.Contains(got, "no hooks were created") {
+		t.Errorf("output must explain the skipped append:\n%s", got)
+	}
+}
+
 func TestHandleConnectRepoAdminDenied(t *testing.T) {
 	r := &Router{commands: make(map[string]Command)}
 	r.registerDefaults()

@@ -416,7 +416,9 @@ func clipTaskField(s string, max int) string {
 
 const taskCallbackPrefix = "task:"
 
-func TaskThreadURL(threadID string) string {
+const taskCallbackLimit = 100
+
+func TaskThreadURL(platform, threadID string) string {
 	threadID = strings.TrimSpace(threadID)
 	if threadID == "" {
 		return ""
@@ -424,15 +426,18 @@ func TaskThreadURL(threadID string) string {
 	if strings.Contains(threadID, "://") {
 		return threadID
 	}
+	if !strings.EqualFold(strings.TrimSpace(platform), "discord") {
+		return ""
+	}
 	return "https://discord.com/channels/_/" + threadID
 }
 
-func TaskLinkButtons(prURL, threadID string) []channel.Button {
+func TaskLinkButtons(platform, prURL, threadID string) []channel.Button {
 	var buttons []channel.Button
 	if normalized := normalizeTaskPRURL(prURL); normalized != "" {
 		buttons = append(buttons, channel.Button{Label: "Open PR", URL: normalized, Row: 1})
 	}
-	if url := TaskThreadURL(threadID); url != "" {
+	if url := TaskThreadURL(platform, threadID); url != "" {
 		buttons = append(buttons, channel.Button{Label: "Open thread", URL: url, Row: 1})
 	}
 	return buttons
@@ -447,11 +452,8 @@ func TaskActionButtons(repo, branch string) []channel.Button {
 	key := TaskThreadKey(repo, branch)
 	mergeID := "task:merge:" + key
 	redispatchID := "task:redispatch:" + key
-	if len(mergeID) > 100 {
-		mergeID = mergeID[:100]
-	}
-	if len(redispatchID) > 100 {
-		redispatchID = redispatchID[:100]
+	if utf8.RuneCountInString(mergeID) > taskCallbackLimit || utf8.RuneCountInString(redispatchID) > taskCallbackLimit {
+		return nil
 	}
 	return []channel.Button{
 		{Label: "Merge", Value: mergeID, Row: 2},
@@ -459,7 +461,7 @@ func TaskActionButtons(repo, branch string) []channel.Button {
 	}
 }
 
-func TaskParentButtons(envelope WebhookEnvelope, repo, branch, threadID string) []channel.Button {
+func TaskParentButtons(platform string, envelope WebhookEnvelope, repo, branch, threadID string) []channel.Button {
 	if repo == "" || branch == "" {
 		repo = strings.TrimSpace(stringValue(envelope["repository"]))
 		branch = strings.TrimSpace(stringValue(envelope["head_branch"]))
@@ -468,7 +470,7 @@ func TaskParentButtons(envelope WebhookEnvelope, repo, branch, threadID string) 
 		return nil
 	}
 	prURL := strings.TrimSpace(stringValue(envelope["pr_url"]))
-	buttons := TaskLinkButtons(prURL, threadID)
+	buttons := TaskLinkButtons(platform, prURL, threadID)
 	buttons = append(buttons, TaskActionButtons(repo, branch)...)
 	return buttons
 }
