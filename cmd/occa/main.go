@@ -810,6 +810,9 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 						targetChannelID = targetChannelID + ":" + workCtx.ThreadID
 					}
 				}
+				if platform == "discord" && workCtx.ThreadID != "" {
+					targetChannelID = workCtx.ThreadID
+				}
 
 				if taskOpts.Registry != nil {
 					if repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope); repo != "" && branch != "" {
