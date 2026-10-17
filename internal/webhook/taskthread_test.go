@@ -160,6 +160,28 @@ func TestTaskThreadKeyHostAgnosticBothDirections(t *testing.T) {
 	}
 }
 
+func TestTaskThreadKeyBranchCaseWhitespace(t *testing.T) {
+	reg := NewTaskThreadRegistry()
+	reg.Upsert("github.com/anggasct/occa", "fix/card-openpr-dedup", "root-1", "thread-1", TaskDispatched)
+	if rec, ok := reg.Lookup("anggasct/occa", "fix/card-openpr-dedup"); !ok || rec.ThreadID != "thread-1" {
+		t.Fatalf("full record must hit short lookup: %+v %v", rec, ok)
+	}
+	reg2 := NewTaskThreadRegistry()
+	reg2.Upsert("anggasct/occa", "fix/card-openpr-dedup", "root-2", "thread-2", TaskDispatched)
+	if rec, ok := reg2.Lookup("github.com/anggasct/occa", "fix/card-openpr-dedup"); !ok || rec.ThreadID != "thread-2" {
+		t.Fatalf("short record must hit full lookup: %+v %v", rec, ok)
+	}
+	cases := []string{"Fix/Card-OpenPR-Dedup", "  fix/card-openpr-dedup  ", "FIX/CARD-OPENPR-DEDUP", "  Fix/Card-OpenPR-Dedup "}
+	for _, variant := range cases {
+		if rec, ok := reg.Lookup("anggasct/occa", variant); !ok || rec.ThreadID != "thread-1" {
+			t.Errorf("branch variant %q miss: %+v %v", variant, rec, ok)
+		}
+	}
+	if got := TaskThreadKey("anggasct/occa", "Fix/Card-OpenPR-Dedup"); got != "anggasct/occa#fix/card-openpr-dedup" {
+		t.Errorf("branch normalized key = %q, want lowercased", got)
+	}
+}
+
 func TestMissDetailSameBranchHint(t *testing.T) {
 	reg := NewTaskThreadRegistry()
 	reg.Upsert("acme/widget", "feat/x", "root-1", "thread-1", TaskDispatched)
