@@ -113,6 +113,8 @@ func fullRuntimeYAML() string {
     retention_keep: 500
     prune_interval: 10m
     dispatcher_idle_ttl: 1h
+    dispatcher_stuck_after: 5m
+    watchdog_interval: 1m
     http_read_header_timeout: 10s
     http_read_timeout: 30s
     http_write_timeout: 30s

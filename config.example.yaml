@@ -39,6 +39,8 @@ webhooks:
     retention_keep: 500 # always keep this many recent deliveries per prune
     prune_interval: 10m # delivery prune and workspace reap cadence
     dispatcher_idle_ttl: 1h # evict per-key dispatchers idle longer than this
+    dispatcher_stuck_after: 5m # flag a started-but-unfinished delivery stuck past this
+    watchdog_interval: 1m # how often the dispatcher watchdog sweeps for stuck keys
     http_read_header_timeout: 10s # max time reading request headers
     http_read_timeout: 30s # max time reading the full request
     http_write_timeout: 30s # max time writing the response

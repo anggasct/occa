@@ -112,6 +112,8 @@ type Server struct {
 	processingTimeout     time.Duration
 	stallFreshness        time.Duration
 	dispatcherIdleTTL     time.Duration
+	dispatcherStuckAfter  time.Duration
+	watchdogInterval      time.Duration
 	workspaceRetryBackoff []time.Duration
 	workspaceRetrySleep   func(ctx context.Context, d time.Duration) bool
 	isolatedWorkspaceTTL  time.Duration
@@ -172,6 +174,8 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 		claimGraceSeconds:     int64(rt.ClaimGrace / time.Second),
 		processingTimeout:     rt.ProcessingTimeout,
 		dispatcherIdleTTL:     rt.DispatcherIdleTTL,
+		dispatcherStuckAfter:  rt.DispatcherStuckAfter,
+		watchdogInterval:      rt.WatchdogInterval,
 		workspaceRetryBackoff: rt.WorkspaceRetryBackoff,
 		workspaceRetrySleep:   sleepWithContext,
 		isolatedWorkspaceTTL:  rt.IsolatedWorkspaceTTL,
@@ -474,6 +478,8 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}()
 
+	go s.watchdogLoop()
+
 	slog.Info("webhook server started", "bind", s.bind, "endpoints", len(s.endpoints))
 	return nil
 }
@@ -595,13 +601,14 @@ func (s *Server) enqueue(ep config.EndpointConfig, key WebhookExecutionKey, item
 	defer s.dispatchMu.Unlock()
 	d, ok := s.dispatchers[lockKey]
 	if !ok || d.exiting {
-		d = &dispatcher{server: s, key: lockKey, ch: make(chan dispatchItem, s.maxQueuedPerKey)}
+		d = &dispatcher{server: s, key: lockKey, ch: make(chan dispatchItem, s.maxQueuedPerKey), lastActivity: time.Now()}
 		s.dispatchers[lockKey] = d
 		s.dispatchWG.Add(1)
 		go d.run(s.shutdownCtx)
 	}
 	select {
 	case d.ch <- item:
+		d.touch()
 		return d, true
 	default:
 		return nil, false
@@ -725,10 +732,79 @@ type dispatchItem struct {
 }
 
 type dispatcher struct {
-	server  *Server
-	key     string
-	ch      chan dispatchItem
-	exiting bool
+	server          *Server
+	key             string
+	ch              chan dispatchItem
+	exiting         bool
+	mu              sync.Mutex
+	active          dispatchItem
+	activeStartedAt time.Time
+	hasActive       bool
+	lastActivity    time.Time
+	stuckReported   bool
+}
+
+func (d *dispatcher) touch() {
+	d.mu.Lock()
+	d.lastActivity = time.Now()
+	d.mu.Unlock()
+}
+
+func (d *dispatcher) setActive(item dispatchItem) {
+	d.mu.Lock()
+	d.active = item
+	d.activeStartedAt = time.Now()
+	d.hasActive = true
+	d.lastActivity = d.activeStartedAt
+	d.stuckReported = false
+	d.mu.Unlock()
+}
+
+func (d *dispatcher) clearActive() {
+	d.mu.Lock()
+	d.hasActive = false
+	d.lastActivity = time.Now()
+	d.mu.Unlock()
+}
+
+func (d *dispatcher) isExiting() bool {
+	d.server.dispatchMu.Lock()
+	defer d.server.dispatchMu.Unlock()
+	return d.exiting
+}
+
+type dispatcherSnapshot struct {
+	hasActive   bool
+	active      dispatchItem
+	startedAt   time.Time
+	lastActive  time.Time
+	queueLen    int
+	queueCap    int
+	stuckMarked bool
+}
+
+func (d *dispatcher) snapshot() dispatcherSnapshot {
+	d.mu.Lock()
+	snap := dispatcherSnapshot{
+		hasActive:   d.hasActive,
+		active:      d.active,
+		startedAt:   d.activeStartedAt,
+		lastActive:  d.lastActivity,
+		stuckMarked: d.stuckReported,
+	}
+	d.mu.Unlock()
+	snap.queueLen = len(d.ch)
+	snap.queueCap = cap(d.ch)
+	if snap.lastActive.IsZero() {
+		snap.lastActive = snap.startedAt
+	}
+	return snap
+}
+
+func (d *dispatcher) markStuckReported() {
+	d.mu.Lock()
+	d.stuckReported = true
+	d.mu.Unlock()
 }
 
 // run serially executes queued deliveries until the queue stays idle for the
@@ -737,6 +813,19 @@ type dispatcher struct {
 // send is ever stranded; on shutdown every leftover is recorded as failed.
 func (d *dispatcher) run(ctx context.Context) {
 	defer d.server.dispatchWG.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			d.mu.Lock()
+			active := d.active
+			hasActive := d.hasActive
+			d.mu.Unlock()
+			var failed dispatchItem
+			if hasActive {
+				failed = active
+			}
+			d.server.rebuildAfterPanic(d, failed, r)
+		}
+	}()
 	timer := time.NewTimer(d.server.dispatcherIdleTTL)
 	defer timer.Stop()
 	for {
@@ -756,7 +845,19 @@ func (d *dispatcher) run(ctx context.Context) {
 				d.server.abandon(item, "shutting down")
 				continue
 			}
-			d.handle(item)
+			d.setActive(item)
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						d.server.handleDispatcherPanic(d, item, r)
+					}
+				}()
+				d.handle(item)
+			}()
+			d.clearActive()
+			if d.isExiting() {
+				return
+			}
 		case <-timer.C:
 			if !d.tryRetireIdle() {
 				timer.Reset(d.server.dispatcherIdleTTL)
@@ -813,6 +914,12 @@ func (d *dispatcher) handle(item dispatchItem) {
 	if receipt == nil {
 		return
 	}
+	held := false
+	defer func() {
+		if held {
+			s.releaseEvent()
+		}
+	}()
 	incompleteRetried := false
 	enriched := false
 	for attempt := 0; ; attempt++ {
@@ -820,9 +927,11 @@ func (d *dispatcher) handle(item dispatchItem) {
 			s.failAbandonedReceipt(receipt, "shutting down")
 			return
 		}
+		held = true
 		if !enriched {
 			newBody, err := s.enrichCommentBody(item)
 			if err != nil {
+				held = false
 				s.releaseEvent()
 				s.failEnrichment(item, receipt, err)
 				return
@@ -832,6 +941,7 @@ func (d *dispatcher) handle(item dispatchItem) {
 		}
 		earlyEnvelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", item.ep.CommentTrigger)
 		if allowed, reason := admitDelivery(item.ep, s.policy, earlyEnvelope); !allowed {
+			held = false
 			s.releaseEvent()
 			slog.Info("webhook: delivery skipped before workspace",
 				"endpoint", item.ep.Name,
@@ -844,13 +954,9 @@ func (d *dispatcher) handle(item dispatchItem) {
 		}
 		lease, werr := s.resolveWorkspace(item)
 		if werr == nil {
-			// Self-heal grant: the one-shot decision is owned here so
-			// executeDelivery can leave the receipt in processing when the
-			// incomplete response should be retried. Attempt 2 gets a fresh
-			// session automatically — WebhookTurn is constructed per
-			// execution. Same lease shape as the workspace-retry loop.
 			allowRetry := func() bool { return !incompleteRetried }
 			execErr := s.executeDelivery(item.ep, item.body, receipt.ID, item.deliveryID, item.eventType, receipt.Attempt, lease, allowRetry)
+			held = false
 			s.releaseEvent()
 			s.pruneIfDue()
 			if execErr != nil && errors.Is(execErr, relay.ErrWebhookResponseIncomplete) && !incompleteRetried {
@@ -863,6 +969,7 @@ func (d *dispatcher) handle(item dispatchItem) {
 			}
 			return
 		}
+		held = false
 		s.releaseEvent()
 		if IsWorkspaceRetryable(werr) && attempt < len(s.workspaceRetryBackoff) {
 			slog.Warn("webhook: workspace busy, retrying",

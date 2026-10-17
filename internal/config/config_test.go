@@ -290,7 +290,7 @@ func TestWebhookLoopbackValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.bind, func(t *testing.T) {
-			yaml := fmt.Sprintf("webhooks:\n  policy:\n    trust_review_logins: []\n    verdicts:\n      approved: ['approved']\n      request_changes: ['request_changes']\n  runtime:\n    max_body_size: 10MB\n    max_concurrent_events: 16\n    max_queued_per_key: 8\n    processing_timeout: 30m\n    claim_grace: 32m\n    retry_after: 30s\n    workspace_retry_backoff: [30s, 60s, 120s]\n    retention: 720h\n    retention_keep: 500\n    prune_interval: 10m\n    dispatcher_idle_ttl: 1h\n    http_read_header_timeout: 10s\n    http_read_timeout: 30s\n    http_write_timeout: 30s\n    http_idle_timeout: 2m\n    review_dedupe_window: 60m\n    isolated_workspace_ttl: 24h\n  bind: %q\n  endpoints:\n    - name: test\n      path: /test\n      secret: s\n      platform: telegram\n      channel_id: c1\n      prompt: p\n      admit:\n        - event: ping\n      workspace:\n        type: none\n", tt.bind)
+			yaml := fmt.Sprintf("webhooks:\n  policy:\n    trust_review_logins: []\n    verdicts:\n      approved: ['approved']\n      request_changes: ['request_changes']\n  runtime:\n    max_body_size: 10MB\n    max_concurrent_events: 16\n    max_queued_per_key: 8\n    processing_timeout: 30m\n    claim_grace: 32m\n    retry_after: 30s\n    workspace_retry_backoff: [30s, 60s, 120s]\n    retention: 720h\n    retention_keep: 500\n    prune_interval: 10m\n    dispatcher_idle_ttl: 1h\n    dispatcher_stuck_after: 5m\n    watchdog_interval: 1m\n    http_read_header_timeout: 10s\n    http_read_timeout: 30s\n    http_write_timeout: 30s\n    http_idle_timeout: 2m\n    review_dedupe_window: 60m\n    isolated_workspace_ttl: 24h\n  bind: %q\n  endpoints:\n    - name: test\n      path: /test\n      secret: s\n      platform: telegram\n      channel_id: c1\n      prompt: p\n      admit:\n        - event: ping\n      workspace:\n        type: none\n", tt.bind)
 			path := writeConfig(t, t.TempDir(), yaml)
 			_, err := Load(path)
 			if tt.wantErr && err == nil {
@@ -335,6 +335,8 @@ func TestWebhookEmptySecretValidation(t *testing.T) {
     retention_keep: 500
     prune_interval: 10m
     dispatcher_idle_ttl: 1h
+    dispatcher_stuck_after: 5m
+    watchdog_interval: 1m
     http_read_header_timeout: 10s
     http_read_timeout: 30s
     http_write_timeout: 30s
@@ -382,6 +384,8 @@ func TestWebhookDuplicatePathValidation(t *testing.T) {
     retention_keep: 500
     prune_interval: 10m
     dispatcher_idle_ttl: 1h
+    dispatcher_stuck_after: 5m
+    watchdog_interval: 1m
     http_read_header_timeout: 10s
     http_read_timeout: 30s
     http_write_timeout: 30s
@@ -449,6 +453,8 @@ func TestWebhookAuthModeValidation(t *testing.T) {
     retention_keep: 500
     prune_interval: 10m
     dispatcher_idle_ttl: 1h
+    dispatcher_stuck_after: 5m
+    watchdog_interval: 1m
     http_read_header_timeout: 10s
     http_read_timeout: 30s
     http_write_timeout: 30s
@@ -489,6 +495,8 @@ func TestWebhookAuthModeValidation(t *testing.T) {
     retention_keep: 500
     prune_interval: 10m
     dispatcher_idle_ttl: 1h
+    dispatcher_stuck_after: 5m
+    watchdog_interval: 1m
     http_read_header_timeout: 10s
     http_read_timeout: 30s
     http_write_timeout: 30s
@@ -529,6 +537,8 @@ func TestWebhookAuthModeValidation(t *testing.T) {
     retention_keep: 500
     prune_interval: 10m
     dispatcher_idle_ttl: 1h
+    dispatcher_stuck_after: 5m
+    watchdog_interval: 1m
     http_read_header_timeout: 10s
     http_read_timeout: 30s
     http_write_timeout: 30s
@@ -569,6 +579,8 @@ func TestWebhookAuthModeValidation(t *testing.T) {
     retention_keep: 500
     prune_interval: 10m
     dispatcher_idle_ttl: 1h
+    dispatcher_stuck_after: 5m
+    watchdog_interval: 1m
     http_read_header_timeout: 10s
     http_read_timeout: 30s
     http_write_timeout: 30s
@@ -610,6 +622,8 @@ func TestWebhookAuthModeValidation(t *testing.T) {
     retention_keep: 500
     prune_interval: 10m
     dispatcher_idle_ttl: 1h
+    dispatcher_stuck_after: 5m
+    watchdog_interval: 1m
     http_read_header_timeout: 10s
     http_read_timeout: 30s
     http_write_timeout: 30s
@@ -740,6 +754,8 @@ func testWebhookConfigYAML(endpoints string) string {
     retention_keep: 500
     prune_interval: 10m
     dispatcher_idle_ttl: 1h
+    dispatcher_stuck_after: 5m
+    watchdog_interval: 1m
     http_read_header_timeout: 10s
     http_read_timeout: 30s
     http_write_timeout: 30s
@@ -835,6 +851,8 @@ func TestEndpointThreadAndProgressCardConfig(t *testing.T) {
     retention_keep: 500
     prune_interval: 10m
     dispatcher_idle_ttl: 1h
+    dispatcher_stuck_after: 5m
+    watchdog_interval: 1m
     http_read_header_timeout: 10s
     http_read_timeout: 30s
     http_write_timeout: 30s
@@ -907,6 +925,8 @@ func TestEndpointProgressCardAliasAndThreadID(t *testing.T) {
     retention_keep: 500
     prune_interval: 10m
     dispatcher_idle_ttl: 1h
+    dispatcher_stuck_after: 5m
+    watchdog_interval: 1m
     http_read_header_timeout: 10s
     http_read_timeout: 30s
     http_write_timeout: 30s
@@ -1057,6 +1077,8 @@ func TestWebhookEndpointModelValidation(t *testing.T) {
     retention_keep: 500
     prune_interval: 10m
     dispatcher_idle_ttl: 1h
+    dispatcher_stuck_after: 5m
+    watchdog_interval: 1m
     http_read_header_timeout: 10s
     http_read_timeout: 30s
     http_write_timeout: 30s
@@ -1120,6 +1142,8 @@ func TestWebhookEndpointCommentTrigger(t *testing.T) {
     retention_keep: 500
     prune_interval: 10m
     dispatcher_idle_ttl: 1h
+    dispatcher_stuck_after: 5m
+    watchdog_interval: 1m
     http_read_header_timeout: 10s
     http_read_timeout: 30s
     http_write_timeout: 30s

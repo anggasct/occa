@@ -44,6 +44,8 @@ func runWebhooksCheckConfig(args []string) int {
 	fmt.Printf("  retention: %s keep=%d\n", rt.Retention, rt.RetentionKeep)
 	fmt.Printf("  prune_interval: %s\n", rt.PruneInterval)
 	fmt.Printf("  dispatcher_idle_ttl: %s\n", rt.DispatcherIdleTTL)
+	fmt.Printf("  dispatcher_stuck_after: %s\n", rt.DispatcherStuckAfter)
+	fmt.Printf("  watchdog_interval: %s\n", rt.WatchdogInterval)
 	fmt.Printf("  http: read_header=%s read=%s write=%s idle=%s\n", rt.HTTPReadHeaderTimeout, rt.HTTPReadTimeout, rt.HTTPWriteTimeout, rt.HTTPIdleTimeout)
 	fmt.Printf("  review_dedupe_window: %s\n", rt.ReviewDedupeWindow)
 	fmt.Printf("  isolated_workspace_ttl: %s\n", rt.IsolatedWorkspaceTTL)
