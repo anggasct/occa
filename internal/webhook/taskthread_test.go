@@ -450,6 +450,14 @@ func TestTaskParentButtonsPerPlatform(t *testing.T) {
 		t.Errorf("telegram parent must keep the Open PR button: %+v", telegram)
 	}
 	discord := TaskParentButtons("discord", "guild-1", envelope, "acme/widget", "feat/x", "thread-123")
+	if len(discord) != 4 {
+		t.Fatalf("discord parent must carry 4 buttons in one row, got %+v", discord)
+	}
+	for _, b := range discord {
+		if b.Row != 1 {
+			t.Errorf("all card buttons must sit on row 1, got %+v", b)
+		}
+	}
 	foundThread := false
 	for _, b := range discord {
 		if b.Label == "Open thread" && strings.Contains(b.URL, "thread-123") && strings.Contains(b.URL, "guild-1") {
@@ -474,6 +482,9 @@ func TestTaskActionButtons(t *testing.T) {
 	}
 	if buttons[0].URL != "" || buttons[1].URL != "" {
 		t.Errorf("action buttons must not carry URL: %+v", buttons)
+	}
+	if buttons[0].Row != 1 || buttons[1].Row != 1 {
+		t.Errorf("action buttons must sit on row 1 with the link buttons, got %+v", buttons)
 	}
 	if len(buttons[0].Value) > 100 || len(buttons[1].Value) > 100 {
 		t.Errorf("callback ids must fit Discord 100-char limit: %+v", buttons)

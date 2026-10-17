@@ -546,8 +546,8 @@ func TaskActionButtons(repo, branch string) []channel.Button {
 		return nil
 	}
 	return []channel.Button{
-		{Label: "Merge", Value: mergeID, Row: 2},
-		{Label: "Re-dispatch", Value: redispatchID, Row: 2},
+		{Label: "Merge", Value: mergeID, Row: 1},
+		{Label: "Re-dispatch", Value: redispatchID, Row: 1},
 	}
 }
 
