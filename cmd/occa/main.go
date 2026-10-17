@@ -416,15 +416,6 @@ func main() {
 					if rec, ok := registry.Lookup(repo, branch); ok && strings.TrimSpace(rec.ThreadID) != "" {
 						return rec.ThreadID, true
 					}
-					if _, ok := registry.Lookup(repo, branch); !ok {
-						return "", false
-					}
-					for range 30 {
-						time.Sleep(100 * time.Millisecond)
-						if rec, ok := registry.Lookup(repo, branch); ok && strings.TrimSpace(rec.ThreadID) != "" {
-							return rec.ThreadID, true
-						}
-					}
 					return "", false
 				})
 				da.SetTaskThreadMissDetail(func(repo, branch string) (string, string, string, bool, bool) {
