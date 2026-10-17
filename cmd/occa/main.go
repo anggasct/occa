@@ -415,6 +415,14 @@ func main() {
 				da.SetTaskThreadLookup(func(repo, branch string) (string, bool) {
 					if rec, ok := registry.Lookup(repo, branch); ok && strings.TrimSpace(rec.ThreadID) != "" {
 						return rec.ThreadID, true
+					} else if !ok {
+						return "", false
+					}
+					for i := 0; i < 10; i++ {
+						time.Sleep(300 * time.Millisecond)
+						if rec, ok := registry.Lookup(repo, branch); ok && strings.TrimSpace(rec.ThreadID) != "" {
+							return rec.ThreadID, true
+						}
 					}
 					return "", false
 				})

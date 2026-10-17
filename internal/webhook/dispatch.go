@@ -96,7 +96,7 @@ func (d *DispatchStore) Create(req DispatchRequest) DispatchTask {
 	n := atomic.AddInt64(&d.counter, 1)
 	task := DispatchTask{
 		ID:        fmt.Sprintf("task-%d-%d", time.Now().UnixNano(), n),
-		Repo:      strings.TrimSpace(req.Repo),
+		Repo:      normalizeRepoKey(req.Repo),
 		Branch:    strings.TrimSpace(req.Branch),
 		BaseSHA:   strings.ToLower(strings.TrimSpace(req.BaseSHA)),
 		SpecPath:  strings.TrimSpace(req.SpecPath),
@@ -127,7 +127,7 @@ func (d *DispatchStore) Count() int {
 }
 
 func FormatDispatchSummary(task DispatchTask, icons map[string]string) string {
-	head := task.Repo + "#" + task.Branch
+	head := normalizeRepoKey(task.Repo) + "#" + strings.TrimSpace(task.Branch)
 	first := TaskIcon(TaskDispatched, icons) + " Dispatched " + head + " · " + task.ID
 	second := "Spec: " + task.SpecPath
 	if strings.TrimSpace(task.Verify) != "" {
