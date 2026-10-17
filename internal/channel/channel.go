@@ -3,6 +3,7 @@ package channel
 import (
 	"context"
 	"errors"
+	"strings"
 )
 
 var (
@@ -45,6 +46,7 @@ type IncomingMessage struct {
 	IsMention              bool
 	IsThread               bool
 	IsCallback             bool
+	IsSelfDispatch         bool
 	CallbackData           string
 	CallbackRef            MessageRef
 	// SourceRef is the original user message that triggered this interaction
@@ -53,6 +55,44 @@ type IncomingMessage struct {
 	SourceRef   MessageRef
 	Attachments []Attachment
 	ReplyCtx    ReplyContext
+}
+
+func ParseDispatchSummary(text string) (string, string, string, bool) {
+	line := text
+	if i := strings.Index(line, "\n"); i >= 0 {
+		line = line[:i]
+	}
+	line = strings.TrimSpace(line)
+	idx := strings.Index(line, "Dispatched ")
+	if idx < 0 {
+		return "", "", "", false
+	}
+	rest := strings.TrimSpace(line[idx+len("Dispatched "):])
+	parts := strings.Split(rest, "·")
+	if len(parts) != 2 {
+		return "", "", "", false
+	}
+	head := strings.TrimSpace(parts[0])
+	taskID := strings.TrimSpace(parts[1])
+	if fields := strings.Fields(taskID); len(fields) > 0 {
+		taskID = fields[0]
+	}
+	if !strings.HasPrefix(taskID, "task-") || len(taskID) <= len("task-") {
+		return "", "", "", false
+	}
+	repo, branch, ok := strings.Cut(head, "#")
+	repo = strings.TrimSpace(repo)
+	branch = strings.TrimSpace(branch)
+	if !ok || repo == "" || branch == "" {
+		return "", "", "", false
+	}
+	if strings.Contains(repo, " ") || strings.Contains(branch, " ") {
+		return "", "", "", false
+	}
+	if !strings.Contains(repo, "/") {
+		return "", "", "", false
+	}
+	return repo, branch, taskID, true
 }
 
 type ReplyContext interface {

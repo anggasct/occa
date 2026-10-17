@@ -55,7 +55,12 @@ type Adapter struct {
 	threadsMu   sync.Mutex
 	threads     map[string]struct{}
 	parentCache map[string]string
+
+	dispatchMu       sync.Mutex
+	seenDispatchTask map[string]time.Time
 }
+
+const maxSeenDispatchTasks = 1024
 
 func New(token string, menu []channel.MenuCommand, cfg Config) *Adapter {
 	return NewWithPolicy(token, menu, AllowlistPolicy{}, cfg)
@@ -394,6 +399,15 @@ func (a *Adapter) onMessage(m *discordgo.MessageCreate, handler func(channel.Inc
 		return
 	}
 	if self := a.selfID(); self != "" && m.Author.ID == self {
+		if _, _, taskID, ok := channel.ParseDispatchSummary(m.Content); ok {
+			if !a.tryClaimDispatchTask(taskID) {
+				return
+			}
+			msg := a.normalizeMessage(m.Message)
+			msg.IsMention = true
+			msg.IsSelfDispatch = true
+			handler(msg)
+		}
 		return
 	}
 	if m.Author.Bot && !a.allowsBotSender(m.Author.ID) {
@@ -403,6 +417,37 @@ func (a *Adapter) onMessage(m *discordgo.MessageCreate, handler func(channel.Inc
 		return
 	}
 	handler(a.normalizeMessage(m.Message))
+}
+
+func (a *Adapter) tryClaimDispatchTask(taskID string) bool {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return false
+	}
+	a.dispatchMu.Lock()
+	defer a.dispatchMu.Unlock()
+	if a.seenDispatchTask == nil {
+		a.seenDispatchTask = make(map[string]time.Time)
+	}
+	now := time.Now()
+	if _, ok := a.seenDispatchTask[taskID]; ok {
+		return false
+	}
+	if len(a.seenDispatchTask) >= maxSeenDispatchTasks {
+		oldest := ""
+		var oldestAt time.Time
+		first := true
+		for id, claimedAt := range a.seenDispatchTask {
+			if first || claimedAt.Before(oldestAt) {
+				oldest, oldestAt, first = id, claimedAt, false
+			}
+		}
+		if oldest != "" {
+			delete(a.seenDispatchTask, oldest)
+		}
+	}
+	a.seenDispatchTask[taskID] = now
+	return true
 }
 
 func (a *Adapter) allowsBotSender(userID string) bool {
