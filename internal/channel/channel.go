@@ -25,6 +25,7 @@ type Button struct {
 	Label string
 	Value string
 	Row   int
+	URL   string
 }
 
 type MenuCommand struct {
@@ -94,8 +95,16 @@ type MessageSender interface {
 	SendNotification(channelID string, text string) (string, error)
 }
 
+type MessageSenderWithButtons interface {
+	SendNotificationWithButtons(channelID string, text string, buttons []Button) (string, error)
+}
+
 type MessageEditor interface {
 	EditNotification(channelID, messageID string, text string) error
+}
+
+type MessageEditorWithButtons interface {
+	EditNotificationWithButtons(channelID, messageID string, text string, buttons []Button) error
 }
 
 type ThreadStarter interface {

@@ -242,25 +242,48 @@ func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelo
 	}
 
 	threadID := ""
+	rootID := ""
 	if wCtx != nil {
 		threadID = wCtx.ThreadID
+		rootID = wCtx.RootMessageID
+	}
+	if (threadID == "" || rootID == "") && s.tasks != nil {
+		if repo, branch := TaskRepoBranch(WebhookExecutionKey{}, envelope); repo != "" && branch != "" {
+			if rec, ok := s.tasks.Lookup(repo, branch); ok {
+				if threadID == "" && rec.ThreadID != "" {
+					threadID = rec.ThreadID
+				}
+				if rootID == "" && rec.RootMessageID != "" {
+					rootID = rec.RootMessageID
+				}
+			}
+		}
 	}
 	targetChannel := auditTargetChannel(ep.Platform, ep.ChannelID, threadID)
 
-	if wCtx != nil && wCtx.RootMessageID != "" && s.editor != nil {
+	if rootID != "" && (s.editor != nil || s.editorButtons != nil) {
 		text := card
 		if text == "" {
 			elapsed := time.Duration(0)
-			if !wCtx.StartTime.IsZero() {
+			if wCtx != nil && !wCtx.StartTime.IsZero() {
 				elapsed = time.Since(wCtx.StartTime)
 			}
-			text = terminalRootCard(envelope, ep.Workflow, status, reason, wCtx.ThreadID, ep.Platform, elapsed)
+			text = terminalRootCard(envelope, ep.Workflow, status, reason, threadID, ep.Platform, elapsed)
 		}
 		text = WithTaskHeader(text, envelope, ep.Workflow, TaskStatusForAudit(status, ep.Workflow), s.statusIcons)
 		text = redactAuditSummary(text, ep.Secret)
-		if err := s.editor(ctx, ep.Platform, targetChannel, wCtx.RootMessageID, text); err != nil {
-			slog.Warn("webhook: failed to edit root card, falling back to notifier", "endpoint", ep.Name, "error", err)
+		repo, branch := TaskRepoBranch(WebhookExecutionKey{}, envelope)
+		buttons := TaskParentButtons(ep.Platform, envelope, repo, branch, threadID)
+		if err := s.editParent(ctx, ep.Platform, targetChannel, rootID, text, buttons); err != nil {
+			slog.Warn("webhook: failed to edit root card, posting detail into thread once", "endpoint", ep.Name, "error", err)
+			if threadID != "" {
+				s.postThreadDetail(ctx, ep, threadID, envelope, status, reason)
+				return
+			}
 		} else {
+			if status == "SKIP" && threadID != "" {
+				s.postThreadDetail(ctx, ep, threadID, envelope, status, reason)
+			}
 			return
 		}
 	}
@@ -274,8 +297,30 @@ func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelo
 		slog.Info("webhook: audit notification skipped", "endpoint", ep.Name, "status", status)
 		return
 	}
+	if threadID != "" && rootID != "" {
+		s.postThreadDetail(ctx, ep, threadID, envelope, status, reason)
+		return
+	}
 	if err := s.notifier(ctx, ep.Platform, targetChannel, summary); err != nil {
 		slog.Warn("webhook: audit notification failed", "endpoint", ep.Name, "status", status, "error", err)
+	}
+}
+
+func (s *Server) postThreadDetail(ctx context.Context, ep config.EndpointConfig, threadID string, envelope WebhookEnvelope, status, reason string) {
+	if s.notifier == nil || threadID == "" {
+		return
+	}
+	summary := redactAuditSummary(formatAuditSummary(envelope, ep.Workflow, status, reason), ep.Secret)
+	var target string
+	if ep.Platform == "telegram" && !strings.Contains(ep.ChannelID, ":") {
+		target = ep.ChannelID + ":" + threadID
+	} else if ep.Platform == "discord" {
+		target = threadID
+	} else {
+		target = auditTargetChannel(ep.Platform, ep.ChannelID, threadID)
+	}
+	if err := s.notifier(ctx, ep.Platform, target, summary); err != nil {
+		slog.Warn("webhook: thread detail post failed", "endpoint", ep.Name, "status", status, "error", err)
 	}
 }
 

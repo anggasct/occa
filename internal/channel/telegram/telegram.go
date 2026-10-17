@@ -687,7 +687,12 @@ func inlineKeyboard(buttons []channel.Button) tgbotapi.InlineKeyboardMarkup {
 	grouped := make(map[int][]tgbotapi.InlineKeyboardButton)
 	var order []int
 	for _, b := range buttons {
-		btn := tgbotapi.NewInlineKeyboardButtonData(b.Label, b.Value)
+		var btn tgbotapi.InlineKeyboardButton
+		if strings.TrimSpace(b.URL) != "" {
+			btn = tgbotapi.NewInlineKeyboardButtonURL(b.Label, strings.TrimSpace(b.URL))
+		} else {
+			btn = tgbotapi.NewInlineKeyboardButtonData(b.Label, b.Value)
+		}
 		if b.Row == 0 {
 			solo = append(solo, btn)
 			continue

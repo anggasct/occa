@@ -481,6 +481,41 @@ func (a *Adapter) EditNotification(channelID, messageID, text string) error {
 	return nil
 }
 
+func (a *Adapter) SendNotificationWithButtons(channelID, text string, buttons []channel.Button) (string, error) {
+	if a.session == nil {
+		return "", errors.New("discord: session not ready")
+	}
+	content := render.Clamp(text, render.DiscordLimit)
+	msg, err := a.session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+		Content:         content,
+		Components:      componentRows(buttons),
+		AllowedMentions: &discordgo.MessageAllowedMentions{},
+	})
+	if err != nil {
+		return "", fmt.Errorf("discord: send notification with buttons: %w", err)
+	}
+	return msg.ID, nil
+}
+
+func (a *Adapter) EditNotificationWithButtons(channelID, messageID, text string, buttons []channel.Button) error {
+	if a.session == nil {
+		return errors.New("discord: session not ready")
+	}
+	content := render.Clamp(text, render.DiscordLimit)
+	components := componentRows(buttons)
+	_, err := a.session.ChannelMessageEditComplex(&discordgo.MessageEdit{
+		Channel:         channelID,
+		ID:              messageID,
+		Content:         &content,
+		Components:      &components,
+		AllowedMentions: &discordgo.MessageAllowedMentions{},
+	})
+	if err != nil {
+		return fmt.Errorf("discord: edit notification with buttons: %w", err)
+	}
+	return nil
+}
+
 func (a *Adapter) ReplyNotification(channelID, replyToMessageID, text string) (string, error) {
 	if a.session == nil {
 		return "", errors.New("discord: session not ready")
@@ -861,10 +896,19 @@ func componentRows(buttons []channel.Button) []discordgo.MessageComponent {
 	grouped := make(map[int][]discordgo.MessageComponent)
 	var order []int
 	for _, b := range buttons {
-		btn := discordgo.Button{
-			Label:    safeButtonLabel(b.Label),
-			Style:    discordgo.SecondaryButton,
-			CustomID: b.Value,
+		var btn discordgo.Button
+		if strings.TrimSpace(b.URL) != "" {
+			btn = discordgo.Button{
+				Label: safeButtonLabel(b.Label),
+				Style: discordgo.LinkButton,
+				URL:   strings.TrimSpace(b.URL),
+			}
+		} else {
+			btn = discordgo.Button{
+				Label:    safeButtonLabel(b.Label),
+				Style:    discordgo.SecondaryButton,
+				CustomID: b.Value,
+			}
 		}
 		if b.Row == 0 {
 			legacy = append(legacy, btn)
@@ -919,16 +963,18 @@ func (rc *replyContext) Delete(ref channel.MessageRef) error {
 }
 
 var (
-	_ channel.Channel              = (*Adapter)(nil)
-	_ channel.MessageDeleter       = (*Adapter)(nil)
-	_ channel.MessageSender        = (*Adapter)(nil)
-	_ channel.MessageEditor        = (*Adapter)(nil)
-	_ channel.MessageReplier       = (*Adapter)(nil)
-	_ channel.ThreadStarter        = (*Adapter)(nil)
-	_ channel.ThreadParentResolver = (*Adapter)(nil)
-	_ channel.ReplyContext         = (*replyContext)(nil)
-	_ channel.MessageRemover       = (*replyContext)(nil)
-	_ channel.ChatCommandSetter    = (*replyContext)(nil)
-	_ channel.ReactionSetter       = (*replyContext)(nil)
-	_ channel.MessageRef           = messageRef{}
+	_ channel.Channel                  = (*Adapter)(nil)
+	_ channel.MessageDeleter           = (*Adapter)(nil)
+	_ channel.MessageSender            = (*Adapter)(nil)
+	_ channel.MessageSenderWithButtons = (*Adapter)(nil)
+	_ channel.MessageEditor            = (*Adapter)(nil)
+	_ channel.MessageEditorWithButtons = (*Adapter)(nil)
+	_ channel.MessageReplier           = (*Adapter)(nil)
+	_ channel.ThreadStarter            = (*Adapter)(nil)
+	_ channel.ThreadParentResolver     = (*Adapter)(nil)
+	_ channel.ReplyContext             = (*replyContext)(nil)
+	_ channel.MessageRemover           = (*replyContext)(nil)
+	_ channel.ChatCommandSetter        = (*replyContext)(nil)
+	_ channel.ReactionSetter           = (*replyContext)(nil)
+	_ channel.MessageRef               = messageRef{}
 )

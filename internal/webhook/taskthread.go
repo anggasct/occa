@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/config"
 )
 
@@ -233,10 +234,55 @@ func FormatTaskParent(repo, branch, prNumber string, status TaskStatus, icons ma
 }
 
 func FormatTaskLinks(prURL string) string {
-	if strings.TrimSpace(prURL) == "" {
+	prURL = normalizeTaskPRURL(prURL)
+	if prURL == "" {
 		return ""
 	}
-	return "[Open PR](" + strings.TrimSpace(prURL) + ")"
+	return "[Open PR](" + prURL + ")"
+}
+
+func normalizeTaskPRURL(raw string) string {
+	prURL := strings.TrimSpace(raw)
+	if prURL == "" {
+		return ""
+	}
+	if rewritten := rewriteGitHubAPIPrURL(prURL); rewritten != "" {
+		return rewritten
+	}
+	return prURL
+}
+
+func rewriteGitHubAPIPrURL(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	lower := strings.ToLower(trimmed)
+	const marker = "api.github.com/repos/"
+	idx := strings.Index(lower, marker)
+	if idx < 0 {
+		return ""
+	}
+	rest := trimmed[idx+len(marker):]
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) != 4 {
+		return ""
+	}
+	owner, repo, pulls, number := parts[0], parts[1], parts[2], parts[3]
+	if owner == "" || repo == "" || number == "" {
+		return ""
+	}
+	if !strings.EqualFold(pulls, "pulls") {
+		return ""
+	}
+	digits := number
+	for i, r := range number {
+		if r < '0' || r > '9' {
+			digits = number[:i]
+			break
+		}
+	}
+	if digits == "" {
+		return ""
+	}
+	return "https://github.com/" + owner + "/" + repo + "/pull/" + digits
 }
 
 func TaskCardHeader(envelope WebhookEnvelope, workflow string, status TaskStatus, icons map[string]string) string {
@@ -366,4 +412,94 @@ func clipTaskField(s string, max int) string {
 		return s
 	}
 	return string([]rune(s)[:max])
+}
+
+const taskCallbackPrefix = "task:"
+
+const taskCallbackLimit = 100
+
+func TaskThreadURL(platform, threadID string) string {
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" {
+		return ""
+	}
+	if strings.Contains(threadID, "://") {
+		return threadID
+	}
+	if !strings.EqualFold(strings.TrimSpace(platform), "discord") {
+		return ""
+	}
+	return "https://discord.com/channels/_/" + threadID
+}
+
+func TaskLinkButtons(platform, prURL, threadID string) []channel.Button {
+	var buttons []channel.Button
+	if normalized := normalizeTaskPRURL(prURL); normalized != "" {
+		buttons = append(buttons, channel.Button{Label: "Open PR", URL: normalized, Row: 1})
+	}
+	if url := TaskThreadURL(platform, threadID); url != "" {
+		buttons = append(buttons, channel.Button{Label: "Open thread", URL: url, Row: 1})
+	}
+	return buttons
+}
+
+func TaskActionButtons(repo, branch string) []channel.Button {
+	repo = strings.TrimSpace(repo)
+	branch = strings.TrimSpace(branch)
+	if repo == "" || branch == "" {
+		return nil
+	}
+	key := TaskThreadKey(repo, branch)
+	mergeID := "task:merge:" + key
+	redispatchID := "task:redispatch:" + key
+	if utf8.RuneCountInString(mergeID) > taskCallbackLimit || utf8.RuneCountInString(redispatchID) > taskCallbackLimit {
+		return nil
+	}
+	return []channel.Button{
+		{Label: "Merge", Value: mergeID, Row: 2},
+		{Label: "Re-dispatch", Value: redispatchID, Row: 2},
+	}
+}
+
+func TaskParentButtons(platform string, envelope WebhookEnvelope, repo, branch, threadID string) []channel.Button {
+	if repo == "" || branch == "" {
+		repo = strings.TrimSpace(stringValue(envelope["repository"]))
+		branch = strings.TrimSpace(stringValue(envelope["head_branch"]))
+	}
+	if repo == "" || branch == "" {
+		return nil
+	}
+	prURL := strings.TrimSpace(stringValue(envelope["pr_url"]))
+	buttons := TaskLinkButtons(platform, prURL, threadID)
+	buttons = append(buttons, TaskActionButtons(repo, branch)...)
+	return buttons
+}
+
+func ParseTaskCallback(data string) (string, string, string, bool) {
+	trimmed := strings.TrimSpace(data)
+	if !strings.HasPrefix(trimmed, taskCallbackPrefix) {
+		return "", "", "", false
+	}
+	rest := strings.TrimPrefix(trimmed, taskCallbackPrefix)
+	action := ""
+	if strings.HasPrefix(rest, "merge:") {
+		action = "merge"
+		rest = strings.TrimPrefix(rest, "merge:")
+	} else if strings.HasPrefix(rest, "redispatch:") {
+		action = "redispatch"
+		rest = strings.TrimPrefix(rest, "redispatch:")
+	} else {
+		return "", "", "", false
+	}
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		return "", "", "", false
+	}
+	repo, branch, ok := strings.Cut(rest, "#")
+	repo = strings.TrimSpace(repo)
+	branch = strings.TrimSpace(branch)
+	if !ok || repo == "" || branch == "" {
+		return "", "", "", false
+	}
+	return action, repo, branch, true
 }
