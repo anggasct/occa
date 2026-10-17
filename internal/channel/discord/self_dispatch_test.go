@@ -3,7 +3,6 @@ package discord
 import (
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/bwmarrin/discordgo"
 
@@ -52,13 +51,5 @@ func TestDispatchClaimSetBounded(t *testing.T) {
 	}
 	if !a.tryClaimDispatchTask("task-0") {
 		t.Fatalf("evicted task-0 should be claimable again")
-	}
-}
-
-func TestDispatchClaimExpires(t *testing.T) {
-	a := New("fake-token", nil, Config{})
-	a.seenDispatchTask = map[string]time.Time{"task-old": time.Now().Add(-2 * dispatchClaimTTL)}
-	if !a.tryClaimDispatchTask("task-old") {
-		t.Fatalf("expired claim should be reclaimable")
 	}
 }

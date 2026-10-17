@@ -60,10 +60,7 @@ type Adapter struct {
 	seenDispatchTask map[string]time.Time
 }
 
-const (
-	maxSeenDispatchTasks = 1024
-	dispatchClaimTTL     = 24 * time.Hour
-)
+const maxSeenDispatchTasks = 1024
 
 func New(token string, menu []channel.MenuCommand, cfg Config) *Adapter {
 	return NewWithPolicy(token, menu, AllowlistPolicy{}, cfg)
@@ -433,15 +430,8 @@ func (a *Adapter) tryClaimDispatchTask(taskID string) bool {
 		a.seenDispatchTask = make(map[string]time.Time)
 	}
 	now := time.Now()
-	if claimedAt, ok := a.seenDispatchTask[taskID]; ok {
-		if now.Sub(claimedAt) < dispatchClaimTTL {
-			return false
-		}
-	}
-	for id, claimedAt := range a.seenDispatchTask {
-		if now.Sub(claimedAt) >= dispatchClaimTTL {
-			delete(a.seenDispatchTask, id)
-		}
+	if _, ok := a.seenDispatchTask[taskID]; ok {
+		return false
 	}
 	if len(a.seenDispatchTask) >= maxSeenDispatchTasks {
 		oldest := ""
