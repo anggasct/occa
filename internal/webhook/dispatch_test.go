@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -111,6 +112,42 @@ func TestHandleDispatchTokenHeader(t *testing.T) {
 	srv.handleDispatch(rec, req)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("header token status = %d, want 201", rec.Code)
+	}
+}
+
+func TestHandleDispatchPostsSummary(t *testing.T) {
+	srv := newDispatchServer(t, dispatchEndpoints("acme/widget"))
+	var mu sync.Mutex
+	var posts []string
+	var platform, channel string
+	srv.SetNotifier(func(_ context.Context, p, c, text string) error {
+		mu.Lock()
+		posts = append(posts, text)
+		platform, channel = p, c
+		mu.Unlock()
+		return nil
+	})
+	rec := postDispatch(t, srv, "dispatch-token", validDispatchBody)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201: %s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(posts) != 1 {
+		t.Fatalf("summary posts = %d, want 1", len(posts))
+	}
+	if platform != "discord" || channel != "chan-1" {
+		t.Errorf("target = %s/%s, want discord/chan-1", platform, channel)
+	}
+	if !strings.Contains(posts[0], "Dispatched") || !strings.Contains(posts[0], payload["task_id"]) {
+		t.Errorf("summary = %q, want Dispatched with %q", posts[0], payload["task_id"])
+	}
+	if !strings.Contains(posts[0], "acme/widget#feat/x") || !strings.Contains(posts[0], "specs/feat-x.md") {
+		t.Errorf("summary missing repo/branch/spec: %q", posts[0])
 	}
 }
 
@@ -221,14 +258,36 @@ func TestScheduleDispatchFallbackFires(t *testing.T) {
 		branchCalls.Add(1)
 		return BranchPRResult{}, nil
 	})
-	var findings atomic.Int64
+	var mu sync.Mutex
+	var posts []string
+	var platforms []string
+	var channels []string
 	srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
-		findings.Add(1)
+		mu.Lock()
+		posts = append(posts, text)
+		platforms = append(platforms, platform)
+		channels = append(channels, channelID)
+		mu.Unlock()
 		return nil
 	})
-	if rec := postDispatch(t, srv, "dispatch-token", validDispatchBody); rec.Code != http.StatusCreated {
+	rec := postDispatch(t, srv, "dispatch-token", validDispatchBody)
+	if rec.Code != http.StatusCreated {
 		t.Fatalf("dispatch status = %d, want 201", rec.Code)
 	}
+	var payload map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	taskID := payload["task_id"]
+	mu.Lock()
+	if len(posts) != 1 {
+		mu.Unlock()
+		t.Fatalf("dispatch summary posts = %d, want 1 synchronous post", len(posts))
+	}
+	if !strings.Contains(posts[0], "Dispatched") || !strings.Contains(posts[0], taskID) {
+		t.Errorf("dispatch summary = %q, want Dispatched with %q", posts[0], taskID)
+	}
+	mu.Unlock()
 	deadline := time.Now().Add(2 * time.Second)
 	for branchCalls.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
@@ -237,8 +296,22 @@ func TestScheduleDispatchFallbackFires(t *testing.T) {
 	if got := branchCalls.Load(); got != 1 {
 		t.Errorf("branch checks = %d, want exactly 1", got)
 	}
-	if got := findings.Load(); got != 1 {
-		t.Errorf("finding posts = %d, want exactly 1", got)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(posts) != 2 {
+		t.Fatalf("finding posts = %d, want exactly 2 (summary + fallback)", len(posts))
+	}
+	joined := strings.Join(posts, "\n")
+	if !strings.Contains(joined, "Dispatched") {
+		t.Errorf("posts missing dispatch summary: %q", joined)
+	}
+	if !strings.Contains(joined, "Fallback poll") {
+		t.Errorf("posts missing fallback finding: %q", joined)
+	}
+	for i := range platforms {
+		if platforms[i] != "discord" || channels[i] != "chan-1" {
+			t.Errorf("post %d target = %s/%s, want discord/chan-1", i, platforms[i], channels[i])
+		}
 	}
 }
 
