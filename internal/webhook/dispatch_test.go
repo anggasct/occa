@@ -432,3 +432,30 @@ func TestScheduleDeliveryFallbackTerminalSkips(t *testing.T) {
 		t.Errorf("claimed delivery branch checks = %d, want exactly 1", got)
 	}
 }
+
+func TestPollBranchOnceDoesNotAdoptCrossRepoThread(t *testing.T) {
+	srv := newDispatchServer(t, dispatchEndpoints("acme/widget"))
+	srv.tasks.Upsert("acme/widget", "feat/x", "root-1", "thread-1", TaskDispatched)
+	var mu sync.Mutex
+	var targets []string
+	srv.SetNotifier(func(_ context.Context, _, channelID, _ string) error {
+		mu.Lock()
+		targets = append(targets, channelID)
+		mu.Unlock()
+		return nil
+	})
+	srv.SetBranchChecker(func(_ context.Context, _, _ string) (BranchPRResult, error) {
+		return BranchPRResult{}, nil
+	})
+	srv.pollBranchOnce("other/widget", "feat/x", "discord", "chan-1", "")
+	mu.Lock()
+	defer mu.Unlock()
+	if len(targets) != 0 {
+		t.Fatalf("cross-repo fallback posts = %v, want none suppressed without PR", targets)
+	}
+	for _, target := range targets {
+		if target == "thread-1" {
+			t.Fatalf("fallback adopted another repo's thread: %v", targets)
+		}
+	}
+}
