@@ -485,6 +485,14 @@ func main() {
 			}
 			return "", errors.New("webhook channel adapter unavailable")
 		})
+		webhookSrv.SetGuildResolver(func(ctx context.Context, platform, channelID string) string {
+			for _, ch := range channels {
+				if ch.Name() == platform {
+					return guildIDForButtons(ch, channelID, "")
+				}
+			}
+			return ""
+		})
 		rt.SetRootCardEditor(func(ctx context.Context, platform, channelID, messageID, text string) error {
 			for _, ch := range channels {
 				if ch.Name() == platform {
@@ -648,6 +656,26 @@ func notifyEditWithButtons(ch channel.Channel, channelID, messageID, text string
 	return notifyEdit(ch, channelID, messageID, chunks[0])
 }
 
+func guildIDForButtons(ch channel.Channel, channelID, threadID string) string {
+	if !strings.EqualFold(strings.TrimSpace(ch.Name()), "discord") {
+		return ""
+	}
+	resolver, ok := ch.(channel.GuildResolver)
+	if !ok {
+		return ""
+	}
+	for _, id := range []string{threadID, channelID} {
+		id = strings.TrimSpace(id)
+		if id == "" || strings.Contains(id, "://") || strings.Contains(id, ":") {
+			continue
+		}
+		if guild, err := resolver.GuildIDForChannel(id); err == nil && strings.TrimSpace(guild) != "" {
+			return strings.TrimSpace(guild)
+		}
+	}
+	return ""
+}
+
 func notifyReply(ch channel.Channel, channelID, replyToMessageID, text string) (string, error) {
 	chunks, err := outboundRenderer.Render(text, render.PlatformFor(ch.Name()))
 	if err != nil || len(chunks) == 0 {
@@ -740,7 +768,7 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 						if _, ok := taskOpts.Registry.Lookup(repo, branch); ok {
 							header := webhook.TaskCardHeader(workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons)
 							if header != "" {
-								buttons := webhook.TaskParentButtons(platform, workCtx.Envelope, repo, branch, workCtx.ThreadID)
+								buttons := webhook.TaskParentButtons(platform, guildIDForButtons(ch, channelID, workCtx.ThreadID), workCtx.Envelope, repo, branch, workCtx.ThreadID)
 								if err := notifyEditWithButtons(ch, channelID, workCtx.RootMessageID, webhook.FormatWebhookMessage(header), buttons); err != nil {
 									slog.Warn("webhook: failed to edit task parent, continuing in thread", "channel_id", channelID, "error", err)
 								}
@@ -768,7 +796,7 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 					rootCard := webhook.FormatRootCard(workCtx.Envelope, workCtx.Workflow, "RUNNING", "", "", platform)
 					rootCard = webhook.WithTaskHeader(rootCard, workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons)
 					repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope)
-					buttons := webhook.TaskParentButtons(platform, workCtx.Envelope, repo, branch, "")
+					buttons := webhook.TaskParentButtons(platform, guildIDForButtons(ch, channelID, ""), workCtx.Envelope, repo, branch, "")
 					rootMsgID, err := notifySendWithButtons(ch, channelID, webhook.FormatWebhookMessage(rootCard), buttons)
 					if err != nil {
 						slog.Warn("webhook: failed to send root card; falling back to channel", "channel_id", channelID, "error", err)
@@ -784,7 +812,7 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 							if taskOpts.Registry != nil {
 								if repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope); repo != "" && branch != "" {
 									taskOpts.Registry.Upsert(repo, branch, rootMsgID, threadID, taskStatus)
-									threadButtons := webhook.TaskParentButtons(platform, workCtx.Envelope, repo, branch, threadID)
+									threadButtons := webhook.TaskParentButtons(platform, guildIDForButtons(ch, channelID, threadID), workCtx.Envelope, repo, branch, threadID)
 									_ = notifyEditWithButtons(ch, channelID, rootMsgID, webhook.FormatWebhookMessage(rootCard), threadButtons)
 								}
 							}

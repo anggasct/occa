@@ -469,7 +469,7 @@ const taskCallbackPrefix = "task:"
 
 const taskCallbackLimit = 100
 
-func TaskThreadURL(platform, threadID string) string {
+func TaskThreadURL(platform, guildID, threadID string) string {
 	threadID = strings.TrimSpace(threadID)
 	if threadID == "" {
 		return ""
@@ -480,15 +480,18 @@ func TaskThreadURL(platform, threadID string) string {
 	if !strings.EqualFold(strings.TrimSpace(platform), "discord") {
 		return ""
 	}
-	return "https://discord.com/channels/_/" + threadID
+	if guildID = strings.TrimSpace(guildID); guildID == "" {
+		return "https://discord.com/channels/_/" + threadID
+	}
+	return "https://discord.com/channels/" + guildID + "/" + threadID
 }
 
-func TaskLinkButtons(platform, prURL, threadID string) []channel.Button {
+func TaskLinkButtons(platform, guildID, prURL, threadID string) []channel.Button {
 	var buttons []channel.Button
 	if normalized := normalizeTaskPRURL(prURL); normalized != "" {
 		buttons = append(buttons, channel.Button{Label: "Open PR", URL: normalized, Row: 1})
 	}
-	if url := TaskThreadURL(platform, threadID); url != "" {
+	if url := TaskThreadURL(platform, guildID, threadID); url != "" {
 		buttons = append(buttons, channel.Button{Label: "Open thread", URL: url, Row: 1})
 	}
 	return buttons
@@ -512,7 +515,7 @@ func TaskActionButtons(repo, branch string) []channel.Button {
 	}
 }
 
-func TaskParentButtons(platform string, envelope WebhookEnvelope, repo, branch, threadID string) []channel.Button {
+func TaskParentButtons(platform, guildID string, envelope WebhookEnvelope, repo, branch, threadID string) []channel.Button {
 	if repo == "" || branch == "" {
 		repo = strings.TrimSpace(stringValue(envelope["repository"]))
 		branch = strings.TrimSpace(stringValue(envelope["head_branch"]))
@@ -521,7 +524,7 @@ func TaskParentButtons(platform string, envelope WebhookEnvelope, repo, branch, 
 		return nil
 	}
 	prURL := strings.TrimSpace(stringValue(envelope["pr_url"]))
-	buttons := TaskLinkButtons(platform, prURL, threadID)
+	buttons := TaskLinkButtons(platform, guildID, prURL, threadID)
 	buttons = append(buttons, TaskActionButtons(repo, branch)...)
 	return buttons
 }

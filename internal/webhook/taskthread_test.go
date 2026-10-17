@@ -323,7 +323,7 @@ func TestFormatTaskLinksRewritesAPIURL(t *testing.T) {
 }
 
 func TestTaskLinkButtons(t *testing.T) {
-	buttons := TaskLinkButtons("discord", "https://github.com/acme/widget/pull/42", "thread-123")
+	buttons := TaskLinkButtons("discord", "guild-1", "https://github.com/acme/widget/pull/42", "thread-123")
 	if len(buttons) != 2 {
 		t.Fatalf("link buttons = %d, want 2 (Open PR + Open thread)", len(buttons))
 	}
@@ -333,27 +333,36 @@ func TestTaskLinkButtons(t *testing.T) {
 	if buttons[1].Label != "Open thread" || !strings.Contains(buttons[1].URL, "thread-123") {
 		t.Errorf("open thread button = %+v", buttons[1])
 	}
-	apiButtons := TaskLinkButtons("discord", "https://api.github.com/repos/acme/widget/pulls/7", "")
+	if !strings.Contains(buttons[1].URL, "guild-1") {
+		t.Errorf("open thread button must carry guild id: %+v", buttons[1])
+	}
+	apiButtons := TaskLinkButtons("discord", "guild-1", "https://api.github.com/repos/acme/widget/pulls/7", "")
 	if len(apiButtons) != 1 || !strings.Contains(apiButtons[0].URL, "github.com/acme/widget/pull/7") {
 		t.Errorf("api pr button must rewrite to web url: %+v", apiButtons)
 	}
 }
 
 func TestTaskThreadURLPerPlatform(t *testing.T) {
-	if got := TaskThreadURL("discord", "thread-123"); !strings.Contains(got, "thread-123") || !strings.Contains(got, "discord.com") {
-		t.Errorf("discord thread url = %q, want discord link with thread id", got)
+	if got := TaskThreadURL("discord", "guild-1", "thread-123"); got != "https://discord.com/channels/guild-1/thread-123" {
+		t.Errorf("discord thread url = %q, want guild link", got)
+	}
+	if got := TaskThreadURL("discord", "", "thread-123"); !strings.Contains(got, "thread-123") || !strings.Contains(got, "discord.com") {
+		t.Errorf("discord thread url without guild = %q, want fallback link with thread id", got)
+	}
+	if got := TaskThreadURL("discord", "", "thread-123"); strings.Contains(got, "guild-1") {
+		t.Errorf("fallback url must not invent guild: %q", got)
 	}
 	for _, platform := range []string{"telegram", "", "bogus"} {
-		if got := TaskThreadURL(platform, "thread-123"); got != "" {
+		if got := TaskThreadURL(platform, "guild-1", "thread-123"); got != "" {
 			t.Errorf("TaskThreadURL(%q, thread) = %q, want empty (no dead link)", platform, got)
 		}
 	}
-	if got := TaskThreadURL("telegram", ""); got != "" {
+	if got := TaskThreadURL("telegram", "guild-1", ""); got != "" {
 		t.Errorf("empty thread id = %q, want empty", got)
 	}
 	full := "https://example.com/t/thread-123"
 	for _, platform := range []string{"discord", "telegram"} {
-		if got := TaskThreadURL(platform, full); got != full {
+		if got := TaskThreadURL(platform, "guild-1", full); got != full {
 			t.Errorf("TaskThreadURL(%q, url) = %q, want passthrough", platform, got)
 		}
 	}
@@ -365,7 +374,7 @@ func TestTaskParentButtonsPerPlatform(t *testing.T) {
 		"head_branch": "feat/x",
 		"pr_url":      "https://github.com/acme/widget/pull/42",
 	}
-	telegram := TaskParentButtons("telegram", envelope, "acme/widget", "feat/x", "topic-123")
+	telegram := TaskParentButtons("telegram", "", envelope, "acme/widget", "feat/x", "topic-123")
 	for _, b := range telegram {
 		if strings.Contains(b.URL, "discord.com") {
 			t.Errorf("telegram parent must not carry a discord thread url: %+v", b)
@@ -383,15 +392,15 @@ func TestTaskParentButtonsPerPlatform(t *testing.T) {
 	if !foundPR {
 		t.Errorf("telegram parent must keep the Open PR button: %+v", telegram)
 	}
-	discord := TaskParentButtons("discord", envelope, "acme/widget", "feat/x", "thread-123")
+	discord := TaskParentButtons("discord", "guild-1", envelope, "acme/widget", "feat/x", "thread-123")
 	foundThread := false
 	for _, b := range discord {
-		if b.Label == "Open thread" && strings.Contains(b.URL, "thread-123") {
+		if b.Label == "Open thread" && strings.Contains(b.URL, "thread-123") && strings.Contains(b.URL, "guild-1") {
 			foundThread = true
 		}
 	}
 	if !foundThread {
-		t.Errorf("discord parent must carry a thread link: %+v", discord)
+		t.Errorf("discord parent must carry a guild thread link: %+v", discord)
 	}
 }
 
