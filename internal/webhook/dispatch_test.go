@@ -259,9 +259,19 @@ func TestScheduleDispatchFallbackFires(t *testing.T) {
 		return BranchPRResult{}, nil
 	})
 	var mu sync.Mutex
+	var senderPosts []string
 	var posts []string
 	var platforms []string
 	var channels []string
+	srv.SetSender(func(_ context.Context, _, _, text string) (string, error) {
+		mu.Lock()
+		senderPosts = append(senderPosts, text)
+		mu.Unlock()
+		return "parent-123", nil
+	})
+	srv.SetThreadStarter(func(_ context.Context, _, _, _, _ string) (string, error) {
+		return "thread-456", nil
+	})
 	srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
 		mu.Lock()
 		posts = append(posts, text)
@@ -280,12 +290,12 @@ func TestScheduleDispatchFallbackFires(t *testing.T) {
 	}
 	taskID := payload["task_id"]
 	mu.Lock()
-	if len(posts) != 1 {
+	if len(senderPosts) != 1 {
 		mu.Unlock()
-		t.Fatalf("dispatch summary posts = %d, want 1 synchronous post", len(posts))
+		t.Fatalf("dispatch summary posts = %d, want 1 synchronous post", len(senderPosts))
 	}
-	if !strings.Contains(posts[0], "Dispatched") || !strings.Contains(posts[0], taskID) {
-		t.Errorf("dispatch summary = %q, want Dispatched with %q", posts[0], taskID)
+	if !strings.Contains(senderPosts[0], "Dispatched") || !strings.Contains(senderPosts[0], taskID) {
+		t.Errorf("dispatch summary = %q, want Dispatched with %q", senderPosts[0], taskID)
 	}
 	mu.Unlock()
 	deadline := time.Now().Add(2 * time.Second)
@@ -298,20 +308,60 @@ func TestScheduleDispatchFallbackFires(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(posts) != 2 {
-		t.Fatalf("finding posts = %d, want exactly 2 (summary + fallback)", len(posts))
+	if len(posts) != 1 {
+		t.Fatalf("finding posts = %d, want exactly 1 thread-only fallback", len(posts))
 	}
-	joined := strings.Join(posts, "\n")
-	if !strings.Contains(joined, "Dispatched") {
-		t.Errorf("posts missing dispatch summary: %q", joined)
+	if !strings.Contains(posts[0], "Fallback poll") {
+		t.Errorf("posts missing fallback finding: %q", posts[0])
 	}
-	if !strings.Contains(joined, "Fallback poll") {
-		t.Errorf("posts missing fallback finding: %q", joined)
+	if strings.Contains(posts[0], "Dispatched") {
+		t.Errorf("fallback must not repeat dispatch summary: %q", posts[0])
 	}
 	for i := range platforms {
-		if platforms[i] != "discord" || channels[i] != "chan-1" {
-			t.Errorf("post %d target = %s/%s, want discord/chan-1", i, platforms[i], channels[i])
+		if platforms[i] != "discord" || channels[i] != "thread-456" {
+			t.Errorf("post %d target = %s/%s, want discord/thread-456", i, platforms[i], channels[i])
 		}
+	}
+}
+
+func TestScheduleDispatchFallbackNoPRWithoutThreadSuppressed(t *testing.T) {
+	srv := newDispatchServer(t, dispatchEndpoints("acme/widget"))
+	srv.SetFallbackPollAfter(20 * time.Millisecond)
+	var branchCalls atomic.Int64
+	srv.SetBranchChecker(func(ctx context.Context, repo, branch string) (BranchPRResult, error) {
+		branchCalls.Add(1)
+		return BranchPRResult{}, nil
+	})
+	var mu sync.Mutex
+	var posts []string
+	srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
+		mu.Lock()
+		posts = append(posts, text)
+		mu.Unlock()
+		return nil
+	})
+	rec := postDispatch(t, srv, "dispatch-token", validDispatchBody)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("dispatch status = %d, want 201", rec.Code)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for branchCalls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := branchCalls.Load(); got != 1 {
+		t.Errorf("branch checks = %d, want exactly 1", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(posts) != 1 {
+		t.Fatalf("posts = %d, want 1 summary only with no-PR thread-only suppressed", len(posts))
+	}
+	if !strings.Contains(posts[0], "Dispatched") {
+		t.Errorf("posts missing dispatch summary: %q", posts[0])
+	}
+	if strings.Contains(strings.Join(posts, "\n"), "Fallback poll") {
+		t.Errorf("no-PR fallback must never post top-level without thread: %q", posts)
 	}
 }
 

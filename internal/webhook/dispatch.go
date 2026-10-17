@@ -311,7 +311,11 @@ func (s *Server) scheduleDispatchFallback(task DispatchTask, suppressAfter time.
 		if rec, ok := s.tasks.Lookup(task.Repo, task.Branch); ok && rec.UpdatedAt.After(stamp) {
 			return
 		}
-		s.pollBranchOnce(task.Repo, task.Branch, "", task.Repo, "")
+		var threadID string
+		if rec, ok := s.tasks.Lookup(task.Repo, task.Branch); ok {
+			threadID = rec.ThreadID
+		}
+		s.pollBranchOnce(task.Repo, task.Branch, "", "", threadID)
 	}()
 }
 
@@ -347,6 +351,9 @@ func (s *Server) scheduleDeliveryFallback(ep config.EndpointConfig, workCtx *Web
 			if isTaskTerminal(rec.Status) {
 				return
 			}
+			if strings.TrimSpace(rec.ThreadID) != "" {
+				threadID = rec.ThreadID
+			}
 		}
 		s.pollBranchOnce(repo, branch, ep.Platform, ep.ChannelID, threadID)
 	}()
@@ -361,6 +368,11 @@ func (s *Server) pollBranchOnce(repo, branch, platform, channelID, threadID stri
 		return
 	}
 	finding := FormatFallbackFinding(repo, branch, result)
+	if threadID == "" && s.tasks != nil {
+		if rec, ok := s.tasks.Lookup(repo, branch); ok && strings.TrimSpace(rec.ThreadID) != "" {
+			threadID = rec.ThreadID
+		}
+	}
 	if platform == "" || channelID == "" {
 		for _, ep := range s.endpoints {
 			if ep.Repository == "" {
@@ -378,13 +390,27 @@ func (s *Server) pollBranchOnce(repo, branch, platform, channelID, threadID stri
 		slog.Info("webhook: fallback poll finding", "repo", repo, "branch", branch, "finding", finding)
 		return
 	}
+	if !result.Found && threadID == "" {
+		slog.Info("webhook: fallback poll no PR, thread-only suppressed top-level", "repo", repo, "branch", branch)
+		return
+	}
 	target := channelID
+	threadTarget := ""
 	if platform == "discord" && threadID != "" {
 		target = threadID
+		threadTarget = threadID
 	} else if platform == "telegram" && threadID != "" && !strings.Contains(channelID, ":") {
 		target = channelID + ":" + threadID
+		threadTarget = target
 	}
 	if err := s.notifier(context.Background(), platform, target, finding); err != nil {
 		slog.Warn("webhook: fallback poll notify failed", "repo", repo, "branch", branch, "error", err)
+		if threadTarget != "" && target == threadTarget && result.Found {
+			if fallbackErr := s.notifier(context.Background(), platform, channelID, finding); fallbackErr != nil {
+				slog.Warn("webhook: fallback poll parent fallback failed", "repo", repo, "branch", branch, "error", fallbackErr)
+			} else {
+				slog.Info("webhook: fallback poll fell back to parent", "repo", repo, "branch", branch)
+			}
+		}
 	}
 }

@@ -409,6 +409,17 @@ func main() {
 	if len(cfg.Webhooks.Endpoints) > 0 {
 		taskRegistry := webhook.NewTaskThreadRegistry()
 		taskRegistry.SetStatusConfig(cfg.Webhooks.StatusIcons, cfg.Webhooks.StatusColors)
+		for _, ch := range channels {
+			if da, ok := ch.(*discord.Adapter); ok {
+				registry := taskRegistry
+				da.SetTaskThreadLookup(func(repo, branch string) (string, bool) {
+					if rec, ok := registry.Lookup(repo, branch); ok && strings.TrimSpace(rec.ThreadID) != "" {
+						return rec.ThreadID, true
+					}
+					return "", false
+				})
+			}
+		}
 		webhookExecutor := newWebhookExecutor(channels, managerProvider{m: manager}, db.ChannelRepo(), cfg.Agent.DefaultWorkdir, relay.Config{
 			NoEventTimeout:      cfg.Runtime.Relay.NoEventTimeout,
 			WebhookAbortTimeout: cfg.Runtime.Relay.WebhookAbortTimeout,
