@@ -790,6 +790,18 @@ func (d *dispatcher) handle(item dispatchItem) {
 			item.body = newBody
 			enriched = true
 		}
+		earlyEnvelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", item.ep.CommentTrigger)
+		if allowed, reason := admitDelivery(item.ep, s.policy, earlyEnvelope); !allowed {
+			s.releaseEvent()
+			slog.Info("webhook: delivery skipped before workspace",
+				"endpoint", item.ep.Name,
+				"delivery_id", item.deliveryID,
+				"event_type", item.eventType,
+				"reason", reason,
+			)
+			s.markSkipped(receipt.ID, item.ep, earlyEnvelope, reason)
+			return
+		}
 		lease, werr := s.resolveWorkspace(item)
 		if werr == nil {
 			// Self-heal grant: the one-shot decision is owned here so
@@ -872,29 +884,72 @@ func (s *Server) failWorkspace(item dispatchItem, receipt *store.WebhookDelivery
 func (s *Server) enrichCommentBody(item dispatchItem) ([]byte, error) {
 	ep := item.ep
 	if item.eventType != "issue_comment" {
+		slog.Info("webhook: comment enrichment skipped",
+			"endpoint", ep.Name,
+			"delivery_id", item.deliveryID,
+			"gate", "non-issue-comment",
+			"event_type", item.eventType,
+		)
 		return item.body, nil
 	}
 	if ep.Workspace.Type != config.WorkspaceTypeGit {
+		slog.Info("webhook: comment enrichment skipped",
+			"endpoint", ep.Name,
+			"delivery_id", item.deliveryID,
+			"gate", "non-git-workspace",
+			"workspace_type", ep.Workspace.Type,
+		)
 		return item.body, nil
 	}
 	if ExtractExecutionKey(item.body).Branch != "" {
+		slog.Info("webhook: comment enrichment skipped",
+			"endpoint", ep.Name,
+			"delivery_id", item.deliveryID,
+			"gate", "branch-present",
+		)
 		return item.body, nil
 	}
 	repo, number, ok := parseIssueCommentPR(item.body)
 	if !ok {
+		slog.Info("webhook: comment enrichment skipped",
+			"endpoint", ep.Name,
+			"delivery_id", item.deliveryID,
+			"gate", "parse-failed",
+		)
 		return item.body, nil
 	}
 	envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", ep.CommentTrigger)
 	if stringValue(envelope["comment_trigger"]) == "" {
+		slog.Info("webhook: comment enrichment skipped",
+			"endpoint", ep.Name,
+			"delivery_id", item.deliveryID,
+			"gate", "no-comment-trigger",
+			"repo", repo,
+			"pr_number", number,
+		)
 		return item.body, nil
 	}
-	if allowed, _ := admitDelivery(ep, s.policy, envelope); !allowed {
+	if allowed, reason := admitDelivery(ep, s.policy, envelope); !allowed {
+		slog.Info("webhook: comment enrichment skipped",
+			"endpoint", ep.Name,
+			"delivery_id", item.deliveryID,
+			"gate", "admission-denied",
+			"repo", repo,
+			"pr_number", number,
+			"reason", reason,
+		)
 		return item.body, nil
 	}
 	resolver := s.prHeadResolver
 	if resolver == nil {
 		resolver = &ghPRHeadResolver{timeout: s.processingTimeout}
 	}
+	slog.Info("webhook: resolving PR head for comment",
+		"endpoint", ep.Name,
+		"delivery_id", item.deliveryID,
+		"repo", repo,
+		"pr_number", number,
+	)
 	head, err := resolver.ResolvePRHead(context.Background(), repo, number)
 	if err != nil {
 		return nil, err
@@ -909,6 +964,13 @@ func (s *Server) enrichCommentBody(item dispatchItem) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	slog.Info("webhook: comment enriched with PR head",
+		"endpoint", ep.Name,
+		"delivery_id", item.deliveryID,
+		"repo", repo,
+		"pr_number", number,
+		"branch", strings.TrimSpace(head.Branch),
+	)
 	return enriched, nil
 }
 
