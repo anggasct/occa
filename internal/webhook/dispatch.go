@@ -253,20 +253,24 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.dispatchCreateMu.Lock()
-	if s.tasks != nil {
-		if rec, ok := s.tasks.Lookup(normalizeRepoKey(req.Repo), normalizeBranchKey(req.Branch)); ok && !isTaskTerminal(rec.Status) {
-			if existing, ok := s.dispatchTasks.LatestFor(req.Repo, req.Branch); ok {
-				s.dispatchCreateMu.Unlock()
-				writeDispatchJSON(w, http.StatusOK, map[string]string{"task_id": existing.ID})
-				return
-			}
-			slog.Warn("webhook: dispatch live record without task, allowing fresh", "repo", normalizeRepoKey(req.Repo), "branch", normalizeBranchKey(req.Branch))
+	if rec, ok := s.tasks.ResolveTaskThread(normalizeRepoKey(req.Repo), normalizeBranchKey(req.Branch), "dispatch"); ok && !isTaskTerminal(rec.Status) {
+		if existing, ok := s.dispatchTasks.LatestFor(req.Repo, req.Branch); ok {
+			s.dispatchCreateMu.Unlock()
+			writeDispatchJSON(w, http.StatusOK, map[string]string{"task_id": existing.ID})
+			return
 		}
+		slog.Warn("webhook: dispatch live record without task, allowing fresh", "repo", normalizeRepoKey(req.Repo), "branch", normalizeBranchKey(req.Branch))
 	}
 	task := s.dispatchTasks.Create(req)
+	if s.tasks != nil {
+		s.tasks.UpsertWithSpec(task.Repo, task.Branch, "", "", TaskDispatched, task.SpecPath)
+	}
 	platform, channelID, rootID, err := s.postDispatchSummary(task)
 	if err != nil {
 		s.dispatchTasks.Delete(task.ID)
+		if s.tasks != nil {
+			s.tasks.UpsertWithSpec(task.Repo, task.Branch, "", "", TaskFailed, task.SpecPath)
+		}
 		s.dispatchCreateMu.Unlock()
 		slog.Error("webhook: dispatch parent post failed", "repo", task.Repo, "branch", task.Branch, "task_id", task.ID, "error", err)
 		writeDispatchJSON(w, http.StatusBadGateway, map[string]string{"error": "dispatch parent post failed: " + err.Error()})
@@ -274,7 +278,7 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	}
 	suppressAfter := task.CreatedAt
 	if s.tasks != nil {
-		suppressAfter = s.tasks.UpsertWithSpec(task.Repo, task.Branch, "", "", TaskDispatched, task.SpecPath).UpdatedAt
+		suppressAfter = s.tasks.UpsertWithSpec(task.Repo, task.Branch, rootID, "", TaskDispatched, task.SpecPath).UpdatedAt
 	}
 	s.dispatchCreateMu.Unlock()
 	if rec, ok := s.openDispatchThread(task, platform, channelID, rootID); ok {
@@ -298,7 +302,7 @@ func (s *Server) handleRedispatch(w http.ResponseWriter, r *http.Request, req Di
 	}
 	repo := normalizeRepoKey(req.Repo)
 	branch := strings.TrimSpace(req.Branch)
-	rec, ok := s.tasks.Lookup(repo, branch)
+	rec, ok := s.tasks.ResolveTaskThread(repo, branch, "redispatch")
 	if !ok {
 		return false
 	}
@@ -308,14 +312,16 @@ func (s *Server) handleRedispatch(w http.ResponseWriter, r *http.Request, req Di
 			req.SpecPath = orig
 		}
 		task := s.dispatchTasks.Create(req)
+		s.tasks.UpsertWithSpec(task.Repo, task.Branch, "", "", TaskDispatched, task.SpecPath)
 		platform, channelID, rootID, err := s.postDispatchSummary(task)
 		if err != nil {
 			s.dispatchTasks.Delete(task.ID)
+			s.tasks.UpsertWithSpec(task.Repo, task.Branch, "", "", TaskFailed, task.SpecPath)
 			slog.Error("webhook: dispatch parent post failed", "repo", task.Repo, "branch", task.Branch, "task_id", task.ID, "error", err)
 			writeDispatchJSON(w, http.StatusBadGateway, map[string]string{"error": "dispatch parent post failed: " + err.Error()})
 			return true
 		}
-		suppressAfter := s.tasks.UpsertWithSpec(task.Repo, task.Branch, "", "", TaskDispatched, task.SpecPath).UpdatedAt
+		suppressAfter := s.tasks.UpsertWithSpec(task.Repo, task.Branch, rootID, "", TaskDispatched, task.SpecPath).UpdatedAt
 		if r2, ok := s.openDispatchThread(task, platform, channelID, rootID); ok {
 			suppressAfter = r2.UpdatedAt
 		}
@@ -516,20 +522,14 @@ func (s *Server) scheduleDispatchFallback(task DispatchTask, suppressAfter time.
 			return
 		default:
 		}
-		if rec, ok := s.tasks.Lookup(task.Repo, task.Branch); ok {
+		if rec, ok := s.tasks.ResolveTaskThread(task.Repo, task.Branch, "dispatch-fallback"); ok {
 			if rec.UpdatedAt.After(stamp) {
 				return
 			}
-		} else if s.tasks != nil {
-			tried, sameKey, sameThread, hasSame, triedExists := s.tasks.MissDetail(task.Repo, task.Branch)
-			slog.Warn("webhook: dispatch fallback no record", "repo", task.Repo, "branch", task.Branch, "tried_key", tried, "same_branch_key", sameKey, "same_branch_thread", sameThread, "has_same_branch", hasSame, "tried_exists", triedExists, "task_id", task.ID)
 		}
 		var threadID string
-		if rec, ok := s.tasks.Lookup(task.Repo, task.Branch); ok {
+		if rec, ok := s.tasks.ResolveTaskThread(task.Repo, task.Branch, "dispatch-fallback-thread"); ok {
 			threadID = rec.ThreadID
-		} else if s.tasks != nil {
-			tried, sameKey, sameThread, hasSame, triedExists := s.tasks.MissDetail(task.Repo, task.Branch)
-			slog.Warn("webhook: dispatch fallback thread lookup miss", "repo", task.Repo, "branch", task.Branch, "tried_key", tried, "same_branch_key", sameKey, "same_branch_thread", sameThread, "has_same_branch", hasSame, "tried_exists", triedExists, "task_id", task.ID)
 		}
 		s.pollBranchOnce(task.Repo, task.Branch, "", "", threadID)
 	}()
@@ -543,7 +543,7 @@ func (s *Server) scheduleDeliveryFallback(ep config.EndpointConfig, workCtx *Web
 	if repo == "" || branch == "" {
 		return
 	}
-	if rec, ok := s.tasks.Lookup(repo, branch); ok && isTaskTerminal(rec.Status) {
+	if rec, ok := s.tasks.ResolveTaskThread(repo, branch, "delivery-fallback"); ok && isTaskTerminal(rec.Status) {
 		return
 	}
 	after := s.fallbackAfter
@@ -560,7 +560,7 @@ func (s *Server) scheduleDeliveryFallback(ep config.EndpointConfig, workCtx *Web
 			return
 		default:
 		}
-		if rec, ok := s.tasks.Lookup(repo, branch); ok {
+		if rec, ok := s.tasks.ResolveTaskThread(repo, branch, "delivery-fallback"); ok {
 			if rec.UpdatedAt.After(since) {
 				return
 			}
@@ -570,9 +570,6 @@ func (s *Server) scheduleDeliveryFallback(ep config.EndpointConfig, workCtx *Web
 			if strings.TrimSpace(rec.ThreadID) != "" {
 				threadID = rec.ThreadID
 			}
-		} else if s.tasks != nil {
-			tried, sameKey, sameThread, hasSame, triedExists := s.tasks.MissDetail(repo, branch)
-			slog.Warn("webhook: delivery fallback thread lookup miss", "repo", repo, "branch", branch, "tried_key", tried, "same_branch_key", sameKey, "same_branch_thread", sameThread, "has_same_branch", hasSame, "tried_exists", triedExists, "endpoint", ep.Name, "delivery_id", workCtx.DeliveryID)
 		}
 		s.pollBranchOnce(repo, branch, ep.Platform, ep.ChannelID, threadID)
 	}()
@@ -587,12 +584,9 @@ func (s *Server) pollBranchOnce(repo, branch, platform, channelID, threadID stri
 		return
 	}
 	finding := FormatFallbackFinding(repo, branch, result)
-	if threadID == "" && s.tasks != nil {
-		if rec, ok := s.tasks.Lookup(repo, branch); ok && strings.TrimSpace(rec.ThreadID) != "" {
+	if threadID == "" {
+		if rec, ok := s.tasks.ResolveTaskThread(repo, branch, "fallback-poll"); ok && strings.TrimSpace(rec.ThreadID) != "" {
 			threadID = rec.ThreadID
-		} else {
-			tried, sameKey, sameThread, hasSame, triedExists := s.tasks.MissDetail(repo, branch)
-			slog.Warn("webhook: fallback poll thread lookup miss", "repo", repo, "branch", branch, "tried_key", tried, "same_branch_key", sameKey, "same_branch_thread", sameThread, "has_same_branch", hasSame, "tried_exists", triedExists, "platform", platform, "channel_id", channelID)
 		}
 	}
 	if platform == "" || channelID == "" {

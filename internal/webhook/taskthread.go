@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"strings"
 	"sync"
@@ -209,6 +210,35 @@ func (t *TaskThreadRegistry) Lookup(repo, branch string) (TaskThreadRecord, bool
 	return rec, ok
 }
 
+func (t *TaskThreadRegistry) ResolveTaskThread(repo, branch, caller string) (TaskThreadRecord, bool) {
+	canonical := TaskThreadKey(repo, branch)
+	normRepo := normalizeRepoKey(repo)
+	normBranch := normalizeBranchKey(branch)
+	if t == nil {
+		slog.Info("webhook: task thread resolve", "caller", caller, "canonical_key", canonical, "repo", normRepo, "branch", normBranch, "hit", false)
+		return TaskThreadRecord{}, false
+	}
+	rec, ok := t.Lookup(repo, branch)
+	if ok {
+		slog.Info("webhook: task thread resolve", "caller", caller, "canonical_key", canonical, "repo", normRepo, "branch", normBranch, "hit", true, "thread_id", rec.ThreadID, "root_message_id", rec.RootMessageID, "status", string(rec.Status))
+		return rec, true
+	}
+	tried, sameKey, sameThread, hasSame, triedExists := t.MissDetail(repo, branch)
+	slog.Info("webhook: task thread resolve", "caller", caller, "canonical_key", canonical, "repo", normRepo, "branch", normBranch, "hit", false, "tried_key", tried, "same_branch_key", sameKey, "same_branch_thread", sameThread, "has_same_branch", hasSame, "tried_exists", triedExists)
+	return TaskThreadRecord{}, false
+}
+
+func (t *TaskThreadRegistry) ResolveForDelivery(key WebhookExecutionKey, envelope WebhookEnvelope, caller string) (string, string, TaskThreadRecord, bool) {
+	repo, branch := TaskRepoBranch(key, envelope)
+	rec, ok := t.ResolveTaskThread(repo, branch, caller)
+	return repo, branch, rec, ok
+}
+
+func TaskThreadKeyForDelivery(key WebhookExecutionKey, envelope WebhookEnvelope) string {
+	repo, branch := TaskRepoBranch(key, envelope)
+	return TaskThreadKey(repo, branch)
+}
+
 func (t *TaskThreadRegistry) Upsert(repo, branch, rootID, threadID string, status TaskStatus) TaskThreadRecord {
 	return t.UpsertWithSpec(repo, branch, rootID, threadID, status, "")
 }
@@ -225,7 +255,9 @@ func (t *TaskThreadRegistry) UpsertWithSpec(repo, branch, rootID, threadID strin
 		rootID = prev.RootMessageID
 	}
 	if threadID == "" {
-		threadID = prev.ThreadID
+		if rootID == "" || rootID == prev.RootMessageID {
+			threadID = prev.ThreadID
+		}
 	}
 	specPath = strings.TrimSpace(specPath)
 	if specPath == "" {
