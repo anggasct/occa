@@ -75,6 +75,9 @@ func TestRuntimeExampleParity(t *testing.T) {
 	if rt.Channels.Discord.DownloadTimeout != 60*time.Second || int64(rt.Channels.Discord.MaxDownloadSize) != 10*1024*1024 {
 		t.Fatalf("discord channels = %+v", rt.Channels.Discord)
 	}
+	if rt.Channels.Discord.TaskThreadPollInterval != 300*time.Millisecond || rt.Channels.Discord.TaskThreadPollAttempts != 10 {
+		t.Fatalf("discord task thread poll = %+v", rt.Channels.Discord)
+	}
 	if rt.Channels.Telegram.DownloadTimeout != 60*time.Second || int64(rt.Channels.Telegram.MaxDownloadSize) != 10*1024*1024 || rt.Channels.Telegram.InitTimeout != 15*time.Second || rt.Channels.Telegram.InitAttempts != 3 {
 		t.Fatalf("telegram channels = %+v", rt.Channels.Telegram)
 	}

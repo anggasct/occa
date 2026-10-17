@@ -243,6 +243,9 @@ func TestDispatchRecordClaimLookupBothDirections(t *testing.T) {
 	if rec, ok := reg.Lookup(repo, branch); !ok || rec.ThreadID != "thread-1" {
 		t.Fatalf("host record short lookup miss: %+v %v (parsed %q %q)", rec, ok, repo, branch)
 	}
+	if rec, ok := reg.Lookup("github.com/acme/widget", "feat/hosted"); !ok || rec.ThreadID != "thread-1" {
+		t.Fatalf("host record fallback host lookup miss: %+v %v", rec, ok)
+	}
 	reg2 := NewTaskThreadRegistry()
 	task2 := DispatchTask{ID: "task-2", Repo: "acme/widget", Branch: "feat/short", SpecPath: "specs/x.md"}
 	reg2.Upsert(task2.Repo, task2.Branch, "root-2", "thread-2", TaskDispatched)
@@ -253,6 +256,37 @@ func TestDispatchRecordClaimLookupBothDirections(t *testing.T) {
 	}
 	if rec, ok := reg2.Lookup("github.com/"+repo2, branch2); !ok || rec.ThreadID != "thread-2" {
 		t.Fatalf("short record host lookup miss: %+v %v", rec, ok)
+	}
+	if rec, ok := reg2.Lookup(repo2, branch2); !ok || rec.ThreadID != "thread-2" {
+		t.Fatalf("short record fallback short lookup miss: %+v %v", rec, ok)
+	}
+}
+
+func TestDispatchCreateNormalizesRepoKey(t *testing.T) {
+	store := NewDispatchStore()
+	cases := map[string]string{
+		"github.com/acme/widget":         "acme/widget",
+		"acme/widget":                    "acme/widget",
+		" GitHub.com/Acme/Widget ":       "acme/widget",
+		"https://github.com/acme/widget": "acme/widget",
+		"ACME/WIDGET":                    "acme/widget",
+	}
+	for in, want := range cases {
+		task := store.Create(DispatchRequest{Repo: in, Branch: "feat/x", SpecPath: "specs/x.md"})
+		if task.Repo != want {
+			t.Errorf("Create(%q).Repo = %q, want %q", in, task.Repo, want)
+		}
+	}
+}
+
+func TestFormatDispatchSummaryNormalizesRepoKey(t *testing.T) {
+	task := DispatchTask{ID: "task-9", Repo: "github.com/acme/widget", Branch: "feat/hosted", SpecPath: "specs/x.md"}
+	summary := FormatDispatchSummary(task, nil)
+	if !strings.Contains(summary, "acme/widget#feat/hosted") {
+		t.Errorf("summary %q must contain normalized acme/widget#feat/hosted", summary)
+	}
+	if strings.Contains(summary, "github.com/acme/widget") {
+		t.Errorf("summary %q must not contain raw host prefix", summary)
 	}
 }
 

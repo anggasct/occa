@@ -412,9 +412,19 @@ func main() {
 		for _, ch := range channels {
 			if da, ok := ch.(*discord.Adapter); ok {
 				registry := taskRegistry
+				pollInterval := cfg.Runtime.Channels.Discord.TaskThreadPollInterval
+				pollAttempts := cfg.Runtime.Channels.Discord.TaskThreadPollAttempts
 				da.SetTaskThreadLookup(func(repo, branch string) (string, bool) {
 					if rec, ok := registry.Lookup(repo, branch); ok && strings.TrimSpace(rec.ThreadID) != "" {
 						return rec.ThreadID, true
+					} else if !ok {
+						return "", false
+					}
+					for i := 0; i < pollAttempts; i++ {
+						time.Sleep(pollInterval)
+						if rec, ok := registry.Lookup(repo, branch); ok && strings.TrimSpace(rec.ThreadID) != "" {
+							return rec.ThreadID, true
+						}
 					}
 					return "", false
 				})

@@ -200,6 +200,26 @@ func TestTaskRepoBranch(t *testing.T) {
 	}
 }
 
+func TestTaskRepoBranchNormalizesRepoKey(t *testing.T) {
+	key := WebhookExecutionKey{Repository: "github.com/Acme/Widget", Branch: "feat/x"}
+	if repo, branch := TaskRepoBranch(key, WebhookEnvelope{}); repo != "acme/widget" || branch != "feat/x" {
+		t.Errorf("host key got %q %q, want acme/widget feat/x", repo, branch)
+	}
+	envelope := WebhookEnvelope{"repository": "https://github.com/acme/widget", "head_branch": "feat/y"}
+	if repo, branch := TaskRepoBranch(WebhookExecutionKey{}, envelope); repo != "acme/widget" || branch != "feat/y" {
+		t.Errorf("host envelope got %q %q, want acme/widget feat/y", repo, branch)
+	}
+	reg := NewTaskThreadRegistry()
+	repo, branch := TaskRepoBranch(WebhookExecutionKey{Repository: "github.com/acme/widget", Branch: "feat/z"}, WebhookEnvelope{})
+	reg.Upsert(repo, branch, "root-1", "thread-1", TaskDispatched)
+	if rec, ok := reg.Lookup("acme/widget", "feat/z"); !ok || rec.ThreadID != "thread-1" {
+		t.Fatalf("normalized record short lookup miss: %+v %v", rec, ok)
+	}
+	if rec, ok := reg.Lookup("github.com/acme/widget", "feat/z"); !ok || rec.ThreadID != "thread-1" {
+		t.Fatalf("normalized record host lookup miss: %+v %v", rec, ok)
+	}
+}
+
 func TestFormatTaskParent(t *testing.T) {
 	got := FormatTaskParent("acme/widget", "feat/x", "42", TaskMerged, nil)
 	for _, want := range []string{"✅", "acme/widget#feat/x", "PR #42", "merged"} {

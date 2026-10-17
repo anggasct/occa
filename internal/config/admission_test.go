@@ -68,6 +68,8 @@ func validRuntimeYAML() string {
     discord:
       download_timeout: 60s
       max_download_size: 10MB
+      task_thread_poll_interval: 300ms
+      task_thread_poll_attempts: 10
     telegram:
       download_timeout: 60s
       max_download_size: 10MB

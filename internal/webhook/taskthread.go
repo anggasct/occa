@@ -158,7 +158,7 @@ func TaskRepoBranch(key WebhookExecutionKey, envelope WebhookEnvelope) (string, 
 	if branch == "" {
 		branch = strings.TrimSpace(stringValue(envelope["head_branch"]))
 	}
-	return repo, branch
+	return normalizeRepoKey(repo), normalizeBranchKey(branch)
 }
 
 type TaskThreadRecord struct {
