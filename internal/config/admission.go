@@ -52,6 +52,8 @@ type WebhookRuntime struct {
 	RetentionKeep         int             `yaml:"retention_keep"`
 	PruneInterval         time.Duration   `yaml:"prune_interval"`
 	DispatcherIdleTTL     time.Duration   `yaml:"dispatcher_idle_ttl"`
+	DispatcherStuckAfter  time.Duration   `yaml:"dispatcher_stuck_after"`
+	WatchdogInterval      time.Duration   `yaml:"watchdog_interval"`
 	HTTPReadHeaderTimeout time.Duration   `yaml:"http_read_header_timeout"`
 	HTTPReadTimeout       time.Duration   `yaml:"http_read_timeout"`
 	HTTPWriteTimeout      time.Duration   `yaml:"http_write_timeout"`
@@ -228,6 +230,12 @@ func validateWebhookRuntime(runtime WebhookRuntime) (WebhookRuntime, error) {
 	}
 	if runtime.DispatcherIdleTTL <= 0 {
 		return WebhookRuntime{}, missing("dispatcher_idle_ttl")
+	}
+	if runtime.DispatcherStuckAfter <= 0 {
+		return WebhookRuntime{}, missing("dispatcher_stuck_after")
+	}
+	if runtime.WatchdogInterval <= 0 {
+		return WebhookRuntime{}, missing("watchdog_interval")
 	}
 	if runtime.HTTPReadHeaderTimeout <= 0 {
 		return WebhookRuntime{}, missing("http_read_header_timeout")

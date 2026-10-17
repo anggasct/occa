@@ -34,6 +34,8 @@ func testRuntime() config.WebhookRuntime {
 		RetentionKeep:         500,
 		PruneInterval:         10 * time.Minute,
 		DispatcherIdleTTL:     time.Hour,
+		DispatcherStuckAfter:  5 * time.Minute,
+		WatchdogInterval:      time.Minute,
 		HTTPReadHeaderTimeout: 10 * time.Second,
 		HTTPReadTimeout:       30 * time.Second,
 		HTTPWriteTimeout:      30 * time.Second,

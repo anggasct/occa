@@ -27,14 +27,17 @@ func (s *Server) stuckAfter() time.Duration {
 	if s.dispatcherStuckAfter > 0 {
 		return s.dispatcherStuckAfter
 	}
-	return 5 * time.Minute
+	if s.processingTimeout > 0 {
+		return s.processingTimeout / 6
+	}
+	return s.claimGrace / 6
 }
 
 func (s *Server) watchdogTick() time.Duration {
 	if s.watchdogInterval > 0 {
 		return s.watchdogInterval
 	}
-	return time.Minute
+	return s.stuckAfter() / 5
 }
 
 func (s *Server) ensureEnqueueReceipt(item dispatchItem) {
