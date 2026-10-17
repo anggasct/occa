@@ -344,15 +344,51 @@ func TaskCardHeader(envelope WebhookEnvelope, workflow string, status TaskStatus
 		return ""
 	}
 	prNumber := strings.TrimSpace(stringValue(envelope["pr_number"]))
+	return FormatTaskParent(repo, branch, prNumber, status, icons)
+}
+
+func HasOpenPRButton(buttons []channel.Button) bool {
+	for _, b := range buttons {
+		if b.Label == "Open PR" && strings.TrimSpace(b.URL) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func TaskInlineFallback(prURL, platform string, buttons []channel.Button) string {
+	if normalizeTaskPRURL(prURL) == "" {
+		return ""
+	}
+	if strings.EqualFold(strings.TrimSpace(platform), "discord") && HasOpenPRButton(buttons) {
+		return ""
+	}
+	return FormatTaskLinks(prURL)
+}
+
+func TaskCardHeaderWithButtons(envelope WebhookEnvelope, workflow string, status TaskStatus, icons map[string]string, platform string, buttons []channel.Button) string {
+	repo := strings.TrimSpace(stringValue(envelope["repository"]))
+	branch := strings.TrimSpace(stringValue(envelope["head_branch"]))
+	if repo == "" || branch == "" {
+		return ""
+	}
+	prNumber := strings.TrimSpace(stringValue(envelope["pr_number"]))
 	header := FormatTaskParent(repo, branch, prNumber, status, icons)
-	if links := FormatTaskLinks(stringValue(envelope["pr_url"])); links != "" {
-		header += "\n" + links
+	if link := TaskInlineFallback(stringValue(envelope["pr_url"]), platform, buttons); link != "" {
+		header += "\n" + link
 	}
 	return header
 }
 
 func WithTaskHeader(card string, envelope WebhookEnvelope, workflow string, status TaskStatus, icons map[string]string) string {
 	if header := TaskCardHeader(envelope, workflow, status, icons); header != "" {
+		return header + "\n" + card
+	}
+	return card
+}
+
+func WithTaskHeaderWithButtons(card string, envelope WebhookEnvelope, workflow string, status TaskStatus, icons map[string]string, platform string, buttons []channel.Button) string {
+	if header := TaskCardHeaderWithButtons(envelope, workflow, status, icons, platform, buttons); header != "" {
 		return header + "\n" + card
 	}
 	return card

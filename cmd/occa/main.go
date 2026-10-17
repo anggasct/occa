@@ -776,9 +776,9 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 				if reused && taskOpts.Registry != nil {
 					if repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope); repo != "" && branch != "" {
 						if _, ok := taskOpts.Registry.Lookup(repo, branch); ok {
-							header := webhook.TaskCardHeader(workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons)
+							buttons := webhook.TaskParentButtons(platform, guildIDForButtons(ch, channelID, workCtx.ThreadID), workCtx.Envelope, repo, branch, workCtx.ThreadID)
+							header := webhook.TaskCardHeaderWithButtons(workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons, platform, buttons)
 							if header != "" {
-								buttons := webhook.TaskParentButtons(platform, guildIDForButtons(ch, channelID, workCtx.ThreadID), workCtx.Envelope, repo, branch, workCtx.ThreadID)
 								if err := notifyEditWithButtons(ch, channelID, workCtx.RootMessageID, webhook.FormatWebhookMessage(header), buttons); err != nil {
 									slog.Warn("webhook: failed to edit task parent, continuing in thread", "channel_id", channelID, "error", err)
 								}
@@ -804,9 +804,9 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 
 				if !reused && useThread && starter != nil && sender != nil {
 					rootCard := webhook.FormatRootCard(workCtx.Envelope, workCtx.Workflow, "RUNNING", "", "", platform)
-					rootCard = webhook.WithTaskHeader(rootCard, workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons)
 					repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope)
 					buttons := webhook.TaskParentButtons(platform, guildIDForButtons(ch, channelID, ""), workCtx.Envelope, repo, branch, "")
+					rootCard = webhook.WithTaskHeaderWithButtons(rootCard, workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons, platform, buttons)
 					rootMsgID, err := notifySendWithButtons(ch, channelID, webhook.FormatWebhookMessage(rootCard), buttons)
 					if err != nil {
 						slog.Warn("webhook: failed to send root card; falling back to channel", "channel_id", channelID, "error", err)
@@ -830,7 +830,7 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 					}
 				} else if platform == "telegram" && useProgressCard && sender != nil {
 					rootCard := webhook.FormatRootCard(workCtx.Envelope, workCtx.Workflow, "RUNNING", "", workCtx.ThreadID, platform)
-					rootCard = webhook.WithTaskHeader(rootCard, workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons)
+					rootCard = webhook.WithTaskHeaderWithButtons(rootCard, workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons, platform, nil)
 					rootMsgID, err := notifySend(ch, targetChannelID, webhook.FormatWebhookMessage(rootCard))
 					if err != nil {
 						slog.Warn("webhook: failed to send telegram root card; falling back to channel", "channel_id", targetChannelID, "error", err)
@@ -893,15 +893,17 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 
 				if err != nil {
 					if workCtx.RootMessageID != "" {
-						terminalCard := webhook.FormatTerminalCard(workCtx.Envelope, workCtx.Workflow, "FAILED", err.Error(), workCtx.ThreadID, platform, elapsed)
-						terminalCard = webhook.WithTaskHeader(terminalCard, workCtx.Envelope, workCtx.Workflow, webhook.TaskFailed, taskOpts.Icons)
+						baseCard := webhook.FormatTerminalCard(workCtx.Envelope, workCtx.Workflow, "FAILED", err.Error(), workCtx.ThreadID, platform, elapsed)
 						if workCtx.ThreadID != "" {
+							terminalCard := webhook.WithTaskHeaderWithButtons(baseCard, workCtx.Envelope, workCtx.Workflow, webhook.TaskFailed, taskOpts.Icons, platform, nil)
 							_, _ = notifySend(ch, targetChannelID, webhook.FormatWebhookMessage(terminalCard))
 						} else if platform == "discord" {
+							terminalCard := webhook.WithTaskHeader(baseCard, workCtx.Envelope, workCtx.Workflow, webhook.TaskFailed, taskOpts.Icons)
 							if editErr := notifyEdit(ch, channelID, workCtx.RootMessageID, webhook.FormatWebhookMessage(terminalCard)); editErr != nil {
 								slog.Warn("webhook: failed to update task parent with failure", "channel_id", channelID, "error", editErr)
 							}
 						} else {
+							terminalCard := webhook.WithTaskHeaderWithButtons(baseCard, workCtx.Envelope, workCtx.Workflow, webhook.TaskFailed, taskOpts.Icons, platform, nil)
 							_, _ = notifySend(ch, targetChannelID, webhook.FormatWebhookMessage(terminalCard))
 						}
 					} else {
@@ -924,15 +926,17 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 				}
 
 				if workCtx.RootMessageID != "" {
-					terminalCard := webhook.FormatTerminalCard(workCtx.Envelope, workCtx.Workflow, "COMPLETED", "", workCtx.ThreadID, platform, elapsed)
-					terminalCard = webhook.WithTaskHeader(terminalCard, workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons)
+					baseCard := webhook.FormatTerminalCard(workCtx.Envelope, workCtx.Workflow, "COMPLETED", "", workCtx.ThreadID, platform, elapsed)
 					if workCtx.ThreadID != "" {
+						terminalCard := webhook.WithTaskHeaderWithButtons(baseCard, workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons, platform, nil)
 						_, _ = notifySend(ch, targetChannelID, webhook.FormatWebhookMessage(terminalCard))
 					} else if platform == "discord" {
+						terminalCard := webhook.WithTaskHeader(baseCard, workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons)
 						if editErr := notifyEdit(ch, channelID, workCtx.RootMessageID, webhook.FormatWebhookMessage(terminalCard)); editErr != nil {
 							slog.Warn("webhook: failed to update task parent with completion", "channel_id", channelID, "error", editErr)
 						}
 					} else {
+						terminalCard := webhook.WithTaskHeaderWithButtons(baseCard, workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons, platform, nil)
 						_, _ = notifySend(ch, targetChannelID, webhook.FormatWebhookMessage(terminalCard))
 					}
 				} else {

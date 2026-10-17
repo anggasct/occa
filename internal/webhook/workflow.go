@@ -277,10 +277,10 @@ func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelo
 			}
 			text = terminalRootCard(envelope, ep.Workflow, status, reason, threadID, ep.Platform, elapsed)
 		}
-		text = WithTaskHeader(text, envelope, ep.Workflow, TaskStatusForAudit(status, ep.Workflow), s.statusIcons)
-		text = redactAuditSummary(text, ep.Secret)
 		repo, branch := TaskRepoBranch(WebhookExecutionKey{}, envelope)
 		buttons := TaskParentButtons(ep.Platform, s.guildIDFor(ep.Platform, ep.ChannelID, threadID), envelope, repo, branch, threadID)
+		text = WithTaskHeaderWithButtons(text, envelope, ep.Workflow, TaskStatusForAudit(status, ep.Workflow), s.statusIcons, ep.Platform, buttons)
+		text = redactAuditSummary(text, ep.Secret)
 		if err := s.editParent(ctx, ep.Platform, targetChannel, rootID, text, buttons); err != nil {
 			slog.Warn("webhook: failed to edit root card, posting detail into thread once", "endpoint", ep.Name, "error", err)
 			if threadID != "" {
