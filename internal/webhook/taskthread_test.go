@@ -244,16 +244,53 @@ func TestTaskCardHeader(t *testing.T) {
 		"pr_url":      "https://example.com/acme/widget/pull/42",
 	}
 	header := TaskCardHeader(envelope, "review", TaskClaimed, nil)
-	for _, want := range []string{"👀", "acme/widget#feat/x", "[Open PR](https://example.com/acme/widget/pull/42)"} {
+	for _, want := range []string{"👀", "acme/widget#feat/x"} {
 		if !strings.Contains(header, want) {
 			t.Errorf("header %q must contain %q", header, want)
 		}
 	}
+	if strings.Contains(header, "[Open PR]") {
+		t.Errorf("header %q must not contain inline Open PR link, button carries it", header)
+	}
 	if got := WithTaskHeader("body", envelope, "review", TaskClaimed, nil); !strings.HasPrefix(got, "👀") || !strings.HasSuffix(got, "body") {
 		t.Errorf("wrapped card = %q", got)
 	}
+	if strings.Contains(WithTaskHeader("body", envelope, "review", TaskClaimed, nil), "[Open PR]") {
+		t.Errorf("wrapped card must not contain inline Open PR link")
+	}
 	if got := WithTaskHeader("body", WebhookEnvelope{}, "review", TaskClaimed, nil); got != "body" {
 		t.Errorf("empty header must leave card alone, got %q", got)
+	}
+}
+
+func TestTaskCardHeaderFallback(t *testing.T) {
+	envelope := WebhookEnvelope{
+		"repository":  "acme/widget",
+		"head_branch": "feat/x",
+		"pr_number":   "42",
+		"pr_url":      "https://example.com/acme/widget/pull/42",
+	}
+	prButtons := TaskParentButtons("discord", "guild-1", envelope, "acme/widget", "feat/x", "thread-1")
+	if !HasOpenPRButton(prButtons) {
+		t.Fatalf("discord parent must carry Open PR button: %+v", prButtons)
+	}
+	if got := TaskCardHeaderWithButtons(envelope, "review", TaskClaimed, nil, "discord", prButtons); strings.Contains(got, "[Open PR]") {
+		t.Errorf("discord header with button must not contain inline link, got %q", got)
+	}
+	if got := TaskCardHeaderWithButtons(envelope, "review", TaskClaimed, nil, "telegram", prButtons); !strings.Contains(got, "[Open PR](https://example.com/acme/widget/pull/42)") {
+		t.Errorf("telegram header must keep inline fallback, got %q", got)
+	}
+	if got := TaskCardHeaderWithButtons(envelope, "review", TaskClaimed, nil, "discord", nil); !strings.Contains(got, "[Open PR]") {
+		t.Errorf("discord header without buttons must keep inline fallback, got %q", got)
+	}
+	if got := WithTaskHeaderWithButtons("body", envelope, "review", TaskClaimed, nil, "discord", prButtons); strings.Contains(got, "[Open PR]") {
+		t.Errorf("discord wrapped card with button must not contain inline link, got %q", got)
+	}
+	if got := WithTaskHeaderWithButtons("body", envelope, "review", TaskClaimed, nil, "telegram", nil); !strings.Contains(got, "[Open PR]") {
+		t.Errorf("telegram wrapped card must keep inline fallback, got %q", got)
+	}
+	if got := TaskInlineFallback("", "discord", nil); got != "" {
+		t.Errorf("empty PR URL must have no fallback, got %q", got)
 	}
 }
 
@@ -413,6 +450,14 @@ func TestTaskParentButtonsPerPlatform(t *testing.T) {
 		t.Errorf("telegram parent must keep the Open PR button: %+v", telegram)
 	}
 	discord := TaskParentButtons("discord", "guild-1", envelope, "acme/widget", "feat/x", "thread-123")
+	if len(discord) != 4 {
+		t.Fatalf("discord parent must carry 4 buttons in one row, got %+v", discord)
+	}
+	for _, b := range discord {
+		if b.Row != 1 {
+			t.Errorf("all card buttons must sit on row 1, got %+v", b)
+		}
+	}
 	foundThread := false
 	for _, b := range discord {
 		if b.Label == "Open thread" && strings.Contains(b.URL, "thread-123") && strings.Contains(b.URL, "guild-1") {
@@ -437,6 +482,9 @@ func TestTaskActionButtons(t *testing.T) {
 	}
 	if buttons[0].URL != "" || buttons[1].URL != "" {
 		t.Errorf("action buttons must not carry URL: %+v", buttons)
+	}
+	if buttons[0].Row != 1 || buttons[1].Row != 1 {
+		t.Errorf("action buttons must sit on row 1 with the link buttons, got %+v", buttons)
 	}
 	if len(buttons[0].Value) > 100 || len(buttons[1].Value) > 100 {
 		t.Errorf("callback ids must fit Discord 100-char limit: %+v", buttons)
