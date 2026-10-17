@@ -123,16 +123,24 @@ func stuckRepoBranch(s *Server, item dispatchItem) (string, string) {
 func (s *Server) alarmStuckDispatcher(d *dispatcher, snap dispatcherSnapshot, now time.Time, after time.Duration) {
 	item := snap.active
 	if !snap.hasActive && snap.queueLen > 0 {
-		select {
-		case peek := <-d.ch:
-			item = peek
+		s.dispatchMu.Lock()
+		var drained []dispatchItem
+		for {
 			select {
-			case d.ch <- peek:
+			case q := <-d.ch:
+				drained = append(drained, q)
 			default:
-				s.failDelivery(peek.ep, 0, peek.deliveryID, peek.eventType, normalizeWebhook(peek.body, peek.eventType, peek.deliveryID, s.verdicts, false, "", peek.ep.CommentTrigger), "watchdog queue overflow while peeking", &WebhookWorkContext{DeliveryID: peek.deliveryID})
+				goto restored
 			}
-		default:
 		}
+	restored:
+		if len(drained) > 0 {
+			item = drained[0]
+			for _, q := range drained {
+				d.ch <- q
+			}
+		}
+		s.dispatchMu.Unlock()
 	}
 	repo, branch := stuckRepoBranch(s, item)
 	if repo == "" || branch == "" {
