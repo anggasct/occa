@@ -867,6 +867,10 @@ func (d *dispatcher) handle(item dispatchItem) {
 			}
 			continue
 		}
+		if errors.Is(werr, ErrWorkspaceLeased) {
+			s.standDownBusy(item, receipt, werr)
+			return
+		}
 		s.failWorkspace(item, receipt, werr)
 		return
 	}
@@ -900,15 +904,81 @@ func (s *Server) resolveWorkspace(item dispatchItem) (*WorkspaceLease, error) {
 	return lease, nil
 }
 
+func (s *Server) standDownBusy(item dispatchItem, receipt *store.WebhookDelivery, err error) {
+	envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", item.ep.CommentTrigger)
+	key := ExtractExecutionKey(item.body)
+	repo, branch := TaskRepoBranch(key, envelope)
+	slog.Info("webhook: workspace busy, standing down",
+		"endpoint", item.ep.Name,
+		"delivery_id", item.deliveryID,
+		"repo", repo,
+		"branch", branch,
+		"error", err,
+	)
+	summary := redactSummary(err.Error(), maxErrorSummaryRunes, item.ep.Secret)
+	ok, tErr := s.deliveries.Transition(context.Background(), receipt.ID, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusSkipped, summary)
+	if tErr != nil {
+		slog.Error("webhook: stand-down transition failed", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "error", tErr)
+		return
+	}
+	if !ok {
+		slog.Warn("webhook: stand-down transition lost race", "endpoint", item.ep.Name, "delivery_id", item.deliveryID)
+	}
+}
+
 func (s *Server) failWorkspace(item dispatchItem, receipt *store.WebhookDelivery, err error) {
 	envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", item.ep.CommentTrigger)
+	key := ExtractExecutionKey(item.body)
 	workCtx := &WebhookWorkContext{
-		Key:        ExtractExecutionKey(item.body),
-		DeliveryID: item.deliveryID,
-		Attempt:    receipt.Attempt,
+		Key:          key,
+		DeliveryID:   item.deliveryID,
+		Attempt:      receipt.Attempt,
+		Thread:       item.ep.Thread,
+		ProgressCard: item.ep.ProgressCard,
+		Workflow:     item.ep.Workflow,
+		Envelope:     envelope,
 	}
-	summary := redactSummary(err.Error(), maxErrorSummaryRunes, item.ep.Secret)
+	if repo, branch := TaskRepoBranch(key, envelope); repo != "" && branch != "" {
+		if rec, ok := s.tasks.Lookup(repo, branch); ok {
+			workCtx.ThreadID = rec.ThreadID
+			workCtx.RootMessageID = rec.RootMessageID
+		}
+	}
+	base := redactSummary(err.Error(), maxErrorSummaryRunes, item.ep.Secret)
+	summary := base
+	if !strings.Contains(strings.ToLower(summary), "action:") {
+		combined := base + " — Action: clean the worktree for repo+branch or dispatch manually."
+		summary = clipRunes(combined, maxErrorSummaryRunes)
+	}
 	s.failDelivery(item.ep, receipt.ID, item.deliveryID, item.eventType, envelope, summary, workCtx)
+	threadID := workCtx.ThreadID
+	if threadID == "" && s.tasks != nil {
+		if repo, branch := TaskRepoBranch(WebhookExecutionKey{}, envelope); repo != "" && branch != "" {
+			if rec, ok := s.tasks.Lookup(repo, branch); ok {
+				threadID = rec.ThreadID
+			}
+		}
+	}
+	if threadID == "" {
+		return
+	}
+	elapsed := time.Duration(0)
+	card := terminalRootCard(envelope, item.ep.Workflow, "FAILED", summary, threadID, item.ep.Platform, elapsed)
+	card = WithTaskHeader(card, envelope, item.ep.Workflow, TaskFailed, s.statusIcons)
+	card = redactAuditSummary(card, item.ep.Secret)
+	target := threadID
+	if item.ep.Platform == "telegram" && !strings.Contains(item.ep.ChannelID, ":") {
+		target = item.ep.ChannelID + ":" + threadID
+	} else if item.ep.Platform != "discord" {
+		target = auditTargetChannel(item.ep.Platform, item.ep.ChannelID, threadID)
+	}
+	if s.notifier == nil {
+		slog.Info("webhook: workspace failure thread card skipped, no notifier", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "thread_id", threadID)
+		return
+	}
+	if nErr := s.notifier(context.Background(), item.ep.Platform, target, card); nErr != nil {
+		slog.Warn("webhook: workspace failure thread card failed", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "thread_id", threadID, "error", nErr)
+	}
 }
 
 func (s *Server) enrichCommentBody(item dispatchItem) ([]byte, error) {

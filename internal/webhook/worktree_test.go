@@ -343,7 +343,7 @@ func TestWorkspaceMutableDirtyIsRetryable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveWorkspace: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(lease.Path, "dirty.txt"), []byte("user work\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(lease.Path, "README.md"), []byte("# Test Repo\nuser work\n"), 0644); err != nil {
 		t.Fatalf("write dirty file: %v", err)
 	}
 	if err := lease.Release(context.Background()); err != nil {
@@ -357,8 +357,12 @@ func TestWorkspaceMutableDirtyIsRetryable(t *testing.T) {
 	if !IsWorkspaceRetryable(err) {
 		t.Fatal("dirty workspace must be retryable")
 	}
-	if _, rErr := os.Stat(filepath.Join(lease.Path, "dirty.txt")); rErr != nil {
+	data, rErr := os.ReadFile(filepath.Join(lease.Path, "README.md"))
+	if rErr != nil {
 		t.Fatalf("dirty workspace content must be preserved: %v", rErr)
+	}
+	if !strings.Contains(string(data), "user work") {
+		t.Fatalf("tracked dirty content lost: %q", string(data))
 	}
 }
 

@@ -378,7 +378,34 @@ func (m *WorkspaceManager) isWorktreeDirty(ctx context.Context, dir string) (boo
 	if err != nil {
 		return false, err
 	}
-	return strings.TrimSpace(out) != "", nil
+	tracked, untracked := classifyPorcelainStatus(out)
+	if !tracked && len(untracked) > 0 {
+		slog.Info("webhook: worktree has only untracked files, proceeding",
+			"workspace", dir,
+			"scratch_files", strings.Join(untracked, ","),
+		)
+		return false, nil
+	}
+	return tracked, nil
+}
+
+func classifyPorcelainStatus(out string) (bool, []string) {
+	var untracked []string
+	tracked := false
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "??") {
+			path := strings.TrimSpace(strings.TrimPrefix(line, "??"))
+			if path != "" {
+				untracked = append(untracked, path)
+			}
+			continue
+		}
+		tracked = true
+	}
+	return tracked, untracked
 }
 
 func (m *WorkspaceManager) hasLocalBranch(ctx context.Context, dir, branch string) (bool, error) {

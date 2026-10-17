@@ -3289,7 +3289,7 @@ func TestWebhookMutableConflictExhaustsRetriesAndFails(t *testing.T) {
 	if resp := post(t, ts.URL+"/github?secret=s3cret", "delivery-1", "pull_request", `{}`); resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected accepted 200, got %d", resp.StatusCode)
 	}
-	receipt := waitForReceipt(t, st, store.WebhookStatusFailed)
+	receipt := waitForReceipt(t, st, store.WebhookStatusSkipped)
 	if !strings.Contains(receipt.ErrorSummary, "workspace leased") {
 		t.Fatalf("expected 'workspace leased' in terminal summary, got %q", receipt.ErrorSummary)
 	}
