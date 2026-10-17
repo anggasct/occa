@@ -102,7 +102,7 @@ func TestSkipOptOutCoversAllFamilies(t *testing.T) {
 		})
 		id := seedReviewDelivery(t, st.WebhookDeliveryRepo(), ep.Name, "del-admit")
 		body := []byte(`{"action":"opened","repository":{"full_name":"o/r"},"pull_request":{"number":7}}`)
-		if err := srv.executeDelivery(ep, body, id, "del-admit", "pull_request", 1, nil, nil); err != nil {
+		if err := srv.executeDelivery(ep, body, id, "del-admit", "pull_request", 1, nil, nil, nil); err != nil {
 			t.Fatalf("executeDelivery: %v", err)
 		}
 		if exec.callCount() != 0 {
@@ -133,7 +133,7 @@ func TestSkipOptOutCoversAllFamilies(t *testing.T) {
 		})
 		body := reviewEventBody(t, "changes_requested", "**Verdict:** REQUEST_CHANGES", "5932515abc123")
 		id1 := seedReviewDelivery(t, st.WebhookDeliveryRepo(), ep.Name, "del-dup-1")
-		if err := srv.executeDelivery(ep, body, id1, "del-dup-1", "pull_request_review", 1, nil, nil); err != nil {
+		if err := srv.executeDelivery(ep, body, id1, "del-dup-1", "pull_request_review", 1, nil, nil, nil); err != nil {
 			t.Fatalf("first executeDelivery: %v", err)
 		}
 		if exec.callCount() != 1 {
@@ -143,7 +143,7 @@ func TestSkipOptOutCoversAllFamilies(t *testing.T) {
 		calls = 0
 		mu.Unlock()
 		id2 := seedReviewDelivery(t, st.WebhookDeliveryRepo(), ep.Name, "del-dup-2")
-		if err := srv.executeDelivery(ep, body, id2, "del-dup-2", "pull_request_review", 1, nil, nil); err != nil {
+		if err := srv.executeDelivery(ep, body, id2, "del-dup-2", "pull_request_review", 1, nil, nil, nil); err != nil {
 			t.Fatalf("duplicate executeDelivery: %v", err)
 		}
 		receipt, err := st.WebhookDeliveryRepo().Get(context.Background(), ep.Name, "del-dup-2")
@@ -175,7 +175,7 @@ func TestSkipOptOutCoversAllFamilies(t *testing.T) {
 		})
 		body := issueCommentEventBody(t, 7, "please re-review this PR")
 		id := seedReviewDelivery(t, st.WebhookDeliveryRepo(), ep.Name, "del-cap")
-		if err := srv.executeDelivery(ep, body, id, "del-cap", "issue_comment", 1, nil, nil); err != nil {
+		if err := srv.executeDelivery(ep, body, id, "del-cap", "issue_comment", 1, nil, nil, nil); err != nil {
 			t.Fatalf("executeDelivery: %v", err)
 		}
 		if exec.callCount() != 0 {

@@ -233,7 +233,7 @@ func TestEnrichedCommentRateCapIntact(t *testing.T) {
 	for i := 1; i <= 3; i++ {
 		delID := fmt.Sprintf("cap-%d", i)
 		id := seedReviewDelivery(t, st.WebhookDeliveryRepo(), ep.Name, delID)
-		if err := srv.executeDelivery(ep, enriched, id, delID, "issue_comment", 1, nil, nil); err != nil {
+		if err := srv.executeDelivery(ep, enriched, id, delID, "issue_comment", 1, nil, nil, nil); err != nil {
 			t.Fatalf("delivery %d: %v", i, err)
 		}
 	}
@@ -241,7 +241,7 @@ func TestEnrichedCommentRateCapIntact(t *testing.T) {
 		t.Fatalf("calls = %d, want 3", exec.callCount())
 	}
 	id4 := seedReviewDelivery(t, st.WebhookDeliveryRepo(), ep.Name, "cap-4")
-	if err := srv.executeDelivery(ep, enriched, id4, "cap-4", "issue_comment", 1, nil, nil); err != nil {
+	if err := srv.executeDelivery(ep, enriched, id4, "cap-4", "issue_comment", 1, nil, nil, nil); err != nil {
 		t.Fatalf("delivery 4: %v", err)
 	}
 	if exec.callCount() != 3 {

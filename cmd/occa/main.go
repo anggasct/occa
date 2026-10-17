@@ -877,6 +877,15 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 					AbortTimeout:  relayCfg.WebhookAbortTimeout,
 					VerifyTimeout: relayCfg.VerifyTimeout,
 					Streamer:      streamer,
+					OnEvent: func(ev relay.Event) {
+						if workCtx.Heartbeat == nil {
+							return
+						}
+						switch ev.Type {
+						case relay.EventDelta, relay.EventTool, relay.EventReasoning, relay.EventSegment:
+							workCtx.Heartbeat()
+						}
+					},
 				}
 				result, err := turn.Run(ctx)
 

@@ -89,7 +89,7 @@ func TestDuplicateReviewDeliverySkipped(t *testing.T) {
 	body := reviewEventBody(t, "changes_requested", "**Verdict:** REQUEST_CHANGES\n\n## Findings\n- F-001", "5932515abc123")
 
 	id1 := seedReviewDelivery(t, st.WebhookDeliveryRepo(), ep.Name, "del-1")
-	if err := srv.executeDelivery(ep, body, id1, "del-1", "pull_request_review", 1, nil, nil); err != nil {
+	if err := srv.executeDelivery(ep, body, id1, "del-1", "pull_request_review", 1, nil, nil, nil); err != nil {
 		t.Fatalf("first executeDelivery: %v", err)
 	}
 	if count := exec.callCount(); count != 1 {
@@ -101,7 +101,7 @@ func TestDuplicateReviewDeliverySkipped(t *testing.T) {
 	}
 
 	id2 := seedReviewDelivery(t, st.WebhookDeliveryRepo(), ep.Name, "del-2")
-	if err := srv.executeDelivery(ep, body, id2, "del-2", "pull_request_review", 1, nil, nil); err != nil {
+	if err := srv.executeDelivery(ep, body, id2, "del-2", "pull_request_review", 1, nil, nil, nil); err != nil {
 		t.Fatalf("duplicate executeDelivery: %v", err)
 	}
 	if count := exec.callCount(); count != 1 {
@@ -139,11 +139,11 @@ func TestReviewDedupeNoFalsePositive(t *testing.T) {
 			srv, exec, st := newTestServerFull(t, []config.EndpointConfig{ep})
 
 			id1 := seedReviewDelivery(t, st.WebhookDeliveryRepo(), ep.Name, "del-1")
-			if err := srv.executeDelivery(ep, reviewEventBody(t, tc.firstState, tc.firstBody, tc.firstCommit), id1, "del-1", "pull_request_review", 1, nil, nil); err != nil {
+			if err := srv.executeDelivery(ep, reviewEventBody(t, tc.firstState, tc.firstBody, tc.firstCommit), id1, "del-1", "pull_request_review", 1, nil, nil, nil); err != nil {
 				t.Fatalf("first executeDelivery: %v", err)
 			}
 			id2 := seedReviewDelivery(t, st.WebhookDeliveryRepo(), ep.Name, "del-2")
-			if err := srv.executeDelivery(ep, reviewEventBody(t, tc.secondState, tc.secondBody, tc.secondCommit), id2, "del-2", "pull_request_review", 1, nil, nil); err != nil {
+			if err := srv.executeDelivery(ep, reviewEventBody(t, tc.secondState, tc.secondBody, tc.secondCommit), id2, "del-2", "pull_request_review", 1, nil, nil, nil); err != nil {
 				t.Fatalf("second executeDelivery: %v", err)
 			}
 			if count := exec.callCount(); count != 2 {
@@ -159,13 +159,13 @@ func TestReviewDedupeWindowExpiry(t *testing.T) {
 	body := reviewEventBody(t, "changes_requested", "**Verdict:** REQUEST_CHANGES", "5932515abc")
 
 	id1 := seedReviewDelivery(t, st.WebhookDeliveryRepo(), ep.Name, "del-1")
-	if err := srv.executeDelivery(ep, body, id1, "del-1", "pull_request_review", 1, nil, nil); err != nil {
+	if err := srv.executeDelivery(ep, body, id1, "del-1", "pull_request_review", 1, nil, nil, nil); err != nil {
 		t.Fatalf("first executeDelivery: %v", err)
 	}
 
 	srv.reviewDedupeNow = func() time.Time { return time.Now().Add(2 * time.Hour) }
 	id2 := seedReviewDelivery(t, st.WebhookDeliveryRepo(), ep.Name, "del-2")
-	if err := srv.executeDelivery(ep, body, id2, "del-2", "pull_request_review", 1, nil, nil); err != nil {
+	if err := srv.executeDelivery(ep, body, id2, "del-2", "pull_request_review", 1, nil, nil, nil); err != nil {
 		t.Fatalf("expired-window executeDelivery: %v", err)
 	}
 	if count := exec.callCount(); count != 2 {
@@ -316,7 +316,7 @@ func TestCommentTriggerRateCap(t *testing.T) {
 	for i := 1; i <= 3; i++ {
 		delID := fmt.Sprintf("del-%d", i)
 		id := seedReviewDelivery(t, st.WebhookDeliveryRepo(), ep.Name, delID)
-		if err := srv.executeDelivery(ep, bodyPR7, id, delID, "issue_comment", 1, nil, nil); err != nil {
+		if err := srv.executeDelivery(ep, bodyPR7, id, delID, "issue_comment", 1, nil, nil, nil); err != nil {
 			t.Fatalf("executeDelivery %d: %v", i, err)
 		}
 		if count := exec.callCount(); count != i {
@@ -329,7 +329,7 @@ func TestCommentTriggerRateCap(t *testing.T) {
 	}
 
 	id4 := seedReviewDelivery(t, st.WebhookDeliveryRepo(), ep.Name, "del-4")
-	if err := srv.executeDelivery(ep, bodyPR7, id4, "del-4", "issue_comment", 1, nil, nil); err != nil {
+	if err := srv.executeDelivery(ep, bodyPR7, id4, "del-4", "issue_comment", 1, nil, nil, nil); err != nil {
 		t.Fatalf("executeDelivery 4: %v", err)
 	}
 	if count := exec.callCount(); count != 3 {
@@ -348,7 +348,7 @@ func TestCommentTriggerRateCap(t *testing.T) {
 
 	bodyPR8 := issueCommentEventBody(t, 8, "please re-review this PR")
 	idPR8 := seedReviewDelivery(t, st.WebhookDeliveryRepo(), ep.Name, "del-pr8")
-	if err := srv.executeDelivery(ep, bodyPR8, idPR8, "del-pr8", "issue_comment", 1, nil, nil); err != nil {
+	if err := srv.executeDelivery(ep, bodyPR8, idPR8, "del-pr8", "issue_comment", 1, nil, nil, nil); err != nil {
 		t.Fatalf("executeDelivery PR 8: %v", err)
 	}
 	if count := exec.callCount(); count != 4 {
@@ -362,7 +362,7 @@ func TestCommentTriggerRateCap(t *testing.T) {
 		}
 	}
 	id5 := seedReviewDelivery(t, st.WebhookDeliveryRepo(), ep.Name, "del-5")
-	if err := srv.executeDelivery(ep, bodyPR7, id5, "del-5", "issue_comment", 1, nil, nil); err != nil {
+	if err := srv.executeDelivery(ep, bodyPR7, id5, "del-5", "issue_comment", 1, nil, nil, nil); err != nil {
 		t.Fatalf("expired window executeDelivery: %v", err)
 	}
 	if count := exec.callCount(); count != 5 {

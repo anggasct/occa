@@ -331,3 +331,143 @@ func TestDispatcherRunPanicFailsActiveWithoutRequeue(t *testing.T) {
 		t.Fatalf("active receipt re-queued and re-executed: %+v", rec)
 	}
 }
+
+func TestDispatcherActivityRefreshesStamp(t *testing.T) {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+		return nil
+	}
+	srv, _ := newWatchdogServer(t, exec)
+	ep := config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Admit: defaultCatchAllAdmit()}
+	item := dispatchItem{ep: ep, body: []byte(stuckPayload()), deliveryID: "delivery-heartbeat", eventType: "pull_request", payloadHash: "hash-hb"}
+	d := &dispatcher{server: srv, key: "key:heartbeat-stamp-test", ch: make(chan dispatchItem, 8)}
+	d.setActive(item)
+	before := d.snapshot().lastActive
+	time.Sleep(20 * time.Millisecond)
+	d.touch()
+	after := d.snapshot().lastActive
+	if !after.After(before) {
+		t.Fatalf("touch did not refresh lastActivity: before=%v after=%v", before, after)
+	}
+	if got := d.snapshot().startedAt; got.IsZero() {
+		t.Fatal("startedAt must be set after setActive")
+	}
+
+	var captured func()
+	probe := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+		captured = workCtx.Heartbeat
+		if captured == nil {
+			t.Error("executeDelivery did not expose Heartbeat on work context")
+		} else {
+			mark := d.snapshot().lastActive
+			time.Sleep(20 * time.Millisecond)
+			captured()
+			if refreshed := d.snapshot().lastActive; !refreshed.After(mark) {
+				t.Errorf("Heartbeat did not refresh dispatcher stamp")
+			}
+		}
+		return nil
+	}
+	srv.executor = probe
+	if err := srv.executeDelivery(ep, []byte(stuckPayload()), 0, "delivery-hb-probe", "pull_request", 1, nil, nil, d.touch); err != nil {
+		t.Fatalf("executeDelivery: %v", err)
+	}
+	if captured == nil {
+		t.Fatal("heartbeat was not captured by executor")
+	}
+}
+
+func TestDispatcherSilentStillAlarms(t *testing.T) {
+	var mu sync.Mutex
+	var cards []string
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+		return nil
+	}
+	srv, _ := newWatchdogServer(t, exec)
+	srv.SetDispatcherStuckAfter(5 * time.Minute)
+	srv.SetDispatcherWatchdogInterval(time.Hour)
+	srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
+		mu.Lock()
+		cards = append(cards, text)
+		mu.Unlock()
+		return nil
+	})
+	srv.TaskRegistry().Upsert("anggasct/occa", "fix/watchdog", "root-1", "thread-1", TaskDispatched)
+	ep := config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Admit: defaultCatchAllAdmit()}
+	item := dispatchItem{ep: ep, body: []byte(stuckPayload()), deliveryID: "delivery-frozen", eventType: "pull_request", payloadHash: "hash-frozen"}
+	d := &dispatcher{server: srv, key: "key:silent-alarm-test", ch: make(chan dispatchItem, 8)}
+	d.setActive(item)
+	silentSince := time.Now().Add(-6 * time.Minute)
+	d.mu.Lock()
+	d.activeStartedAt = silentSince
+	d.lastActivity = silentSince
+	d.mu.Unlock()
+	srv.dispatchMu.Lock()
+	srv.dispatchers[d.key] = d
+	srv.dispatchMu.Unlock()
+	if n := srv.sweepStuckDispatchers(time.Now()); n != 1 {
+		t.Fatalf("frozen run sweep handled %d, want 1", n)
+	}
+	mu.Lock()
+	joined := strings.Join(cards, "\n")
+	mu.Unlock()
+	if !strings.Contains(joined, "STUCK") || !strings.Contains(joined, "delivery-frozen") {
+		t.Fatalf("silent run must still alarm LOUD, got %q", joined)
+	}
+}
+
+func TestDispatcherCIWaitNoAlarm(t *testing.T) {
+	var mu sync.Mutex
+	var cards []string
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+		for i := 0; i < 28; i++ {
+			if workCtx.Heartbeat != nil {
+				workCtx.Heartbeat()
+			}
+			select {
+			case <-time.After(time.Millisecond):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return nil
+	}
+	srv, _ := newWatchdogServer(t, exec)
+	srv.SetDispatcherStuckAfter(5 * time.Minute)
+	srv.SetDispatcherWatchdogInterval(time.Hour)
+	srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
+		mu.Lock()
+		cards = append(cards, text)
+		mu.Unlock()
+		return nil
+	})
+	srv.TaskRegistry().Upsert("anggasct/occa", "fix/watchdog", "root-1", "thread-1", TaskDispatched)
+	ep := config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Admit: defaultCatchAllAdmit()}
+	item := dispatchItem{ep: ep, body: []byte(stuckPayload()), deliveryID: "delivery-ci-wait", eventType: "pull_request", payloadHash: "hash-ci"}
+	d := &dispatcher{server: srv, key: "key:ci-wait-test", ch: make(chan dispatchItem, 8)}
+	d.setActive(item)
+	d.mu.Lock()
+	d.activeStartedAt = time.Now().Add(-11 * time.Minute)
+	d.mu.Unlock()
+	srv.dispatchMu.Lock()
+	srv.dispatchers[d.key] = d
+	srv.dispatchMu.Unlock()
+	if err := srv.executeDelivery(ep, []byte(stuckPayload()), 0, "delivery-ci-wait", "pull_request", 1, nil, nil, d.touch); err != nil {
+		t.Fatalf("CI-wait execution: %v", err)
+	}
+	snap := d.snapshot()
+	if time.Since(snap.lastActive) >= 5*time.Minute {
+		t.Fatalf("CI poll loop must keep lastActivity fresh, age=%s", time.Since(snap.lastActive))
+	}
+	if n := srv.sweepStuckDispatchers(time.Now()); n != 0 {
+		t.Fatalf("CI-waiting run past pickup threshold must not alarm, sweep=%d", n)
+	}
+	mu.Lock()
+	joined := strings.Join(cards, "\n")
+	mu.Unlock()
+	if strings.Contains(joined, "STUCK") {
+		t.Fatalf("CI-waiting run produced false-positive alarm: %q", joined)
+	}
+	if time.Since(snap.startedAt) < 5*time.Minute {
+		t.Fatalf("test setup must keep pickup older than threshold, started=%s ago", time.Since(snap.startedAt))
+	}
+}

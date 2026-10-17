@@ -172,7 +172,7 @@ func TestExecuteDeliveryCompletedMarksTakeover(t *testing.T) {
 		}
 		ep := takeoverTestEndpoint()
 		ep.Workflow = ""
-		if err := srv.executeDelivery(ep, []byte(`{"x":1}`), 0, "del-9", "pull_request_review", 1, nil, nil); err != nil {
+		if err := srv.executeDelivery(ep, []byte(`{"x":1}`), 0, "del-9", "pull_request_review", 1, nil, nil, nil); err != nil {
 			t.Fatalf("executeDelivery: %v", err)
 		}
 		candidate, err := st.SessionRepo().TakeoverCandidate(ctx, "discord", "chan-1", "thread-1")
@@ -208,7 +208,7 @@ func TestExecuteDeliveryCompletedMarksTakeover(t *testing.T) {
 
 		ep := takeoverTestEndpoint()
 		ep.Workflow = ""
-		if err := srv.executeDelivery(ep, []byte(`{"x":1}`), 0, "del-9", "pull_request_review", 2, nil, nil); err != nil {
+		if err := srv.executeDelivery(ep, []byte(`{"x":1}`), 0, "del-9", "pull_request_review", 2, nil, nil, nil); err != nil {
 			t.Fatalf("executeDelivery: %v", err)
 		}
 		candidate, _ := st.SessionRepo().TakeoverCandidate(ctx, "discord", "chan-1", "thread-1")
@@ -323,7 +323,7 @@ func TestExecuteDeliveryCompletedLinksRootCard(t *testing.T) {
 	}
 	ep := takeoverTestEndpoint()
 	ep.Workflow = ""
-	if err := srv.executeDelivery(ep, []byte(`{"x":1}`), receipt.ID, "del-9", "pull_request_review", 1, nil, nil); err != nil {
+	if err := srv.executeDelivery(ep, []byte(`{"x":1}`), receipt.ID, "del-9", "pull_request_review", 1, nil, nil, nil); err != nil {
 		t.Fatalf("executeDelivery: %v", err)
 	}
 
