@@ -194,7 +194,12 @@ func (r *Router) Route(ctx context.Context, msg channel.IncomingMessage) error {
 	} else if parent != "" && originalChannelID == msg.ThreadID {
 		slog.Info("thread parent resolved", "platform", msg.Platform, "thread_id", msg.ThreadID, "parent", parent, "source", source)
 	}
-	if err := r.authorize(ctx, msg); err != nil {
+	if msg.IsSelfDispatch {
+		if _, _, _, ok := channel.ParseDispatchSummary(msg.Text); !ok {
+			return nil
+		}
+		msg.IsMention = true
+	} else if err := r.authorize(ctx, msg); err != nil {
 		if errors.Is(err, ErrDenied) {
 			slog.Info("access denied", "platform", msg.Platform, "channel_id", msg.ChannelID, "thread_id", msg.ThreadID, "user_id", msg.UserID, "input_kind", inputKind, "outcome", "denied")
 			r.reply(msg, accessDeniedMessage)

@@ -55,6 +55,9 @@ type Adapter struct {
 	threadsMu   sync.Mutex
 	threads     map[string]struct{}
 	parentCache map[string]string
+
+	dispatchMu       sync.Mutex
+	seenDispatchTask map[string]struct{}
 }
 
 func New(token string, menu []channel.MenuCommand, cfg Config) *Adapter {
@@ -394,6 +397,15 @@ func (a *Adapter) onMessage(m *discordgo.MessageCreate, handler func(channel.Inc
 		return
 	}
 	if self := a.selfID(); self != "" && m.Author.ID == self {
+		if _, _, taskID, ok := channel.ParseDispatchSummary(m.Content); ok {
+			if !a.tryClaimDispatchTask(taskID) {
+				return
+			}
+			msg := a.normalizeMessage(m.Message)
+			msg.IsMention = true
+			msg.IsSelfDispatch = true
+			handler(msg)
+		}
 		return
 	}
 	if m.Author.Bot && !a.allowsBotSender(m.Author.ID) {
@@ -403,6 +415,23 @@ func (a *Adapter) onMessage(m *discordgo.MessageCreate, handler func(channel.Inc
 		return
 	}
 	handler(a.normalizeMessage(m.Message))
+}
+
+func (a *Adapter) tryClaimDispatchTask(taskID string) bool {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return false
+	}
+	a.dispatchMu.Lock()
+	defer a.dispatchMu.Unlock()
+	if a.seenDispatchTask == nil {
+		a.seenDispatchTask = make(map[string]struct{})
+	}
+	if _, ok := a.seenDispatchTask[taskID]; ok {
+		return false
+	}
+	a.seenDispatchTask[taskID] = struct{}{}
+	return true
 }
 
 func (a *Adapter) allowsBotSender(userID string) bool {
