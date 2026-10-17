@@ -578,6 +578,7 @@ func (a *Adapter) SendNotification(channelID, text string) (string, error) {
 		msg, err := a.session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
 			Content:         chunk,
 			AllowedMentions: &discordgo.MessageAllowedMentions{},
+			Flags:           discordgo.MessageFlagsSuppressEmbeds,
 		})
 		if err != nil {
 			return "", fmt.Errorf("discord: send notification: %w", err)
@@ -603,6 +604,7 @@ func (a *Adapter) EditNotification(channelID, messageID, text string) error {
 		ID:              messageID,
 		Content:         &content,
 		AllowedMentions: &discordgo.MessageAllowedMentions{},
+		Flags:           discordgo.MessageFlagsSuppressEmbeds,
 	})
 	if err != nil {
 		return fmt.Errorf("discord: edit notification: %w", err)
@@ -619,6 +621,7 @@ func (a *Adapter) SendNotificationWithButtons(channelID, text string, buttons []
 		Content:         content,
 		Components:      componentRows(buttons),
 		AllowedMentions: &discordgo.MessageAllowedMentions{},
+		Flags:           discordgo.MessageFlagsSuppressEmbeds,
 	})
 	if err != nil {
 		return "", fmt.Errorf("discord: send notification with buttons: %w", err)
@@ -638,6 +641,7 @@ func (a *Adapter) EditNotificationWithButtons(channelID, messageID, text string,
 		Content:         &content,
 		Components:      &components,
 		AllowedMentions: &discordgo.MessageAllowedMentions{},
+		Flags:           discordgo.MessageFlagsSuppressEmbeds,
 	})
 	if err != nil {
 		return fmt.Errorf("discord: edit notification with buttons: %w", err)
@@ -662,6 +666,7 @@ func (a *Adapter) ReplyNotification(channelID, replyToMessageID, text string) (s
 				ChannelID: channelID,
 			},
 			AllowedMentions: &discordgo.MessageAllowedMentions{},
+			Flags:           discordgo.MessageFlagsSuppressEmbeds,
 		})
 		if err != nil {
 			return "", fmt.Errorf("discord: reply notification: %w", err)
