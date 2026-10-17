@@ -3,7 +3,9 @@ package webhook
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -198,6 +200,36 @@ func TestRedispatchOpenReusesSameParentThreadWithOriginalSpec(t *testing.T) {
 	}
 	if after.SpecPath != "specs/orig.md" {
 		t.Errorf("record spec = %q, want specs/orig.md", after.SpecPath)
+	}
+}
+
+func TestClassifyBranchCheckResult(t *testing.T) {
+	exitErr := errors.New("exit status 1")
+	cases := []struct {
+		name      string
+		out       string
+		err       error
+		wantExist bool
+		wantErr   bool
+	}{
+		{"success", "", nil, true, false},
+		{"not-found-body", "gh: Not Found (HTTP 404)", exitErr, false, false},
+		{"branch-not-found-body", `{"message": "Branch not found"}`, exitErr, false, false},
+		{"server-error", "gh: Internal Server Error (HTTP 500)", exitErr, false, true},
+		{"network-error", "gh: failed to connect: no route to host", exitErr, false, true},
+		{"bare-exit-status", "", exitErr, false, true},
+		{"missing-binary", "", &exec.Error{Name: "gh", Err: exec.ErrNotFound}, false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			exists, err := classifyBranchCheckResult([]byte(tc.out), tc.err)
+			if exists != tc.wantExist {
+				t.Errorf("exists = %v, want %v", exists, tc.wantExist)
+			}
+			if (err != nil) != tc.wantErr {
+				t.Errorf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
 	}
 }
 

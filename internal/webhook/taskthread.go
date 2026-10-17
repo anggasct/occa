@@ -3,6 +3,7 @@ package webhook
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -473,14 +474,25 @@ func ghBranchExistsChecker(ctx context.Context, repo, branch string) (bool, erro
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "gh", "api", "repos/"+repo+"/branches/"+branch, "--silent")
-	if err := cmd.Run(); err != nil {
-		msg := strings.ToLower(strings.TrimSpace(err.Error()))
-		if strings.Contains(msg, "404") || strings.Contains(msg, "not found") || strings.Contains(msg, "no such") {
-			return false, nil
-		}
+	out, err := cmd.CombinedOutput()
+	return classifyBranchCheckResult(out, err)
+}
+
+func classifyBranchCheckResult(out []byte, err error) (bool, error) {
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, exec.ErrNotFound) {
 		return false, fmt.Errorf("webhook: branch check gh api: %w", err)
 	}
-	return true, nil
+	msg := strings.ToLower(strings.TrimSpace(string(out)))
+	if strings.Contains(msg, "404") || strings.Contains(msg, "not found") || strings.Contains(msg, "no such") {
+		return false, nil
+	}
+	if msg != "" {
+		return false, fmt.Errorf("webhook: branch check gh api: %v: %s", err, clipTaskField(strings.TrimSpace(string(out)), 200))
+	}
+	return false, fmt.Errorf("webhook: branch check gh api: %w", err)
 }
 
 func parseBranchPRList(out []byte) (BranchPRResult, error) {
