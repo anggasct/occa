@@ -154,6 +154,7 @@ func main() {
 	rt := router.NewWithAllowlists(managerProvider{manager}, db, cfg.Agent.DefaultWorkdir, cfg.AdminID, cfg.Discord.AllowedSenderIDs, cfg.Telegram.AllowedSenderIDs, router.Config{
 		ContextStaleAfter:      cfg.Runtime.Router.ContextStaleAfter,
 		ProgressQuietThreshold: cfg.Runtime.Router.ProgressQuietThreshold,
+		ProgressStalledAfter:   cfg.Runtime.Router.ProgressStalledAfter,
 		MaxQueuedMessages:      cfg.Runtime.Router.MaxQueuedMessages,
 		MaxPickerSessions:      cfg.Runtime.Router.MaxPickerSessions,
 		MaxPickerPages:         cfg.Runtime.Router.MaxPickerPages,

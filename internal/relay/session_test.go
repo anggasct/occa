@@ -80,6 +80,14 @@ func (m *mockSessionRepo) LinkThreadRoot(_ context.Context, _, _, _, _, _, _ str
 	return nil
 }
 
+func (m *mockSessionRepo) MarkParked(_ context.Context, _, _, _, _, _ string) error {
+	return nil
+}
+
+func (m *mockSessionRepo) ParkState(_ context.Context, _, _, _, _ string) (bool, string, error) {
+	return false, "", nil
+}
+
 func (m *mockSessionRepo) ThreadRoot(_ context.Context, _, _, _ string) (*store.ThreadRootCard, error) {
 	return nil, nil
 }
@@ -241,6 +249,76 @@ func TestResolveStaleSessionRecreates(t *testing.T) {
 		call := repo.setCalls[0]
 		if call.sessionID != "fresh-session" || call.agentPID != 100 {
 			t.Fatalf("unexpected SetActive call: %+v", call)
+		}
+	})
+}
+
+func TestResolveStoredIDNamesReplacedSession(t *testing.T) {
+	t.Run("gone direct session names stored id", func(t *testing.T) {
+		repo := &mockSessionRepo{activeID: "gone-session", ownerPID: 999}
+		client := &mockClient{sessionID: "fresh-session", sessionExists: false}
+		resolver := NewSessionResolver(repo, client)
+
+		res, err := resolver.ResolveDetailed(context.Background(), "telegram", "123", "", "user-1", 100)
+		if err != nil {
+			t.Fatalf("ResolveDetailed: %v", err)
+		}
+		if res.Resumed || !res.HadStored || res.SessionID != "fresh-session" {
+			t.Fatalf("resolution = %+v, want fresh non-resumed session", res)
+		}
+		if res.StoredID != "gone-session" {
+			t.Fatalf("StoredID = %q, want gone-session", res.StoredID)
+		}
+	})
+
+	t.Run("gone takeover candidate names candidate id", func(t *testing.T) {
+		repo := &mockSessionRepo{takeover: &store.TakeoverCandidate{SessionID: "dead-delivery", AgentPID: 999, Seed: "seed"}}
+		client := &mockClient{sessionID: "fresh-session", sessionExists: false}
+		resolver := NewSessionResolver(repo, client)
+
+		res, err := resolver.ResolveDetailed(context.Background(), "discord", "chan", "thread-1", "op-1", 100)
+		if err != nil {
+			t.Fatalf("ResolveDetailed: %v", err)
+		}
+		if res.Resumed || res.SessionID != "fresh-session" {
+			t.Fatalf("resolution = %+v, want fresh non-resumed session", res)
+		}
+		if res.StoredID != "dead-delivery" {
+			t.Fatalf("StoredID = %q, want dead-delivery", res.StoredID)
+		}
+	})
+
+	t.Run("resumed session leaves stored id empty", func(t *testing.T) {
+		repo := &mockSessionRepo{activeID: "live-session", ownerPID: 100}
+		client := &mockClient{sessionID: "fresh-session"}
+		resolver := NewSessionResolver(repo, client)
+
+		res, err := resolver.ResolveDetailed(context.Background(), "telegram", "123", "", "user-1", 100)
+		if err != nil {
+			t.Fatalf("ResolveDetailed: %v", err)
+		}
+		if !res.Resumed || res.SessionID != "live-session" {
+			t.Fatalf("resolution = %+v, want resumed live-session", res)
+		}
+		if res.StoredID != "" {
+			t.Fatalf("StoredID = %q, want empty on resume", res.StoredID)
+		}
+	})
+
+	t.Run("no stored session leaves stored id empty", func(t *testing.T) {
+		repo := &mockSessionRepo{}
+		client := &mockClient{sessionID: "fresh-session"}
+		resolver := NewSessionResolver(repo, client)
+
+		res, err := resolver.ResolveDetailed(context.Background(), "telegram", "123", "", "user-1", 100)
+		if err != nil {
+			t.Fatalf("ResolveDetailed: %v", err)
+		}
+		if res.Resumed || res.HadStored || res.SessionID != "fresh-session" {
+			t.Fatalf("resolution = %+v, want fresh session without storage", res)
+		}
+		if res.StoredID != "" {
+			t.Fatalf("StoredID = %q, want empty without storage", res.StoredID)
 		}
 	})
 }

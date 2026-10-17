@@ -742,13 +742,21 @@ func (f *fakeScheduleRepo) Attribute(_ context.Context, _ int64, _, _ string) er
 func (f *fakeScheduleRepo) SweepPending(_ context.Context) (int64, error)                { return 0, nil }
 
 type fakeSessionRepo struct {
-	activeID string
-	activeBy map[string]string
-	titles   map[string]string
-	sessions []store.Session
-	models   map[string]string
-	takeover map[string]takeoverMark
-	roots    map[string]store.ThreadRootCard
+	activeID   string
+	activePID  int
+	activeBy   map[string]string
+	activePIDs map[string]int
+	titles     map[string]string
+	sessions   []store.Session
+	models     map[string]string
+	takeover   map[string]takeoverMark
+	roots      map[string]store.ThreadRootCard
+	parked     map[string]parkMark
+	deletes    []int64
+}
+
+type parkMark struct {
+	reason string
 }
 
 type takeoverMark struct {
@@ -818,20 +826,37 @@ func (f *fakeSessionRepo) sessionKey(platform, channelID, threadID, userID strin
 
 func (f *fakeSessionRepo) Active(_ context.Context, platform, channelID, threadID, userID string) (string, int, error) {
 	if f.activeBy == nil {
-		return f.activeID, 0, nil
+		return f.activeID, f.activePID, nil
 	}
-	return f.activeBy[f.sessionKey(platform, channelID, threadID, userID)], 0, nil
+	id := f.activeBy[f.sessionKey(platform, channelID, threadID, userID)]
+	pid := 0
+	if f.activePIDs != nil {
+		pid = f.activePIDs[f.sessionKey(platform, channelID, threadID, userID)]
+	}
+	return id, pid, nil
 }
 
-func (f *fakeSessionRepo) SetActive(_ context.Context, platform, channelID, threadID, userID, sessionID string, _ int) error {
+func (f *fakeSessionRepo) SetActive(_ context.Context, platform, channelID, threadID, userID, sessionID string, agentPID int) error {
 	f.activeID = sessionID
+	f.activePID = agentPID
 	if f.activeBy == nil {
 		f.activeBy = make(map[string]string)
 	}
+	if f.activePIDs == nil {
+		f.activePIDs = make(map[string]int)
+	}
 	f.activeBy[f.sessionKey(platform, channelID, threadID, userID)] = sessionID
+	f.activePIDs[f.sessionKey(platform, channelID, threadID, userID)] = agentPID
+	if f.parked != nil {
+		delete(f.parked, f.sessionKey(platform, channelID, threadID, userID))
+	}
 	if len(f.sessions) > 0 {
 		for i := range f.sessions {
 			f.sessions[i].Active = (f.sessions[i].AgentSessionID == sessionID)
+			if f.sessions[i].Active {
+				f.sessions[i].Parked = false
+				f.sessions[i].ParkReason = ""
+			}
 		}
 	}
 	return nil
@@ -841,6 +866,9 @@ func (f *fakeSessionRepo) Deactivate(_ context.Context, platform, channelID, thr
 	f.activeID = ""
 	if f.activeBy != nil {
 		delete(f.activeBy, f.sessionKey(platform, channelID, threadID, userID))
+	}
+	if f.activePIDs != nil {
+		delete(f.activePIDs, f.sessionKey(platform, channelID, threadID, userID))
 	}
 	if len(f.sessions) > 0 {
 		for i := range f.sessions {
@@ -962,7 +990,33 @@ func (f *fakeSessionRepo) ThreadChannel(_ context.Context, platform, threadID st
 	return "", nil
 }
 
-func (f *fakeSessionRepo) Delete(_ context.Context, id int64) error { return nil }
+func (f *fakeSessionRepo) Delete(_ context.Context, id int64) error {
+	f.deletes = append(f.deletes, id)
+	return nil
+}
+
+func (f *fakeSessionRepo) MarkParked(_ context.Context, platform, channelID, threadID, userID, reason string) error {
+	key := f.sessionKey(platform, channelID, threadID, userID)
+	if f.activeBy[key] == "" && f.activeID == "" {
+		return store.ErrNotFound
+	}
+	if f.parked == nil {
+		f.parked = make(map[string]parkMark)
+	}
+	f.parked[key] = parkMark{reason: reason}
+	return nil
+}
+
+func (f *fakeSessionRepo) ParkState(_ context.Context, platform, channelID, threadID, userID string) (bool, string, error) {
+	if f.parked == nil {
+		return false, "", nil
+	}
+	mark, ok := f.parked[f.sessionKey(platform, channelID, threadID, userID)]
+	if !ok {
+		return false, "", nil
+	}
+	return true, mark.reason, nil
+}
 
 func (f *fakeSessionRepo) SetModel(_ context.Context, platform, channelID, threadID, userID, model string) error {
 	id := f.activeID
