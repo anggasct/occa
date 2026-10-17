@@ -854,3 +854,40 @@ func TestWebhookExecutorTelegramExplicitFalseProgressCard(t *testing.T) {
 		t.Errorf("final output text = %q, want plain output", tgCh.sentMessages[1].text)
 	}
 }
+
+func TestWebhookExecutorDiscordRoutingThreadID(t *testing.T) {
+	discordCh := &mockDiscordChannel{name: "discord"}
+	agentClient := &mockRelayClient{
+		events: []relay.Event{
+			{Type: relay.EventTool, Delta: "bash", ToolContext: "go test ./..."},
+			{Type: relay.EventDelta, Delta: "Review analysis done."},
+		},
+	}
+	manager := &mockAgentManager{client: agentClient}
+	reg := webhook.NewTaskThreadRegistry()
+	reg.Upsert("anggasct/occa", "fix/turn-delivery", "root-1", "thread-1", webhook.TaskClaimed)
+	exec := newWebhookExecutor([]channel.Channel{discordCh}, manager, mockChannelStore{}, "/tmp", relay.Config{NoEventTimeout: 15 * time.Minute, WebhookAbortTimeout: 5 * time.Second, VerifyTimeout: 15 * time.Second}, webhook.TaskOptions{Registry: reg})
+
+	workCtx := &webhook.WebhookWorkContext{
+		Workflow:      "review",
+		Envelope:      webhook.WebhookEnvelope{"repository": "anggasct/occa", "pr_number": "178", "event_type": "issue_comment"},
+		DeliveryID:    "del-review-routing",
+		ThreadID:      "thread-1",
+		RootMessageID: "root-1",
+	}
+
+	if err := exec(context.Background(), "discord", "chat1", "prompt text", workCtx); err != nil {
+		t.Fatalf("executor error: %v", err)
+	}
+	if len(discordCh.sentMessages) == 0 {
+		t.Fatal("expected progress/step posts in thread, got none")
+	}
+	for i, m := range discordCh.sentMessages {
+		if m.channelID != "thread-1" {
+			t.Errorf("sent message %d channelID = %q, want thread-1", i, m.channelID)
+		}
+	}
+	if len(discordCh.threadStarts) != 0 {
+		t.Errorf("threadStarts = %d, want 0 (reuse routing-identity thread)", len(discordCh.threadStarts))
+	}
+}
