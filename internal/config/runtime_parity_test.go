@@ -51,7 +51,7 @@ func TestRuntimeExampleParity(t *testing.T) {
 	if rt.Relay.WebhookAbortTimeout != 5*time.Second || rt.Relay.VerifyTimeout != 15*time.Second || rt.Relay.StallFreshness != 2*time.Minute || rt.Relay.NoEventTimeout != 15*time.Minute {
 		t.Fatalf("relay webhook = %+v", rt.Relay)
 	}
-	if rt.Router.ContextStaleAfter != 15*time.Minute || rt.Router.ProgressQuietThreshold != 90*time.Second {
+	if rt.Router.ContextStaleAfter != 15*time.Minute || rt.Router.ProgressQuietThreshold != 90*time.Second || rt.Router.ProgressStalledAfter != 5*time.Minute {
 		t.Fatalf("router flow = %+v", rt.Router)
 	}
 	if rt.Router.MaxQueuedMessages != 5 || rt.Router.MaxPickerSessions != 6 || rt.Router.MaxPickerPages != 5 {

@@ -45,6 +45,7 @@ type RelayRuntime struct {
 type RouterRuntime struct {
 	ContextStaleAfter      time.Duration `yaml:"context_stale_after"`
 	ProgressQuietThreshold time.Duration `yaml:"progress_quiet_threshold"`
+	ProgressStalledAfter   time.Duration `yaml:"progress_stalled_after"`
 	MaxQueuedMessages      int           `yaml:"max_queued_messages"`
 	MaxPickerSessions      int           `yaml:"max_picker_sessions"`
 	MaxPickerPages         int           `yaml:"max_picker_pages"`

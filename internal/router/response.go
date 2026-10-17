@@ -17,6 +17,57 @@ import (
 
 const busyResponseMessage = "⚠️ A response is already running in this conversation. Wait for it to finish or check /status."
 
+const defaultProgressStalledAfter = 5 * time.Minute
+
+type turnTracker struct {
+	mu                sync.Mutex
+	lastProductive    time.Time
+	outputs           int64
+	permissionPending func() bool
+}
+
+func newTurnTracker(now time.Time, permissionPending func() bool) *turnTracker {
+	return &turnTracker{lastProductive: now, permissionPending: permissionPending}
+}
+
+func (t *turnTracker) markProductive(now time.Time) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.lastProductive = now
+	t.outputs++
+	t.mu.Unlock()
+}
+
+func (t *turnTracker) stallState(now time.Time, stalledAfter time.Duration) (time.Duration, string) {
+	if t == nil || stalledAfter <= 0 {
+		return 0, ""
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	quiet := now.Sub(t.lastProductive)
+	if quiet < stalledAfter {
+		return quiet, ""
+	}
+	if t.permissionPending != nil && t.permissionPending() {
+		return quiet, "permission"
+	}
+	if t.outputs == 0 {
+		return quiet, "provider"
+	}
+	return quiet, "idle"
+}
+
+func isProductiveEvent(ev relay.Event) bool {
+	switch ev.Type {
+	case relay.EventDelta, relay.EventTool, relay.EventReasoning, relay.EventSegment:
+		return true
+	default:
+		return false
+	}
+}
+
 type queuedMessage struct {
 	ctx context.Context
 	msg channel.IncomingMessage
@@ -141,6 +192,13 @@ func (c *responseCoordinator) cancelMatching(platform, channelID, threadID, user
 	}
 }
 
+func (r *Router) stalledAfter() time.Duration {
+	if r.progressStalledAfter > 0 {
+		return r.progressStalledAfter
+	}
+	return defaultProgressStalledAfter
+}
+
 func (r *Router) runResponse(
 	ctx context.Context,
 	cancel context.CancelFunc,
@@ -210,7 +268,11 @@ func (r *Router) runResponse(
 		notices = r.store.ProgressNoticeRepo()
 	}
 
-	go startProgressTicker(ctx, msg.ReplyCtx, progressActivityCh, progressStopCh, progressTickerInterval, r.progressQuietThreshold, notices, key.platform, key.channelID, key.threadID, nil)
+	tracker := newTurnTracker(time.Now(), func() bool {
+		return r.permissions.HasPendingFor(owner)
+	})
+
+	go startProgressTicker(ctx, msg.ReplyCtx, progressActivityCh, progressStopCh, progressTickerInterval, r.progressQuietThreshold, notices, key.platform, key.channelID, key.threadID, nil, r.stalledAfter(), tracker)
 
 	observedEvents := make(chan relay.Event, 64)
 	go func() {
@@ -218,6 +280,9 @@ func (r *Router) runResponse(
 			select {
 			case progressActivityCh <- struct{}{}:
 			default:
+			}
+			if isProductiveEvent(ev) {
+				tracker.markProductive(time.Now())
 			}
 			select {
 			case observedEvents <- ev:
@@ -302,7 +367,9 @@ func (r *Router) runResponse(
 	var recoveryCause error
 	if dispatchErr != nil && !errors.Is(dispatchErr, context.Canceled) {
 		slog.Warn("response dispatch failed", "platform", key.platform, "channel_id", key.channelID, "thread_id", key.threadID, "user_id", key.userID, "error", dispatchErr)
-		if errors.Is(dispatchErr, relay.ErrAttachmentTooLarge) {
+		if errors.Is(dispatchErr, relay.ErrNotFound) {
+			r.replaceDeadSession(msg, key, inst, sessionID)
+		} else if errors.Is(dispatchErr, relay.ErrAttachmentTooLarge) {
 			r.reply(msg, "⚠️ "+dispatchErr.Error())
 		} else if trigger, classified := classifyDispatchFailure(dispatchErr); classified {
 			recoveryTrigger, recoveryCause = trigger, dispatchErr
@@ -312,6 +379,9 @@ func (r *Router) runResponse(
 	}
 	if streamErr != nil && !errors.Is(streamErr, context.Canceled) {
 		slog.Warn("response stream ended", "platform", key.platform, "channel_id", key.channelID, "thread_id", key.threadID, "user_id", key.userID, "error", streamErr)
+		if errors.Is(streamErr, relay.ErrTimeout) {
+			r.parkTimedOutSession(key, sessionID, r.permissions.HasPendingFor(owner))
+		}
 		if recoveryTrigger == "" && errors.Is(streamErr, relay.ErrIncompleteStream) {
 			recoveryTrigger, recoveryCause = store.RecoveryTriggerStreamEnded, streamErr
 		}
@@ -325,6 +395,36 @@ func (r *Router) runResponse(
 	if root != nil {
 		r.editRootCard(key.platform, root, followupTerminalLine(outcome, time.Since(started)))
 	}
+}
+
+func (r *Router) parkTimedOutSession(key responseKey, sessionID string, permissionPending bool) {
+	reason := "idle"
+	if permissionPending {
+		reason = "permission"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := r.store.SessionRepo().MarkParked(ctx, key.platform, key.channelID, key.threadID, key.userID, reason); err != nil {
+		slog.Warn("response timeout park failed", "platform", key.platform, "channel_id", key.channelID, "thread_id", key.threadID, "user_id", key.userID, "session_id", sessionID, "error", err)
+		return
+	}
+	slog.Info("response timed out, session parked", "platform", key.platform, "channel_id", key.channelID, "thread_id", key.threadID, "user_id", key.userID, "session_id", sessionID, "reason", reason)
+}
+
+func (r *Router) replaceDeadSession(msg channel.IncomingMessage, key responseKey, inst AgentInstance, deadSessionID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	freshID, err := inst.Client().CreateSession(ctx)
+	if err != nil {
+		r.reply(msg, "⚠️ Agent unreachable")
+		return
+	}
+	if err := r.store.SessionRepo().SetActive(ctx, key.platform, key.channelID, key.threadID, key.userID, freshID, inst.PID()); err != nil {
+		r.reply(msg, "⚠️ Agent unreachable")
+		return
+	}
+	slog.Info("dead session replaced", "platform", key.platform, "channel_id", key.channelID, "thread_id", key.threadID, "user_id", key.userID, "dead_session_id", deadSessionID, "session_id", freshID)
+	r.reply(msg, fmt.Sprintf("⚠️ Session %s is gone on the agent — fresh session %s is ready. Send your message again to continue.", deadSessionID, freshID))
 }
 
 const followupRunningLine = "Follow-up: 🔄 running in thread"
@@ -378,6 +478,14 @@ func progressNotice(seconds int64) string {
 	return fmt.Sprintf("⏳ Still working... (%dm)", minutes)
 }
 
+func stalledNotice(quiet time.Duration, gate string) string {
+	minutes := int64(quiet / time.Minute)
+	if minutes < 1 {
+		minutes = 1
+	}
+	return fmt.Sprintf("⚠️ Stalled — no agent output for %dm (suspected gate: %s)", minutes, gate)
+}
+
 var progressTickerInterval = 15 * time.Second
 
 func startProgressTicker(
@@ -389,6 +497,8 @@ func startProgressTicker(
 	notices store.ProgressNoticeRepo,
 	platform, channelID, threadID string,
 	now func() time.Time,
+	stalledAfter time.Duration,
+	tracker *turnTracker,
 ) {
 	if now == nil {
 		now = time.Now
@@ -429,7 +539,8 @@ func startProgressTicker(
 			lastActivity = now()
 			removeNotice()
 		case <-ticker.C:
-			quiet := now().Sub(lastActivity)
+			nowTime := now()
+			quiet := nowTime.Sub(lastActivity)
 			if quiet < quietThreshold {
 				if noticeRef != nil {
 					removeNotice()
@@ -441,6 +552,11 @@ func startProgressTicker(
 				minutes = 1
 			}
 			text := progressNotice(int64(minutes) * 60)
+			if tracker != nil {
+				if stallQuiet, gate := tracker.stallState(nowTime, stalledAfter); gate != "" {
+					text = stalledNotice(stallQuiet, gate)
+				}
+			}
 			if noticeRef == nil {
 				ref, err := reply.Send(text)
 				if err != nil {

@@ -25,6 +25,15 @@ func dropWebhookReviewKey(t *testing.T, s *SQLiteStore) {
 	}
 }
 
+func dropSessionParkedColumns(t *testing.T, s *SQLiteStore) {
+	t.Helper()
+	for _, col := range []string{"parked", "parked_at", "park_reason"} {
+		if _, err := s.db.Exec("ALTER TABLE session DROP COLUMN " + col); err != nil {
+			t.Fatalf("drop %s: %v", col, err)
+		}
+	}
+}
+
 func TestThreadRootLinkAndLookup(t *testing.T) {
 	st, err := OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
 	if err != nil {
