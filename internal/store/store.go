@@ -7,6 +7,8 @@ import (
 
 var ErrNotFound = errors.New("store: not found")
 
+// Parked marks a timed-out session kept listed for resume: ParkedAt records
+// when, ParkReason is idle or permission. SetActive clears all three on resume.
 type Session struct {
 	ID             int64
 	ChannelID      string

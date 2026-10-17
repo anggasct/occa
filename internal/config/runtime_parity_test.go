@@ -115,6 +115,27 @@ func TestRuntimeMissingKeyFails(t *testing.T) {
 	}
 }
 
+func TestRuntimeStalledAfterRequired(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
+	with := "discord:\n  allowed_sender_ids:\n    - '123'\n" + validRuntimeYAML()
+	path := writeConfig(t, t.TempDir(), with)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load with progress_stalled_after: %v", err)
+	}
+	if cfg.Runtime.Router.ProgressStalledAfter != 5*time.Minute {
+		t.Fatalf("ProgressStalledAfter = %v, want 5m", cfg.Runtime.Router.ProgressStalledAfter)
+	}
+	without := replaceFirst(with, "    progress_stalled_after: 5m\n", "")
+	rawPath := filepath.Join(t.TempDir(), "missing.yaml")
+	if err := os.WriteFile(rawPath, []byte(without), 0o644); err != nil {
+		t.Fatalf("write raw: %v", err)
+	}
+	if _, err := Load(rawPath); err == nil {
+		t.Fatal("expected missing runtime.router.progress_stalled_after to fail")
+	}
+}
+
 func replaceFirst(s, old, new string) string {
 	for i := 0; i < len(s)-len(old); i++ {
 		if s[i:i+len(old)] == old {

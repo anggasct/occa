@@ -199,6 +199,9 @@ func validateRuntime(rt RuntimeConfig) (RuntimeConfig, error) {
 	if err := positive("router", "progress_quiet_threshold", ro.ProgressQuietThreshold); err != nil {
 		return RuntimeConfig{}, err
 	}
+	if err := positive("router", "progress_stalled_after", ro.ProgressStalledAfter); err != nil {
+		return RuntimeConfig{}, err
+	}
 	if err := count("router", "max_queued_messages", ro.MaxQueuedMessages); err != nil {
 		return RuntimeConfig{}, err
 	}
