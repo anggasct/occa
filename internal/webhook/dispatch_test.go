@@ -3,6 +3,7 @@ package webhook
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -105,6 +106,154 @@ func TestHandleDispatchSuccess(t *testing.T) {
 	}
 }
 
+func TestHandleDispatchIdempotentLiveRecord(t *testing.T) {
+	srv := newDispatchServer(t, dispatchEndpoints("acme/widget"))
+	var mu sync.Mutex
+	var parents, threads int
+	srv.SetSender(func(_ context.Context, _, _, _ string) (string, error) {
+		mu.Lock()
+		parents++
+		mu.Unlock()
+		return "parent-1", nil
+	})
+	srv.SetThreadStarter(func(_ context.Context, _, _, _, _ string) (string, error) {
+		mu.Lock()
+		threads++
+		mu.Unlock()
+		return "thread-1", nil
+	})
+	first := postDispatch(t, srv, "dispatch-token", validDispatchBody)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first status = %d, want 201: %s", first.Code, first.Body.String())
+	}
+	var firstPayload map[string]string
+	if err := json.Unmarshal(first.Body.Bytes(), &firstPayload); err != nil {
+		t.Fatalf("decode first: %v", err)
+	}
+	normalized := `{"repo":"github.com/ACME/widget","base_sha":"abcdef1234567890","branch":"FEAT/X","spec_path":"specs/feat-x.md","scope":"ship it","verify":"go test ./..."}`
+	second := postDispatch(t, srv, "dispatch-token", normalized)
+	if second.Code != http.StatusOK {
+		t.Fatalf("retry status = %d, want 200: %s", second.Code, second.Body.String())
+	}
+	var secondPayload map[string]string
+	if err := json.Unmarshal(second.Body.Bytes(), &secondPayload); err != nil {
+		t.Fatalf("decode retry: %v", err)
+	}
+	if secondPayload["task_id"] != firstPayload["task_id"] {
+		t.Errorf("retry task_id = %q, want existing %q", secondPayload["task_id"], firstPayload["task_id"])
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if parents != 1 || threads != 1 {
+		t.Errorf("parents = %d threads = %d, want exactly 1 each", parents, threads)
+	}
+	if got := srv.dispatchTasks.Count(); got != 1 {
+		t.Errorf("stored tasks = %d, want 1", got)
+	}
+}
+
+func TestHandleDispatchFreshAfterTerminal(t *testing.T) {
+	srv := newDispatchServer(t, dispatchEndpoints("acme/widget"))
+	var mu sync.Mutex
+	var parents int
+	srv.SetSender(func(_ context.Context, _, _, _ string) (string, error) {
+		mu.Lock()
+		parents++
+		mu.Unlock()
+		return "parent-1", nil
+	})
+	first := postDispatch(t, srv, "dispatch-token", validDispatchBody)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first status = %d, want 201: %s", first.Code, first.Body.String())
+	}
+	var firstPayload map[string]string
+	if err := json.Unmarshal(first.Body.Bytes(), &firstPayload); err != nil {
+		t.Fatalf("decode first: %v", err)
+	}
+	srv.tasks.Upsert("acme/widget", "feat/x", "", "", TaskFailed)
+	second := postDispatch(t, srv, "dispatch-token", validDispatchBody)
+	if second.Code != http.StatusCreated {
+		t.Fatalf("retry-after-failed status = %d, want 201: %s", second.Code, second.Body.String())
+	}
+	var secondPayload map[string]string
+	if err := json.Unmarshal(second.Body.Bytes(), &secondPayload); err != nil {
+		t.Fatalf("decode retry: %v", err)
+	}
+	if secondPayload["task_id"] == "" || secondPayload["task_id"] == firstPayload["task_id"] {
+		t.Errorf("retry-after-failed task_id = %q, want fresh id", secondPayload["task_id"])
+	}
+	srv.tasks.Upsert("acme/widget", "feat/x", "", "", TaskMerged)
+	third := postDispatch(t, srv, "dispatch-token", validDispatchBody)
+	if third.Code != http.StatusCreated {
+		t.Fatalf("retry-after-merged status = %d, want 201: %s", third.Code, third.Body.String())
+	}
+	var thirdPayload map[string]string
+	if err := json.Unmarshal(third.Body.Bytes(), &thirdPayload); err != nil {
+		t.Fatalf("decode third: %v", err)
+	}
+	if thirdPayload["task_id"] == "" || thirdPayload["task_id"] == secondPayload["task_id"] {
+		t.Errorf("retry-after-merged task_id = %q, want fresh id", thirdPayload["task_id"])
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if parents != 3 {
+		t.Errorf("parents = %d, want 3 fresh posts", parents)
+	}
+}
+
+func TestHandleDispatchParentFailure(t *testing.T) {
+	srv := newDispatchServer(t, dispatchEndpoints("acme/widget"))
+	var mu sync.Mutex
+	parentFails := true
+	var parents, threads int
+	srv.SetSender(func(_ context.Context, _, _, _ string) (string, error) {
+		mu.Lock()
+		parents++
+		mu.Unlock()
+		if parentFails {
+			return "", errors.New("channel adapter unavailable")
+		}
+		return "parent-1", nil
+	})
+	srv.SetThreadStarter(func(_ context.Context, _, _, _, _ string) (string, error) {
+		mu.Lock()
+		threads++
+		mu.Unlock()
+		return "thread-1", nil
+	})
+	rec := postDispatch(t, srv, "dispatch-token", validDispatchBody)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502: %s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, hasTask := payload["task_id"]; hasTask {
+		t.Errorf("failed post accepted task_id %q, want no accept", payload["task_id"])
+	}
+	if !strings.Contains(payload["error"], "dispatch parent post failed") {
+		t.Errorf("error = %q, want parent post reason", payload["error"])
+	}
+	mu.Lock()
+	if parents != 1 || threads != 0 {
+		t.Errorf("parents = %d threads = %d, want 1 parent attempt and no thread spawn", parents, threads)
+	}
+	mu.Unlock()
+	if got := srv.dispatchTasks.Count(); got != 0 {
+		t.Errorf("stored tasks = %d, want 0 after parent failure", got)
+	}
+	if live, ok := srv.tasks.Lookup("acme/widget", "feat/x"); ok && !isTaskTerminal(live.Status) {
+		t.Errorf("registry holds live dead record %+v after parent failure", live)
+	}
+	mu.Lock()
+	parentFails = false
+	mu.Unlock()
+	retry := postDispatch(t, srv, "dispatch-token", validDispatchBody)
+	if retry.Code != http.StatusCreated {
+		t.Fatalf("retry status = %d, want 201: %s", retry.Code, retry.Body.String())
+	}
+}
 func TestHandleDispatchTokenHeader(t *testing.T) {
 	srv := newDispatchServer(t, dispatchEndpoints("acme/widget"))
 	req := httptest.NewRequest(http.MethodPost, "/dispatch", strings.NewReader(validDispatchBody))
@@ -303,10 +452,24 @@ func postDispatchAt(t *testing.T, srv *Server, path, token, body string) *httpte
 
 func TestHandleDispatchIngressPrefix(t *testing.T) {
 	srv := newDispatchServer(t, dispatchEndpoints("acme/widget"))
-	for _, path := range []string{"/dispatch", "/occa/dispatch"} {
-		if rec := postDispatchAt(t, srv, path, "dispatch-token", validDispatchBody); rec.Code != http.StatusCreated {
-			t.Errorf("%s: status = %d, want 201: %s", path, rec.Code, rec.Body.String())
-		}
+	first := postDispatchAt(t, srv, "/dispatch", "dispatch-token", validDispatchBody)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("/dispatch: status = %d, want 201: %s", first.Code, first.Body.String())
+	}
+	var firstPayload map[string]string
+	if err := json.Unmarshal(first.Body.Bytes(), &firstPayload); err != nil {
+		t.Fatalf("decode first: %v", err)
+	}
+	second := postDispatchAt(t, srv, "/occa/dispatch", "dispatch-token", validDispatchBody)
+	if second.Code != http.StatusOK {
+		t.Fatalf("/occa/dispatch: status = %d, want 200: %s", second.Code, second.Body.String())
+	}
+	var secondPayload map[string]string
+	if err := json.Unmarshal(second.Body.Bytes(), &secondPayload); err != nil {
+		t.Fatalf("decode second: %v", err)
+	}
+	if secondPayload["task_id"] != firstPayload["task_id"] {
+		t.Errorf("prefixed retry task_id = %q, want existing %q", secondPayload["task_id"], firstPayload["task_id"])
 	}
 }
 

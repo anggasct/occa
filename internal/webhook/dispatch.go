@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,6 +18,12 @@ import (
 )
 
 const defaultDispatchPath = "/dispatch"
+
+const dispatchThreadAttempts = 3
+
+const dispatchThreadRetryBaseDelay = 500 * time.Millisecond
+
+var errDispatchThreadEmpty = errors.New("dispatch thread starter returned empty thread id")
 
 type DispatchRequest struct {
 	Repo     string `json:"repo"`
@@ -85,11 +92,12 @@ type DispatchTask struct {
 type DispatchStore struct {
 	mu      sync.Mutex
 	tasks   map[string]DispatchTask
+	byKey   map[string]string
 	counter int64
 }
 
 func NewDispatchStore() *DispatchStore {
-	return &DispatchStore{tasks: make(map[string]DispatchTask)}
+	return &DispatchStore{tasks: make(map[string]DispatchTask), byKey: make(map[string]string)}
 }
 
 func (d *DispatchStore) Create(req DispatchRequest) DispatchTask {
@@ -109,7 +117,11 @@ func (d *DispatchStore) Create(req DispatchRequest) DispatchTask {
 	if d.tasks == nil {
 		d.tasks = make(map[string]DispatchTask)
 	}
+	if d.byKey == nil {
+		d.byKey = make(map[string]string)
+	}
 	d.tasks[task.ID] = task
+	d.byKey[TaskThreadKey(task.Repo, task.Branch)] = task.ID
 	return task
 }
 
@@ -118,6 +130,30 @@ func (d *DispatchStore) Get(id string) (DispatchTask, bool) {
 	defer d.mu.Unlock()
 	task, ok := d.tasks[id]
 	return task, ok
+}
+
+func (d *DispatchStore) LatestFor(repo, branch string) (DispatchTask, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	id, ok := d.byKey[TaskThreadKey(repo, branch)]
+	if !ok {
+		return DispatchTask{}, false
+	}
+	task, ok := d.tasks[id]
+	return task, ok
+}
+
+func (d *DispatchStore) Delete(id string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	task, ok := d.tasks[id]
+	if !ok {
+		return
+	}
+	delete(d.tasks, id)
+	if key := TaskThreadKey(task.Repo, task.Branch); d.byKey[key] == id {
+		delete(d.byKey, key)
+	}
 }
 
 func (d *DispatchStore) Count() int {
@@ -133,6 +169,13 @@ func FormatDispatchSummary(task DispatchTask, icons map[string]string) string {
 	if strings.TrimSpace(task.Verify) != "" {
 		second += " · Verify: " + strings.TrimSpace(task.Verify)
 	}
+	return first + "\n" + second
+}
+
+func FormatDispatchFailed(task DispatchTask, icons map[string]string, attempts int) string {
+	head := normalizeRepoKey(task.Repo) + "#" + normalizeBranchKey(task.Branch)
+	first := TaskIcon(TaskFailed, icons) + " Dispatch failed " + head + " · " + task.ID
+	second := fmt.Sprintf("Could not open a thread after %d attempts. Re-dispatch once the platform recovers.", attempts)
 	return first + "\n" + second
 }
 
@@ -207,12 +250,28 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	if isRedispatchScope(req.Scope) && s.handleRedispatch(w, r, req) {
 		return
 	}
+	if s.tasks != nil {
+		if rec, ok := s.tasks.Lookup(normalizeRepoKey(req.Repo), normalizeBranchKey(req.Branch)); ok && !isTaskTerminal(rec.Status) {
+			if existing, ok := s.dispatchTasks.LatestFor(req.Repo, req.Branch); ok {
+				writeDispatchJSON(w, http.StatusOK, map[string]string{"task_id": existing.ID})
+				return
+			}
+			writeDispatchJSON(w, http.StatusConflict, map[string]string{"error": "live task for " + normalizeRepoKey(req.Repo) + "#" + normalizeBranchKey(req.Branch) + " is already in progress"})
+			return
+		}
+	}
 	task := s.dispatchTasks.Create(req)
+	platform, channelID, rootID, err := s.postDispatchSummary(task)
+	if err != nil {
+		s.dispatchTasks.Delete(task.ID)
+		slog.Error("webhook: dispatch parent post failed", "repo", task.Repo, "branch", task.Branch, "task_id", task.ID, "error", err)
+		writeDispatchJSON(w, http.StatusBadGateway, map[string]string{"error": "dispatch parent post failed: " + err.Error()})
+		return
+	}
 	suppressAfter := task.CreatedAt
 	if s.tasks != nil {
 		suppressAfter = s.tasks.UpsertWithSpec(task.Repo, task.Branch, "", "", TaskDispatched, task.SpecPath).UpdatedAt
 	}
-	platform, channelID, rootID := s.postDispatchSummary(task)
 	if rec, ok := s.openDispatchThread(task, platform, channelID, rootID); ok {
 		suppressAfter = rec.UpdatedAt
 	}
@@ -244,8 +303,14 @@ func (s *Server) handleRedispatch(w http.ResponseWriter, r *http.Request, req Di
 			req.SpecPath = orig
 		}
 		task := s.dispatchTasks.Create(req)
+		platform, channelID, rootID, err := s.postDispatchSummary(task)
+		if err != nil {
+			s.dispatchTasks.Delete(task.ID)
+			slog.Error("webhook: dispatch parent post failed", "repo", task.Repo, "branch", task.Branch, "task_id", task.ID, "error", err)
+			writeDispatchJSON(w, http.StatusBadGateway, map[string]string{"error": "dispatch parent post failed: " + err.Error()})
+			return true
+		}
 		suppressAfter := s.tasks.UpsertWithSpec(task.Repo, task.Branch, "", "", TaskDispatched, task.SpecPath).UpdatedAt
-		platform, channelID, rootID := s.postDispatchSummary(task)
 		if r2, ok := s.openDispatchThread(task, platform, channelID, rootID); ok {
 			suppressAfter = r2.UpdatedAt
 		}
@@ -356,22 +421,21 @@ func (s *Server) dispatchNotifyTarget(repo string) (string, string) {
 	return fallbackPlatform, fallbackChannel
 }
 
-func (s *Server) postDispatchSummary(task DispatchTask) (string, string, string) {
+func (s *Server) postDispatchSummary(task DispatchTask) (string, string, string, error) {
 	platform, channelID := s.dispatchNotifyTarget(task.Repo)
 	if platform == "" || channelID == "" {
-		return "", "", ""
+		return "", "", "", nil
 	}
 	summary := FormatDispatchSummary(task, s.statusIcons)
 	buttons := TaskActionButtons(task.Repo, task.Branch)
 	rootID, err := s.sendParent(context.Background(), platform, channelID, summary, buttons)
 	if err != nil {
-		slog.Warn("webhook: dispatch notify failed", "repo", task.Repo, "branch", task.Branch, "error", err)
-		return platform, channelID, ""
+		return platform, channelID, "", err
 	}
 	if rootID == "" && s.sender == nil && s.senderButtons == nil {
-		return platform, channelID, ""
+		return platform, channelID, "", nil
 	}
-	return platform, channelID, rootID
+	return platform, channelID, rootID, nil
 }
 
 func dispatchThreadName(task DispatchTask) string {
@@ -385,13 +449,16 @@ func (s *Server) openDispatchThread(task DispatchTask, platform, channelID, root
 	if s.threadStarter == nil {
 		return s.tasks.UpsertWithSpec(task.Repo, task.Branch, rootID, "", TaskDispatched, task.SpecPath), true
 	}
-	threadID, err := s.threadStarter(context.Background(), platform, channelID, rootID, dispatchThreadName(task))
+	threadID, err := s.startDispatchThread(task, platform, channelID, rootID)
 	if err != nil {
-		slog.Warn("webhook: dispatch thread failed", "repo", task.Repo, "branch", task.Branch, "error", err)
-		return s.tasks.UpsertWithSpec(task.Repo, task.Branch, rootID, "", TaskDispatched, task.SpecPath), true
-	}
-	if strings.TrimSpace(threadID) == "" {
-		return s.tasks.UpsertWithSpec(task.Repo, task.Branch, rootID, "", TaskDispatched, task.SpecPath), true
+		rec := s.tasks.UpsertWithSpec(task.Repo, task.Branch, rootID, "", TaskFailed, task.SpecPath)
+		failed := FormatDispatchFailed(task, s.statusIcons, dispatchThreadAttempts)
+		buttons := TaskActionButtons(task.Repo, task.Branch)
+		if editErr := s.editParent(context.Background(), platform, channelID, rootID, failed, buttons); editErr != nil {
+			slog.Warn("webhook: dispatch failed-mark edit failed", "repo", task.Repo, "branch", task.Branch, "task_id", task.ID, "error", editErr)
+		}
+		slog.Error("webhook: dispatch thread failed, record marked failed", "repo", task.Repo, "branch", task.Branch, "task_id", task.ID, "error", err)
+		return rec, true
 	}
 	rec := s.tasks.UpsertWithSpec(task.Repo, task.Branch, rootID, threadID, TaskDispatched, task.SpecPath)
 	summary := FormatDispatchSummary(task, s.statusIcons)
@@ -401,6 +468,25 @@ func (s *Server) openDispatchThread(task DispatchTask, platform, channelID, root
 		slog.Warn("webhook: dispatch parent buttons failed", "repo", task.Repo, "branch", task.Branch, "error", err)
 	}
 	return rec, true
+}
+
+func (s *Server) startDispatchThread(task DispatchTask, platform, channelID, rootID string) (string, error) {
+	var err error
+	threadID := ""
+	for attempt := 1; attempt <= dispatchThreadAttempts; attempt++ {
+		threadID, err = s.threadStarter(context.Background(), platform, channelID, rootID, dispatchThreadName(task))
+		if err == nil && strings.TrimSpace(threadID) != "" {
+			return threadID, nil
+		}
+		if err == nil {
+			err = errDispatchThreadEmpty
+		}
+		if attempt < dispatchThreadAttempts {
+			slog.Warn("webhook: dispatch thread retry", "repo", task.Repo, "branch", task.Branch, "task_id", task.ID, "attempt", attempt, "error", err)
+			time.Sleep(dispatchThreadRetryBaseDelay * time.Duration(attempt))
+		}
+	}
+	return "", err
 }
 
 func (s *Server) scheduleDispatchFallback(task DispatchTask, suppressAfter time.Time) {
