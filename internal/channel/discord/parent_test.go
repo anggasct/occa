@@ -91,3 +91,37 @@ func TestParentChannelOfEmpty(t *testing.T) {
 		t.Fatalf("empty thread must return empty, got %q err=%v", got, err)
 	}
 }
+
+func TestGuildIDForChannel(t *testing.T) {
+	direct := &Adapter{
+		channelLookup: func(channelID string) (*discordgo.Channel, error) {
+			return &discordgo.Channel{ID: channelID, GuildID: "guild-1", Type: discordgo.ChannelTypeGuildText}, nil
+		},
+	}
+	if got, err := direct.GuildIDForChannel("channel-1"); err != nil || got != "guild-1" {
+		t.Fatalf("guild for channel = %q err=%v, want guild-1", got, err)
+	}
+	threaded := &Adapter{
+		channelLookup: func(channelID string) (*discordgo.Channel, error) {
+			if channelID == "thread-1" {
+				return &discordgo.Channel{ID: "thread-1", ParentID: "parent-1", Type: discordgo.ChannelTypeGuildPublicThread}, nil
+			}
+			return &discordgo.Channel{ID: "parent-1", GuildID: "guild-9", Type: discordgo.ChannelTypeGuildText}, nil
+		},
+	}
+	if got, err := threaded.GuildIDForChannel("thread-1"); err != nil || got != "guild-9" {
+		t.Fatalf("guild for thread via parent = %q err=%v, want guild-9", got, err)
+	}
+	empty := &Adapter{
+		channelLookup: func(string) (*discordgo.Channel, error) {
+			return &discordgo.Channel{Type: discordgo.ChannelTypeGuildText}, nil
+		},
+	}
+	if got, err := empty.GuildIDForChannel("channel-1"); err != nil || got != "" {
+		t.Fatalf("missing guild must return empty, got %q err=%v", got, err)
+	}
+	bare := &Adapter{}
+	if got, err := bare.GuildIDForChannel(""); err != nil || got != "" {
+		t.Fatalf("empty channel must return empty, got %q err=%v", got, err)
+	}
+}
