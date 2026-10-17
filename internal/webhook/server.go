@@ -1189,6 +1189,40 @@ func (s *Server) enrichCommentBody(item dispatchItem) ([]byte, error) {
 	return enriched, nil
 }
 
+func (s *Server) commentRoutingIdentity(body []byte, eventType string, ep config.EndpointConfig, envelope WebhookEnvelope) (string, string, bool) {
+	if eventType != "issue_comment" {
+		return "", "", false
+	}
+	if ExtractExecutionKey(body).Branch != "" {
+		return "", "", false
+	}
+	repo, number, ok := parseIssueCommentPR(body)
+	if !ok {
+		return "", "", false
+	}
+	if strings.TrimSpace(stringValue(envelope["comment_trigger"])) == "" {
+		return "", "", false
+	}
+	if allowed, _ := admitDelivery(ep, s.policy, envelope); !allowed {
+		return "", "", false
+	}
+	resolver := s.prHeadResolver
+	if resolver == nil {
+		resolver = &ghPRHeadResolver{timeout: s.processingTimeout}
+	}
+	head, err := resolver.ResolvePRHead(context.Background(), repo, number)
+	if err != nil {
+		return "", "", false
+	}
+	if strings.TrimSpace(head.Branch) == "" || normalizeRevision(head.SHA) == "" || !isValidRepoFullName(strings.TrimSpace(head.HeadRepo)) {
+		return "", "", false
+	}
+	if !strings.EqualFold(strings.TrimSpace(head.HeadRepo), repo) {
+		return "", "", false
+	}
+	return repo, strings.TrimSpace(head.Branch), true
+}
+
 func (s *Server) failEnrichment(item dispatchItem, receipt *store.WebhookDelivery, err error) {
 	envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", item.ep.CommentTrigger)
 	workCtx := &WebhookWorkContext{
@@ -1374,14 +1408,14 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		StartTime:    time.Now(),
 		Heartbeat:    heartbeat,
 	}
+	caller := ep.Workflow
+	if caller == "" {
+		caller = "delivery"
+	}
+	if eventType == "issue_comment" && caller == "fix" {
+		caller = "review-fix"
+	}
 	if repo, branch := TaskRepoBranch(key, envelope); repo != "" && branch != "" {
-		caller := ep.Workflow
-		if caller == "" {
-			caller = "delivery"
-		}
-		if eventType == "issue_comment" && caller == "fix" {
-			caller = "review-fix"
-		}
 		if _, _, rec, ok := s.tasks.ResolveForDelivery(key, envelope, caller); ok {
 			if rec.ThreadID != "" {
 				workCtx.ThreadID = rec.ThreadID
@@ -1389,6 +1423,21 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 			if rec.RootMessageID != "" {
 				workCtx.RootMessageID = rec.RootMessageID
 			}
+		}
+	} else if eventType == "issue_comment" {
+		if routingRepo, routingBranch, ok := s.commentRoutingIdentity(body, eventType, ep, envelope); ok {
+			if rec, ok := s.tasks.ResolveTaskThread(routingRepo, routingBranch, caller); ok {
+				if rec.ThreadID != "" {
+					workCtx.ThreadID = rec.ThreadID
+				}
+				if rec.RootMessageID != "" {
+					workCtx.RootMessageID = rec.RootMessageID
+				}
+			}
+		} else if repo != "" || branch != "" {
+			s.tasks.ResolveTaskThread(repo, branch, caller)
+		} else if parsedRepo, _, ok := parseIssueCommentPR(body); ok {
+			s.tasks.ResolveTaskThread(parsedRepo, "", caller)
 		}
 	}
 	if lease != nil {
