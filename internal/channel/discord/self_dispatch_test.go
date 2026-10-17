@@ -53,3 +53,74 @@ func TestDispatchClaimSetBounded(t *testing.T) {
 		t.Fatalf("evicted task-0 should be claimable again")
 	}
 }
+
+func TestOwnDispatchSummaryRoutesIntoTaskThread(t *testing.T) {
+	a := New("fake-token", nil, Config{})
+	a.onReady(&discordgo.Ready{User: &discordgo.User{ID: "bot-42"}})
+	a.channelLookup = func(string) (*discordgo.Channel, error) {
+		return &discordgo.Channel{Type: discordgo.ChannelTypeGuildText}, nil
+	}
+	a.SetTaskThreadLookup(func(repo, branch string) (string, bool) {
+		if repo == "acme/widget" && branch == "feat/x" {
+			return "thread-456", true
+		}
+		return "", false
+	})
+	summary := "⏳ Dispatched acme/widget#feat/x · task-1792210842511548349-1\nSpec: specs/feat-x.md"
+	var got []channel.IncomingMessage
+	deliver := func(m channel.IncomingMessage) { got = append(got, m) }
+	mk := func(content string) *discordgo.MessageCreate {
+		return &discordgo.MessageCreate{Message: &discordgo.Message{
+			ChannelID: "chan-1",
+			GuildID:   "guild-1",
+			Author:    &discordgo.User{ID: "bot-42"},
+			Content:   content,
+		}}
+	}
+	a.onMessage(mk(summary), deliver)
+	if len(got) != 1 {
+		t.Fatalf("delivered = %d, want 1", len(got))
+	}
+	msg := got[0]
+	if msg.ThreadID != "thread-456" || !msg.IsThread || msg.ParentChannelID != "chan-1" {
+		t.Fatalf("thread routing = %+v, want thread-456/chan-1/isThread", msg)
+	}
+	if msg.ChannelID != "chan-1" {
+		t.Fatalf("ChannelID = %q, want parent chan-1", msg.ChannelID)
+	}
+	rc, ok := msg.ReplyCtx.(*taskThreadReplyContext)
+	if !ok {
+		t.Fatalf("ReplyCtx type = %T, want taskThreadReplyContext", msg.ReplyCtx)
+	}
+	if rc.thread.channelID != "thread-456" || rc.parent.channelID != "chan-1" {
+		t.Fatalf("reply targets = %q/%q, want thread-456/chan-1", rc.thread.channelID, rc.parent.channelID)
+	}
+}
+
+func TestOwnDispatchSummaryWithoutThreadStaysTopLevel(t *testing.T) {
+	a := New("fake-token", nil, Config{})
+	a.onReady(&discordgo.Ready{User: &discordgo.User{ID: "bot-42"}})
+	a.channelLookup = func(string) (*discordgo.Channel, error) {
+		return &discordgo.Channel{Type: discordgo.ChannelTypeGuildText}, nil
+	}
+	summary := "⏳ Dispatched acme/widget#feat/y · task-999\nSpec: specs/y.md"
+	var got []channel.IncomingMessage
+	deliver := func(m channel.IncomingMessage) { got = append(got, m) }
+	mk := func(content string) *discordgo.MessageCreate {
+		return &discordgo.MessageCreate{Message: &discordgo.Message{
+			ChannelID: "chan-1",
+			Author:    &discordgo.User{ID: "bot-42"},
+			Content:   content,
+		}}
+	}
+	a.onMessage(mk(summary), deliver)
+	if len(got) != 1 {
+		t.Fatalf("delivered = %d, want 1", len(got))
+	}
+	if got[0].ThreadID != "" || got[0].IsThread {
+		t.Fatalf("without lookup must stay top-level: %+v", got[0])
+	}
+	if _, ok := got[0].ReplyCtx.(*taskThreadReplyContext); ok {
+		t.Fatalf("without thread must not use task thread reply context")
+	}
+}

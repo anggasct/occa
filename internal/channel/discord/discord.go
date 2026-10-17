@@ -58,6 +58,8 @@ type Adapter struct {
 
 	dispatchMu       sync.Mutex
 	seenDispatchTask map[string]time.Time
+
+	taskThreadLookup func(repo, branch string) (string, bool)
 }
 
 const maxSeenDispatchTasks = 1024
@@ -97,6 +99,21 @@ func (a *Adapter) SetAutoThreadPolicy(policy ThreadPolicy) {
 
 func (a *Adapter) SetOwnedThreadCheck(check OwnedThreadCheck) {
 	a.ownedThread = check
+}
+
+func (a *Adapter) SetTaskThreadLookup(fn func(repo, branch string) (string, bool)) {
+	a.taskThreadLookup = fn
+}
+
+func (a *Adapter) lookupTaskThread(repo, branch string) (string, bool) {
+	if a.taskThreadLookup == nil {
+		return "", false
+	}
+	threadID, ok := a.taskThreadLookup(strings.TrimSpace(repo), strings.TrimSpace(branch))
+	if !ok || strings.TrimSpace(threadID) == "" {
+		return "", false
+	}
+	return strings.TrimSpace(threadID), true
 }
 
 func (a *Adapter) trackThread(threadID string) {
@@ -399,13 +416,35 @@ func (a *Adapter) onMessage(m *discordgo.MessageCreate, handler func(channel.Inc
 		return
 	}
 	if self := a.selfID(); self != "" && m.Author.ID == self {
-		if _, _, taskID, ok := channel.ParseDispatchSummary(m.Content); ok {
+		if repo, branch, taskID, ok := channel.ParseDispatchSummary(m.Content); ok {
 			if !a.tryClaimDispatchTask(taskID) {
 				return
 			}
 			msg := a.normalizeMessage(m.Message)
 			msg.IsMention = true
 			msg.IsSelfDispatch = true
+			if threadID, found := a.lookupTaskThread(repo, branch); found {
+				parent := msg.ChannelID
+				if parent == "" {
+					parent = m.ChannelID
+				}
+				msg.ParentChannelID = parent
+				msg.ThreadID = threadID
+				msg.IsThread = true
+				if rc, ok := msg.ReplyCtx.(*replyContext); ok && rc != nil {
+					threadRc := &replyContext{
+						session:           rc.session,
+						channelID:         threadID,
+						reactionChannelID: parent,
+						guildID:           rc.guildID,
+						appID:             rc.appID,
+					}
+					msg.ReplyCtx = a.taskThreadReply(threadRc, rc)
+				}
+				a.trackThread(threadID)
+			} else {
+				slog.Warn("discord: task thread unknown, self-dispatch will run top-level", "repo", repo, "branch", branch, "task_id", taskID)
+			}
 			handler(msg)
 		}
 		return
@@ -1007,6 +1046,75 @@ func (rc *replyContext) Delete(ref channel.MessageRef) error {
 	return rc.session.ChannelMessageDelete(rc.channelID, ref.ID())
 }
 
+func (a *Adapter) taskThreadReply(thread, parent *replyContext) channel.ReplyContext {
+	if thread == nil {
+		return parent
+	}
+	if parent == nil {
+		return thread
+	}
+	return &taskThreadReplyContext{thread: thread, parent: parent}
+}
+
+type taskThreadReplyContext struct {
+	thread *replyContext
+	parent *replyContext
+}
+
+func (t *taskThreadReplyContext) SendTyping() error {
+	if err := t.thread.SendTyping(); err != nil {
+		slog.Warn("discord: task thread typing failed, falling back to parent", "thread_id", t.thread.channelID, "error", err)
+		return t.parent.SendTyping()
+	}
+	return nil
+}
+
+func (t *taskThreadReplyContext) Send(text string) (channel.MessageRef, error) {
+	ref, err := t.thread.Send(text)
+	if err != nil {
+		slog.Warn("discord: task thread send failed, falling back to parent", "thread_id", t.thread.channelID, "error", err)
+		return t.parent.Send(text)
+	}
+	return ref, nil
+}
+
+func (t *taskThreadReplyContext) SendWithButtons(text string, buttons []channel.Button) (channel.MessageRef, error) {
+	ref, err := t.thread.SendWithButtons(text, buttons)
+	if err != nil {
+		slog.Warn("discord: task thread send failed, falling back to parent", "thread_id", t.thread.channelID, "error", err)
+		return t.parent.SendWithButtons(text, buttons)
+	}
+	return ref, nil
+}
+
+func (t *taskThreadReplyContext) Edit(ref channel.MessageRef, text string) error {
+	if err := t.thread.Edit(ref, text); err != nil {
+		slog.Warn("discord: task thread edit failed, falling back to parent", "thread_id", t.thread.channelID, "error", err)
+		return t.parent.Edit(ref, text)
+	}
+	return nil
+}
+
+func (t *taskThreadReplyContext) EditWithButtons(ref channel.MessageRef, text string, buttons []channel.Button) error {
+	if err := t.thread.EditWithButtons(ref, text, buttons); err != nil {
+		slog.Warn("discord: task thread edit failed, falling back to parent", "thread_id", t.thread.channelID, "error", err)
+		return t.parent.EditWithButtons(ref, text, buttons)
+	}
+	return nil
+}
+
+func (t *taskThreadReplyContext) Delete(ref channel.MessageRef) error {
+	return t.thread.Delete(ref)
+}
+
+func (t *taskThreadReplyContext) SetReaction(ref channel.MessageRef, state channel.ReactionState) error {
+	return t.thread.SetReaction(ref, state)
+}
+
+func (t *taskThreadReplyContext) SetChatCommands(commands []channel.MenuCommand) error {
+	return t.thread.SetChatCommands(commands)
+}
+
 var (
 	_ channel.Channel                  = (*Adapter)(nil)
 	_ channel.MessageDeleter           = (*Adapter)(nil)
@@ -1021,5 +1129,9 @@ var (
 	_ channel.MessageRemover           = (*replyContext)(nil)
 	_ channel.ChatCommandSetter        = (*replyContext)(nil)
 	_ channel.ReactionSetter           = (*replyContext)(nil)
+	_ channel.ReplyContext             = (*taskThreadReplyContext)(nil)
+	_ channel.MessageRemover           = (*taskThreadReplyContext)(nil)
+	_ channel.ChatCommandSetter        = (*taskThreadReplyContext)(nil)
+	_ channel.ReactionSetter           = (*taskThreadReplyContext)(nil)
 	_ channel.MessageRef               = messageRef{}
 )
