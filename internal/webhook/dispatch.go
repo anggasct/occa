@@ -204,10 +204,13 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if isRedispatchScope(req.Scope) && s.handleRedispatch(w, r, req) {
+		return
+	}
 	task := s.dispatchTasks.Create(req)
 	suppressAfter := task.CreatedAt
 	if s.tasks != nil {
-		suppressAfter = s.tasks.Upsert(task.Repo, task.Branch, "", "", TaskDispatched).UpdatedAt
+		suppressAfter = s.tasks.UpsertWithSpec(task.Repo, task.Branch, "", "", TaskDispatched, task.SpecPath).UpdatedAt
 	}
 	platform, channelID, rootID := s.postDispatchSummary(task)
 	if rec, ok := s.openDispatchThread(task, platform, channelID, rootID); ok {
@@ -215,6 +218,119 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	}
 	s.scheduleDispatchFallback(task, suppressAfter)
 	writeDispatchJSON(w, http.StatusCreated, map[string]string{"task_id": task.ID})
+}
+
+func isRedispatchScope(scope string) bool {
+	return strings.HasPrefix(strings.TrimSpace(scope), "redispatch ")
+}
+
+func FormatRedispatchSeparator(task DispatchTask, icons map[string]string) string {
+	return "---\n🔁 Re-dispatch requested — retrying in this thread.\n" + FormatDispatchSummary(task, icons)
+}
+
+func (s *Server) handleRedispatch(w http.ResponseWriter, r *http.Request, req DispatchRequest) bool {
+	if s.tasks == nil {
+		return false
+	}
+	repo := normalizeRepoKey(req.Repo)
+	branch := strings.TrimSpace(req.Branch)
+	rec, ok := s.tasks.Lookup(repo, branch)
+	if !ok {
+		return false
+	}
+	if strings.TrimSpace(rec.RootMessageID) == "" {
+		orig := strings.TrimSpace(rec.SpecPath)
+		if orig != "" {
+			req.SpecPath = orig
+		}
+		task := s.dispatchTasks.Create(req)
+		suppressAfter := s.tasks.UpsertWithSpec(task.Repo, task.Branch, "", "", TaskDispatched, task.SpecPath).UpdatedAt
+		platform, channelID, rootID := s.postDispatchSummary(task)
+		if r2, ok := s.openDispatchThread(task, platform, channelID, rootID); ok {
+			suppressAfter = r2.UpdatedAt
+		}
+		s.scheduleDispatchFallback(task, suppressAfter)
+		writeDispatchJSON(w, http.StatusCreated, map[string]string{"task_id": task.ID})
+		return true
+	}
+	if rec.Status == TaskMerged {
+		writeDispatchJSON(w, http.StatusConflict, map[string]string{"error": "task already merged for " + repo + "#" + branch + " — re-dispatch refused"})
+		return true
+	}
+	ctx := r.Context()
+	if s.branchChecker != nil {
+		result, err := s.branchChecker(ctx, repo, branch)
+		if err == nil {
+			state := strings.ToUpper(strings.TrimSpace(result.State))
+			if result.Found && (state == "MERGED" || state == "CLOSED") {
+				writeDispatchJSON(w, http.StatusConflict, map[string]string{"error": "PR #" + strings.TrimSpace(result.Number) + " (" + strings.TrimSpace(result.State) + ") for " + repo + "#" + branch + " is closed — re-dispatch refused"})
+				return true
+			}
+			if !result.Found && rec.Status == TaskPROpened {
+				writeDispatchJSON(w, http.StatusConflict, map[string]string{"error": "no open PR found for " + repo + "#" + branch + " — re-dispatch refused"})
+				return true
+			}
+		} else {
+			slog.Warn("webhook: redispatch PR check failed, continuing with branch check", "repo", repo, "branch", branch, "error", err)
+		}
+	}
+	if s.branchExists != nil {
+		exists, err := s.branchExists(ctx, repo, branch)
+		if err != nil {
+			slog.Warn("webhook: redispatch branch check failed, allowing retry", "repo", repo, "branch", branch, "error", err)
+		} else if !exists {
+			writeDispatchJSON(w, http.StatusConflict, map[string]string{"error": "branch gone for " + repo + "#" + branch + " — re-dispatch refused"})
+			return true
+		}
+	}
+	origSpec := strings.TrimSpace(rec.SpecPath)
+	if origSpec != "" {
+		req.SpecPath = origSpec
+	}
+	task := s.dispatchTasks.Create(req)
+	platform, channelID := s.dispatchNotifyTarget(task.Repo)
+	if platform == "" || channelID == "" {
+		for _, ep := range s.endpoints {
+			if ep.Repository == "" {
+				continue
+			}
+			if normalizeRepoKey(ep.Repository) != normalizeRepoKey(task.Repo) {
+				continue
+			}
+			platform, channelID = ep.Platform, ep.ChannelID
+			break
+		}
+	}
+	summary := FormatDispatchSummary(task, s.statusIcons)
+	if strings.TrimSpace(rec.RootMessageID) != "" && platform != "" && channelID != "" {
+		if err := s.editParent(ctx, platform, channelID, rec.RootMessageID, summary, nil); err != nil {
+			slog.Warn("webhook: redispatch parent edit failed", "repo", task.Repo, "branch", task.Branch, "error", err)
+		}
+	}
+	threadID := strings.TrimSpace(rec.ThreadID)
+	if threadID == "" && s.threadStarter != nil && platform != "" && channelID != "" && strings.TrimSpace(rec.RootMessageID) != "" {
+		newThread, err := s.threadStarter(ctx, platform, channelID, rec.RootMessageID, dispatchThreadName(task))
+		if err != nil {
+			slog.Warn("webhook: redispatch thread start failed", "repo", task.Repo, "branch", task.Branch, "error", err)
+		} else if strings.TrimSpace(newThread) != "" {
+			threadID = strings.TrimSpace(newThread)
+		}
+	}
+	if threadID != "" && platform != "" && channelID != "" && s.notifier != nil {
+		target := channelID
+		if platform == "discord" {
+			target = threadID
+		} else if platform == "telegram" && !strings.Contains(channelID, ":") {
+			target = channelID + ":" + threadID
+		}
+		if err := s.notifier(ctx, platform, target, FormatRedispatchSeparator(task, s.statusIcons)); err != nil {
+			slog.Warn("webhook: redispatch thread post failed", "repo", task.Repo, "branch", task.Branch, "error", err)
+		}
+	}
+	suppressAfter := s.tasks.UpsertWithSpec(task.Repo, task.Branch, rec.RootMessageID, threadID, TaskDispatched, task.SpecPath).UpdatedAt
+	s.scheduleDispatchFallback(task, suppressAfter)
+	writeDispatchJSON(w, http.StatusCreated, map[string]string{"task_id": task.ID})
+	return true
 }
 
 func (s *Server) dispatchNotifyTarget(repo string) (string, string) {
@@ -267,17 +383,17 @@ func (s *Server) openDispatchThread(task DispatchTask, platform, channelID, root
 		return TaskThreadRecord{}, false
 	}
 	if s.threadStarter == nil {
-		return s.tasks.Upsert(task.Repo, task.Branch, rootID, "", TaskDispatched), true
+		return s.tasks.UpsertWithSpec(task.Repo, task.Branch, rootID, "", TaskDispatched, task.SpecPath), true
 	}
 	threadID, err := s.threadStarter(context.Background(), platform, channelID, rootID, dispatchThreadName(task))
 	if err != nil {
 		slog.Warn("webhook: dispatch thread failed", "repo", task.Repo, "branch", task.Branch, "error", err)
-		return s.tasks.Upsert(task.Repo, task.Branch, rootID, "", TaskDispatched), true
+		return s.tasks.UpsertWithSpec(task.Repo, task.Branch, rootID, "", TaskDispatched, task.SpecPath), true
 	}
 	if strings.TrimSpace(threadID) == "" {
-		return s.tasks.Upsert(task.Repo, task.Branch, rootID, "", TaskDispatched), true
+		return s.tasks.UpsertWithSpec(task.Repo, task.Branch, rootID, "", TaskDispatched, task.SpecPath), true
 	}
-	rec := s.tasks.Upsert(task.Repo, task.Branch, rootID, threadID, TaskDispatched)
+	rec := s.tasks.UpsertWithSpec(task.Repo, task.Branch, rootID, threadID, TaskDispatched, task.SpecPath)
 	summary := FormatDispatchSummary(task, s.statusIcons)
 	buttons := TaskLinkButtons(platform, s.guildIDFor(platform, channelID, threadID), "", threadID)
 	buttons = append(buttons, TaskActionButtons(task.Repo, task.Branch)...)

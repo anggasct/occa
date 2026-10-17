@@ -86,7 +86,12 @@ func (r *Router) handleTaskCallback(ctx context.Context, msg channel.IncomingMes
 	defer func() { _ = resp.Body.Close() }()
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode != 201 {
-		r.editCallback(msg, fmt.Sprintf("⚠️ Dispatch failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(respBody))))
+		errText := dispatchErrorText(respBody)
+		if action == "redispatch" && resp.StatusCode == http.StatusConflict {
+			r.editCallback(msg, "⚠️ Re-dispatch refused: "+errText)
+			return nil
+		}
+		r.editCallback(msg, fmt.Sprintf("⚠️ Dispatch failed (%d): %s", resp.StatusCode, errText))
 		return nil
 	}
 	var decoded struct {
@@ -113,6 +118,23 @@ func (r *Router) editCallback(msg channel.IncomingMessage, text string) {
 	if err := msg.ReplyCtx.Edit(msg.CallbackRef, text); err != nil {
 		r.reply(msg, text)
 	}
+}
+
+func dispatchErrorText(body []byte) string {
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" {
+		return "unknown error"
+	}
+	var decoded struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(trimmed), &decoded); err == nil && strings.TrimSpace(decoded.Error) != "" {
+		trimmed = strings.TrimSpace(decoded.Error)
+	}
+	if len([]rune(trimmed)) > 200 {
+		trimmed = string([]rune(trimmed)[:200])
+	}
+	return trimmed
 }
 
 func shortDispatchError(err error) string {

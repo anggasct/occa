@@ -110,3 +110,45 @@ func TestHandleTaskCallbackMissingConfig(t *testing.T) {
 		t.Errorf("edits = %v, want not-configured warning", reply.edits)
 	}
 }
+
+func TestHandleTaskCallbackRedispatchRefusedInPlace(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "task already merged for acme/widget#feat/x — re-dispatch refused"})
+	}))
+	defer srv.Close()
+
+	r := &Router{commands: make(map[string]Command)}
+	r.SetDispatchConfig("dispatch-token", srv.URL)
+	reply := &taskEditReply{}
+	msg := channel.IncomingMessage{
+		Platform:     "discord",
+		ChannelID:    "chan-1",
+		IsCallback:   true,
+		CallbackData: "task:redispatch:acme/widget#feat/x",
+		CallbackRef:  taskRef{},
+		ReplyCtx:     reply,
+	}
+	if err := r.handleTaskCallback(context.Background(), msg); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if len(reply.edits) != 1 {
+		t.Fatalf("edits = %v, want exactly 1 refusal", reply.edits)
+	}
+	if !strings.Contains(reply.edits[0], "Re-dispatch refused") {
+		t.Errorf("refusal must say Re-dispatch refused, got %q", reply.edits[0])
+	}
+	if !strings.Contains(reply.edits[0], "already merged") {
+		t.Errorf("refusal must carry server reason, got %q", reply.edits[0])
+	}
+}
+
+func TestDispatchErrorTextParsesJSON(t *testing.T) {
+	if got := dispatchErrorText([]byte(`{"error":"branch gone for a#b — re-dispatch refused"}`)); !strings.Contains(got, "branch gone") {
+		t.Errorf("json error = %q, want branch gone", got)
+	}
+	if got := dispatchErrorText([]byte(`plain failure`)); got != "plain failure" {
+		t.Errorf("plain error = %q, want passthrough", got)
+	}
+}
