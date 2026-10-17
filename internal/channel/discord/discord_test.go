@@ -785,3 +785,91 @@ func TestStartThreadClampsNameAndTracksThread(t *testing.T) {
 		t.Fatalf("threadReqBody was not clamped to 100 runes: %s", threadReqBody)
 	}
 }
+
+func TestRelayNotificationsSuppressEmbeds(t *testing.T) {
+	var sendBodies []string
+	var editBodies []string
+	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
+		b, _ := io.ReadAll(r.Body)
+		if r.Method == http.MethodPatch {
+			editBodies = append(editBodies, string(b))
+			return []byte(`{"id":"msg-123","channel_id":"chan-1"}`), http.StatusOK
+		}
+		sendBodies = append(sendBodies, string(b))
+		return []byte(`{"id":"msg-123","channel_id":"chan-1"}`), http.StatusOK
+	})
+
+	a := &Adapter{session: session}
+	if _, err := a.SendNotification("chan-1", "relay status https://example.com/pr/1"); err != nil {
+		t.Fatalf("SendNotification: %v", err)
+	}
+	if _, err := a.SendNotificationWithButtons("chan-1", "card https://example.com/pr/2", []channel.Button{{Label: "Open", Value: "open"}}); err != nil {
+		t.Fatalf("SendNotificationWithButtons: %v", err)
+	}
+	if _, err := a.ReplyNotification("chan-1", "msg-1", "reply https://example.com/pr/3"); err != nil {
+		t.Fatalf("ReplyNotification: %v", err)
+	}
+	if err := a.EditNotification("chan-1", "msg-123", "updated https://example.com/pr/4"); err != nil {
+		t.Fatalf("EditNotification: %v", err)
+	}
+	if err := a.EditNotificationWithButtons("chan-1", "msg-123", "updated https://example.com/pr/5", []channel.Button{{Label: "Open", Value: "open"}}); err != nil {
+		t.Fatalf("EditNotificationWithButtons: %v", err)
+	}
+
+	if len(sendBodies) != 3 {
+		t.Fatalf("send bodies = %d, want 3", len(sendBodies))
+	}
+	if len(editBodies) != 2 {
+		t.Fatalf("edit bodies = %d, want 2", len(editBodies))
+	}
+	for i, body := range sendBodies {
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(body), &payload); err != nil {
+			t.Fatalf("send body %d is not JSON: %v", i, err)
+		}
+		if got, _ := payload["flags"].(float64); got != 4 {
+			t.Fatalf("send body %d flags = %v, want 4: %s", i, payload["flags"], body)
+		}
+	}
+	for i, body := range editBodies {
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(body), &payload); err != nil {
+			t.Fatalf("edit body %d is not JSON: %v", i, err)
+		}
+		if got, _ := payload["flags"].(float64); got != 4 {
+			t.Fatalf("edit body %d flags = %v, want 4: %s", i, payload["flags"], body)
+		}
+	}
+}
+
+func TestAgentReplyContextKeepsNormalRendering(t *testing.T) {
+	var bodies []string
+	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		return []byte(`{"id":"msg-1"}`), http.StatusOK
+	})
+
+	rc := &replyContext{session: session, channelID: "ch-1"}
+	if _, err := rc.Send("agent text https://example.com/x"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if _, err := rc.SendWithButtons("agent card", []channel.Button{{Label: "Allow", Value: "allow"}}); err != nil {
+		t.Fatalf("SendWithButtons: %v", err)
+	}
+	if err := rc.Edit(messageRef{id: "msg-1"}, "edited"); err != nil {
+		t.Fatalf("Edit: %v", err)
+	}
+	if err := rc.EditWithButtons(messageRef{id: "msg-1"}, "edited", []channel.Button{{Label: "Allow", Value: "allow"}}); err != nil {
+		t.Fatalf("EditWithButtons: %v", err)
+	}
+
+	if len(bodies) != 4 {
+		t.Fatalf("bodies = %d, want 4", len(bodies))
+	}
+	for i, body := range bodies {
+		if strings.Contains(body, `"flags"`) {
+			t.Fatalf("agent body %d must not carry flags: %s", i, body)
+		}
+	}
+}
