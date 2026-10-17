@@ -283,8 +283,6 @@ func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelo
 		} else {
 			if repo, branch := TaskRepoBranch(WebhookExecutionKey{}, envelope); repo != "" && branch != "" && threadID != "" {
 				s.postPhaseBannerIfChanged(ctx, ep.Platform, ep.ChannelID, threadID, repo, branch, ep.Workflow, reason)
-				phase, _ := ThreadPhaseForWorkflow(ep.Workflow)
-				_ = phase
 				last := strings.TrimSpace(status)
 				if r := strings.TrimSpace(reason); r != "" {
 					last += ": " + clipTaskField(r, 120)
@@ -340,8 +338,6 @@ func (s *Server) postThreadDetail(ctx context.Context, ep config.EndpointConfig,
 	}
 	if repo != "" && branch != "" {
 		s.postPhaseBannerIfChanged(ctx, ep.Platform, ep.ChannelID, threadID, repo, branch, ep.Workflow, reason)
-		_, stepText := threadStatusForDelivery(ep.Workflow, stringValue(envelope["delivery_id"]), 0, status, reason)
-		_ = stepText
 		phase, icon := ThreadPhaseForWorkflow(ep.Workflow)
 		last := strings.TrimSpace(status)
 		if r := strings.TrimSpace(reason); r != "" {

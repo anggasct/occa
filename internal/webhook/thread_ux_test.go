@@ -8,9 +8,9 @@ import (
 
 func TestFormatPhaseBannerSingleLine(t *testing.T) {
 	cases := map[string]string{
-		"review": "🔍 REVIEW mulai",
-		"fix":    "🔨 FIX jalan",
-		"merge":  "🔀 MERGE cek gate",
+		"review": "🔍 REVIEW started",
+		"fix":    "🔨 FIX in progress",
+		"merge":  "🔀 MERGE checking gate",
 		"merged": "✅ DONE",
 	}
 	for workflow, want := range cases {
@@ -26,7 +26,7 @@ func TestFormatPhaseBannerSingleLine(t *testing.T) {
 		}
 	}
 	got := FormatPhaseBanner("fix", "F-002, F-003")
-	if !strings.Contains(got, "F-002") || !strings.Contains(got, "🔨 FIX jalan") {
+	if !strings.Contains(got, "F-002") || !strings.Contains(got, "🔨 FIX in progress") {
 		t.Errorf("fix banner with detail = %q, want findings inline", got)
 	}
 	if strings.Contains(got, "\n") {

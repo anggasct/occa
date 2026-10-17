@@ -3,7 +3,6 @@ package webhook
 import (
 	"context"
 	"strings"
-	"time"
 	"unicode/utf8"
 )
 
@@ -65,16 +64,16 @@ func FormatPhaseBanner(workflow, detail string) string {
 	b.WriteString(phase)
 	switch phase {
 	case "REVIEW":
-		b.WriteString(" mulai")
+		b.WriteString(" started")
 	case "FIX":
-		b.WriteString(" jalan")
+		b.WriteString(" in progress")
 		if single != "" {
 			b.WriteString(" (")
 			b.WriteString(clipTaskField(single, 120))
 			b.WriteString(")")
 		}
 	case "MERGE":
-		b.WriteString(" cek gate")
+		b.WriteString(" checking gate")
 	case "DONE":
 	}
 	out := b.String()
@@ -286,57 +285,4 @@ func (s *Server) ensureThreadStatus(ctx context.Context, platform, channelID, th
 	}
 	s.tasks.SetStatusMessage(repo, branch, msgID)
 	return msgID
-}
-
-func threadStatusForDelivery(workflow, deliveryID string, attempt int, status, reason string) (string, string) {
-	phase, icon := ThreadPhaseForWorkflow(workflow)
-	_ = time.Now
-	run := strings.TrimSpace(workflow)
-	if run == "" {
-		run = "run"
-	}
-	if short := shortDeliveryID(deliveryID); short != "" {
-		if attempt > 0 {
-			run = "Step " + itoa(attempt) + " (" + run + " run " + short + ")"
-		} else {
-			run = run + " run " + short
-		}
-	} else if attempt > 0 {
-		run = "Step " + itoa(attempt)
-	}
-	last := strings.TrimSpace(status)
-	if r := strings.TrimSpace(reason); r != "" {
-		if last != "" {
-			last += ": " + clipTaskField(r, 120)
-		} else {
-			last = clipTaskField(r, 120)
-		}
-	}
-	label := strings.TrimSpace(phase)
-	if strings.TrimSpace(icon) != "" {
-		label = strings.TrimSpace(icon) + " " + label
-	}
-	return label, FormatThreadStatus(label, run, last, nextHintForPhase(phase))
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var b [20]byte
-	pos := len(b)
-	for n > 0 {
-		pos--
-		b[pos] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		pos--
-		b[pos] = '-'
-	}
-	return string(b[pos:])
 }

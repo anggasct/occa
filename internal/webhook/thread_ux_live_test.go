@@ -109,7 +109,7 @@ func TestThreadUXLiveProofFullCycle(t *testing.T) {
 	}
 	banners := 0
 	for _, text := range threadPosts {
-		if text == "🔍 REVIEW mulai" || strings.HasPrefix(text, "🔨 FIX jalan") || text == "🔀 MERGE cek gate" || text == "✅ DONE" {
+		if text == "🔍 REVIEW started" || strings.HasPrefix(text, "🔨 FIX in progress") || text == "🔀 MERGE checking gate" || text == "✅ DONE" {
 			banners++
 		}
 		if strings.Contains(text, "━━━") || strings.Contains(text, "Delivery:") || strings.Contains(text, "Model:") {
