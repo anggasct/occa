@@ -70,10 +70,14 @@ func (s *Server) sweepStuckDispatchers(now time.Time) int {
 			continue
 		}
 		if snap.hasActive {
-			if snap.startedAt.IsZero() {
+			last := snap.lastActive
+			if last.IsZero() {
+				last = snap.startedAt
+			}
+			if last.IsZero() {
 				continue
 			}
-			if now.Sub(snap.startedAt) < after {
+			if now.Sub(last) < after {
 				continue
 			}
 			stuck = append(stuck, candidate{d, snap})
@@ -130,9 +134,9 @@ func (s *Server) alarmStuckDispatcher(d *dispatcher, snap dispatcherSnapshot, no
 			repo, branch = key, "-"
 		}
 	}
-	stuckSince := snap.startedAt
+	stuckSince := snap.lastActive
 	if stuckSince.IsZero() {
-		stuckSince = snap.lastActive
+		stuckSince = snap.startedAt
 	}
 	elapsed := now.Sub(stuckSince).Round(time.Second)
 	card := fmt.Sprintf("🚨 STUCK dispatcher %s#%s · delivery %s · stuck since %s (%s, threshold %s) · queue %d/%d — watchdog released the key so the next item proceeds. Check delivery log and sessions.",

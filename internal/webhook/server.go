@@ -955,7 +955,7 @@ func (d *dispatcher) handle(item dispatchItem) {
 		lease, werr := s.resolveWorkspace(item)
 		if werr == nil {
 			allowRetry := func() bool { return !incompleteRetried }
-			execErr := s.executeDelivery(item.ep, item.body, receipt.ID, item.deliveryID, item.eventType, receipt.Attempt, lease, allowRetry)
+			execErr := s.executeDelivery(item.ep, item.body, receipt.ID, item.deliveryID, item.eventType, receipt.Attempt, lease, allowRetry, d.touch)
 			held = false
 			s.releaseEvent()
 			s.pruneIfDue()
@@ -1356,9 +1356,11 @@ func (s *Server) failAbandonedReceipt(receipt *store.WebhookDelivery, reason str
 // the dispatcher's one-shot self-heal decision: when an execution fails with
 // (a wrapped) ErrWebhookResponseIncomplete and the closure returns true, the
 // receipt is deliberately left processing and the dispatcher re-executes once.
+// heartbeat, when non-nil, is exposed on the work context so the executor can
+// report observable progress; the dispatcher stamps last activity from it.
 // The returned error is the executor's error, after the receipt's terminal
 // transition (or retry grant) is recorded.
-func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64, deliveryID, eventType string, attempt int, lease *WorkspaceLease, allowRetryIncomplete func() bool) error {
+func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64, deliveryID, eventType string, attempt int, lease *WorkspaceLease, allowRetryIncomplete func() bool, heartbeat func()) error {
 	key := ExtractExecutionKey(body)
 	envelope := normalizeWebhook(body, eventType, deliveryID, s.verdicts, false, "", ep.CommentTrigger)
 
@@ -1372,6 +1374,7 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		Workflow:     ep.Workflow,
 		Envelope:     envelope,
 		StartTime:    time.Now(),
+		Heartbeat:    heartbeat,
 	}
 	if repo, branch := TaskRepoBranch(key, envelope); repo != "" && branch != "" {
 		if rec, ok := s.tasks.Lookup(repo, branch); ok {

@@ -50,6 +50,7 @@ type WebhookWorkContext struct {
 	RootMessageID  string
 	ThreadID       string
 	StartTime      time.Time
+	Heartbeat      func()
 }
 
 func ExtractExecutionKey(body []byte) WebhookExecutionKey {
