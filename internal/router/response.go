@@ -17,8 +17,6 @@ import (
 
 const busyResponseMessage = "⚠️ A response is already running in this conversation. Wait for it to finish or check /status."
 
-const defaultProgressStalledAfter = 5 * time.Minute
-
 type turnTracker struct {
 	mu                sync.Mutex
 	lastProductive    time.Time
@@ -193,10 +191,7 @@ func (c *responseCoordinator) cancelMatching(platform, channelID, threadID, user
 }
 
 func (r *Router) stalledAfter() time.Duration {
-	if r.progressStalledAfter > 0 {
-		return r.progressStalledAfter
-	}
-	return defaultProgressStalledAfter
+	return r.progressStalledAfter
 }
 
 func (r *Router) runResponse(
