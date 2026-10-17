@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -101,6 +102,11 @@ type Router struct {
 	usageDefaultWindow     time.Duration
 	threadParentOf         func(threadID string) (string, error)
 	rootCardEditor         func(ctx context.Context, platform, channelID, messageID, text string) error
+	dispatchToken          string
+	dispatchURL            string
+	dispatchClient         *http.Client
+	connectDeps            *ConnectRepoDeps
+	connectConfigPath      string
 }
 
 type ScheduleStore interface {
@@ -118,6 +124,14 @@ func (r *Router) SetRootCardEditor(editor func(ctx context.Context, platform, ch
 
 func (r *Router) SetAttributionStore(s *attribution.Store) {
 	r.attrib = s
+}
+
+func (r *Router) SetDispatchConfig(token, url string) {
+	r.dispatchToken = strings.TrimSpace(token)
+	r.dispatchURL = strings.TrimSpace(url)
+	if r.dispatchClient == nil {
+		r.dispatchClient = &http.Client{Timeout: 10 * time.Second}
+	}
 }
 
 func New(instances InstanceProvider, st store.Store, defaultWorkdir string, adminID string, cfg Config) *Router {

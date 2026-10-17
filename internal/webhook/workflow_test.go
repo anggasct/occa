@@ -633,6 +633,56 @@ func TestEmitAuditRootCardEditing(t *testing.T) {
 	})
 }
 
+func TestEmitAuditKnownBranchThreadsDetail(t *testing.T) {
+	envelope := WebhookEnvelope{
+		"repository":  "acme/widget",
+		"head_branch": "feat/x",
+		"pr_number":   "42",
+		"event_type":  "pull_request",
+		"delivery_id": "del-1",
+	}
+	ep := config.EndpointConfig{Platform: "discord", ChannelID: "chan-1", Workflow: "review"}
+
+	t.Run("edit failure posts into thread not top-level", func(t *testing.T) {
+		var notifiedChannel string
+		srv := &Server{tasks: NewTaskThreadRegistry()}
+		srv.SetEditor(func(ctx context.Context, platform, channelID, messageID, text string) error {
+			return errors.New("deleted")
+		})
+		srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
+			notifiedChannel = channelID
+			return nil
+		})
+		workCtx := &WebhookWorkContext{RootMessageID: "root-1", ThreadID: "thread-1"}
+		srv.emitAudit(context.Background(), ep, envelope, "COMPLETED", "", "card", workCtx)
+		if notifiedChannel != "thread-1" {
+			t.Errorf("notifiedChannel = %q, want thread-1 (never new top-level)", notifiedChannel)
+		}
+	})
+
+	t.Run("registry lookup edits known parent without workctx ids", func(t *testing.T) {
+		var editedID string
+		var notifiedChannel string
+		srv := &Server{tasks: NewTaskThreadRegistry()}
+		srv.tasks.Upsert("acme/widget", "feat/x", "root-9", "thread-9", TaskClaimed)
+		srv.SetEditor(func(ctx context.Context, platform, channelID, messageID, text string) error {
+			editedID = messageID
+			return nil
+		})
+		srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
+			notifiedChannel = channelID
+			return nil
+		})
+		srv.emitAudit(context.Background(), ep, envelope, "SKIP", "duplicate", "")
+		if editedID != "root-9" {
+			t.Errorf("editedID = %q, want root-9 (known branch must edit parent)", editedID)
+		}
+		if notifiedChannel != "thread-9" {
+			t.Errorf("notifiedChannel = %q, want thread-9 (SKIP detail into thread)", notifiedChannel)
+		}
+	})
+}
+
 func TestWebhookCheckSuiteGateMatrix(t *testing.T) {
 	tests := []struct {
 		name     string

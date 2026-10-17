@@ -22,6 +22,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/config"
 	"github.com/anggasct/occa/internal/relay"
 	"github.com/anggasct/occa/internal/store"
@@ -68,6 +69,10 @@ type Sender func(ctx context.Context, platform, channelID, text string) (string,
 
 type ThreadStarter func(ctx context.Context, platform, channelID, messageID, name string) (string, error)
 
+type SenderWithButtons func(ctx context.Context, platform, channelID, text string, buttons []channel.Button) (string, error)
+
+type EditorWithButtons func(ctx context.Context, platform, channelID, messageID, text string, buttons []channel.Button) error
+
 type Server struct {
 	bind                  string
 	bindAddr              string
@@ -78,6 +83,8 @@ type Server struct {
 	notifier              Notifier
 	editor                Editor
 	sender                Sender
+	senderButtons         SenderWithButtons
+	editorButtons         EditorWithButtons
 	threadStarter         ThreadStarter
 	deliveries            DeliveryStore
 	channels              ChannelStore
@@ -250,6 +257,26 @@ func (s *Server) SetSender(n Sender) {
 	}
 }
 
+func (s *Server) SetSenderWithButtons(n SenderWithButtons) {
+	if n == nil {
+		s.senderButtons = nil
+		return
+	}
+	s.senderButtons = func(ctx context.Context, platform, channelID, text string, buttons []channel.Button) (string, error) {
+		return n(ctx, platform, channelID, FormatWebhookMessage(text), buttons)
+	}
+}
+
+func (s *Server) SetEditorWithButtons(n EditorWithButtons) {
+	if n == nil {
+		s.editorButtons = nil
+		return
+	}
+	s.editorButtons = func(ctx context.Context, platform, channelID, messageID, text string, buttons []channel.Button) error {
+		return n(ctx, platform, channelID, messageID, FormatWebhookMessage(text), buttons)
+	}
+}
+
 func (s *Server) SetThreadStarter(n ThreadStarter) {
 	if n == nil {
 		s.threadStarter = nil
@@ -260,6 +287,32 @@ func (s *Server) SetThreadStarter(n ThreadStarter) {
 
 func (s *Server) SetChannelStore(c ChannelStore) {
 	s.channels = c
+}
+
+func (s *Server) sendParent(ctx context.Context, platform, channelID, text string, buttons []channel.Button) (string, error) {
+	if len(buttons) > 0 && s.senderButtons != nil {
+		return s.senderButtons(ctx, platform, channelID, text, buttons)
+	}
+	if s.sender != nil {
+		return s.sender(ctx, platform, channelID, text)
+	}
+	if s.notifier == nil {
+		return "", nil
+	}
+	if err := s.notifier(ctx, platform, channelID, text); err != nil {
+		return "", err
+	}
+	return "", nil
+}
+
+func (s *Server) editParent(ctx context.Context, platform, channelID, messageID, text string, buttons []channel.Button) error {
+	if len(buttons) > 0 && s.editorButtons != nil {
+		return s.editorButtons(ctx, platform, channelID, messageID, text, buttons)
+	}
+	if s.editor == nil {
+		return nil
+	}
+	return s.editor(ctx, platform, channelID, messageID, text)
 }
 
 func (s *Server) SetStallFreshness(d time.Duration) {
@@ -1042,8 +1095,10 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		StartTime:    time.Now(),
 	}
 	if repo, branch := TaskRepoBranch(key, envelope); repo != "" && branch != "" {
-		if rec, ok := s.tasks.Lookup(repo, branch); ok && rec.ThreadID != "" {
-			workCtx.ThreadID = rec.ThreadID
+		if rec, ok := s.tasks.Lookup(repo, branch); ok {
+			if rec.ThreadID != "" {
+				workCtx.ThreadID = rec.ThreadID
+			}
 			if rec.RootMessageID != "" {
 				workCtx.RootMessageID = rec.RootMessageID
 			}

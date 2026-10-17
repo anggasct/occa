@@ -173,6 +173,33 @@ func main() {
 		StreamerNoEventTimeout: cfg.Runtime.Relay.NoEventTimeout,
 	})
 
+	if strings.TrimSpace(cfg.Webhooks.Dispatch.Token) != "" {
+		dispatchPath := strings.TrimSpace(cfg.Webhooks.Dispatch.Path)
+		if dispatchPath == "" {
+			dispatchPath = "/dispatch"
+		}
+		bind := strings.TrimSpace(cfg.Webhooks.Bind)
+		if bind == "" {
+			bind = "127.0.0.1:8787"
+		}
+		rt.SetDispatchConfig(cfg.Webhooks.Dispatch.Token, "http://"+bind+dispatchPath)
+	}
+
+	if publicBase := strings.TrimSpace(os.Getenv("OCCA_PUBLIC_URL")); publicBase != "" {
+		cfgPath := strings.TrimSpace(configPath)
+		if cfgPath == "" {
+			if def, err := config.DefaultConfigPath(); err == nil {
+				cfgPath = def
+			}
+		}
+		if cfgPath != "" {
+			rt.SetConnectRepoConfig(cfgPath)
+			if deps := router.NewConnectRepoGHDeps(publicBase, cfgPath); deps != nil {
+				rt.SetConnectRepoDeps(deps)
+			}
+		}
+	}
+
 	discoverAgent(ctx, manager, cfg.Agent.DefaultWorkdir, cfg.Runtime.Relay.DiscoveryTimeout)
 
 	menu := rt.MenuCommands()
@@ -417,6 +444,22 @@ func main() {
 			}
 			return "", errors.New("webhook channel adapter unavailable")
 		})
+		webhookSrv.SetSenderWithButtons(func(ctx context.Context, platform, channelID, text string, buttons []channel.Button) (string, error) {
+			for _, ch := range channels {
+				if ch.Name() == platform {
+					return notifySendWithButtons(ch, channelID, text, buttons)
+				}
+			}
+			return "", errors.New("webhook channel adapter unavailable")
+		})
+		webhookSrv.SetEditorWithButtons(func(ctx context.Context, platform, channelID, messageID, text string, buttons []channel.Button) error {
+			for _, ch := range channels {
+				if ch.Name() == platform {
+					return notifyEditWithButtons(ch, channelID, messageID, text, buttons)
+				}
+			}
+			return errors.New("webhook channel adapter unavailable")
+		})
 		webhookSrv.SetThreadStarter(func(ctx context.Context, platform, channelID, messageID, name string) (string, error) {
 			for _, ch := range channels {
 				if ch.Name() == platform {
@@ -554,6 +597,19 @@ func notifySend(ch channel.Channel, channelID, text string) (string, error) {
 	return "", nil
 }
 
+func notifySendWithButtons(ch channel.Channel, channelID, text string, buttons []channel.Button) (string, error) {
+	chunks, err := outboundRenderer.Render(text, render.PlatformFor(ch.Name()))
+	if err != nil || len(chunks) == 0 {
+		chunks = []string{text}
+	}
+	if len(buttons) > 0 {
+		if sender, ok := ch.(channel.MessageSenderWithButtons); ok {
+			return sender.SendNotificationWithButtons(channelID, chunks[0], buttons)
+		}
+	}
+	return notifySend(ch, channelID, chunks[0])
+}
+
 func notifyEdit(ch channel.Channel, channelID, messageID, text string) error {
 	chunks, err := outboundRenderer.Render(text, render.PlatformFor(ch.Name()))
 	if err != nil || len(chunks) == 0 {
@@ -563,6 +619,19 @@ func notifyEdit(ch channel.Channel, channelID, messageID, text string) error {
 		return editor.EditNotification(channelID, messageID, chunks[0])
 	}
 	return errors.New("channel does not support editing")
+}
+
+func notifyEditWithButtons(ch channel.Channel, channelID, messageID, text string, buttons []channel.Button) error {
+	chunks, err := outboundRenderer.Render(text, render.PlatformFor(ch.Name()))
+	if err != nil || len(chunks) == 0 {
+		chunks = []string{text}
+	}
+	if len(buttons) > 0 {
+		if editor, ok := ch.(channel.MessageEditorWithButtons); ok {
+			return editor.EditNotificationWithButtons(channelID, messageID, chunks[0], buttons)
+		}
+	}
+	return notifyEdit(ch, channelID, messageID, chunks[0])
 }
 
 func notifyReply(ch channel.Channel, channelID, replyToMessageID, text string) (string, error) {
@@ -625,15 +694,19 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 
 				if taskOpts.Registry != nil {
 					if repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope); repo != "" && branch != "" {
-						if rec, ok := taskOpts.Registry.Lookup(repo, branch); ok && rec.ThreadID != "" {
-							workCtx.ThreadID = rec.ThreadID
+						if rec, ok := taskOpts.Registry.Lookup(repo, branch); ok {
+							if rec.ThreadID != "" {
+								workCtx.ThreadID = rec.ThreadID
+							}
 							if rec.RootMessageID != "" {
 								workCtx.RootMessageID = rec.RootMessageID
 							}
-							if platform == "discord" {
-								targetChannelID = rec.ThreadID
-							} else if platform == "telegram" && !strings.Contains(targetChannelID, ":") {
-								targetChannelID = targetChannelID + ":" + rec.ThreadID
+							if rec.ThreadID != "" {
+								if platform == "discord" {
+									targetChannelID = rec.ThreadID
+								} else if platform == "telegram" && !strings.Contains(targetChannelID, ":") {
+									targetChannelID = targetChannelID + ":" + rec.ThreadID
+								}
 							}
 						}
 					}
@@ -644,13 +717,31 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 				editor, _ := ch.(channel.MessageEditor)
 				starter, _ := ch.(channel.ThreadStarter)
 
-				reused := workCtx.ThreadID != "" && workCtx.RootMessageID != ""
+				reused := workCtx.RootMessageID != ""
 				if reused && taskOpts.Registry != nil {
 					if repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope); repo != "" && branch != "" {
 						if _, ok := taskOpts.Registry.Lookup(repo, branch); ok {
 							header := webhook.TaskCardHeader(workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons)
 							if header != "" {
-								_ = notifyEdit(ch, channelID, workCtx.RootMessageID, webhook.FormatWebhookMessage(header))
+								buttons := webhook.TaskParentButtons(workCtx.Envelope, repo, branch, workCtx.ThreadID)
+								if err := notifyEditWithButtons(ch, channelID, workCtx.RootMessageID, webhook.FormatWebhookMessage(header), buttons); err != nil {
+									slog.Warn("webhook: failed to edit task parent, continuing in thread", "channel_id", channelID, "error", err)
+								}
+							}
+						}
+					}
+				}
+				if reused && workCtx.ThreadID == "" && useThread && starter != nil {
+					threadName := webhook.FormatThreadName(workCtx.Envelope, workCtx.Workflow)
+					threadID, err := starter.StartThread(channelID, workCtx.RootMessageID, threadName)
+					if err != nil {
+						slog.Warn("webhook: thread creation on known parent failed", "channel_id", channelID, "error", err)
+					} else if strings.TrimSpace(threadID) != "" {
+						workCtx.ThreadID = threadID
+						targetChannelID = threadID
+						if taskOpts.Registry != nil {
+							if repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope); repo != "" && branch != "" {
+								taskOpts.Registry.Upsert(repo, branch, workCtx.RootMessageID, threadID, taskStatus)
 							}
 						}
 					}
@@ -659,7 +750,9 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 				if !reused && useThread && starter != nil && sender != nil {
 					rootCard := webhook.FormatRootCard(workCtx.Envelope, workCtx.Workflow, "RUNNING", "", "", platform)
 					rootCard = webhook.WithTaskHeader(rootCard, workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons)
-					rootMsgID, err := notifySend(ch, channelID, webhook.FormatWebhookMessage(rootCard))
+					repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope)
+					buttons := webhook.TaskParentButtons(workCtx.Envelope, repo, branch, "")
+					rootMsgID, err := notifySendWithButtons(ch, channelID, webhook.FormatWebhookMessage(rootCard), buttons)
 					if err != nil {
 						slog.Warn("webhook: failed to send root card; falling back to channel", "channel_id", channelID, "error", err)
 					} else {
@@ -674,6 +767,8 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 							if taskOpts.Registry != nil {
 								if repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope); repo != "" && branch != "" {
 									taskOpts.Registry.Upsert(repo, branch, rootMsgID, threadID, taskStatus)
+									threadButtons := webhook.TaskParentButtons(workCtx.Envelope, repo, branch, threadID)
+									_ = notifyEditWithButtons(ch, channelID, rootMsgID, webhook.FormatWebhookMessage(rootCard), threadButtons)
 								}
 							}
 						}
@@ -745,7 +840,15 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 					if workCtx.RootMessageID != "" {
 						terminalCard := webhook.FormatTerminalCard(workCtx.Envelope, workCtx.Workflow, "FAILED", err.Error(), workCtx.ThreadID, platform, elapsed)
 						terminalCard = webhook.WithTaskHeader(terminalCard, workCtx.Envelope, workCtx.Workflow, webhook.TaskFailed, taskOpts.Icons)
-						_, _ = notifySend(ch, targetChannelID, webhook.FormatWebhookMessage(terminalCard))
+						if workCtx.ThreadID != "" {
+							_, _ = notifySend(ch, targetChannelID, webhook.FormatWebhookMessage(terminalCard))
+						} else if platform == "discord" {
+							if editErr := notifyEdit(ch, channelID, workCtx.RootMessageID, webhook.FormatWebhookMessage(terminalCard)); editErr != nil {
+								slog.Warn("webhook: failed to update task parent with failure", "channel_id", channelID, "error", editErr)
+							}
+						} else {
+							_, _ = notifySend(ch, targetChannelID, webhook.FormatWebhookMessage(terminalCard))
+						}
 					} else {
 						switch {
 						case errors.Is(err, relay.ErrWebhookSessionCreate):
@@ -768,7 +871,15 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 				if workCtx.RootMessageID != "" {
 					terminalCard := webhook.FormatTerminalCard(workCtx.Envelope, workCtx.Workflow, "COMPLETED", "", workCtx.ThreadID, platform, elapsed)
 					terminalCard = webhook.WithTaskHeader(terminalCard, workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons)
-					_, _ = notifySend(ch, targetChannelID, webhook.FormatWebhookMessage(terminalCard))
+					if workCtx.ThreadID != "" {
+						_, _ = notifySend(ch, targetChannelID, webhook.FormatWebhookMessage(terminalCard))
+					} else if platform == "discord" {
+						if editErr := notifyEdit(ch, channelID, workCtx.RootMessageID, webhook.FormatWebhookMessage(terminalCard)); editErr != nil {
+							slog.Warn("webhook: failed to update task parent with completion", "channel_id", channelID, "error", editErr)
+						}
+					} else {
+						_, _ = notifySend(ch, targetChannelID, webhook.FormatWebhookMessage(terminalCard))
+					}
 				} else {
 					output := result.Output
 					if output == "" {

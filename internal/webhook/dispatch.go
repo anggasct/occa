@@ -247,22 +247,16 @@ func (s *Server) postDispatchSummary(task DispatchTask) (string, string, string)
 		return "", "", ""
 	}
 	summary := FormatDispatchSummary(task, s.statusIcons)
-	if s.sender != nil {
-		rootID, err := s.sender(context.Background(), platform, channelID, summary)
-		if err != nil {
-			slog.Warn("webhook: dispatch notify failed", "repo", task.Repo, "branch", task.Branch, "error", err)
-			return platform, channelID, ""
-		}
-		return platform, channelID, rootID
-	}
-	if s.notifier == nil {
-		return "", "", ""
-	}
-	if err := s.notifier(context.Background(), platform, channelID, summary); err != nil {
+	buttons := TaskActionButtons(task.Repo, task.Branch)
+	rootID, err := s.sendParent(context.Background(), platform, channelID, summary, buttons)
+	if err != nil {
 		slog.Warn("webhook: dispatch notify failed", "repo", task.Repo, "branch", task.Branch, "error", err)
 		return platform, channelID, ""
 	}
-	return platform, channelID, ""
+	if rootID == "" && s.sender == nil && s.senderButtons == nil {
+		return platform, channelID, ""
+	}
+	return platform, channelID, rootID
 }
 
 func dispatchThreadName(task DispatchTask) string {
@@ -284,7 +278,14 @@ func (s *Server) openDispatchThread(task DispatchTask, platform, channelID, root
 	if strings.TrimSpace(threadID) == "" {
 		return s.tasks.Upsert(task.Repo, task.Branch, rootID, "", TaskDispatched), true
 	}
-	return s.tasks.Upsert(task.Repo, task.Branch, rootID, threadID, TaskDispatched), true
+	rec := s.tasks.Upsert(task.Repo, task.Branch, rootID, threadID, TaskDispatched)
+	summary := FormatDispatchSummary(task, s.statusIcons)
+	buttons := TaskLinkButtons("", threadID)
+	buttons = append(buttons, TaskActionButtons(task.Repo, task.Branch)...)
+	if err := s.editParent(context.Background(), platform, channelID, rootID, summary, buttons); err != nil {
+		slog.Warn("webhook: dispatch parent buttons failed", "repo", task.Repo, "branch", task.Branch, "error", err)
+	}
+	return rec, true
 }
 
 func (s *Server) scheduleDispatchFallback(task DispatchTask, suppressAfter time.Time) {
