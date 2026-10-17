@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 )
 
@@ -100,5 +101,36 @@ func TestSessionFreshRowStartsUnparked(t *testing.T) {
 	}
 	if parked {
 		t.Fatal("fresh session must not be parked")
+	}
+}
+
+func TestParkedColumnsRequiredAtV18(t *testing.T) {
+	has := func(cols []string, want string) bool {
+		for _, c := range cols {
+			if c == want {
+				return true
+			}
+		}
+		return false
+	}
+	for _, want := range []string{"parked", "parked_at", "park_reason"} {
+		if !has(requiredColumnsForVersion(SchemaVersion)["session"], want) {
+			t.Fatalf("v%d session reference missing column %s", SchemaVersion, want)
+		}
+		if has(requiredColumnsForVersion(17)["session"], want) {
+			t.Fatalf("pre-v18 session reference must not require column %s", want)
+		}
+	}
+
+	path := filepath.Join(t.TempDir(), "v18.db")
+	s, err := OpenWithDefaultWorkdir(path, "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if version, err := validateDatabase(path); err != nil || version != SchemaVersion {
+		t.Fatalf("validateDatabase = (%d, %v), want (%d, nil)", version, err, SchemaVersion)
 	}
 }
