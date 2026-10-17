@@ -209,8 +209,47 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	if s.tasks != nil {
 		suppressAfter = s.tasks.Upsert(task.Repo, task.Branch, "", "", TaskDispatched).UpdatedAt
 	}
+	s.postDispatchSummary(task)
 	s.scheduleDispatchFallback(task, suppressAfter)
 	writeDispatchJSON(w, http.StatusCreated, map[string]string{"task_id": task.ID})
+}
+
+func (s *Server) dispatchNotifyTarget(repo string) (string, string) {
+	want := strings.ToLower(strings.TrimSpace(config.RepositoryPath(strings.ToLower(strings.TrimSpace(repo)))))
+	fallbackPlatform, fallbackChannel := "", ""
+	for _, ep := range s.endpoints {
+		if ep.Repository == "" {
+			continue
+		}
+		have := strings.ToLower(strings.TrimSpace(config.RepositoryPath(strings.ToLower(strings.TrimSpace(ep.Repository)))))
+		if have != want {
+			continue
+		}
+		if ep.Platform == "" || ep.ChannelID == "" {
+			continue
+		}
+		if strings.TrimSpace(strings.ToLower(ep.Workflow)) == "review" {
+			return ep.Platform, ep.ChannelID
+		}
+		if fallbackPlatform == "" {
+			fallbackPlatform, fallbackChannel = ep.Platform, ep.ChannelID
+		}
+	}
+	return fallbackPlatform, fallbackChannel
+}
+
+func (s *Server) postDispatchSummary(task DispatchTask) {
+	if s.notifier == nil {
+		return
+	}
+	platform, channelID := s.dispatchNotifyTarget(task.Repo)
+	if platform == "" || channelID == "" {
+		return
+	}
+	summary := FormatDispatchSummary(task, s.statusIcons)
+	if err := s.notifier(context.Background(), platform, channelID, summary); err != nil {
+		slog.Warn("webhook: dispatch notify failed", "repo", task.Repo, "branch", task.Branch, "error", err)
+	}
 }
 
 func (s *Server) scheduleDispatchFallback(task DispatchTask, suppressAfter time.Time) {
