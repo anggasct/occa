@@ -56,23 +56,6 @@ func waitForStatus(t *testing.T, st *store.SQLiteStore, endpoint, deliveryID str
 	return nil
 }
 
-func waitForAnyReceipt(t *testing.T, st *store.SQLiteStore, endpoint, deliveryID string) *store.WebhookDelivery {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		receipt, err := st.WebhookDeliveryRepo().Get(context.Background(), endpoint, deliveryID)
-		if err != nil {
-			t.Fatalf("Get: %v", err)
-		}
-		if receipt != nil {
-			return receipt
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("delivery %s never got a receipt row", deliveryID)
-	return nil
-}
-
 func TestDispatcherStuckFlagReleasesKey(t *testing.T) {
 	stuck := make(chan struct{})
 	var mu sync.Mutex
@@ -118,7 +101,9 @@ func TestDispatcherStuckFlagReleasesKey(t *testing.T) {
 	if resp := post(t, url, "delivery-next", "pull_request", stuckPayload()); resp.StatusCode != http.StatusOK {
 		t.Fatalf("next expected 200, got %d", resp.StatusCode)
 	}
-	waitForAnyReceipt(t, st, "github", "delivery-next")
+	if rec, _ := st.WebhookDeliveryRepo().Get(context.Background(), "github", "delivery-next"); rec != nil {
+		t.Fatalf("queued delivery created a row while waiting: %+v", rec)
+	}
 	time.Sleep(200 * time.Millisecond)
 	if n := srv.sweepStuckDispatchers(time.Now()); n != 1 {
 		t.Fatalf("sweep handled %d dispatchers, want 1", n)
@@ -190,7 +175,7 @@ func (f workspaceResolverFunc) ResolveWorkspace(ctx context.Context, req Workspa
 	return f(ctx, req)
 }
 
-func TestDispatcherEnqueueReceiptBeforeHeavyBody(t *testing.T) {
+func TestDispatcherQueuedDeliveryHasNoRow(t *testing.T) {
 	release := make(chan struct{})
 	started := make(chan string, 8)
 	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
@@ -222,9 +207,9 @@ func TestDispatcherEnqueueReceiptBeforeHeavyBody(t *testing.T) {
 	if resp := post(t, url, "delivery-queued", "pull_request", stuckPayload()); resp.StatusCode != http.StatusOK {
 		t.Fatalf("queued expected 200, got %d", resp.StatusCode)
 	}
-	receipt := waitForAnyReceipt(t, st, "github", "delivery-queued")
-	if receipt.Status != store.WebhookStatusReceived && receipt.Status != store.WebhookStatusProcessing {
-		t.Fatalf("queued receipt status = %s, want received/processing", receipt.Status)
+	time.Sleep(150 * time.Millisecond)
+	if rec, _ := st.WebhookDeliveryRepo().Get(context.Background(), "github", "delivery-queued"); rec != nil {
+		t.Fatalf("queued delivery created a row while waiting: %+v", rec)
 	}
 	select {
 	case id := <-started:
@@ -234,4 +219,115 @@ func TestDispatcherEnqueueReceiptBeforeHeavyBody(t *testing.T) {
 	close(release)
 	waitForStatus(t, st, "github", "delivery-first", store.WebhookStatusCompleted)
 	waitForStatus(t, st, "github", "delivery-queued", store.WebhookStatusCompleted)
+}
+
+func TestDispatcherQueueOnlyAlarmPreservesFIFO(t *testing.T) {
+	var mu sync.Mutex
+	var order []string
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+		mu.Lock()
+		order = append(order, workCtx.DeliveryID)
+		mu.Unlock()
+		return nil
+	}
+	srv, _ := newWatchdogServer(t, exec)
+	ep := config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Admit: defaultCatchAllAdmit()}
+	mkItem := func(id string) dispatchItem {
+		return dispatchItem{ep: ep, body: []byte(stuckPayload()), deliveryID: id, eventType: "pull_request", payloadHash: "hash-" + id}
+	}
+	d := &dispatcher{server: srv, key: "key:fifo-alarm-test", ch: make(chan dispatchItem, 8), lastActivity: time.Now().Add(-10 * time.Minute)}
+	for _, id := range []string{"fifo-1", "fifo-2", "fifo-3"} {
+		d.ch <- mkItem(id)
+	}
+	snap := d.snapshot()
+	if snap.queueLen != 3 || snap.hasActive {
+		t.Fatalf("unexpected snapshot for queue-only alarm: %+v", snap)
+	}
+	srv.alarmStuckDispatcher(d, snap, time.Now(), time.Minute)
+	var got []string
+	for i := 0; i < 3; i++ {
+		select {
+		case it := <-d.ch:
+			got = append(got, it.deliveryID)
+		default:
+			t.Fatalf("alarm consumed a queued item, got %v", got)
+		}
+	}
+	want := []string{"fifo-1", "fifo-2", "fifo-3"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("queue order after alarm = %v, want %v", got, want)
+	}
+	for _, id := range want {
+		d.ch <- mkItem(id)
+	}
+	srv.dispatchMu.Lock()
+	srv.dispatchers[d.key] = d
+	srv.dispatchMu.Unlock()
+	srv.alarmStuckDispatcher(d, d.snapshot(), time.Now(), time.Minute)
+	srv.releaseStuckDispatcher(d)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		n := len(order)
+		mu.Unlock()
+		if n == 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			mu.Lock()
+			cur := append([]string(nil), order...)
+			mu.Unlock()
+			t.Fatalf("executor order incomplete: %v", cur)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Join(order, ",") != strings.Join(want, ",") {
+		t.Fatalf("executor start order = %v, want %v", order, want)
+	}
+}
+
+func TestDispatcherRunPanicFailsActiveWithoutRequeue(t *testing.T) {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+		return nil
+	}
+	srv, st := newWatchdogServer(t, exec)
+	ctx := context.Background()
+	repo := st.WebhookDeliveryRepo()
+	if _, err := repo.Create(ctx, store.WebhookDelivery{Endpoint: "github", DeliveryID: "delivery-active", EventType: "pull_request", PayloadHash: "hash-active", Attempt: 1}); err != nil {
+		t.Fatalf("create active receipt: %v", err)
+	}
+	receipt, _ := repo.Get(ctx, "github", "delivery-active")
+	if ok, err := repo.Transition(ctx, receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived}, store.WebhookStatusProcessing, ""); err != nil || !ok {
+		t.Fatalf("claim active processing: ok=%v err=%v", ok, err)
+	}
+	ep := config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Admit: defaultCatchAllAdmit()}
+	active := dispatchItem{ep: ep, body: []byte(stuckPayload()), deliveryID: "delivery-active", eventType: "pull_request", payloadHash: "hash-active"}
+	queued := dispatchItem{ep: ep, body: []byte(stuckPayload()), deliveryID: "delivery-queued", eventType: "pull_request", payloadHash: "hash-queued"}
+	d := &dispatcher{server: srv, key: "key:panic-active-test", ch: make(chan dispatchItem, 8), lastActivity: time.Now()}
+	d.ch <- queued
+	srv.dispatchMu.Lock()
+	srv.dispatchers[d.key] = d
+	srv.dispatchMu.Unlock()
+	srv.rebuildAfterPanic(d, active, "boom-run")
+	failed, _ := repo.Get(ctx, "github", "delivery-active")
+	if failed == nil || failed.Status != store.WebhookStatusFailed {
+		t.Fatalf("active receipt not failed: %+v", failed)
+	}
+	if !strings.Contains(strings.ToLower(failed.ErrorSummary), "panic") {
+		t.Fatalf("active receipt missing panic summary: %+v", failed)
+	}
+	srv.dispatchMu.Lock()
+	fresh := srv.dispatchers[d.key]
+	srv.dispatchMu.Unlock()
+	if fresh == nil {
+		t.Fatal("expected live replacement dispatcher for queued item")
+	}
+	waitForStatus(t, st, "github", "delivery-queued", store.WebhookStatusCompleted)
+	if rec, _ := repo.Get(ctx, "github", "delivery-active"); rec == nil || rec.Status != store.WebhookStatusFailed {
+		t.Fatalf("active receipt changed after rebuild: %+v", rec)
+	} else if rec.Attempt != 1 {
+		t.Fatalf("active receipt re-queued and re-executed: %+v", rec)
+	}
 }

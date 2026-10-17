@@ -584,7 +584,6 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
 		return
 	}
-	s.ensureEnqueueReceipt(item)
 
 	slog.Info("webhook: delivery enqueued", "endpoint", ep.Name, "delivery_id", deliveryID, "event_type", eventType, "lock", d.key)
 	w.WriteHeader(http.StatusOK)
@@ -816,7 +815,15 @@ func (d *dispatcher) run(ctx context.Context) {
 	defer d.server.dispatchWG.Done()
 	defer func() {
 		if r := recover(); r != nil {
-			d.server.rebuildAfterPanic(d, dispatchItem{}, r)
+			d.mu.Lock()
+			active := d.active
+			hasActive := d.hasActive
+			d.mu.Unlock()
+			var failed dispatchItem
+			if hasActive {
+				failed = active
+			}
+			d.server.rebuildAfterPanic(d, failed, r)
 		}
 	}()
 	timer := time.NewTimer(d.server.dispatcherIdleTTL)
@@ -1215,33 +1222,26 @@ func (s *Server) beginExecution(item dispatchItem) *store.WebhookDelivery {
 	ctx := context.Background()
 	ep := item.ep
 
+	created, err := s.deliveries.Create(ctx, store.WebhookDelivery{
+		Endpoint:    ep.Name,
+		DeliveryID:  item.deliveryID,
+		EventType:   item.eventType,
+		PayloadHash: item.payloadHash,
+		Attempt:     1,
+	})
+	if err != nil {
+		slog.Error("webhook: receipt claim failed", "endpoint", ep.Name, "delivery_id", item.deliveryID, "error", err)
+		return nil
+	}
+
 	receipt, err := s.deliveries.Get(ctx, ep.Name, item.deliveryID)
 	if err != nil {
 		slog.Error("webhook: receipt load failed", "endpoint", ep.Name, "delivery_id", item.deliveryID, "error", err)
 		return nil
 	}
-	created := false
 	if receipt == nil {
-		if _, err := s.deliveries.Create(ctx, store.WebhookDelivery{
-			Endpoint:    ep.Name,
-			DeliveryID:  item.deliveryID,
-			EventType:   item.eventType,
-			PayloadHash: item.payloadHash,
-			Attempt:     1,
-		}); err != nil {
-			slog.Error("webhook: receipt claim failed", "endpoint", ep.Name, "delivery_id", item.deliveryID, "error", err)
-			return nil
-		}
-		receipt, err = s.deliveries.Get(ctx, ep.Name, item.deliveryID)
-		if err != nil {
-			slog.Error("webhook: receipt load failed", "endpoint", ep.Name, "delivery_id", item.deliveryID, "error", err)
-			return nil
-		}
-		if receipt == nil {
-			slog.Error("webhook: receipt missing after claim", "endpoint", ep.Name, "delivery_id", item.deliveryID)
-			return nil
-		}
-		created = true
+		slog.Error("webhook: receipt missing after claim", "endpoint", ep.Name, "delivery_id", item.deliveryID)
+		return nil
 	}
 
 	staleClaimed := false
@@ -1312,7 +1312,8 @@ func (s *Server) logDuplicate(item dispatchItem, observed store.WebhookStatus) {
 }
 
 // abandon records a delivery that was accepted but will never execute — the
-// process is shutting down with it still queued.
+// process is shutting down with it still queued. The receipt is created only
+// now so overload rejections and queue waits leave no rows behind.
 func (s *Server) abandon(item dispatchItem, reason string) {
 	ctx := context.Background()
 	created, err := s.deliveries.Create(ctx, store.WebhookDelivery{
@@ -1327,15 +1328,6 @@ func (s *Server) abandon(item dispatchItem, reason string) {
 		return
 	}
 	if !created {
-		existing, gerr := s.deliveries.Get(ctx, item.ep.Name, item.deliveryID)
-		if gerr != nil || existing == nil {
-			slog.Error("webhook: abandoned delivery receipt missing", "endpoint", item.ep.Name, "delivery_id", item.deliveryID)
-			return
-		}
-		if isTerminal(existing.Status) {
-			return
-		}
-		s.failAbandonedReceipt(existing, reason)
 		return
 	}
 	receipt, err := s.deliveries.Get(ctx, item.ep.Name, item.deliveryID)

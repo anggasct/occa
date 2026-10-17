@@ -2698,7 +2698,7 @@ func TestWebhookFIFOOrderSameKey(t *testing.T) {
 	}
 }
 
-func TestWebhookQueuedDeliveryHasReceipt(t *testing.T) {
+func TestWebhookQueuedDeliveryHasNoRow(t *testing.T) {
 	var startedOnce sync.Once
 	started := make(chan struct{})
 	released := make(chan struct{})
@@ -2752,18 +2752,8 @@ func TestWebhookQueuedDeliveryHasReceipt(t *testing.T) {
 	}
 	time.Sleep(100 * time.Millisecond)
 	rows = mustList(t, st)
-	if len(rows) != 2 {
-		t.Fatalf("queued delivery missing enqueue receipt: %+v", rows)
-	}
-	byID := map[string]store.WebhookStatus{}
-	for _, r := range rows {
-		byID[r.DeliveryID] = r.Status
-	}
-	if byID["delivery-1"] != store.WebhookStatusProcessing {
-		t.Fatalf("executing delivery status = %s, want processing: %+v", byID["delivery-1"], rows)
-	}
-	if byID["delivery-2"] != store.WebhookStatusReceived {
-		t.Fatalf("queued delivery status = %s, want received: %+v", byID["delivery-2"], rows)
+	if len(rows) != 1 {
+		t.Fatalf("queued delivery created a row while waiting: %+v", rows)
 	}
 
 	close(released)
@@ -2823,13 +2813,8 @@ func TestWebhookQueueFullReturns429WithoutRow(t *testing.T) {
 		t.Fatal("429 response missing Retry-After header")
 	}
 	rows := mustList(t, st)
-	if len(rows) != 1+srv.queueCap() {
-		t.Fatalf("accepted rows = %d, want %d: %+v", len(rows), 1+srv.queueCap(), rows)
-	}
-	for _, r := range rows {
-		if r.DeliveryID == "delivery-overflow" {
-			t.Fatalf("overflow delivery wrote a receipt row: %+v", rows)
-		}
+	if len(rows) != 1 {
+		t.Fatalf("overflow delivery wrote a receipt row: %+v", rows)
 	}
 
 	close(release)

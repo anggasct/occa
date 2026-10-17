@@ -40,24 +40,6 @@ func (s *Server) watchdogTick() time.Duration {
 	return s.stuckAfter() / 5
 }
 
-func (s *Server) ensureEnqueueReceipt(item dispatchItem) {
-	ctx := context.Background()
-	created, err := s.deliveries.Create(ctx, store.WebhookDelivery{
-		Endpoint:    item.ep.Name,
-		DeliveryID:  item.deliveryID,
-		EventType:   item.eventType,
-		PayloadHash: item.payloadHash,
-		Attempt:     1,
-	})
-	if err != nil {
-		slog.Error("webhook: enqueue receipt failed", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "error", err)
-		return
-	}
-	if created {
-		slog.Info("webhook: receipt recorded at enqueue", "endpoint", item.ep.Name, "delivery_id", item.deliveryID)
-	}
-}
-
 func (s *Server) watchdogLoop() {
 	ticker := time.NewTicker(s.watchdogTick())
 	defer ticker.Stop()
@@ -278,7 +260,7 @@ func (s *Server) rebuildAfterPanic(d *dispatcher, item dispatchItem, r any) {
 	default:
 	}
 drained:
-	freshNeeded := len(queued) > 0 || strings.TrimSpace(item.deliveryID) != ""
+	freshNeeded := len(queued) > 0
 	var fresh *dispatcher
 	if freshNeeded {
 		fresh = &dispatcher{server: s, key: d.key, ch: make(chan dispatchItem, s.maxQueuedPerKey), lastActivity: time.Now()}
@@ -289,13 +271,6 @@ drained:
 	s.dispatchMu.Unlock()
 	if fresh == nil {
 		return
-	}
-	if strings.TrimSpace(item.deliveryID) != "" {
-		select {
-		case fresh.ch <- item:
-		default:
-			s.abandon(item, "panic rebuild queue overflow")
-		}
 	}
 	for _, q := range queued {
 		select {
