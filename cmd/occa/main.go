@@ -409,6 +409,25 @@ func main() {
 			}
 			return errors.New("webhook channel adapter unavailable")
 		})
+		webhookSrv.SetSender(func(ctx context.Context, platform, channelID, text string) (string, error) {
+			for _, ch := range channels {
+				if ch.Name() == platform {
+					return notifySend(ch, channelID, text)
+				}
+			}
+			return "", errors.New("webhook channel adapter unavailable")
+		})
+		webhookSrv.SetThreadStarter(func(ctx context.Context, platform, channelID, messageID, name string) (string, error) {
+			for _, ch := range channels {
+				if ch.Name() == platform {
+					if starter, ok := ch.(channel.ThreadStarter); ok {
+						return starter.StartThread(channelID, messageID, name)
+					}
+					return "", errors.New("channel does not support threads")
+				}
+			}
+			return "", errors.New("webhook channel adapter unavailable")
+		})
 		rt.SetRootCardEditor(func(ctx context.Context, platform, channelID, messageID, text string) error {
 			for _, ch := range channels {
 				if ch.Name() == platform {

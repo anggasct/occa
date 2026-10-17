@@ -64,6 +64,10 @@ type Notifier func(ctx context.Context, platform, channelID, text string) error
 
 type Editor func(ctx context.Context, platform, channelID, messageID, text string) error
 
+type Sender func(ctx context.Context, platform, channelID, text string) (string, error)
+
+type ThreadStarter func(ctx context.Context, platform, channelID, messageID, name string) (string, error)
+
 type Server struct {
 	bind                  string
 	bindAddr              string
@@ -73,6 +77,8 @@ type Server struct {
 	executor              Executor
 	notifier              Notifier
 	editor                Editor
+	sender                Sender
+	threadStarter         ThreadStarter
 	deliveries            DeliveryStore
 	channels              ChannelStore
 	sessions              TakeoverStore
@@ -232,6 +238,24 @@ func (s *Server) SetEditor(e Editor) {
 	s.editor = func(ctx context.Context, platform, channelID, messageID, text string) error {
 		return e(ctx, platform, channelID, messageID, FormatWebhookMessage(text))
 	}
+}
+
+func (s *Server) SetSender(n Sender) {
+	if n == nil {
+		s.sender = nil
+		return
+	}
+	s.sender = func(ctx context.Context, platform, channelID, text string) (string, error) {
+		return n(ctx, platform, channelID, FormatWebhookMessage(text))
+	}
+}
+
+func (s *Server) SetThreadStarter(n ThreadStarter) {
+	if n == nil {
+		s.threadStarter = nil
+		return
+	}
+	s.threadStarter = n
 }
 
 func (s *Server) SetChannelStore(c ChannelStore) {
