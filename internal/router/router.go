@@ -130,7 +130,7 @@ func (r *Router) SetDispatchConfig(token, url string) {
 	r.dispatchToken = strings.TrimSpace(token)
 	r.dispatchURL = strings.TrimSpace(url)
 	if r.dispatchClient == nil {
-		r.dispatchClient = &http.Client{Timeout: 10 * time.Second}
+		r.dispatchClient = &http.Client{Timeout: dispatchHTTPTimeout}
 	}
 }
 

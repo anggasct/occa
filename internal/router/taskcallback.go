@@ -13,6 +13,8 @@ import (
 	"github.com/anggasct/occa/internal/channel"
 )
 
+const dispatchHTTPTimeout = time.Second * 10
+
 func parseTaskCallback(data string) (string, string, string, bool) {
 	trimmed := strings.TrimSpace(data)
 	if !strings.HasPrefix(trimmed, "task:") {
@@ -74,7 +76,7 @@ func (r *Router) handleTaskCallback(ctx context.Context, msg channel.IncomingMes
 	req.Header.Set("Authorization", "Bearer "+r.dispatchToken)
 	client := r.dispatchClient
 	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
+		client = &http.Client{Timeout: dispatchHTTPTimeout}
 	}
 	resp, err := client.Do(req)
 	if err != nil {
