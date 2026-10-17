@@ -1,7 +1,9 @@
 package discord
 
 import (
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 
@@ -35,5 +37,28 @@ func TestOwnDispatchSummaryDeliveredOnce(t *testing.T) {
 	}
 	if repo, branch, taskID, ok := channel.ParseDispatchSummary(got[0].Text); !ok || repo != "acme/widget" || branch != "feat/x" || taskID != "task-1792210842511548349-1" {
 		t.Fatalf("unexpected parsed trigger: %q %q %q %v", repo, branch, taskID, ok)
+	}
+}
+
+func TestDispatchClaimSetBounded(t *testing.T) {
+	a := New("fake-token", nil, Config{})
+	for i := 0; i < maxSeenDispatchTasks+100; i++ {
+		if !a.tryClaimDispatchTask(fmt.Sprintf("task-%d", i)) {
+			t.Fatalf("claim task-%d should succeed", i)
+		}
+	}
+	if n := len(a.seenDispatchTask); n > maxSeenDispatchTasks {
+		t.Fatalf("claimed set size = %d, want <= %d", n, maxSeenDispatchTasks)
+	}
+	if !a.tryClaimDispatchTask("task-0") {
+		t.Fatalf("evicted task-0 should be claimable again")
+	}
+}
+
+func TestDispatchClaimExpires(t *testing.T) {
+	a := New("fake-token", nil, Config{})
+	a.seenDispatchTask = map[string]time.Time{"task-old": time.Now().Add(-2 * dispatchClaimTTL)}
+	if !a.tryClaimDispatchTask("task-old") {
+		t.Fatalf("expired claim should be reclaimable")
 	}
 }

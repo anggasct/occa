@@ -57,8 +57,13 @@ type Adapter struct {
 	parentCache map[string]string
 
 	dispatchMu       sync.Mutex
-	seenDispatchTask map[string]struct{}
+	seenDispatchTask map[string]time.Time
 }
+
+const (
+	maxSeenDispatchTasks = 1024
+	dispatchClaimTTL     = 24 * time.Hour
+)
 
 func New(token string, menu []channel.MenuCommand, cfg Config) *Adapter {
 	return NewWithPolicy(token, menu, AllowlistPolicy{}, cfg)
@@ -425,12 +430,33 @@ func (a *Adapter) tryClaimDispatchTask(taskID string) bool {
 	a.dispatchMu.Lock()
 	defer a.dispatchMu.Unlock()
 	if a.seenDispatchTask == nil {
-		a.seenDispatchTask = make(map[string]struct{})
+		a.seenDispatchTask = make(map[string]time.Time)
 	}
-	if _, ok := a.seenDispatchTask[taskID]; ok {
-		return false
+	now := time.Now()
+	if claimedAt, ok := a.seenDispatchTask[taskID]; ok {
+		if now.Sub(claimedAt) < dispatchClaimTTL {
+			return false
+		}
 	}
-	a.seenDispatchTask[taskID] = struct{}{}
+	for id, claimedAt := range a.seenDispatchTask {
+		if now.Sub(claimedAt) >= dispatchClaimTTL {
+			delete(a.seenDispatchTask, id)
+		}
+	}
+	if len(a.seenDispatchTask) >= maxSeenDispatchTasks {
+		oldest := ""
+		var oldestAt time.Time
+		first := true
+		for id, claimedAt := range a.seenDispatchTask {
+			if first || claimedAt.Before(oldestAt) {
+				oldest, oldestAt, first = id, claimedAt, false
+			}
+		}
+		if oldest != "" {
+			delete(a.seenDispatchTask, oldest)
+		}
+	}
+	a.seenDispatchTask[taskID] = now
 	return true
 }
 
