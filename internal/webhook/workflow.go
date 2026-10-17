@@ -338,17 +338,12 @@ func (s *Server) postThreadDetail(ctx context.Context, ep config.EndpointConfig,
 	}
 	if repo != "" && branch != "" {
 		s.postPhaseBannerIfChanged(ctx, ep.Platform, ep.ChannelID, threadID, repo, branch, ep.Workflow, reason)
-		phase, icon := ThreadPhaseForWorkflow(ep.Workflow)
 		last := strings.TrimSpace(status)
 		if r := strings.TrimSpace(reason); r != "" {
 			last += ": " + clipTaskField(r, 120)
 		}
 		if outcome := FormatGateOutcome(envelope, ep.Workflow, status); outcome != "" && outcome != "gate checked, "+strings.ToLower(status) {
 			last = outcome
-		}
-		label := strings.TrimSpace(phase)
-		if strings.TrimSpace(icon) != "" {
-			label = strings.TrimSpace(icon) + " " + label
 		}
 		stepRun := strings.TrimSpace(ep.Workflow)
 		if short := shortDeliveryID(stringValue(envelope["delivery_id"])); short != "" {
