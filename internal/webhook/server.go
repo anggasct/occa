@@ -133,6 +133,7 @@ type Server struct {
 	dispatchTasks         *DispatchStore
 	fallbackAfter         time.Duration
 	branchChecker         BranchPRChecker
+	branchExists          BranchExistsChecker
 	statusIcons           map[string]string
 	statusColors          map[string]int
 }
@@ -196,6 +197,7 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 	srv.dispatchTasks = NewDispatchStore()
 	srv.fallbackAfter = cfg.FallbackPollAfter
 	srv.branchChecker = ghBranchPRChecker
+	srv.branchExists = ghBranchExistsChecker
 	return srv
 }
 
@@ -365,6 +367,13 @@ func (s *Server) SetBranchChecker(c BranchPRChecker) {
 		c = ghBranchPRChecker
 	}
 	s.branchChecker = c
+}
+
+func (s *Server) SetBranchExistsChecker(c BranchExistsChecker) {
+	if c == nil {
+		c = ghBranchExistsChecker
+	}
+	s.branchExists = c
 }
 
 func (s *Server) SetFallbackPollAfter(d time.Duration) {

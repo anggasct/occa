@@ -3,6 +3,7 @@ package webhook
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -169,6 +170,7 @@ type TaskThreadRecord struct {
 	Status        TaskStatus
 	Color         int
 	UpdatedAt     time.Time
+	SpecPath      string
 }
 
 type TaskThreadRegistry struct {
@@ -208,6 +210,10 @@ func (t *TaskThreadRegistry) Lookup(repo, branch string) (TaskThreadRecord, bool
 }
 
 func (t *TaskThreadRegistry) Upsert(repo, branch, rootID, threadID string, status TaskStatus) TaskThreadRecord {
+	return t.UpsertWithSpec(repo, branch, rootID, threadID, status, "")
+}
+
+func (t *TaskThreadRegistry) UpsertWithSpec(repo, branch, rootID, threadID string, status TaskStatus, specPath string) TaskThreadRecord {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.records == nil {
@@ -221,6 +227,10 @@ func (t *TaskThreadRegistry) Upsert(repo, branch, rootID, threadID string, statu
 	if threadID == "" {
 		threadID = prev.ThreadID
 	}
+	specPath = strings.TrimSpace(specPath)
+	if specPath == "" {
+		specPath = strings.TrimSpace(prev.SpecPath)
+	}
 	rec := TaskThreadRecord{
 		Repo:          normalizeRepoKey(repo),
 		Branch:        normalizeBranchKey(branch),
@@ -229,6 +239,7 @@ func (t *TaskThreadRegistry) Upsert(repo, branch, rootID, threadID string, statu
 		Status:        status,
 		Color:         TaskColor(status, t.colors),
 		UpdatedAt:     time.Now(),
+		SpecPath:      specPath,
 	}
 	t.records[key] = rec
 	return rec
@@ -441,6 +452,8 @@ type BranchPRResult struct {
 
 type BranchPRChecker func(ctx context.Context, repo, branch string) (BranchPRResult, error)
 
+type BranchExistsChecker func(ctx context.Context, repo, branch string) (bool, error)
+
 func ghBranchPRChecker(ctx context.Context, repo, branch string) (BranchPRResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -450,6 +463,36 @@ func ghBranchPRChecker(ctx context.Context, repo, branch string) (BranchPRResult
 		return BranchPRResult{}, fmt.Errorf("webhook: fallback poll gh pr list: %w", err)
 	}
 	return parseBranchPRList(out)
+}
+
+func ghBranchExistsChecker(ctx context.Context, repo, branch string) (bool, error) {
+	repo = strings.TrimSpace(repo)
+	branch = strings.TrimSpace(branch)
+	if repo == "" || branch == "" {
+		return false, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gh", "api", "repos/"+repo+"/branches/"+branch, "--silent")
+	out, err := cmd.CombinedOutput()
+	return classifyBranchCheckResult(out, err)
+}
+
+func classifyBranchCheckResult(out []byte, err error) (bool, error) {
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, exec.ErrNotFound) {
+		return false, fmt.Errorf("webhook: branch check gh api: %w", err)
+	}
+	msg := strings.ToLower(strings.TrimSpace(string(out)))
+	if strings.Contains(msg, "404") || strings.Contains(msg, "not found") || strings.Contains(msg, "no such") {
+		return false, nil
+	}
+	if msg != "" {
+		return false, fmt.Errorf("webhook: branch check gh api: %v: %s", err, clipTaskField(strings.TrimSpace(string(out)), 200))
+	}
+	return false, fmt.Errorf("webhook: branch check gh api: %w", err)
 }
 
 func parseBranchPRList(out []byte) (BranchPRResult, error) {
