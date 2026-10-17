@@ -124,8 +124,29 @@ func statusColorKeys(m map[string]int) []string {
 	return keys
 }
 
+func normalizeRepoKey(repo string) string {
+	s := strings.TrimSpace(repo)
+	if s == "" {
+		return ""
+	}
+	if canonical, err := config.CanonicalRepository(s); err == nil {
+		return config.RepositoryPath(canonical)
+	}
+	lower := strings.ToLower(s)
+	lower = strings.TrimSuffix(lower, ".git")
+	lower = strings.Trim(lower, "/")
+	if rest, ok := strings.CutPrefix(lower, "github.com/"); ok {
+		return rest
+	}
+	return lower
+}
+
+func normalizeBranchKey(branch string) string {
+	return strings.TrimSpace(branch)
+}
+
 func TaskThreadKey(repo, branch string) string {
-	return strings.ToLower(strings.TrimSpace(repo)) + "#" + strings.TrimSpace(branch)
+	return normalizeRepoKey(repo) + "#" + normalizeBranchKey(branch)
 }
 
 func TaskRepoBranch(key WebhookExecutionKey, envelope WebhookEnvelope) (string, string) {
@@ -201,8 +222,8 @@ func (t *TaskThreadRegistry) Upsert(repo, branch, rootID, threadID string, statu
 		threadID = prev.ThreadID
 	}
 	rec := TaskThreadRecord{
-		Repo:          strings.TrimSpace(repo),
-		Branch:        strings.TrimSpace(branch),
+		Repo:          normalizeRepoKey(repo),
+		Branch:        normalizeBranchKey(branch),
 		RootMessageID: rootID,
 		ThreadID:      threadID,
 		Status:        status,
@@ -221,6 +242,37 @@ func (t *TaskThreadRegistry) Snapshot() map[string]TaskThreadRecord {
 		out[k] = v
 	}
 	return out
+}
+
+func (t *TaskThreadRegistry) MissDetail(repo, branch string) (string, string, string, bool, bool) {
+	tried := TaskThreadKey(repo, branch)
+	wantBranch := normalizeBranchKey(branch)
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	_, triedExists := t.records[tried]
+	if wantBranch == "" {
+		return tried, "", "", false, triedExists
+	}
+	fallbackKey := ""
+	for key, rec := range t.records {
+		if key == tried {
+			continue
+		}
+		_, keyBranch, ok := strings.Cut(key, "#")
+		if !ok || keyBranch != wantBranch {
+			continue
+		}
+		if strings.TrimSpace(rec.ThreadID) != "" {
+			return tried, key, rec.ThreadID, true, triedExists
+		}
+		if fallbackKey == "" {
+			fallbackKey = key
+		}
+	}
+	if fallbackKey != "" {
+		return tried, fallbackKey, "", true, triedExists
+	}
+	return tried, "", "", false, triedExists
 }
 
 func FormatTaskParent(repo, branch, prNumber string, status TaskStatus, icons map[string]string) string {
@@ -324,14 +376,13 @@ func (s *Server) recordTaskThread(ep config.EndpointConfig, envelope WebhookEnve
 }
 
 func MissingTaskWorkflows(endpoints []config.EndpointConfig, repo string) []string {
-	want := strings.ToLower(strings.TrimSpace(config.RepositoryPath(strings.ToLower(strings.TrimSpace(repo)))))
+	want := normalizeRepoKey(repo)
 	present := make(map[string]bool, len(RequiredTaskWorkflows))
 	for _, ep := range endpoints {
 		if ep.Repository == "" {
 			continue
 		}
-		have := strings.ToLower(strings.TrimSpace(config.RepositoryPath(strings.ToLower(strings.TrimSpace(ep.Repository)))))
-		if have != want {
+		if normalizeRepoKey(ep.Repository) != want || want == "" {
 			continue
 		}
 		present[strings.TrimSpace(strings.ToLower(ep.Workflow))] = true

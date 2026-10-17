@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/config"
 	"github.com/anggasct/occa/internal/store"
 )
@@ -227,6 +228,31 @@ func TestDispatchRequestValidate(t *testing.T) {
 	req.BaseSHA = "ABCDEF1234567"
 	if err := req.Validate(); err != nil {
 		t.Errorf("uppercase sha: %v", err)
+	}
+}
+
+func TestDispatchRecordClaimLookupBothDirections(t *testing.T) {
+	reg := NewTaskThreadRegistry()
+	task := DispatchTask{ID: "task-1", Repo: "github.com/acme/widget", Branch: "feat/hosted", SpecPath: "specs/x.md"}
+	reg.Upsert(task.Repo, task.Branch, "root-1", "thread-1", TaskDispatched)
+	summary := FormatDispatchSummary(task, nil)
+	repo, branch, taskID, ok := channel.ParseDispatchSummary(summary)
+	if !ok || taskID != "task-1" {
+		t.Fatalf("parse summary %q = %q %q %q %v", summary, repo, branch, taskID, ok)
+	}
+	if rec, ok := reg.Lookup(repo, branch); !ok || rec.ThreadID != "thread-1" {
+		t.Fatalf("host record short lookup miss: %+v %v (parsed %q %q)", rec, ok, repo, branch)
+	}
+	reg2 := NewTaskThreadRegistry()
+	task2 := DispatchTask{ID: "task-2", Repo: "acme/widget", Branch: "feat/short", SpecPath: "specs/x.md"}
+	reg2.Upsert(task2.Repo, task2.Branch, "root-2", "thread-2", TaskDispatched)
+	summary2 := FormatDispatchSummary(task2, nil)
+	repo2, branch2, _, ok := channel.ParseDispatchSummary(summary2)
+	if !ok {
+		t.Fatalf("parse short summary %q failed", summary2)
+	}
+	if rec, ok := reg2.Lookup("github.com/"+repo2, branch2); !ok || rec.ThreadID != "thread-2" {
+		t.Fatalf("short record host lookup miss: %+v %v", rec, ok)
 	}
 }
 
