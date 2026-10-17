@@ -16,6 +16,10 @@ type ThreadParentResolver interface {
 	ParentChannelOf(threadID string) (string, error)
 }
 
+type GuildResolver interface {
+	GuildIDForChannel(channelID string) (string, error)
+}
+
 type Attachment struct {
 	Filename string
 	MimeType string

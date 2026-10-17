@@ -280,7 +280,7 @@ func (s *Server) openDispatchThread(task DispatchTask, platform, channelID, root
 	}
 	rec := s.tasks.Upsert(task.Repo, task.Branch, rootID, threadID, TaskDispatched)
 	summary := FormatDispatchSummary(task, s.statusIcons)
-	buttons := TaskLinkButtons(platform, "", threadID)
+	buttons := TaskLinkButtons(platform, s.guildIDFor(platform, channelID, threadID), "", threadID)
 	buttons = append(buttons, TaskActionButtons(task.Repo, task.Branch)...)
 	if err := s.editParent(context.Background(), platform, channelID, rootID, summary, buttons); err != nil {
 		slog.Warn("webhook: dispatch parent buttons failed", "repo", task.Repo, "branch", task.Branch, "error", err)

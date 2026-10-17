@@ -197,6 +197,41 @@ func (a *Adapter) ParentChannelOf(threadID string) (string, error) {
 	return ch.ParentID, nil
 }
 
+func (a *Adapter) GuildIDForChannel(channelID string) (string, error) {
+	id := strings.TrimSpace(channelID)
+	if id == "" {
+		return "", nil
+	}
+	if strings.Contains(id, ":") {
+		parts := strings.Split(id, ":")
+		id = strings.TrimSpace(parts[len(parts)-1])
+		if id == "" {
+			return "", nil
+		}
+	}
+	if a.channelLookup == nil && a.session == nil {
+		return "", errors.New("discord: session not ready")
+	}
+	ch, err := a.lookupChannel(id)
+	if err != nil {
+		return "", err
+	}
+	if ch == nil {
+		return "", nil
+	}
+	if strings.TrimSpace(ch.GuildID) != "" {
+		return ch.GuildID, nil
+	}
+	if strings.TrimSpace(ch.ParentID) == "" {
+		return "", nil
+	}
+	parent, err := a.lookupChannel(ch.ParentID)
+	if err != nil || parent == nil {
+		return "", err
+	}
+	return parent.GuildID, nil
+}
+
 func (a *Adapter) setBotID(id string) { a.botID.Store(id) }
 
 func (a *Adapter) setAppID(id string) { a.appID.Store(id) }
@@ -1125,6 +1160,7 @@ var (
 	_ channel.MessageReplier           = (*Adapter)(nil)
 	_ channel.ThreadStarter            = (*Adapter)(nil)
 	_ channel.ThreadParentResolver     = (*Adapter)(nil)
+	_ channel.GuildResolver            = (*Adapter)(nil)
 	_ channel.ReplyContext             = (*replyContext)(nil)
 	_ channel.MessageRemover           = (*replyContext)(nil)
 	_ channel.ChatCommandSetter        = (*replyContext)(nil)

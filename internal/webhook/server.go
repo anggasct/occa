@@ -73,6 +73,8 @@ type SenderWithButtons func(ctx context.Context, platform, channelID, text strin
 
 type EditorWithButtons func(ctx context.Context, platform, channelID, messageID, text string, buttons []channel.Button) error
 
+type GuildResolver func(ctx context.Context, platform, channelID string) string
+
 type Server struct {
 	bind                  string
 	bindAddr              string
@@ -86,6 +88,7 @@ type Server struct {
 	senderButtons         SenderWithButtons
 	editorButtons         EditorWithButtons
 	threadStarter         ThreadStarter
+	guildResolver         GuildResolver
 	deliveries            DeliveryStore
 	channels              ChannelStore
 	sessions              TakeoverStore
@@ -287,6 +290,33 @@ func (s *Server) SetThreadStarter(n ThreadStarter) {
 
 func (s *Server) SetChannelStore(c ChannelStore) {
 	s.channels = c
+}
+
+func (s *Server) SetGuildResolver(fn GuildResolver) {
+	s.guildResolver = fn
+}
+
+func (s *Server) guildIDFor(platform, channelID, threadID string) string {
+	if s == nil || s.guildResolver == nil {
+		return ""
+	}
+	if !strings.EqualFold(strings.TrimSpace(platform), "discord") {
+		return ""
+	}
+	ctx := context.Background()
+	if s.shutdownCtx != nil {
+		ctx = s.shutdownCtx
+	}
+	for _, id := range []string{threadID, channelID} {
+		id = strings.TrimSpace(id)
+		if id == "" || strings.Contains(id, "://") || strings.Contains(id, ":") {
+			continue
+		}
+		if guild := strings.TrimSpace(s.guildResolver(ctx, platform, id)); guild != "" {
+			return guild
+		}
+	}
+	return ""
 }
 
 func (s *Server) sendParent(ctx context.Context, platform, channelID, text string, buttons []channel.Button) (string, error) {
