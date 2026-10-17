@@ -99,6 +99,7 @@ type Server struct {
 	dispatchMu            sync.Mutex
 	dispatchers           map[string]*dispatcher
 	dispatchWG            sync.WaitGroup
+	dispatchCreateMu      sync.Mutex
 	shutdownCtx           context.Context
 	shutdownCancel        context.CancelFunc
 	maxBodySize           int64
