@@ -253,6 +253,7 @@ func TestStatusShowsParkedSession(t *testing.T) {
 	if err := repo.SetActive(ctx, "telegram", "chat1", "", "user1", "ses-parked", 100); err != nil {
 		t.Fatalf("SetActive: %v", err)
 	}
+	r.instances.(*fakeInstanceProvider).pidSeq = 99
 	if err := repo.MarkParked(ctx, "telegram", "chat1", "", "user1", "idle"); err != nil {
 		t.Fatalf("MarkParked: %v", err)
 	}
@@ -263,6 +264,39 @@ func TestStatusShowsParkedSession(t *testing.T) {
 	}
 	if !reply.contains("ses-parked") || !reply.contains("timed out — send a message to resume") {
 		t.Fatalf("status must surface the parked session: %v", reply.texts())
+	}
+}
+
+func TestStatusDeadParkedIssuesFreshWithoutSuffix(t *testing.T) {
+	base := newResponseClient(nil)
+	client := &parkTestClient{responseClient: base, exists: false, freshID: "ses-fresh"}
+	r, st := newResponseRouter(client)
+	repo := st.SessionRepo().(*fakeSessionRepo)
+
+	ctx := context.Background()
+	if err := repo.SetActive(ctx, "telegram", "chat1", "", "user1", "ses-dead", 7); err != nil {
+		t.Fatalf("SetActive: %v", err)
+	}
+	r.instances.(*fakeInstanceProvider).pidSeq = 10
+	if err := repo.MarkParked(ctx, "telegram", "chat1", "", "user1", "idle"); err != nil {
+		t.Fatalf("MarkParked: %v", err)
+	}
+
+	reply := newResponseReply()
+	if err := r.Route(ctx, responseMessage("user1", "chat1", "/status", reply)); err != nil {
+		t.Fatalf("Route status: %v", err)
+	}
+	texts := strings.Join(reply.texts(), "\n")
+	if !strings.Contains(texts, "ses-fresh") {
+		t.Fatalf("status must name the fresh session, got: %v", reply.texts())
+	}
+	if strings.Contains(texts, "timed out") {
+		t.Fatalf("fresh session must not carry the timed-out suffix, got: %v", reply.texts())
+	}
+	if parked, _, err := repo.ParkState(ctx, "telegram", "chat1", "", "user1"); err != nil {
+		t.Fatalf("ParkState: %v", err)
+	} else if parked {
+		t.Fatal("fresh session must not stay parked")
 	}
 }
 

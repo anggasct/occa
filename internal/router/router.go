@@ -775,7 +775,6 @@ func (r *Router) handleStatus(ctx context.Context, msg channel.IncomingMessage, 
 	start := time.Now()
 	resolver := relay.NewSessionResolver(r.store.SessionRepo(), inst.Client())
 	threadID, userID := conversationKey(msg)
-	parkedBefore, _, _ := r.store.SessionRepo().ParkState(ctx, msg.Platform, msg.ChannelID, threadID, userID)
 	sessionID, err := resolver.Resolve(ctx, msg.Platform, msg.ChannelID, threadID, userID, inst.PID())
 	if err != nil {
 		return "⚠️ Agent unreachable", nil
@@ -885,10 +884,7 @@ func (r *Router) handleStatus(ctx context.Context, msg channel.IncomingMessage, 
 			}
 		}
 	}
-	parked := parkedBefore
-	if !parked {
-		parked, _, _ = r.store.SessionRepo().ParkState(ctx, msg.Platform, msg.ChannelID, threadID, userID)
-	}
+	parked, _, _ := r.store.SessionRepo().ParkState(ctx, msg.Platform, msg.ChannelID, threadID, userID)
 	if parked {
 		sessionLine += " (timed out — send a message to resume)"
 	}
