@@ -539,7 +539,7 @@ func TestWebhookExecutorWithThread(t *testing.T) {
 		if strings.HasPrefix(text, "📌 STATUS: ") {
 			foundStatus = true
 		}
-		if text == "🔍 REVIEW mulai" {
+		if text == "🔍 REVIEW started" {
 			foundBanner = true
 		}
 	}
