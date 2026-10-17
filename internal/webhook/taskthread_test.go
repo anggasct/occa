@@ -163,7 +163,7 @@ func TestTaskThreadKeyHostAgnosticBothDirections(t *testing.T) {
 func TestMissDetailSameBranchHint(t *testing.T) {
 	reg := NewTaskThreadRegistry()
 	reg.Upsert("acme/widget", "feat/x", "root-1", "thread-1", TaskDispatched)
-	tried, sameKey, sameThread, hasSame, triedExists := reg.MissDetail("acme/widget", "feat/none")
+	tried, sameKey, _, hasSame, triedExists := reg.MissDetail("acme/widget", "feat/none")
 	if hasSame {
 		t.Errorf("different branch must not hint: %q %q", tried, sameKey)
 	}
@@ -173,7 +173,7 @@ func TestMissDetailSameBranchHint(t *testing.T) {
 	if triedExists {
 		t.Errorf("missing key must report triedExists=false")
 	}
-	tried, sameKey, sameThread, hasSame, _ = reg.MissDetail("other/widget", "feat/x")
+	tried, sameKey, sameThread, hasSame, _ := reg.MissDetail("other/widget", "feat/x")
 	if !hasSame || sameKey != "acme/widget#feat/x" || sameThread != "thread-1" {
 		t.Errorf("same-branch hint = %q %q %q %v, want acme/widget#feat/x thread-1 true", tried, sameKey, sameThread, hasSame)
 	}
