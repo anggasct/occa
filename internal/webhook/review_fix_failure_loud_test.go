@@ -170,11 +170,17 @@ func TestConflictingDirtyRefusesLoud(t *testing.T) {
 		}
 		text := cap.notify[i]
 		hasAll := true
-		for _, want := range []string{"acme/widget", "feat/x", "del-dirty-1", "workspace dirty", "Action:"} {
+		for _, want := range []string{"acme/widget", "feat/x", "workspace dirty", "Action:"} {
 			if !strings.Contains(text, want) {
 				hasAll = false
 				break
 			}
+		}
+		if strings.Contains(text, "Delivery:") || strings.Contains(text, "Model:") || strings.Contains(text, "━━━") {
+			continue
+		}
+		if strings.Contains(text, "del-dirty-1") {
+			continue
 		}
 		if !hasAll || !strings.Contains(text, "❌") {
 			continue

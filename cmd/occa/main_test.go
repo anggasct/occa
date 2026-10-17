@@ -238,6 +238,8 @@ type mockDiscordChannel struct {
 	startThreadErr error
 	nextMsgID      string
 	nextThreadID   string
+	sentButtons    [][]channel.Button
+	editedButtons  [][]channel.Button
 }
 
 type mockMessage struct {
@@ -270,6 +272,18 @@ func (m *mockDiscordChannel) SendNotification(channelID, text string) (string, e
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sentMessages = append(m.sentMessages, mockMessage{channelID, text})
+	m.sentButtons = append(m.sentButtons, nil)
+	if m.nextMsgID != "" {
+		return m.nextMsgID, nil
+	}
+	return fmt.Sprintf("msg-%d", len(m.sentMessages)), nil
+}
+func (m *mockDiscordChannel) SendNotificationWithButtons(channelID, text string, buttons []channel.Button) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sentMessages = append(m.sentMessages, mockMessage{channelID, text})
+	cp := append([]channel.Button(nil), buttons...)
+	m.sentButtons = append(m.sentButtons, cp)
 	if m.nextMsgID != "" {
 		return m.nextMsgID, nil
 	}
@@ -279,6 +293,15 @@ func (m *mockDiscordChannel) EditNotification(channelID, messageID, text string)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.editedMessages = append(m.editedMessages, mockEdit{channelID, messageID, text})
+	m.editedButtons = append(m.editedButtons, nil)
+	return nil
+}
+func (m *mockDiscordChannel) EditNotificationWithButtons(channelID, messageID, text string, buttons []channel.Button) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.editedMessages = append(m.editedMessages, mockEdit{channelID, messageID, text})
+	cp := append([]channel.Button(nil), buttons...)
+	m.editedButtons = append(m.editedButtons, cp)
 	return nil
 }
 func (m *mockDiscordChannel) StartThread(channelID, messageID, name string) (string, error) {
@@ -451,12 +474,13 @@ func TestWebhookExecutorWithThread(t *testing.T) {
 
 	agentClient := &mockRelayClient{events: events}
 	manager := &mockAgentManager{client: agentClient}
-	exec := newWebhookExecutor([]channel.Channel{discordCh}, manager, mockChannelStore{}, "/tmp", relay.Config{NoEventTimeout: 15 * time.Minute, WebhookAbortTimeout: 5 * time.Second, VerifyTimeout: 15 * time.Second})
+	reg := webhook.NewTaskThreadRegistry()
+	exec := newWebhookExecutor([]channel.Channel{discordCh}, manager, mockChannelStore{}, "/tmp", relay.Config{NoEventTimeout: 15 * time.Minute, WebhookAbortTimeout: 5 * time.Second, VerifyTimeout: 15 * time.Second}, webhook.TaskOptions{Registry: reg})
 
 	workCtx := &webhook.WebhookWorkContext{
 		Thread:     true,
 		Workflow:   "github_reviewer",
-		Envelope:   webhook.WebhookEnvelope{"pr_number": "42", "head_branch": "feat/thread"},
+		Envelope:   webhook.WebhookEnvelope{"repository": "acme/widget", "pr_number": "42", "head_branch": "feat/thread", "pr_url": "https://github.com/acme/widget/pull/42"},
 		DeliveryID: "del-123",
 	}
 
@@ -497,7 +521,7 @@ func TestWebhookExecutorWithThread(t *testing.T) {
 		t.Fatalf("mainMsgs = %+v, want single RUNNING root card", mainMsgs)
 	}
 
-	var foundToolBubble, foundOutput, foundTerminalCard bool
+	var foundToolBubble, foundOutput, foundTerminalSlim, foundStatus, foundBanner bool
 	for _, text := range threadMsgs {
 		if strings.Contains(text, "⚙️") {
 			foundToolBubble = true
@@ -505,8 +529,18 @@ func TestWebhookExecutorWithThread(t *testing.T) {
 		if strings.Contains(text, "Analysis output line.") {
 			foundOutput = true
 		}
-		if strings.Contains(text, "Status: ✅ COMPLETED") {
-			foundTerminalCard = true
+		if strings.Contains(text, "acme/widget#feat/thread") && strings.Contains(text, "[Open PR]") {
+			if strings.Contains(text, "Status:") || strings.Contains(text, "Delivery:") || strings.Contains(text, "Model:") || strings.Contains(text, "━━━") {
+				t.Errorf("thread slim must not leak Status/Delivery/Model/separator: %q", text)
+			} else {
+				foundTerminalSlim = true
+			}
+		}
+		if strings.HasPrefix(text, "📌 STATUS: ") {
+			foundStatus = true
+		}
+		if text == "🔍 REVIEW mulai" {
+			foundBanner = true
 		}
 	}
 
@@ -516,14 +550,48 @@ func TestWebhookExecutorWithThread(t *testing.T) {
 	if !foundOutput {
 		t.Error("missing final agent output in thread")
 	}
-	if !foundTerminalCard {
-		t.Error("missing terminal status card in thread")
+	if !foundTerminalSlim {
+		t.Error("missing slim terminal card with gate outcome in thread")
+	}
+	if !foundStatus {
+		t.Error("missing pinned STATUS in thread")
+	}
+	if !foundBanner {
+		t.Error("missing phase banner in thread")
+	}
+	for i, m := range discordCh.sentMessages {
+		if m.channelID == "thread-999" && len(discordCh.sentButtons[i]) != 0 {
+			t.Errorf("thread message must post with zero components, got %+v", discordCh.sentButtons[i])
+		}
+	}
+	foundParentButtons := false
+	for i, m := range discordCh.sentMessages {
+		if m.channelID == "chan-main" && len(discordCh.sentButtons[i]) > 0 {
+			foundParentButtons = true
+		}
+	}
+	for _, buttons := range discordCh.editedButtons {
+		if len(buttons) > 0 {
+			foundParentButtons = true
+		}
+	}
+	if !foundParentButtons {
+		t.Error("parent must keep action buttons, got none on parent send/edit")
 	}
 
 	if len(discordCh.editedMessages) == 0 {
 		t.Error("expected Streamer to edit working message with tool rollup")
-	} else if !strings.Contains(discordCh.editedMessages[0].text, "6 tool calls") {
-		t.Errorf("edited message does not contain tool rollup: %+v", discordCh.editedMessages[0])
+	} else {
+		foundRollup := false
+		for _, e := range discordCh.editedMessages {
+			if strings.Contains(e.text, "6 tool calls") {
+				foundRollup = true
+				break
+			}
+		}
+		if !foundRollup {
+			t.Errorf("edited messages do not contain tool rollup: %+v", discordCh.editedMessages)
+		}
 	}
 }
 
@@ -724,8 +792,11 @@ func TestWebhookExecutorTelegramTopicDispatch(t *testing.T) {
 	if terminalMsg.channelID != wantTarget {
 		t.Errorf("terminalMsg channelID = %q, want %q", terminalMsg.channelID, wantTarget)
 	}
-	if !strings.Contains(terminalMsg.text, "Status: ✅ COMPLETED") {
-		t.Errorf("terminalMsg missing COMPLETED status: %s", terminalMsg.text)
+	if !strings.Contains(terminalMsg.text, "feat/topic") || !strings.Contains(terminalMsg.text, "PR #99") {
+		t.Errorf("terminalMsg missing slim thread card, got: %s", terminalMsg.text)
+	}
+	if strings.Contains(terminalMsg.text, "Status:") || strings.Contains(terminalMsg.text, "Delivery:") || strings.Contains(terminalMsg.text, "Model:") || strings.Contains(terminalMsg.text, "━━━") {
+		t.Errorf("thread slim must not leak Status/Delivery/Model/separator: %s", terminalMsg.text)
 	}
 }
 

@@ -87,6 +87,9 @@ type Server struct {
 	sender                Sender
 	senderButtons         SenderWithButtons
 	editorButtons         EditorWithButtons
+	rawNotifier           Notifier
+	rawSender             Sender
+	rawEditor             Editor
 	threadStarter         ThreadStarter
 	guildResolver         GuildResolver
 	deliveries            DeliveryStore
@@ -240,8 +243,10 @@ func (s *Server) SetSessionStore(st TakeoverStore) {
 func (s *Server) SetNotifier(n Notifier) {
 	if n == nil {
 		s.notifier = nil
+		s.rawNotifier = nil
 		return
 	}
+	s.rawNotifier = n
 	s.notifier = func(ctx context.Context, platform, channelID, text string) error {
 		return n(ctx, platform, channelID, FormatWebhookMessage(text))
 	}
@@ -250,8 +255,10 @@ func (s *Server) SetNotifier(n Notifier) {
 func (s *Server) SetEditor(e Editor) {
 	if e == nil {
 		s.editor = nil
+		s.rawEditor = nil
 		return
 	}
+	s.rawEditor = e
 	s.editor = func(ctx context.Context, platform, channelID, messageID, text string) error {
 		return e(ctx, platform, channelID, messageID, FormatWebhookMessage(text))
 	}
@@ -260,8 +267,10 @@ func (s *Server) SetEditor(e Editor) {
 func (s *Server) SetSender(n Sender) {
 	if n == nil {
 		s.sender = nil
+		s.rawSender = nil
 		return
 	}
+	s.rawSender = n
 	s.sender = func(ctx context.Context, platform, channelID, text string) (string, error) {
 		return n(ctx, platform, channelID, FormatWebhookMessage(text))
 	}
@@ -350,6 +359,55 @@ func (s *Server) editParent(ctx context.Context, platform, channelID, messageID,
 		return nil
 	}
 	return s.editor(ctx, platform, channelID, messageID, text)
+}
+
+func (s *Server) notifyThread(ctx context.Context, platform, channelID, text string) error {
+	if s.rawNotifier != nil {
+		return s.rawNotifier(ctx, platform, channelID, text)
+	}
+	if s.notifier == nil {
+		return nil
+	}
+	return s.notifier(ctx, platform, channelID, strings.ReplaceAll(text, webhookMessageSeparator, ""))
+}
+
+func (s *Server) sendThread(ctx context.Context, platform, channelID, text string) (string, error) {
+	if s.rawSender != nil {
+		return s.rawSender(ctx, platform, channelID, text)
+	}
+	if s.rawNotifier != nil {
+		if err := s.rawNotifier(ctx, platform, channelID, text); err != nil {
+			return "", err
+		}
+		return "", nil
+	}
+	if s.notifier == nil {
+		return "", nil
+	}
+	return "", s.notifier(ctx, platform, channelID, text)
+}
+
+func (s *Server) editThread(ctx context.Context, platform, channelID, messageID, text string) error {
+	if s.rawEditor != nil {
+		return s.rawEditor(ctx, platform, channelID, messageID, text)
+	}
+	if s.editor == nil {
+		return nil
+	}
+	return s.editor(ctx, platform, channelID, messageID, text)
+}
+
+func threadTargetFor(platform, channelID, threadID string) string {
+	if threadID == "" {
+		return channelID
+	}
+	if platform == "telegram" && !strings.Contains(channelID, ":") {
+		return channelID + ":" + threadID
+	}
+	if platform == "discord" {
+		return threadID
+	}
+	return channelID
 }
 
 func (s *Server) SetStallFreshness(d time.Duration) {
@@ -1077,21 +1135,19 @@ func (s *Server) failWorkspace(item dispatchItem, receipt *store.WebhookDelivery
 	if threadID == "" {
 		return
 	}
-	elapsed := time.Duration(0)
-	card := terminalRootCard(envelope, item.ep.Workflow, "FAILED", summary, threadID, item.ep.Platform, elapsed)
-	card = WithTaskHeader(card, envelope, item.ep.Workflow, TaskFailed, s.statusIcons)
-	card = redactAuditSummary(card, item.ep.Secret)
-	target := threadID
-	if item.ep.Platform == "telegram" && !strings.Contains(item.ep.ChannelID, ":") {
-		target = item.ep.ChannelID + ":" + threadID
-	} else if item.ep.Platform != "discord" {
-		target = auditTargetChannel(item.ep.Platform, item.ep.ChannelID, threadID)
+	slim := redactAuditSummary(FormatThreadSlimCard(envelope, item.ep.Workflow, TaskFailed, s.statusIcons), item.ep.Secret)
+	target := threadTargetFor(item.ep.Platform, item.ep.ChannelID, threadID)
+	if repo, branch := TaskRepoBranch(WebhookExecutionKey{}, envelope); repo != "" && branch != "" {
+		s.postPhaseBannerIfChanged(context.Background(), item.ep.Platform, item.ep.ChannelID, threadID, repo, branch, item.ep.Workflow, summary)
+		s.ensureThreadStatus(context.Background(), item.ep.Platform, item.ep.ChannelID, threadID, repo, branch, item.ep.Workflow, item.ep.Workflow+" run "+shortDeliveryID(item.deliveryID), FormatGateOutcome(envelope, item.ep.Workflow, "FAILED"))
 	}
-	if s.notifier == nil {
-		slog.Info("webhook: workspace failure thread card skipped, no notifier", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "thread_id", threadID)
+	if strings.TrimSpace(summary) != "" {
+		slim = strings.TrimSpace(slim) + "\n" + strings.TrimSpace(summary)
+	}
+	if strings.TrimSpace(slim) == "" {
 		return
 	}
-	if nErr := s.notifier(context.Background(), item.ep.Platform, target, card); nErr != nil {
+	if nErr := s.notifyThread(context.Background(), item.ep.Platform, target, slim); nErr != nil {
 		slog.Warn("webhook: workspace failure thread card failed", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "thread_id", threadID, "error", nErr)
 	}
 }

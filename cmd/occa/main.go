@@ -686,6 +686,73 @@ func guildIDForButtons(ch channel.Channel, channelID, threadID string) string {
 	return ""
 }
 
+func refreshThreadBannerAndStatus(ch channel.Channel, reg *webhook.TaskThreadRegistry, platform, channelID, threadID, repo, branch string, workCtx *webhook.WebhookWorkContext, lastEvent string) {
+	if reg == nil || strings.TrimSpace(threadID) == "" || strings.TrimSpace(repo) == "" || strings.TrimSpace(branch) == "" {
+		return
+	}
+	workflow := ""
+	deliveryID := ""
+	if workCtx != nil {
+		workflow = workCtx.Workflow
+		deliveryID = workCtx.DeliveryID
+	}
+	phase, icon := webhook.ThreadPhaseForWorkflow(workflow)
+	if rec, ok := reg.Lookup(repo, branch); ok {
+		prev := strings.TrimSpace(rec.Phase)
+		if prev == "" || prev != phase {
+			banner := webhook.FormatPhaseBanner(workflow, lastEvent)
+			target := threadID
+			if platform == "telegram" && !strings.Contains(channelID, ":") {
+				target = channelID + ":" + threadID
+			}
+			if strings.TrimSpace(banner) != "" {
+				_, _ = notifySend(ch, target, banner)
+			}
+		}
+	} else {
+		banner := webhook.FormatPhaseBanner(workflow, lastEvent)
+		target := threadID
+		if platform == "telegram" && !strings.Contains(channelID, ":") {
+			target = channelID + ":" + threadID
+		}
+		if strings.TrimSpace(banner) != "" {
+			_, _ = notifySend(ch, target, banner)
+		}
+	}
+	reg.SetPhase(repo, branch, phase)
+	stepRun := strings.TrimSpace(workflow)
+	if stepRun == "" {
+		stepRun = "run"
+	}
+	if len(strings.TrimSpace(deliveryID)) >= 8 {
+		stepRun += " run " + strings.TrimSpace(deliveryID)[:8]
+	} else if strings.TrimSpace(deliveryID) != "" {
+		stepRun += " run " + strings.TrimSpace(deliveryID)
+	}
+	next := ""
+	switch phase {
+	case "REVIEW":
+		next = "fix or merge gate"
+	case "FIX":
+		next = "push + re-review"
+	case "MERGE":
+		next = "merge or fix"
+	}
+	text := webhook.ThreadStatusText(phase, icon, stepRun, lastEvent, next)
+	target := threadID
+	if platform == "telegram" && !strings.Contains(channelID, ":") {
+		target = channelID + ":" + threadID
+	}
+	if rec, ok := reg.Lookup(repo, branch); ok && strings.TrimSpace(rec.StatusMessageID) != "" {
+		if err := notifyEdit(ch, target, strings.TrimSpace(rec.StatusMessageID), text); err == nil {
+			return
+		}
+	}
+	if msgID, err := notifySend(ch, target, text); err == nil && strings.TrimSpace(msgID) != "" {
+		reg.SetStatusMessage(repo, branch, msgID)
+	}
+}
+
 func notifyReply(ch channel.Channel, channelID, replyToMessageID, text string) (string, error) {
 	chunks, err := outboundRenderer.Render(text, render.PlatformFor(ch.Name()))
 	if err != nil || len(chunks) == 0 {
@@ -789,6 +856,9 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 									slog.Warn("webhook: failed to edit task parent, continuing in thread", "channel_id", channelID, "error", err)
 								}
 							}
+							if strings.TrimSpace(workCtx.ThreadID) != "" {
+								refreshThreadBannerAndStatus(ch, taskOpts.Registry, platform, channelID, workCtx.ThreadID, repo, branch, workCtx, "run started")
+							}
 						}
 					}
 				}
@@ -835,6 +905,11 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 									taskOpts.Registry.Upsert(repo, branch, rootMsgID, threadID, taskStatus)
 									threadButtons := webhook.TaskParentButtons(platform, guildIDForButtons(ch, channelID, threadID), workCtx.Envelope, repo, branch, threadID)
 									_ = notifyEditWithButtons(ch, channelID, rootMsgID, webhook.FormatWebhookMessage(rootCard), threadButtons)
+									opener := webhook.FormatThreadOpener(workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons)
+									if strings.TrimSpace(opener) != "" {
+										_, _ = notifySend(ch, targetChannelID, opener)
+									}
+									refreshThreadBannerAndStatus(ch, taskOpts.Registry, platform, channelID, threadID, repo, branch, workCtx, "dispatched")
 								}
 							}
 						}
@@ -913,16 +988,22 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 
 				if err != nil {
 					if workCtx.RootMessageID != "" {
-						baseCard := webhook.FormatTerminalCard(workCtx.Envelope, workCtx.Workflow, "FAILED", err.Error(), workCtx.ThreadID, platform, elapsed)
 						if workCtx.ThreadID != "" {
-							terminalCard := webhook.WithTaskHeaderWithButtons(baseCard, workCtx.Envelope, workCtx.Workflow, webhook.TaskFailed, taskOpts.Icons, platform, nil)
-							_, _ = notifySend(ch, targetChannelID, webhook.FormatWebhookMessage(terminalCard))
+							slim := webhook.FormatThreadSlimCard(workCtx.Envelope, workCtx.Workflow, webhook.TaskFailed, taskOpts.Icons)
+							_, _ = notifySend(ch, targetChannelID, slim)
+							if taskOpts.Registry != nil {
+								if repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope); repo != "" && branch != "" {
+									refreshThreadBannerAndStatus(ch, taskOpts.Registry, platform, channelID, workCtx.ThreadID, repo, branch, workCtx, webhook.FormatGateOutcome(workCtx.Envelope, workCtx.Workflow, "FAILED"))
+								}
+							}
 						} else if platform == "discord" {
+							baseCard := webhook.FormatTerminalCard(workCtx.Envelope, workCtx.Workflow, "FAILED", err.Error(), workCtx.ThreadID, platform, elapsed)
 							terminalCard := webhook.WithTaskHeader(baseCard, workCtx.Envelope, workCtx.Workflow, webhook.TaskFailed, taskOpts.Icons)
 							if editErr := notifyEdit(ch, channelID, workCtx.RootMessageID, webhook.FormatWebhookMessage(terminalCard)); editErr != nil {
 								slog.Warn("webhook: failed to update task parent with failure", "channel_id", channelID, "error", editErr)
 							}
 						} else {
+							baseCard := webhook.FormatTerminalCard(workCtx.Envelope, workCtx.Workflow, "FAILED", err.Error(), workCtx.ThreadID, platform, elapsed)
 							terminalCard := webhook.WithTaskHeaderWithButtons(baseCard, workCtx.Envelope, workCtx.Workflow, webhook.TaskFailed, taskOpts.Icons, platform, nil)
 							_, _ = notifySend(ch, targetChannelID, webhook.FormatWebhookMessage(terminalCard))
 						}
@@ -946,16 +1027,22 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 				}
 
 				if workCtx.RootMessageID != "" {
-					baseCard := webhook.FormatTerminalCard(workCtx.Envelope, workCtx.Workflow, "COMPLETED", "", workCtx.ThreadID, platform, elapsed)
 					if workCtx.ThreadID != "" {
-						terminalCard := webhook.WithTaskHeaderWithButtons(baseCard, workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons, platform, nil)
-						_, _ = notifySend(ch, targetChannelID, webhook.FormatWebhookMessage(terminalCard))
+						slim := webhook.FormatThreadSlimCard(workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons)
+						_, _ = notifySend(ch, targetChannelID, slim)
+						if taskOpts.Registry != nil {
+							if repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope); repo != "" && branch != "" {
+								refreshThreadBannerAndStatus(ch, taskOpts.Registry, platform, channelID, workCtx.ThreadID, repo, branch, workCtx, webhook.FormatGateOutcome(workCtx.Envelope, workCtx.Workflow, "COMPLETED"))
+							}
+						}
 					} else if platform == "discord" {
+						baseCard := webhook.FormatTerminalCard(workCtx.Envelope, workCtx.Workflow, "COMPLETED", "", workCtx.ThreadID, platform, elapsed)
 						terminalCard := webhook.WithTaskHeader(baseCard, workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons)
 						if editErr := notifyEdit(ch, channelID, workCtx.RootMessageID, webhook.FormatWebhookMessage(terminalCard)); editErr != nil {
 							slog.Warn("webhook: failed to update task parent with completion", "channel_id", channelID, "error", editErr)
 						}
 					} else {
+						baseCard := webhook.FormatTerminalCard(workCtx.Envelope, workCtx.Workflow, "COMPLETED", "", workCtx.ThreadID, platform, elapsed)
 						terminalCard := webhook.WithTaskHeaderWithButtons(baseCard, workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons, platform, nil)
 						_, _ = notifySend(ch, targetChannelID, webhook.FormatWebhookMessage(terminalCard))
 					}
