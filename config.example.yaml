@@ -205,6 +205,8 @@ runtime:
     discord:
       download_timeout: 60s # Discord attachment downloads
       max_download_size: 10MB # largest Discord download accepted
+      task_thread_poll_interval: 300ms # wait between task-thread registry polls on claim
+      task_thread_poll_attempts: 10 # registry polls before giving up on an in-flight dispatch thread
     telegram:
       download_timeout: 60s # Telegram file downloads
       max_download_size: 10MB # largest Telegram download accepted

@@ -70,8 +70,10 @@ type ChannelsRuntime struct {
 }
 
 type DiscordChannelRuntime struct {
-	DownloadTimeout time.Duration `yaml:"download_timeout"`
-	MaxDownloadSize byteSize      `yaml:"max_download_size"`
+	DownloadTimeout        time.Duration `yaml:"download_timeout"`
+	MaxDownloadSize        byteSize      `yaml:"max_download_size"`
+	TaskThreadPollInterval time.Duration `yaml:"task_thread_poll_interval"`
+	TaskThreadPollAttempts int           `yaml:"task_thread_poll_attempts"`
 }
 
 type TelegramChannelRuntime struct {
@@ -256,6 +258,12 @@ func validateRuntime(rt RuntimeConfig) (RuntimeConfig, error) {
 	}
 	if ch.Discord.MaxDownloadSize <= 0 {
 		return RuntimeConfig{}, fmt.Errorf("config: runtime.channels.discord.max_download_size is required")
+	}
+	if err := positive("channels.discord", "task_thread_poll_interval", ch.Discord.TaskThreadPollInterval); err != nil {
+		return RuntimeConfig{}, fmt.Errorf("config: runtime.channels.discord.task_thread_poll_interval is required")
+	}
+	if err := count("channels.discord", "task_thread_poll_attempts", ch.Discord.TaskThreadPollAttempts); err != nil {
+		return RuntimeConfig{}, fmt.Errorf("config: runtime.channels.discord.task_thread_poll_attempts is required")
 	}
 	if err := positive("channels.telegram", "download_timeout", ch.Telegram.DownloadTimeout); err != nil {
 		return RuntimeConfig{}, fmt.Errorf("config: runtime.channels.telegram.download_timeout is required")
