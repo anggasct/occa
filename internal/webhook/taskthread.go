@@ -142,7 +142,7 @@ func normalizeRepoKey(repo string) string {
 }
 
 func normalizeBranchKey(branch string) string {
-	return strings.TrimSpace(branch)
+	return strings.ToLower(strings.TrimSpace(branch))
 }
 
 func TaskThreadKey(repo, branch string) string {
