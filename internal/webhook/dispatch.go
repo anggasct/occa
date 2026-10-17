@@ -263,13 +263,13 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	}
 	task := s.dispatchTasks.Create(req)
 	if s.tasks != nil {
-		s.tasks.UpsertWithSpec(task.Repo, task.Branch, "", "", TaskDispatched, task.SpecPath)
+		s.tasks.ReserveDispatch(task.Repo, task.Branch, TaskDispatched, task.SpecPath)
 	}
 	platform, channelID, rootID, err := s.postDispatchSummary(task)
 	if err != nil {
 		s.dispatchTasks.Delete(task.ID)
 		if s.tasks != nil {
-			s.tasks.UpsertWithSpec(task.Repo, task.Branch, "", "", TaskFailed, task.SpecPath)
+			s.tasks.ReserveDispatch(task.Repo, task.Branch, TaskFailed, task.SpecPath)
 		}
 		s.dispatchCreateMu.Unlock()
 		slog.Error("webhook: dispatch parent post failed", "repo", task.Repo, "branch", task.Branch, "task_id", task.ID, "error", err)
@@ -312,11 +312,11 @@ func (s *Server) handleRedispatch(w http.ResponseWriter, r *http.Request, req Di
 			req.SpecPath = orig
 		}
 		task := s.dispatchTasks.Create(req)
-		s.tasks.UpsertWithSpec(task.Repo, task.Branch, "", "", TaskDispatched, task.SpecPath)
+		s.tasks.ReserveDispatch(task.Repo, task.Branch, TaskDispatched, task.SpecPath)
 		platform, channelID, rootID, err := s.postDispatchSummary(task)
 		if err != nil {
 			s.dispatchTasks.Delete(task.ID)
-			s.tasks.UpsertWithSpec(task.Repo, task.Branch, "", "", TaskFailed, task.SpecPath)
+			s.tasks.ReserveDispatch(task.Repo, task.Branch, TaskFailed, task.SpecPath)
 			slog.Error("webhook: dispatch parent post failed", "repo", task.Repo, "branch", task.Branch, "task_id", task.ID, "error", err)
 			writeDispatchJSON(w, http.StatusBadGateway, map[string]string{"error": "dispatch parent post failed: " + err.Error()})
 			return true

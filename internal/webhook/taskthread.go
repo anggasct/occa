@@ -277,6 +277,32 @@ func (t *TaskThreadRegistry) UpsertWithSpec(repo, branch, rootID, threadID strin
 	return rec
 }
 
+func (t *TaskThreadRegistry) ReserveDispatch(repo, branch string, status TaskStatus, specPath string) TaskThreadRecord {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.records == nil {
+		t.records = make(map[string]TaskThreadRecord)
+	}
+	key := TaskThreadKey(repo, branch)
+	prev := t.records[key]
+	specPath = strings.TrimSpace(specPath)
+	if specPath == "" {
+		specPath = strings.TrimSpace(prev.SpecPath)
+	}
+	rec := TaskThreadRecord{
+		Repo:          normalizeRepoKey(repo),
+		Branch:        normalizeBranchKey(branch),
+		RootMessageID: "",
+		ThreadID:      "",
+		Status:        status,
+		Color:         TaskColor(status, t.colors),
+		UpdatedAt:     time.Now(),
+		SpecPath:      specPath,
+	}
+	t.records[key] = rec
+	return rec
+}
+
 func (t *TaskThreadRegistry) Snapshot() map[string]TaskThreadRecord {
 	t.mu.RLock()
 	defer t.mu.RUnlock()

@@ -47,7 +47,7 @@ func TestResolveForDeliveryEnrichedAndDirectIdentical(t *testing.T) {
 	reg := NewTaskThreadRegistry()
 	reg.Upsert("acme/widget", "feat/x", "root-1", "thread-1", TaskDispatched)
 	direct := WebhookExecutionKey{Repository: "acme/widget", HeadRepository: "acme/widget", Branch: "feat/x"}
-	enriched := WebhookExecutionKey{Repository: "acme/widget", HeadRepository: "acme/widget", Branch: "feat/x"}
+	enriched := WebhookExecutionKey{Repository: "acme/widget", HeadRepository: "acme/widget", Branch: ""}
 	envDirect := WebhookEnvelope{"repository": "acme/widget", "head_branch": "feat/x"}
 	envEnriched := WebhookEnvelope{"repository": "acme/widget", "head_branch": "feat/x"}
 	if TaskThreadKeyForDelivery(direct, envDirect) != TaskThreadKeyForDelivery(enriched, envEnriched) {
@@ -125,5 +125,37 @@ func TestUpsertThenPollNeverBindsStale(t *testing.T) {
 	rec, ok = reg.ResolveTaskThread("acme/widget", "feat/x", "claim")
 	if !ok || rec.ThreadID != "thread-new" {
 		t.Fatalf("after fresh thread, poll = %+v %v, want thread-new", rec, ok)
+	}
+}
+
+func TestReserveDispatchClearsStaleThread(t *testing.T) {
+	reg := NewTaskThreadRegistry()
+	reg.Upsert("acme/widget", "feat/x", "root-old", "thread-old", TaskDispatched)
+	reg.ReserveDispatch("acme/widget", "feat/x", TaskDispatched, "spec.md")
+	rec, ok := reg.ResolveTaskThread("acme/widget", "feat/x", "claim")
+	if !ok {
+		t.Fatal("reserved record must exist")
+	}
+	if rec.ThreadID != "" {
+		t.Fatalf("empty-root reservation must clear stale thread, got %+v", rec)
+	}
+	if rec.RootMessageID != "" {
+		t.Fatalf("empty-root reservation must clear stale root, got %+v", rec)
+	}
+	if rec.SpecPath != "spec.md" {
+		t.Fatalf("reservation spec = %q, want spec.md", rec.SpecPath)
+	}
+	preserved := reg.Upsert("acme/widget", "feat/x", "", "", TaskClaimed)
+	if preserved.ThreadID != "" {
+		t.Fatalf("status-only touch on empty reservation must stay empty, got %+v", preserved)
+	}
+	reg.Upsert("acme/widget", "feat/x", "root-new", "thread-new", TaskDispatched)
+	after, ok := reg.ResolveTaskThread("acme/widget", "feat/x", "claim")
+	if !ok || after.ThreadID != "thread-new" || after.RootMessageID != "root-new" {
+		t.Fatalf("after fresh post, poll = %+v %v, want root-new/thread-new", after, ok)
+	}
+	claimed := reg.Upsert("acme/widget", "feat/x", "", "", TaskClaimed)
+	if claimed.ThreadID != "thread-new" || claimed.RootMessageID != "root-new" {
+		t.Fatalf("status-only touch must preserve fresh ids, got %+v", claimed)
 	}
 }
