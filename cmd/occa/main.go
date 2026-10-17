@@ -415,14 +415,14 @@ func main() {
 				pollInterval := cfg.Runtime.Channels.Discord.TaskThreadPollInterval
 				pollAttempts := cfg.Runtime.Channels.Discord.TaskThreadPollAttempts
 				da.SetTaskThreadLookup(func(repo, branch string) (string, bool) {
-					if rec, ok := registry.Lookup(repo, branch); ok && strings.TrimSpace(rec.ThreadID) != "" {
+					if rec, ok := registry.ResolveTaskThread(repo, branch, "claim"); ok && strings.TrimSpace(rec.ThreadID) != "" {
 						return rec.ThreadID, true
 					} else if !ok {
 						return "", false
 					}
 					for i := 0; i < pollAttempts; i++ {
 						time.Sleep(pollInterval)
-						if rec, ok := registry.Lookup(repo, branch); ok && strings.TrimSpace(rec.ThreadID) != "" {
+						if rec, ok := registry.ResolveTaskThread(repo, branch, "claim"); ok && strings.TrimSpace(rec.ThreadID) != "" {
 							return rec.ThreadID, true
 						}
 					}
@@ -746,7 +746,16 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 
 				if taskOpts.Registry != nil {
 					if repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope); repo != "" && branch != "" {
-						if rec, ok := taskOpts.Registry.Lookup(repo, branch); ok {
+						caller := workCtx.Workflow
+						if caller == "" {
+							caller = "executor"
+						}
+						if caller == "fix" {
+							if evt, _ := workCtx.Envelope["event_type"].(string); evt == "issue_comment" {
+								caller = "review-fix"
+							}
+						}
+						if _, _, rec, ok := taskOpts.Registry.ResolveForDelivery(workCtx.Key, workCtx.Envelope, caller); ok {
 							if rec.ThreadID != "" {
 								workCtx.ThreadID = rec.ThreadID
 							}
@@ -760,9 +769,6 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 									targetChannelID = targetChannelID + ":" + rec.ThreadID
 								}
 							}
-						} else {
-							tried, sameKey, sameThread, hasSame, triedExists := taskOpts.Registry.MissDetail(repo, branch)
-							slog.Warn("webhook: executor thread lookup miss", "repo", repo, "branch", branch, "tried_key", tried, "same_branch_key", sameKey, "same_branch_thread", sameThread, "has_same_branch", hasSame, "tried_exists", triedExists, "platform", platform, "channel_id", channelID, "delivery_id", workCtx.DeliveryID)
 						}
 					}
 				}
@@ -775,7 +781,7 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 				reused := workCtx.RootMessageID != ""
 				if reused && taskOpts.Registry != nil {
 					if repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope); repo != "" && branch != "" {
-						if _, ok := taskOpts.Registry.Lookup(repo, branch); ok {
+						if _, ok := taskOpts.Registry.ResolveTaskThread(repo, branch, "executor"); ok {
 							buttons := webhook.TaskParentButtons(platform, guildIDForButtons(ch, channelID, workCtx.ThreadID), workCtx.Envelope, repo, branch, workCtx.ThreadID)
 							header := webhook.TaskCardHeaderWithButtons(workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons, platform, buttons)
 							if header != "" {
@@ -811,6 +817,11 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 					if err != nil {
 						slog.Warn("webhook: failed to send root card; falling back to channel", "channel_id", channelID, "error", err)
 					} else {
+						if taskOpts.Registry != nil {
+							if repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope); repo != "" && branch != "" {
+								taskOpts.Registry.Upsert(repo, branch, rootMsgID, "", taskStatus)
+							}
+						}
 						threadName := webhook.FormatThreadName(workCtx.Envelope, workCtx.Workflow)
 						threadID, err := starter.StartThread(channelID, rootMsgID, threadName)
 						if err != nil {

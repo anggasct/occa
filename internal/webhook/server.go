@@ -1056,7 +1056,7 @@ func (s *Server) failWorkspace(item dispatchItem, receipt *store.WebhookDelivery
 		Envelope:     envelope,
 	}
 	if repo, branch := TaskRepoBranch(key, envelope); repo != "" && branch != "" {
-		if rec, ok := s.tasks.Lookup(repo, branch); ok {
+		if rec, ok := s.tasks.ResolveTaskThread(repo, branch, "workspace-fail"); ok {
 			workCtx.ThreadID = rec.ThreadID
 			workCtx.RootMessageID = rec.RootMessageID
 		}
@@ -1069,11 +1069,9 @@ func (s *Server) failWorkspace(item dispatchItem, receipt *store.WebhookDelivery
 	}
 	s.failDelivery(item.ep, receipt.ID, item.deliveryID, item.eventType, envelope, summary, workCtx)
 	threadID := workCtx.ThreadID
-	if threadID == "" && s.tasks != nil {
-		if repo, branch := TaskRepoBranch(WebhookExecutionKey{}, envelope); repo != "" && branch != "" {
-			if rec, ok := s.tasks.Lookup(repo, branch); ok {
-				threadID = rec.ThreadID
-			}
+	if threadID == "" {
+		if _, _, rec, ok := s.tasks.ResolveForDelivery(WebhookExecutionKey{}, envelope, "workspace-fail-envelope"); ok {
+			threadID = rec.ThreadID
 		}
 	}
 	if threadID == "" {
@@ -1377,16 +1375,20 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		Heartbeat:    heartbeat,
 	}
 	if repo, branch := TaskRepoBranch(key, envelope); repo != "" && branch != "" {
-		if rec, ok := s.tasks.Lookup(repo, branch); ok {
+		caller := ep.Workflow
+		if caller == "" {
+			caller = "delivery"
+		}
+		if eventType == "issue_comment" && caller == "fix" {
+			caller = "review-fix"
+		}
+		if _, _, rec, ok := s.tasks.ResolveForDelivery(key, envelope, caller); ok {
 			if rec.ThreadID != "" {
 				workCtx.ThreadID = rec.ThreadID
 			}
 			if rec.RootMessageID != "" {
 				workCtx.RootMessageID = rec.RootMessageID
 			}
-		} else if s.tasks != nil {
-			tried, sameKey, sameThread, hasSame, triedExists := s.tasks.MissDetail(repo, branch)
-			slog.Warn("webhook: delivery thread lookup miss", "repo", repo, "branch", branch, "tried_key", tried, "same_branch_key", sameKey, "same_branch_thread", sameThread, "has_same_branch", hasSame, "tried_exists", triedExists, "endpoint", ep.Name, "delivery_id", deliveryID)
 		}
 	}
 	if lease != nil {

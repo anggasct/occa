@@ -154,7 +154,7 @@ func (s *Server) alarmStuckDispatcher(d *dispatcher, snap dispatcherSnapshot, no
 		return
 	}
 	threadID := ""
-	if rec, ok := s.tasks.Lookup(repo, branch); ok {
+	if rec, ok := s.tasks.ResolveTaskThread(repo, branch, "watchdog"); ok {
 		threadID = strings.TrimSpace(rec.ThreadID)
 	}
 	if threadID == "" || s.notifier == nil {

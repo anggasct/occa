@@ -249,20 +249,13 @@ func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelo
 	}
 	if (threadID == "" || rootID == "") && s.tasks != nil {
 		if repo, branch := TaskRepoBranch(WebhookExecutionKey{}, envelope); repo != "" && branch != "" {
-			if rec, ok := s.tasks.Lookup(repo, branch); ok {
+			if _, _, rec, ok := s.tasks.ResolveForDelivery(WebhookExecutionKey{}, envelope, "audit"); ok {
 				if threadID == "" && rec.ThreadID != "" {
 					threadID = rec.ThreadID
 				}
 				if rootID == "" && rec.RootMessageID != "" {
 					rootID = rec.RootMessageID
 				}
-			} else {
-				tried, sameKey, sameThread, hasSame, triedExists := s.tasks.MissDetail(repo, branch)
-				deliveryID := ""
-				if wCtx != nil {
-					deliveryID = wCtx.DeliveryID
-				}
-				slog.Warn("webhook: audit thread lookup miss", "repo", repo, "branch", branch, "tried_key", tried, "same_branch_key", sameKey, "same_branch_thread", sameThread, "has_same_branch", hasSame, "tried_exists", triedExists, "endpoint", ep.Name, "delivery_id", deliveryID)
 			}
 		}
 	}
