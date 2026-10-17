@@ -656,3 +656,87 @@ func TestPollBranchOnceDoesNotAdoptCrossRepoThread(t *testing.T) {
 		}
 	}
 }
+
+func TestHandleDispatchConcurrentDuplicatesYieldOneParent(t *testing.T) {
+	srv := newDispatchServer(t, dispatchEndpoints("acme/widget"))
+	var mu sync.Mutex
+	var parents, threads int
+	srv.SetSender(func(_ context.Context, _, _, _ string) (string, error) {
+		time.Sleep(20 * time.Millisecond)
+		mu.Lock()
+		parents++
+		mu.Unlock()
+		return "parent-1", nil
+	})
+	srv.SetThreadStarter(func(_ context.Context, _, _, _, _ string) (string, error) {
+		mu.Lock()
+		threads++
+		mu.Unlock()
+		return "thread-1", nil
+	})
+	const n = 10
+	codes := make([]int, n)
+	ids := make([]string, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodPost, "/dispatch", strings.NewReader(validDispatchBody))
+			req.Header.Set("Authorization", "Bearer dispatch-token")
+			rec := httptest.NewRecorder()
+			srv.handleDispatch(rec, req)
+			codes[idx] = rec.Code
+			var payload map[string]string
+			_ = json.Unmarshal(rec.Body.Bytes(), &payload)
+			ids[idx] = payload["task_id"]
+		}(i)
+	}
+	wg.Wait()
+	for _, id := range ids {
+		if id == "" {
+			t.Fatalf("concurrent task_ids = %v, want all non-empty", ids)
+		}
+		if id != ids[0] {
+			t.Fatalf("concurrent task_ids = %v, want single shared id", ids)
+		}
+	}
+	created, ok := 0, false
+	for _, c := range codes {
+		if c == http.StatusCreated {
+			created++
+		} else if c != http.StatusOK {
+			t.Fatalf("concurrent codes = %v, want only 201 and 200", codes)
+		} else {
+			ok = true
+		}
+	}
+	if created != 1 || !ok {
+		t.Fatalf("concurrent codes = %v, want exactly one 201 and rest 200", codes)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if parents != 1 || threads != 1 {
+		t.Errorf("parents = %d threads = %d, want exactly 1 each", parents, threads)
+	}
+	if got := srv.dispatchTasks.Count(); got != 1 {
+		t.Errorf("stored tasks = %d, want 1", got)
+	}
+}
+
+func TestHandleDispatchLiveWithoutTaskAllowsFresh(t *testing.T) {
+	srv := newDispatchServer(t, dispatchEndpoints("acme/widget"))
+	srv.SetSender(func(_ context.Context, _, _, _ string) (string, error) { return "parent-1", nil })
+	srv.tasks.Upsert("acme/widget", "feat/x", "root-1", "thread-1", TaskDispatched)
+	rec := postDispatch(t, srv, "dispatch-token", validDispatchBody)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("stale live status = %d, want 201: %s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload["task_id"] == "" {
+		t.Errorf("stale live task_id empty, want fresh id")
+	}
+}

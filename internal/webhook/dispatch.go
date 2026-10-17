@@ -23,6 +23,8 @@ const dispatchThreadAttempts = 3
 
 const dispatchThreadRetryBaseDelay = 500 * time.Millisecond
 
+const dispatchThreadTimeout = dispatchThreadRetryBaseDelay * 30
+
 var errDispatchThreadEmpty = errors.New("dispatch thread starter returned empty thread id")
 
 type DispatchRequest struct {
@@ -250,20 +252,22 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	if isRedispatchScope(req.Scope) && s.handleRedispatch(w, r, req) {
 		return
 	}
+	s.dispatchCreateMu.Lock()
 	if s.tasks != nil {
 		if rec, ok := s.tasks.Lookup(normalizeRepoKey(req.Repo), normalizeBranchKey(req.Branch)); ok && !isTaskTerminal(rec.Status) {
 			if existing, ok := s.dispatchTasks.LatestFor(req.Repo, req.Branch); ok {
+				s.dispatchCreateMu.Unlock()
 				writeDispatchJSON(w, http.StatusOK, map[string]string{"task_id": existing.ID})
 				return
 			}
-			writeDispatchJSON(w, http.StatusConflict, map[string]string{"error": "live task for " + normalizeRepoKey(req.Repo) + "#" + normalizeBranchKey(req.Branch) + " is already in progress"})
-			return
+			slog.Warn("webhook: dispatch live record without task, allowing fresh", "repo", normalizeRepoKey(req.Repo), "branch", normalizeBranchKey(req.Branch))
 		}
 	}
 	task := s.dispatchTasks.Create(req)
 	platform, channelID, rootID, err := s.postDispatchSummary(task)
 	if err != nil {
 		s.dispatchTasks.Delete(task.ID)
+		s.dispatchCreateMu.Unlock()
 		slog.Error("webhook: dispatch parent post failed", "repo", task.Repo, "branch", task.Branch, "task_id", task.ID, "error", err)
 		writeDispatchJSON(w, http.StatusBadGateway, map[string]string{"error": "dispatch parent post failed: " + err.Error()})
 		return
@@ -272,6 +276,7 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	if s.tasks != nil {
 		suppressAfter = s.tasks.UpsertWithSpec(task.Repo, task.Branch, "", "", TaskDispatched, task.SpecPath).UpdatedAt
 	}
+	s.dispatchCreateMu.Unlock()
 	if rec, ok := s.openDispatchThread(task, platform, channelID, rootID); ok {
 		suppressAfter = rec.UpdatedAt
 	}
@@ -474,7 +479,9 @@ func (s *Server) startDispatchThread(task DispatchTask, platform, channelID, roo
 	var err error
 	threadID := ""
 	for attempt := 1; attempt <= dispatchThreadAttempts; attempt++ {
-		threadID, err = s.threadStarter(context.Background(), platform, channelID, rootID, dispatchThreadName(task))
+		ctx, cancel := context.WithTimeout(context.Background(), dispatchThreadTimeout)
+		threadID, err = s.threadStarter(ctx, platform, channelID, rootID, dispatchThreadName(task))
+		cancel()
 		if err == nil && strings.TrimSpace(threadID) != "" {
 			return threadID, nil
 		}
