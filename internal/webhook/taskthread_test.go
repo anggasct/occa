@@ -122,6 +122,71 @@ func TestTaskThreadRegistry(t *testing.T) {
 	}
 }
 
+func TestNormalizeRepoKeyHostAgnostic(t *testing.T) {
+	cases := map[string]string{
+		"acme/widget":                    "acme/widget",
+		"github.com/acme/widget":         "acme/widget",
+		" GitHub.com/Acme/Widget ":       "acme/widget",
+		"https://github.com/acme/widget": "acme/widget",
+		"acme/widget.git":                "acme/widget",
+		"ACME/WIDGET":                    "acme/widget",
+	}
+	for in, want := range cases {
+		if got := normalizeRepoKey(in); got != want {
+			t.Errorf("normalizeRepoKey(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if got := normalizeRepoKey(""); got != "" {
+		t.Errorf("empty repo = %q, want empty", got)
+	}
+}
+
+func TestTaskThreadKeyHostAgnosticBothDirections(t *testing.T) {
+	reg := NewTaskThreadRegistry()
+	reg.Upsert("github.com/acme/widget", "feat/x", "root-1", "thread-1", TaskDispatched)
+	if rec, ok := reg.Lookup("acme/widget", "feat/x"); !ok || rec.ThreadID != "thread-1" {
+		t.Fatalf("host record must hit short lookup: %+v %v", rec, ok)
+	}
+	reg2 := NewTaskThreadRegistry()
+	reg2.Upsert("acme/widget", "feat/y", "root-2", "thread-2", TaskDispatched)
+	if rec, ok := reg2.Lookup("github.com/acme/widget", "feat/y"); !ok || rec.ThreadID != "thread-2" {
+		t.Fatalf("short record must hit host lookup: %+v %v", rec, ok)
+	}
+	if got := TaskThreadKey("github.com/acme/widget", "feat/x"); got != TaskThreadKey("acme/widget", "feat/x") {
+		t.Errorf("keys must match: %q", got)
+	}
+	if got := TaskThreadKey(" GitHub.com/Acme/Widget ", "feat/x"); got != "acme/widget#feat/x" {
+		t.Errorf("normalized key = %q, want acme/widget#feat/x", got)
+	}
+}
+
+func TestMissDetailSameBranchHint(t *testing.T) {
+	reg := NewTaskThreadRegistry()
+	reg.Upsert("acme/widget", "feat/x", "root-1", "thread-1", TaskDispatched)
+	tried, sameKey, _, hasSame, triedExists := reg.MissDetail("acme/widget", "feat/none")
+	if hasSame {
+		t.Errorf("different branch must not hint: %q %q", tried, sameKey)
+	}
+	if tried != "acme/widget#feat/none" {
+		t.Errorf("tried = %q, want acme/widget#feat/none", tried)
+	}
+	if triedExists {
+		t.Errorf("missing key must report triedExists=false")
+	}
+	tried, sameKey, sameThread, hasSame, _ := reg.MissDetail("other/widget", "feat/x")
+	if !hasSame || sameKey != "acme/widget#feat/x" || sameThread != "thread-1" {
+		t.Errorf("same-branch hint = %q %q %q %v, want acme/widget#feat/x thread-1 true", tried, sameKey, sameThread, hasSame)
+	}
+	reg2 := NewTaskThreadRegistry()
+	if _, _, _, hasSame, _ := reg2.MissDetail("acme/widget", "feat/x"); hasSame {
+		t.Errorf("empty registry must not hint")
+	}
+	tried, _, _, _, triedExists = reg.MissDetail("acme/widget", "feat/x")
+	if tried != "acme/widget#feat/x" || !triedExists {
+		t.Errorf("existing key must report triedExists=true: %q %v", tried, triedExists)
+	}
+}
+
 func TestTaskRepoBranch(t *testing.T) {
 	key := WebhookExecutionKey{Repository: "acme/widget", Branch: "feat/x"}
 	repo, branch := TaskRepoBranch(key, WebhookEnvelope{})

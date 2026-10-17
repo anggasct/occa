@@ -418,6 +418,9 @@ func main() {
 					}
 					return "", false
 				})
+				da.SetTaskThreadMissDetail(func(repo, branch string) (string, string, string, bool, bool) {
+					return registry.MissDetail(repo, branch)
+				})
 			}
 		}
 		webhookExecutor := newWebhookExecutor(channels, managerProvider{m: manager}, db.ChannelRepo(), cfg.Agent.DefaultWorkdir, relay.Config{
@@ -719,6 +722,9 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 									targetChannelID = targetChannelID + ":" + rec.ThreadID
 								}
 							}
+						} else {
+							tried, sameKey, sameThread, hasSame, triedExists := taskOpts.Registry.MissDetail(repo, branch)
+							slog.Warn("webhook: executor thread lookup miss", "repo", repo, "branch", branch, "tried_key", tried, "same_branch_key", sameKey, "same_branch_thread", sameThread, "has_same_branch", hasSame, "tried_exists", triedExists, "platform", platform, "channel_id", channelID, "delivery_id", workCtx.DeliveryID)
 						}
 					}
 				}

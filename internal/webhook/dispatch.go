@@ -218,14 +218,13 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) dispatchNotifyTarget(repo string) (string, string) {
-	want := strings.ToLower(strings.TrimSpace(config.RepositoryPath(strings.ToLower(strings.TrimSpace(repo)))))
+	want := normalizeRepoKey(repo)
 	fallbackPlatform, fallbackChannel := "", ""
 	for _, ep := range s.endpoints {
 		if ep.Repository == "" {
 			continue
 		}
-		have := strings.ToLower(strings.TrimSpace(config.RepositoryPath(strings.ToLower(strings.TrimSpace(ep.Repository)))))
-		if have != want {
+		if normalizeRepoKey(ep.Repository) != want || want == "" {
 			continue
 		}
 		if ep.Platform == "" || ep.ChannelID == "" {
@@ -308,12 +307,20 @@ func (s *Server) scheduleDispatchFallback(task DispatchTask, suppressAfter time.
 			return
 		default:
 		}
-		if rec, ok := s.tasks.Lookup(task.Repo, task.Branch); ok && rec.UpdatedAt.After(stamp) {
-			return
+		if rec, ok := s.tasks.Lookup(task.Repo, task.Branch); ok {
+			if rec.UpdatedAt.After(stamp) {
+				return
+			}
+		} else if s.tasks != nil {
+			tried, sameKey, sameThread, hasSame, triedExists := s.tasks.MissDetail(task.Repo, task.Branch)
+			slog.Warn("webhook: dispatch fallback no record", "repo", task.Repo, "branch", task.Branch, "tried_key", tried, "same_branch_key", sameKey, "same_branch_thread", sameThread, "has_same_branch", hasSame, "tried_exists", triedExists, "task_id", task.ID)
 		}
 		var threadID string
 		if rec, ok := s.tasks.Lookup(task.Repo, task.Branch); ok {
 			threadID = rec.ThreadID
+		} else if s.tasks != nil {
+			tried, sameKey, sameThread, hasSame, triedExists := s.tasks.MissDetail(task.Repo, task.Branch)
+			slog.Warn("webhook: dispatch fallback thread lookup miss", "repo", task.Repo, "branch", task.Branch, "tried_key", tried, "same_branch_key", sameKey, "same_branch_thread", sameThread, "has_same_branch", hasSame, "tried_exists", triedExists, "task_id", task.ID)
 		}
 		s.pollBranchOnce(task.Repo, task.Branch, "", "", threadID)
 	}()
@@ -354,6 +361,9 @@ func (s *Server) scheduleDeliveryFallback(ep config.EndpointConfig, workCtx *Web
 			if strings.TrimSpace(rec.ThreadID) != "" {
 				threadID = rec.ThreadID
 			}
+		} else if s.tasks != nil {
+			tried, sameKey, sameThread, hasSame, triedExists := s.tasks.MissDetail(repo, branch)
+			slog.Warn("webhook: delivery fallback thread lookup miss", "repo", repo, "branch", branch, "tried_key", tried, "same_branch_key", sameKey, "same_branch_thread", sameThread, "has_same_branch", hasSame, "tried_exists", triedExists, "endpoint", ep.Name, "delivery_id", workCtx.DeliveryID)
 		}
 		s.pollBranchOnce(repo, branch, ep.Platform, ep.ChannelID, threadID)
 	}()
@@ -371,6 +381,9 @@ func (s *Server) pollBranchOnce(repo, branch, platform, channelID, threadID stri
 	if threadID == "" && s.tasks != nil {
 		if rec, ok := s.tasks.Lookup(repo, branch); ok && strings.TrimSpace(rec.ThreadID) != "" {
 			threadID = rec.ThreadID
+		} else {
+			tried, sameKey, sameThread, hasSame, triedExists := s.tasks.MissDetail(repo, branch)
+			slog.Warn("webhook: fallback poll thread lookup miss", "repo", repo, "branch", branch, "tried_key", tried, "same_branch_key", sameKey, "same_branch_thread", sameThread, "has_same_branch", hasSame, "tried_exists", triedExists, "platform", platform, "channel_id", channelID)
 		}
 	}
 	if platform == "" || channelID == "" {
@@ -378,12 +391,11 @@ func (s *Server) pollBranchOnce(repo, branch, platform, channelID, threadID stri
 			if ep.Repository == "" {
 				continue
 			}
-			have := strings.ToLower(strings.TrimSpace(config.RepositoryPath(strings.ToLower(strings.TrimSpace(ep.Repository)))))
-			want := strings.ToLower(strings.TrimSpace(config.RepositoryPath(strings.ToLower(strings.TrimSpace(repo)))))
-			if have == want {
-				platform, channelID = ep.Platform, ep.ChannelID
-				break
+			if normalizeRepoKey(ep.Repository) != normalizeRepoKey(repo) || normalizeRepoKey(repo) == "" {
+				continue
 			}
+			platform, channelID = ep.Platform, ep.ChannelID
+			break
 		}
 	}
 	if platform == "" || channelID == "" || s.notifier == nil {

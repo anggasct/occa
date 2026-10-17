@@ -124,3 +124,91 @@ func TestOwnDispatchSummaryWithoutThreadStaysTopLevel(t *testing.T) {
 		t.Fatalf("without thread must not use task thread reply context")
 	}
 }
+
+func TestOwnDispatchSummaryHostPrefixRoutesIntoThread(t *testing.T) {
+	a := New("fake-token", nil, Config{})
+	a.onReady(&discordgo.Ready{User: &discordgo.User{ID: "bot-42"}})
+	a.channelLookup = func(string) (*discordgo.Channel, error) {
+		return &discordgo.Channel{Type: discordgo.ChannelTypeGuildText}, nil
+	}
+	a.SetTaskThreadLookup(func(repo, branch string) (string, bool) {
+		normalized := repo
+		if rest, ok := cutoffPrefix(normalized); ok {
+			normalized = rest
+		}
+		if normalized == "acme/widget" && branch == "feat/hosted" {
+			return "thread-789", true
+		}
+		return "", false
+	})
+	summary := "⏳ Dispatched github.com/acme/widget#feat/hosted · task-1792217637155287504-1\nSpec: specs/x.md"
+	var got []channel.IncomingMessage
+	deliver := func(m channel.IncomingMessage) { got = append(got, m) }
+	a.onMessage(&discordgo.MessageCreate{Message: &discordgo.Message{
+		ChannelID: "chan-1",
+		GuildID:   "guild-1",
+		Author:    &discordgo.User{ID: "bot-42"},
+		Content:   summary,
+	}}, deliver)
+	if len(got) != 1 {
+		t.Fatalf("delivered = %d, want 1", len(got))
+	}
+	if got[0].ThreadID != "thread-789" || !got[0].IsThread {
+		t.Fatalf("host summary must route: %+v", got[0])
+	}
+}
+
+func cutoffPrefix(s string) (string, bool) {
+	for _, p := range []string{"github.com/", "https://github.com/", "http://github.com/"} {
+		if len(s) >= len(p) && equalFoldPrefix(s[:len(p)], p) {
+			return s[len(p):], true
+		}
+	}
+	return s, false
+}
+
+func equalFoldPrefix(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		ca, cb := a[i], b[i]
+		if ca >= 'A' && ca <= 'Z' {
+			ca += 'a' - 'A'
+		}
+		if cb >= 'A' && cb <= 'Z' {
+			cb += 'a' - 'A'
+		}
+		if ca != cb {
+			return false
+		}
+	}
+	return true
+}
+
+func TestOwnDispatchSummaryMissDetailPath(t *testing.T) {
+	a := New("fake-token", nil, Config{})
+	a.onReady(&discordgo.Ready{User: &discordgo.User{ID: "bot-42"}})
+	a.channelLookup = func(string) (*discordgo.Channel, error) {
+		return &discordgo.Channel{Type: discordgo.ChannelTypeGuildText}, nil
+	}
+	a.SetTaskThreadLookup(func(string, string) (string, bool) { return "", false })
+	called := false
+	a.SetTaskThreadMissDetail(func(repo, branch string) (string, string, string, bool, bool) {
+		called = true
+		return repo + "#" + branch, "acme/widget#feat/x", "thread-1", true, false
+	})
+	summary := "⏳ Dispatched acme/widget#feat/y · task-999\nSpec: specs/y.md"
+	var got []channel.IncomingMessage
+	a.onMessage(&discordgo.MessageCreate{Message: &discordgo.Message{
+		ChannelID: "chan-1",
+		Author:    &discordgo.User{ID: "bot-42"},
+		Content:   summary,
+	}}, func(m channel.IncomingMessage) { got = append(got, m) })
+	if len(got) != 1 || got[0].IsThread {
+		t.Fatalf("miss must stay top-level: %+v", got)
+	}
+	if !called {
+		t.Fatalf("miss detail must be consulted on lookup miss")
+	}
+}

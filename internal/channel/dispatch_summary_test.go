@@ -36,6 +36,14 @@ func TestParseDispatchSummary(t *testing.T) {
 			wantOK:     true,
 		},
 		{
+			name:       "host-prefixed summary",
+			text:       "⏳ Dispatched github.com/acme/widget#feat/hosted · task-1792217637155287504-1\nSpec: specs/feat-x.md",
+			wantRepo:   "github.com/acme/widget",
+			wantBranch: "feat/hosted",
+			wantTask:   "task-1792217637155287504-1",
+			wantOK:     true,
+		},
+		{
 			name:   "ordinary self message",
 			text:   "echo",
 			wantOK: false,

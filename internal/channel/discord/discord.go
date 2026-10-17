@@ -59,7 +59,8 @@ type Adapter struct {
 	dispatchMu       sync.Mutex
 	seenDispatchTask map[string]time.Time
 
-	taskThreadLookup func(repo, branch string) (string, bool)
+	taskThreadLookup     func(repo, branch string) (string, bool)
+	taskThreadMissDetail func(repo, branch string) (string, string, string, bool, bool)
 }
 
 const maxSeenDispatchTasks = 1024
@@ -103,6 +104,10 @@ func (a *Adapter) SetOwnedThreadCheck(check OwnedThreadCheck) {
 
 func (a *Adapter) SetTaskThreadLookup(fn func(repo, branch string) (string, bool)) {
 	a.taskThreadLookup = fn
+}
+
+func (a *Adapter) SetTaskThreadMissDetail(fn func(repo, branch string) (string, string, string, bool, bool)) {
+	a.taskThreadMissDetail = fn
 }
 
 func (a *Adapter) lookupTaskThread(repo, branch string) (string, bool) {
@@ -442,8 +447,13 @@ func (a *Adapter) onMessage(m *discordgo.MessageCreate, handler func(channel.Inc
 					msg.ReplyCtx = a.taskThreadReply(threadRc, rc)
 				}
 				a.trackThread(threadID)
+				slog.Info("discord: task thread claim hit", "repo", repo, "branch", branch, "thread_id", threadID, "task_id", taskID)
 			} else {
-				slog.Warn("discord: task thread unknown, self-dispatch will run top-level", "repo", repo, "branch", branch, "task_id", taskID)
+				tried, sameKey, sameThread, hasSame, triedExists := "", "", "", false, false
+				if a.taskThreadMissDetail != nil {
+					tried, sameKey, sameThread, hasSame, triedExists = a.taskThreadMissDetail(repo, branch)
+				}
+				slog.Warn("discord: task thread unknown, self-dispatch will run top-level", "repo", repo, "branch", branch, "tried_key", tried, "same_branch_key", sameKey, "same_branch_thread", sameThread, "has_same_branch", hasSame, "tried_exists", triedExists, "task_id", taskID, "channel_id", m.ChannelID)
 			}
 			handler(msg)
 		}

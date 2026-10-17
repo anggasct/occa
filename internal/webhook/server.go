@@ -1164,6 +1164,9 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 			if rec.RootMessageID != "" {
 				workCtx.RootMessageID = rec.RootMessageID
 			}
+		} else if s.tasks != nil {
+			tried, sameKey, sameThread, hasSame, triedExists := s.tasks.MissDetail(repo, branch)
+			slog.Warn("webhook: delivery thread lookup miss", "repo", repo, "branch", branch, "tried_key", tried, "same_branch_key", sameKey, "same_branch_thread", sameThread, "has_same_branch", hasSame, "tried_exists", triedExists, "endpoint", ep.Name, "delivery_id", deliveryID)
 		}
 	}
 	if lease != nil {
