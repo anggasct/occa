@@ -74,6 +74,7 @@ webhooks:
       max_runs_per_pr: 3 # comment-trigger runs allowed per PR per window
       window: 60m # sliding window for the trigger cap
     thread: true # dispatch deliveries run in the PR thread
+    escalation_mention: operator # user or role mentioned when a PR queue blocks on retry exhaustion; empty disables the mention
   repos:
     - repo: acme/widget # owner/name; expands to github-widget-{review,review-fix,merge,merged}
       provider: github # only github is supported
@@ -91,6 +92,9 @@ webhooks:
       # prompt files are locked and resolved vs the config dir:
       #   webhooks/github-review.md, webhooks/github-review-fix.md,
       #   webhooks/github-merge.md, webhooks/github-merged.md
+      # on_merged: [] # optional post-merge extras (default: just close the PR thread)
+      # - prompt_file: "merged-vault.md" # one agent turn with your prompt file (stays in ~/.occa/webhooks, never in this repo)
+      # - run: "make changelog" # one command, run with the repo checkout as cwd
       # on_merged: [] # optional post-merge extras: [{prompt: ...} | {prompt_file: ...} | {run: ...}]
   endpoints:
     - name: sentry-alerts # custom generic endpoints stay here; review/fix/merge/merged come from repos: above

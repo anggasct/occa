@@ -76,6 +76,20 @@ func (r *sqliteWebhookDeliveryRepo) Get(ctx context.Context, endpoint, deliveryI
 	return d, nil
 }
 
+func (r *sqliteWebhookDeliveryRepo) GetByID(ctx context.Context, id int64) (*WebhookDelivery, error) {
+	row := r.db.QueryRowContext(ctx,
+		`SELECT `+deliveryColumns+` FROM webhook_delivery WHERE id = ?`, id,
+	)
+	d, err := scanWebhookDelivery(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: webhook delivery get by id: %w", err)
+	}
+	return d, nil
+}
+
 func (r *sqliteWebhookDeliveryRepo) Transition(ctx context.Context, id int64, from []WebhookStatus, to WebhookStatus, summary string) (bool, error) {
 	if len(from) == 0 {
 		return false, fmt.Errorf("store: webhook delivery transition: empty from set")

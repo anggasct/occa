@@ -124,6 +124,7 @@ func TestReposDefaultsAndOverrides(t *testing.T) {
     limits:
       max_runs_per_pr: 5
       window: 30m
+    escalation_mention: operator
   repos:
     - repo: acme/widget
       provider: github
@@ -155,6 +156,9 @@ func TestReposDefaultsAndOverrides(t *testing.T) {
 	}
 	if limits := byWorkflow["merge"].Limits; limits.MaxRunsPerPR != 5 || limits.Window != 30*time.Minute {
 		t.Fatalf("limits should come from defaults: %+v", limits)
+	}
+	if got := cfg.Webhooks.Defaults.EscalationMention; got != "operator" {
+		t.Fatalf("escalation_mention = %q, want operator", got)
 	}
 	if byWorkflow["review"].Model != "openai/gpt-4o" {
 		t.Fatalf("model = %q", byWorkflow["review"].Model)
@@ -280,7 +284,7 @@ func TestReposValidation(t *testing.T) {
 			want: "automation.authors",
 		},
 		{
-			name: "empty merged run",
+			name: "merged run empty",
 			repos: `  repos:
     - repo: acme/widget
       provider: github
@@ -294,7 +298,7 @@ func TestReposValidation(t *testing.T) {
 			want: "on_merged",
 		},
 		{
-			name: "merged action double set",
+			name: "merged prompt and prompt_file",
 			repos: `  repos:
     - repo: acme/widget
       provider: github
@@ -303,8 +307,8 @@ func TestReposValidation(t *testing.T) {
       secret: s
       checkout: /tmp/w
       on_merged:
-        - run: "make x"
-          prompt: "hi"
+        - prompt: "hi"
+          prompt_file: "x.md"
 `,
 			want: "only one",
 		},
@@ -319,6 +323,36 @@ func TestReposValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReposMergedActionValidation(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
+	dir := t.TempDir()
+	writeRepoPromptFiles(t, dir)
+	path := writeConfig(t, dir, repoConfigYAML(`  repos:
+    - repo: acme/widget
+      provider: github
+      platform: discord
+      channel_id: chan-1
+      secret: s3cret
+      checkout: /tmp/widget
+      on_merged:
+        - prompt_file: "merged-note.md"
+        - run: "make changelog"
+`))
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	for _, ep := range cfg.Webhooks.Endpoints {
+		if ep.Workflow == "merged" {
+			if len(ep.OnMerged) != 2 || ep.OnMerged[0].PromptFile != "merged-note.md" || ep.OnMerged[1].Run != "make changelog" {
+				t.Fatalf("merged on_merged = %+v", ep.OnMerged)
+			}
+			return
+		}
+	}
+	t.Fatal("no merged endpoint expanded")
 }
 
 func TestReposRejectLockedWorkflowInEndpoints(t *testing.T) {

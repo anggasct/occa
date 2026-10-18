@@ -37,9 +37,10 @@ type RepoConfig struct {
 }
 
 type WebhookDefaults struct {
-	CommentTrigger map[string][]string `yaml:"comment_trigger,omitempty"`
-	Limits         *EndpointLimits     `yaml:"limits,omitempty"`
-	Thread         *bool               `yaml:"thread,omitempty"`
+	CommentTrigger    map[string][]string `yaml:"comment_trigger,omitempty"`
+	Limits            *EndpointLimits     `yaml:"limits,omitempty"`
+	Thread            *bool               `yaml:"thread,omitempty"`
+	EscalationMention string              `yaml:"escalation_mention,omitempty"`
 }
 
 var defaultReviewTriggers = []string{"please re-review"}
@@ -238,6 +239,9 @@ func expandRepos(repos []RepoConfig, defaults WebhookDefaults) ([]EndpointConfig
 				Limits:         resolveRepoLimits(defaults, *repo),
 				Automation:     &automationCopy,
 				VerifyEndpoint: "",
+			}
+			if workflow == "merged" {
+				ep.OnMerged = append([]MergedAction(nil), repo.OnMerged...)
 			}
 			if workflow == "fix" {
 				ep.Workspace = EndpointWorkspace{Type: WorkspaceTypeGit, Path: strings.TrimSpace(repo.Checkout), Mode: WorkspaceModeIsolated}

@@ -53,6 +53,10 @@ type PRQueueRepo interface {
 	PruneDrained(ctx context.Context, cutoff int64) (int, error)
 	UpdateThread(ctx context.Context, prKey, threadID, rootMsgID string) error
 	UpdateSession(ctx context.Context, prKey, sessionID string) error
+	SetRetryState(ctx context.Context, prKey string, retryCount int, nextRetryAt int64) error
+	Unblock(ctx context.Context, prKey string) error
+	ListUnresolved(ctx context.Context) ([]PRRun, error)
+	ClearQueue(ctx context.Context, prKey string) (int, error)
 	DeleteItem(ctx context.Context, id int64) error
 }
 
@@ -209,6 +213,20 @@ func (r *sqlitePRQueueRepo) ClearActive(ctx context.Context, prKey string) error
 		}
 	}()
 	now := time.Now().Unix()
+	var current string
+	if err := tx.QueryRowContext(ctx, `SELECT status FROM pr_queue WHERE pr_key = ?`, prKey).Scan(&current); err != nil {
+		return fmt.Errorf("store: pr queue clear status read: %w", err)
+	}
+	if PRStatus(current) == PRStatusBlocked {
+		if _, err := tx.ExecContext(ctx, `UPDATE pr_queue SET updated_at = ? WHERE pr_key = ?`, now, prKey); err != nil {
+			return fmt.Errorf("store: pr queue clear blocked touch: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("store: pr queue clear commit: %w", err)
+		}
+		committed = true
+		return nil
+	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE pr_queue
 		 SET active_kind = '', active_session = '', active_delivery = 0,
@@ -224,32 +242,15 @@ func (r *sqlitePRQueueRepo) ClearActive(ctx context.Context, prKey string) error
 	).Scan(&remaining); err != nil {
 		return fmt.Errorf("store: pr queue clear count: %w", err)
 	}
-	var status PRStatus
-	var current string
-	if err := tx.QueryRowContext(ctx, `SELECT status FROM pr_queue WHERE pr_key = ?`, prKey).Scan(&current); err != nil {
-		return fmt.Errorf("store: pr queue clear status read: %w", err)
+	status := PRStatusActive
+	if remaining == 0 {
+		status = PRStatusDrained
 	}
-	if PRStatus(current) == PRStatusBlocked {
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE pr_queue
-			 SET active_kind = '', active_session = '', active_delivery = 0,
-			     active_since = 0, retry_count = 0, updated_at = ?
-			 WHERE pr_key = ?`,
-			now, prKey,
-		); err != nil {
-			return fmt.Errorf("store: pr queue clear blocked update: %w", err)
-		}
-	} else {
-		status = PRStatusActive
-		if remaining == 0 {
-			status = PRStatusDrained
-		}
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE pr_queue SET status = ?, updated_at = ? WHERE pr_key = ?`,
-			string(status), now, prKey,
-		); err != nil {
-			return fmt.Errorf("store: pr queue clear status: %w", err)
-		}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE pr_queue SET status = ?, updated_at = ? WHERE pr_key = ?`,
+		string(status), now, prKey,
+	); err != nil {
+		return fmt.Errorf("store: pr queue clear status: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("store: pr queue clear commit: %w", err)
@@ -364,11 +365,75 @@ func (r *sqlitePRQueueRepo) UpdateSession(ctx context.Context, prKey, sessionID 
 	return nil
 }
 
+func (r *sqlitePRQueueRepo) SetRetryState(ctx context.Context, prKey string, retryCount int, nextRetryAt int64) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE pr_queue SET retry_count = ?, next_retry_at = ?, updated_at = ? WHERE pr_key = ?`,
+		retryCount, nextRetryAt, time.Now().Unix(), prKey,
+	)
+	if err != nil {
+		return fmt.Errorf("store: pr queue set retry state: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("store: pr queue set retry state rows: %w", err)
+	} else if n == 0 {
+		return fmt.Errorf("store: pr queue set retry state: unknown pr_key %q", prKey)
+	}
+	return nil
+}
+
+func (r *sqlitePRQueueRepo) Unblock(ctx context.Context, prKey string) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE pr_queue SET status = ?, retry_count = 0, next_retry_at = 0, blocked_reason = '', updated_at = ? WHERE pr_key = ? AND status = ?`,
+		string(PRStatusActive), time.Now().Unix(), prKey, string(PRStatusBlocked),
+	)
+	if err != nil {
+		return fmt.Errorf("store: pr queue unblock: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("store: pr queue unblock rows: %w", err)
+	} else if n == 0 {
+		return fmt.Errorf("store: pr queue unblock: %q not blocked", prKey)
+	}
+	return nil
+}
+
 func (r *sqlitePRQueueRepo) DeleteItem(ctx context.Context, id int64) error {
 	if _, err := r.db.ExecContext(ctx, `DELETE FROM pr_queue_items WHERE id = ?`, id); err != nil {
 		return fmt.Errorf("store: pr queue delete item: %w", err)
 	}
 	return nil
+}
+
+func (r *sqlitePRQueueRepo) ListUnresolved(ctx context.Context) ([]PRRun, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT `+prRunColumns+` FROM pr_queue WHERE status != ? ORDER BY updated_at ASC`,
+		string(PRStatusDrained),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: pr queue list unresolved: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []PRRun
+	for rows.Next() {
+		run, err := scanPRRun(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: pr queue list unresolved scan: %w", err)
+		}
+		out = append(out, *run)
+	}
+	return out, rows.Err()
+}
+
+func (r *sqlitePRQueueRepo) ClearQueue(ctx context.Context, prKey string) (int, error) {
+	res, err := r.db.ExecContext(ctx, `DELETE FROM pr_queue_items WHERE pr_key = ?`, prKey)
+	if err != nil {
+		return 0, fmt.Errorf("store: pr queue clear queue: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("store: pr queue clear queue rows: %w", err)
+	}
+	return int(n), nil
 }
 
 var _ PRQueueRepo = (*sqlitePRQueueRepo)(nil)

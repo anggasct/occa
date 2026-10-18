@@ -96,6 +96,7 @@ type EndpointConfig struct {
 	Admit          []AdmitRule       `yaml:"admit"`
 	Limits         *EndpointLimits   `yaml:"limits,omitempty"`
 	VerifyEndpoint string            `yaml:"verify_endpoint,omitempty"`
+	OnMerged       []MergedAction    `yaml:"on_merged,omitempty"`
 	Automation     *RepoAutomation   `yaml:"-"`
 }
 
@@ -122,6 +123,7 @@ func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
 		Admit          []AdmitRule       `yaml:"admit"`
 		Limits         *EndpointLimits   `yaml:"limits,omitempty"`
 		VerifyEndpoint string            `yaml:"verify_endpoint,omitempty"`
+		OnMerged       []MergedAction    `yaml:"on_merged,omitempty"`
 	}
 	var raw rawEndpoint
 	dec := yaml.NewDecoder(bytes.NewReader(mustEncodeNode(node)))
@@ -147,6 +149,7 @@ func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
 	e.CommentTrigger = raw.CommentTrigger
 	e.Admit = raw.Admit
 	e.Limits = raw.Limits
+	e.OnMerged = raw.OnMerged
 	e.VerifyEndpoint = strings.TrimSpace(raw.VerifyEndpoint)
 	e.NotifySkip = raw.NotifySkip
 	if raw.ProgressCard != nil {
@@ -616,6 +619,9 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 			if err := validateEndpointLimits(endpoint.Name, endpoint.Limits, endpoint.Admit); err != nil {
 				return Config{}, err
 			}
+			if err := validateMergedActions(endpoint.OnMerged, fmt.Sprintf("webhooks.endpoints[%d] (%s) ", i, endpoint.Name)); err != nil {
+				return Config{}, err
+			}
 			if _, exists := paths[endpoint.Path]; exists {
 				return Config{}, fmt.Errorf("config: webhooks.endpoints[%d].path duplicates %q", i, endpoint.Path)
 			}
@@ -814,6 +820,12 @@ func loadPromptFile(configDir, promptFile string) (string, error) {
 		return "", fmt.Errorf("file is not valid UTF-8")
 	}
 	return string(data), nil
+}
+
+// LoadPromptFile reads a prompt file with the same rules as prompt_file:
+// relative to the config directory, no traversal, non-empty UTF-8 text.
+func LoadPromptFile(configDir, promptFile string) (string, error) {
+	return loadPromptFile(configDir, promptFile)
 }
 
 func isLoopbackBind(addr string) bool {

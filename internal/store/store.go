@@ -217,6 +217,8 @@ type WebhookDeliveryRepo interface {
 	Create(ctx context.Context, d WebhookDelivery) (bool, error)
 	// Get returns the current receipt, or nil when the key is unknown.
 	Get(ctx context.Context, endpoint, deliveryID string) (*WebhookDelivery, error)
+	// GetByID returns the receipt with the row id, or nil when unknown.
+	GetByID(ctx context.Context, id int64) (*WebhookDelivery, error)
 	// Transition moves a receipt between statuses only when it currently holds
 	// one of the from statuses (compare-and-swap) and returns whether it moved.
 	Transition(ctx context.Context, id int64, from []WebhookStatus, to WebhookStatus, summary string) (bool, error)
