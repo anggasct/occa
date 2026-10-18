@@ -30,7 +30,7 @@ webhooks:
   runtime:
     max_body_size: 10MB # reject larger webhook payloads with 413
     max_concurrent_events: 16 # global executing-delivery semaphore size
-    max_queued_per_key: 8 # per-endpoint queue depth; overflows answer 429
+    max_queued_per_key: 8 # per-identity queue depth; overflows answer 429
     processing_timeout: 30m # per-delivery executor deadline
     claim_grace: 32m # stale-claim reclaim and restart-recovery window
     retry_after: 30s # Retry-After seconds sent with queue-full 429s
@@ -66,99 +66,46 @@ webhooks:
     event: 9807270 # grey
     failed: 15158332 # red
   fallback_poll_after: 10m # no event this long after dispatch/delivery -> one `gh pr list` poll for the branch
+  defaults:
+    comment_trigger:
+      review: ['please re-review'] # default re-review phrase; override per repo
+      fix: ['please fix review', 'please fix ci'] # default fix phrases; override per repo
+    limits:
+      max_runs_per_pr: 3 # comment-trigger runs allowed per PR per window
+      window: 60m # sliding window for the trigger cap
+    thread: true # dispatch deliveries run in the PR thread
+  repos:
+    - repo: acme/widget # owner/name; expands to github-widget-{review,review-fix,merge,merged}
+      provider: github # only github is supported
+      platform: discord # where runs and audit cards go: discord | telegram
+      channel_id: '<channel-id>' # destination chat for runs and audit cards
+      secret: <your-webhook-secret> # one secret shared by the 4 hooks
+      checkout: /home/operator/projects/widget # required checkout root for fix runs (isolated worktree)
+      # model: openai/gpt-4o # optional per-repo model override
+      # comment_trigger: # optional per-workflow trigger override (review and fix only)
+      #   review: ['please re-review']
+      # automation: # optional per-author policy (absent = review-only for everyone)
+      #   default: review-only # full | review-only
+      #   authors:
+      #     owner-login: full
+      # prompt files are locked and resolved vs the config dir:
+      #   webhooks/github-review.md, webhooks/github-review-fix.md,
+      #   webhooks/github-merge.md, webhooks/github-merged.md
+      # on_merged: [] # optional post-merge extras: [{prompt: ...} | {prompt_file: ...} | {run: ...}]
   endpoints:
-    - name: github-acme-review # stable key for receipts, limits and logs
-      path: /webhooks/github-acme-review # unique route suffix (no /occa prefix)
+    - name: sentry-alerts # custom generic endpoints stay here; review/fix/merge/merged come from repos: above
+      path: /webhooks/sentry-alerts # unique route suffix (no /occa prefix)
       auth: github_hmac_sha256 # "" | legacy_bearer | github_hmac_sha256
       secret: <your-webhook-secret> # credential verifying inbound requests
-      workflow: review # review | fix | merge | merged | custom (pipeline label only)
-      platform: discord # where runs and audit cards go: discord | telegram
-      channel_id: '<channel-id>' # destination chat for runs and audit cards
-      prompt_file: webhooks/example-review.md # agent instruction file (exclusive with prompt)
-      comment_trigger: ['please re-review'] # comment substrings that trigger a run
-      thread: true # run each delivery in its own thread
-      notify_skip: true # post SKIP cards; false records skips silently (default true)
-      repository: github.com/acme/widget # owner/repo binding (required for git workspaces)
-      workspace:
-        type: none # none (no checkout) | git
-      admit: # ordered admission rules; first match wins, no match = ignore
-        - event: pull_request
-          actions: [opened, reopened, ready_for_review]
-        - event: issue_comment
-          actions: [created]
-          require: [comment_trigger, pr_open]
-      limits:
-        max_runs_per_pr: 3 # comment-trigger runs allowed per PR per window
-        window: 60m # sliding window for the trigger cap
-    - name: github-acme-review-fix # stable key for receipts, limits and logs
-      path: /webhooks/github-acme-review-fix # unique route suffix (no /occa prefix)
-      auth: github_hmac_sha256 # "" | legacy_bearer | github_hmac_sha256
-      secret: <your-webhook-secret> # credential verifying inbound requests
-      workflow: fix # review | fix | merge | merged | custom (pipeline label only)
-      platform: discord # where runs and audit cards go: discord | telegram
-      channel_id: '<channel-id>' # destination chat for runs and audit cards
-      prompt_file: webhooks/example-review.md # agent instruction file (exclusive with prompt)
-      comment_trigger: ['please fix ci'] # comment substrings that trigger a run
-      thread: true # run each delivery in its own thread
-      repository: github.com/acme/widget # owner/repo binding (required for git workspaces)
-      workspace:
-        type: git # check out the repo for the run
-        path: /home/operator/projects/widget # checkout root (relative = vs config dir)
-        mode: mutable # isolated (detached worktree) | mutable (branch worktree)
-      admit: # ordered admission rules; first match wins, no match = ignore
-        - event: pull_request_review
-          actions: [submitted]
-          review_state: [changes_requested]
-        - event: pull_request_review
-          actions: [submitted]
-          review_state: [commented]
-          review_verdict: [request_changes]
-        - event: issue_comment
-          actions: [created]
-          require: [comment_trigger, pr_open]
-      limits:
-        max_runs_per_pr: 3 # comment-trigger runs allowed per PR per window
-        window: 60m # sliding window for the trigger cap
-    - name: github-acme-merge # stable key for receipts, limits and logs
-      path: /webhooks/github-acme-merge # unique route suffix (no /occa prefix)
-      auth: github_hmac_sha256 # "" | legacy_bearer | github_hmac_sha256
-      secret: <your-webhook-secret> # credential verifying inbound requests
-      workflow: merge # review | fix | merge | merged | custom (pipeline label only)
-      platform: discord # where runs and audit cards go: discord | telegram
+      workflow: custom # custom only; locked workflows are generated from repos:
+      platform: telegram # where runs and audit cards go: discord | telegram
       channel_id: '<channel-id>' # destination chat for runs and audit cards
       prompt_file: webhooks/example-review.md # agent instruction file (exclusive with prompt)
       thread: true # run each delivery in its own thread
       workspace:
         type: none # none (no checkout) | git
       admit: # ordered admission rules; first match wins, no match = ignore
-        - event: pull_request_review
-          actions: [submitted]
-          review_state: [approved]
-        - event: pull_request_review
-          actions: [submitted]
-          review_state: [commented]
-          review_verdict: [approved]
-          require: [approved_without_findings]
-        - event: check_suite
-          actions: [completed]
-          check_status: completed
-          check_app: GitHub Actions
-          require: [pr_open, pr_resolvable]
-    - name: github-acme-merged # stable key for receipts, limits and logs
-      path: /webhooks/github-acme-merged # unique route suffix (no /occa prefix)
-      auth: github_hmac_sha256 # "" | legacy_bearer | github_hmac_sha256
-      secret: <your-webhook-secret> # credential verifying inbound requests
-      workflow: merged # review | fix | merge | merged | custom (pipeline label only)
-      platform: discord # where runs and audit cards go: discord | telegram
-      channel_id: '<channel-id>' # destination chat for runs and audit cards
-      prompt_file: webhooks/example-review.md # agent instruction file (exclusive with prompt)
-      thread: true # run each delivery in its own thread
-      workspace:
-        type: none # none (no checkout) | git
-      admit: # ordered admission rules; first match wins, no match = ignore
-        - event: pull_request
-          actions: [closed]
-          merged: true
+        - event: ping
 # Required tuning: the network, durability, capacity and pagination values the
 # binary sizes itself with. No built-in defaults, no fallbacks.
 runtime:

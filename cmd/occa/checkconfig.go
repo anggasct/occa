@@ -80,6 +80,7 @@ func runWebhooksCheckConfig(args []string) int {
 		}
 	}
 	fmt.Printf("OK: %d endpoint(s)\n", len(cfg.Webhooks.Endpoints))
+	fmt.Printf("repos: %d dispatch repo(s)\n", len(cfg.Webhooks.Repos))
 	return 0
 }
 

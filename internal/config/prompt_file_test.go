@@ -46,7 +46,7 @@ func TestWebhookPromptFileLoadsRelativeToConfigDirectory(t *testing.T) {
   endpoints:
     - name: reviewer
       path: /review
-      workflow: review
+      workflow: custom
       secret: secret
       platform: discord
       channel_id: channel

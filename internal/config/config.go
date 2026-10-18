@@ -58,6 +58,8 @@ type WebhookConfig struct {
 	Policy            WebhookPolicy     `yaml:"policy"`
 	Runtime           WebhookRuntime    `yaml:"runtime"`
 	Endpoints         []EndpointConfig  `yaml:"endpoints"`
+	Defaults          WebhookDefaults   `yaml:"defaults,omitempty"`
+	Repos             []RepoConfig      `yaml:"repos,omitempty"`
 	Dispatch          DispatchConfig    `yaml:"dispatch"`
 	StatusIcons       map[string]string `yaml:"status_icons,omitempty"`
 	StatusColors      map[string]int    `yaml:"status_colors,omitempty"`
@@ -94,6 +96,7 @@ type EndpointConfig struct {
 	Admit          []AdmitRule       `yaml:"admit"`
 	Limits         *EndpointLimits   `yaml:"limits,omitempty"`
 	VerifyEndpoint string            `yaml:"verify_endpoint,omitempty"`
+	Automation     *RepoAutomation   `yaml:"-"`
 }
 
 func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
@@ -502,13 +505,24 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 	}
 	fc.Runtime = runtimeCfg
 
-	if len(fc.Webhooks.Endpoints) > 0 {
+	if len(fc.Webhooks.Endpoints) > 0 || len(fc.Webhooks.Repos) > 0 {
 		if fc.Webhooks.Bind == "" {
 			fc.Webhooks.Bind = "127.0.0.1:8787"
 		}
 		if !isLoopbackBind(fc.Webhooks.Bind) {
 			return Config{}, fmt.Errorf("config: webhooks.bind must be a loopback host:port (127.0.0.1, localhost, or ::1), got %q", fc.Webhooks.Bind)
 		}
+		for i := range fc.Webhooks.Endpoints {
+			switch strings.TrimSpace(strings.ToLower(fc.Webhooks.Endpoints[i].Workflow)) {
+			case "review", "fix", "merge", "merged":
+				return Config{}, fmt.Errorf("config: webhooks.endpoints[%d] uses locked workflow %q: define the repo under webhooks.repos instead; endpoints: keeps custom workflows only", i, fc.Webhooks.Endpoints[i].Workflow)
+			}
+		}
+		expanded, err := expandRepos(fc.Webhooks.Repos, fc.Webhooks.Defaults)
+		if err != nil {
+			return Config{}, err
+		}
+		fc.Webhooks.Endpoints = append(fc.Webhooks.Endpoints, expanded...)
 		runtime, err := validateWebhookRuntime(fc.Webhooks.Runtime)
 		if err != nil {
 			return Config{}, err
