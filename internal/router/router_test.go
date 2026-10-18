@@ -3815,3 +3815,60 @@ func TestSessionStateCommands(t *testing.T) {
 		}
 	})
 }
+
+func TestOperatorCommandHookRoutesBeforeCommands(t *testing.T) {
+	r, _, reply := newTestRouter()
+	if !r.isOccaCommand("/queue") {
+		t.Fatal("/queue must route as an occa command (registered fallback)")
+	}
+	called := false
+	r.SetOperatorCommandHook(func(ctx context.Context, msg channel.IncomingMessage, name, args string) (string, bool, error) {
+		called = true
+		if name != "queue" || args != "7" {
+			t.Fatalf("hook got %q %q", name, args)
+		}
+		return "queue-state", true, nil
+	})
+	m := msg("/queue 7", reply)
+	m.ThreadID = "thread-1"
+	m.IsThread = true
+	if err := r.Route(context.Background(), m); err != nil {
+		t.Fatalf("route: %v", err)
+	}
+	if !called {
+		t.Fatal("operator hook was not called")
+	}
+	if len(reply.sends) == 0 || reply.sends[len(reply.sends)-1] != "queue-state" {
+		t.Fatalf("reply not delivered: %v", reply.sends)
+	}
+}
+
+func TestOperatorHookUnhandledFallsThrough(t *testing.T) {
+	r, _, reply := newTestRouter()
+	r.SetOperatorCommandHook(func(ctx context.Context, msg channel.IncomingMessage, name, args string) (string, bool, error) {
+		return "", false, nil
+	})
+	if !r.isOccaCommand("/queue") {
+		t.Fatal("/queue must route to handleCommand")
+	}
+	m := msg("/queue", reply)
+	if err := r.Route(context.Background(), m); err != nil {
+		t.Fatalf("route: %v", err)
+	}
+	if len(reply.sends) == 0 || !strings.Contains(reply.sends[len(reply.sends)-1], "PR thread") {
+		t.Fatalf("unhandled operator command should hint at the PR thread: %v", reply.sends)
+	}
+}
+
+func TestMenuListsOperatorCommands(t *testing.T) {
+	r, _, _ := newTestRouter()
+	names := map[string]bool{}
+	for _, m := range r.MenuCommands() {
+		names[m.Alias] = true
+	}
+	for _, want := range []string{"queue", "retry", "skip", "cancel"} {
+		if !names[want] {
+			t.Fatalf("menu missing /%s", want)
+		}
+	}
+}

@@ -54,6 +54,10 @@ func (r *Router) MenuCommands() []channel.MenuCommand {
 		{Alias: "schedules", Description: "View or delete scheduled tasks", HasArgs: true},
 		{Alias: "loop", Description: "Repeat a prompt on an interval", HasArgs: true},
 		{Alias: "loops", Description: "List active loops in this conversation"},
+		{Alias: "queue", Description: "Show the PR queue (in a PR thread)", HasArgs: true},
+		{Alias: "retry", Description: "Re-run the PR task (in a PR thread)", HasArgs: true},
+		{Alias: "skip", Description: "Skip the active PR run (in a PR thread)", HasArgs: true},
+		{Alias: "cancel", Description: "Cancel the PR queue (in a PR thread)", HasArgs: true},
 		{Alias: "webhooks", Description: "Recent webhook delivery diagnostics"},
 		{Alias: "connect-repo", Description: "Show the 4-hook wiring checklist for owner/repo", HasArgs: true},
 	}
@@ -108,6 +112,7 @@ type Router struct {
 	dispatchClient         *http.Client
 	connectDeps            *ConnectRepoDeps
 	connectConfigPath      string
+	operatorHook           func(ctx context.Context, msg channel.IncomingMessage, name, args string) (string, bool, error)
 }
 
 type ScheduleStore interface {
@@ -133,6 +138,10 @@ func (r *Router) SetDispatchConfig(token, url string) {
 	if r.dispatchClient == nil {
 		r.dispatchClient = &http.Client{Timeout: dispatchHTTPTimeout}
 	}
+}
+
+func (r *Router) SetOperatorCommandHook(hook func(ctx context.Context, msg channel.IncomingMessage, name, args string) (string, bool, error)) {
+	r.operatorHook = hook
 }
 
 func New(instances InstanceProvider, st store.Store, defaultWorkdir string, adminID string, cfg Config) *Router {
@@ -341,6 +350,24 @@ func (r *Router) handleCommand(ctx context.Context, msg channel.IncomingMessage)
 	args := ""
 	if len(parts) > 1 {
 		args = parts[1]
+	}
+
+	if r.operatorHook != nil {
+		if reply, handled, err := r.operatorHook(ctx, msg, name, args); handled {
+			if err != nil {
+				var replyErr *replyError
+				message := "Command failed. Please try again."
+				if errors.As(err, &replyErr) {
+					message = replyErr.message
+				} else {
+					slog.Error("operator command failed", "command", name, "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID, "error", err)
+				}
+				r.reply(msg, "⚠️ "+message)
+				return nil
+			}
+			r.reply(msg, reply)
+			return nil
+		}
 	}
 
 	cmd, ok := r.commands[name]
@@ -710,6 +737,29 @@ func (r *Router) registerDefaults() {
 		Name:    "connect-repo",
 		Handler: r.handleConnectRepo,
 	}
+	for _, name := range []string{"queue", "retry", "skip", "cancel"} {
+		name := name
+		r.commands[name] = Command{
+			Name: name,
+			Handler: func(ctx context.Context, msg channel.IncomingMessage, args string) (string, error) {
+				return r.handleOperatorCommand(ctx, msg, name, args)
+			},
+		}
+	}
+}
+
+func (r *Router) handleOperatorCommand(ctx context.Context, msg channel.IncomingMessage, name, args string) (string, error) {
+	if r.operatorHook == nil {
+		return "", safeReplyError("PR commands need the webhook relay — start occa with webhooks configured.", nil)
+	}
+	reply, handled, err := r.operatorHook(ctx, msg, name, args)
+	if err != nil {
+		return "", err
+	}
+	if !handled {
+		return "", safeReplyError("Run /"+name+" inside the PR thread.", nil)
+	}
+	return reply, nil
 }
 
 // handleHelp lists OCCA's own commands and, best-effort, the connected

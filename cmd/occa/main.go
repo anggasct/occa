@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"syscall"
@@ -515,6 +516,47 @@ func main() {
 		})
 		webhookSrv.SetWorkspaceResolver(webhook.NewWorkspaceManagerWithTTL(cfg.Webhooks.Runtime.IsolatedWorkspaceTTL))
 		webhookSrv.SetSessionStore(db.SessionRepo())
+		webhookSrv.SetOperatorAuthorizer(func(platform, userID string) bool {
+			var list []string
+			switch strings.TrimSpace(platform) {
+			case "discord":
+				list = cfg.Discord.AllowedSenderIDs
+			case "telegram":
+				list = cfg.Telegram.AllowedSenderIDs
+			default:
+				return false
+			}
+			for _, id := range list {
+				if strings.TrimSpace(id) != "" && strings.TrimSpace(id) == strings.TrimSpace(userID) {
+					return true
+				}
+			}
+			return false
+		})
+		webhookSrv.SetSessionAborter(func(ctx context.Context, sessionID, workdir string) error {
+			if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(workdir) == "" {
+				return errors.New("webhook: abort needs session and workdir")
+			}
+			inst, err := manager.Instance(ctx, workdir)
+			if err != nil {
+				return err
+			}
+			return inst.Client().AbortSession(ctx, sessionID)
+		})
+		{
+			cfgPath := strings.TrimSpace(configPath)
+			if cfgPath == "" {
+				if def, err := config.DefaultConfigPath(); err == nil {
+					cfgPath = def
+				}
+			}
+			if dir := strings.TrimSpace(cfgPath); dir != "" {
+				webhookSrv.SetPromptDir(filepath.Dir(dir))
+			}
+		}
+		rt.SetOperatorCommandHook(func(ctx context.Context, msg channel.IncomingMessage, name, args string) (string, bool, error) {
+			return webhookSrv.HandleOperatorCommand(ctx, msg, name, args)
+		})
 		if err := webhookSrv.Start(ctx); err != nil {
 			slog.Error("failed to start webhook server", "error", err)
 		}
