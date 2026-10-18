@@ -49,6 +49,7 @@ type WebhookWorkContext struct {
 	Envelope       WebhookEnvelope
 	RootMessageID  string
 	ThreadID       string
+	PRKey          string
 	StartTime      time.Time
 	Heartbeat      func()
 }

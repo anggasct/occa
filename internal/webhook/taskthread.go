@@ -177,14 +177,15 @@ type TaskThreadRecord struct {
 }
 
 type TaskThreadRegistry struct {
-	mu      sync.RWMutex
-	records map[string]TaskThreadRecord
-	icons   map[string]string
-	colors  map[string]int
+	mu        sync.RWMutex
+	records   map[string]TaskThreadRecord
+	prThreads map[string]TaskThreadRecord
+	icons     map[string]string
+	colors    map[string]int
 }
 
 func NewTaskThreadRegistry() *TaskThreadRegistry {
-	return &TaskThreadRegistry{records: make(map[string]TaskThreadRecord)}
+	return &TaskThreadRegistry{records: make(map[string]TaskThreadRecord), prThreads: make(map[string]TaskThreadRecord)}
 }
 
 func (t *TaskThreadRegistry) SetStatusConfig(icons map[string]string, colors map[string]int) {
@@ -210,6 +211,28 @@ func (t *TaskThreadRegistry) Lookup(repo, branch string) (TaskThreadRecord, bool
 	defer t.mu.RUnlock()
 	rec, ok := t.records[TaskThreadKey(repo, branch)]
 	return rec, ok
+}
+
+func (t *TaskThreadRegistry) ResolvePRThread(prKey string) (TaskThreadRecord, bool) {
+	if strings.TrimSpace(prKey) == "" {
+		return TaskThreadRecord{}, false
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	rec, ok := t.prThreads[strings.TrimSpace(prKey)]
+	return rec, ok
+}
+
+func (t *TaskThreadRegistry) LinkPRThread(prKey string, rec TaskThreadRecord) {
+	if strings.TrimSpace(prKey) == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.prThreads == nil {
+		t.prThreads = make(map[string]TaskThreadRecord)
+	}
+	t.prThreads[strings.TrimSpace(prKey)] = rec
 }
 
 func (t *TaskThreadRegistry) ResolveTaskThread(repo, branch, caller string) (TaskThreadRecord, bool) {
@@ -487,7 +510,10 @@ func (s *Server) recordTaskThread(ep config.EndpointConfig, envelope WebhookEnve
 	if repo == "" || branch == "" {
 		return
 	}
-	s.tasks.Upsert(repo, branch, workCtx.RootMessageID, workCtx.ThreadID, status)
+	rec := s.tasks.Upsert(repo, branch, workCtx.RootMessageID, workCtx.ThreadID, status)
+	if strings.TrimSpace(workCtx.PRKey) != "" {
+		s.tasks.LinkPRThread(workCtx.PRKey, rec)
+	}
 }
 
 func MissingTaskWorkflows(endpoints []config.EndpointConfig, repo string) []string {

@@ -110,20 +110,11 @@ func (s *Server) alarmStuckDispatcher(d *dispatcher, snap dispatcherSnapshot, no
 	item := snap.active
 	if !snap.hasActive && snap.queueLen > 0 {
 		s.dispatchMu.Lock()
-		var drained []dispatchItem
-		for {
-			select {
-			case q := <-d.ch:
-				drained = append(drained, q)
-			default:
-				goto restored
-			}
-		}
-	restored:
+		drained := d.drain()
 		if len(drained) > 0 {
 			item = drained[0]
 			for _, q := range drained {
-				d.ch <- q
+				d.push(q)
 			}
 		}
 		s.dispatchMu.Unlock()
@@ -183,27 +174,17 @@ func (s *Server) releaseStuckDispatcher(old *dispatcher) {
 	}
 	old.exiting = true
 	delete(s.dispatchers, old.key)
-	fresh := &dispatcher{server: s, key: old.key, ch: make(chan dispatchItem, s.maxQueuedPerKey), lastActivity: time.Now()}
+	fresh := newDispatcher(s, old.key)
 	s.dispatchers[old.key] = fresh
 	s.dispatchWG.Add(1)
 	go fresh.run(s.shutdownCtx)
-	var queued []dispatchItem
-	for {
-		select {
-		case item := <-old.ch:
-			queued = append(queued, item)
-		default:
-			goto drained
-		}
-	}
-drained:
+	queued := old.drain()
 	s.dispatchMu.Unlock()
 	moved := 0
 	for _, item := range queued {
-		select {
-		case fresh.ch <- item:
+		if fresh.push(item) {
 			moved++
-		default:
+		} else {
 			s.abandon(item, "watchdog queue overflow after key release")
 		}
 	}
@@ -249,25 +230,11 @@ func (s *Server) rebuildAfterPanic(d *dispatcher, item dispatchItem, r any) {
 		d.exiting = true
 		delete(s.dispatchers, d.key)
 	}
-	var queued []dispatchItem
-	select {
-	case q := <-d.ch:
-		queued = append(queued, q)
-		for {
-			select {
-			case q := <-d.ch:
-				queued = append(queued, q)
-			default:
-				goto drained
-			}
-		}
-	default:
-	}
-drained:
+	queued := d.drain()
 	freshNeeded := len(queued) > 0
 	var fresh *dispatcher
 	if freshNeeded {
-		fresh = &dispatcher{server: s, key: d.key, ch: make(chan dispatchItem, s.maxQueuedPerKey), lastActivity: time.Now()}
+		fresh = newDispatcher(s, d.key)
 		s.dispatchers[d.key] = fresh
 		s.dispatchWG.Add(1)
 		go fresh.run(s.shutdownCtx)
@@ -277,9 +244,7 @@ drained:
 		return
 	}
 	for _, q := range queued {
-		select {
-		case fresh.ch <- q:
-		default:
+		if !fresh.push(q) {
 			s.abandon(q, "panic rebuild queue overflow")
 		}
 	}

@@ -233,11 +233,11 @@ func TestDispatcherQueueOnlyAlarmPreservesFIFO(t *testing.T) {
 	srv, _ := newWatchdogServer(t, exec)
 	ep := config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Admit: defaultCatchAllAdmit()}
 	mkItem := func(id string) dispatchItem {
-		return dispatchItem{ep: ep, body: []byte(stuckPayload()), deliveryID: id, eventType: "pull_request", payloadHash: "hash-" + id}
+		return dispatchItem{ep: ep, body: []byte(stuckPayload()), deliveryID: id, eventType: "pull_request", payloadHash: "hash-" + id, lane: 3}
 	}
-	d := &dispatcher{server: srv, key: "key:fifo-alarm-test", ch: make(chan dispatchItem, 8), lastActivity: time.Now().Add(-10 * time.Minute)}
+	d := &dispatcher{server: srv, key: "key:fifo-alarm-test", lanes: makePRLanes(8), lastActivity: time.Now().Add(-10 * time.Minute)}
 	for _, id := range []string{"fifo-1", "fifo-2", "fifo-3"} {
-		d.ch <- mkItem(id)
+		d.lanes[3] <- mkItem(id)
 	}
 	snap := d.snapshot()
 	if snap.queueLen != 3 || snap.hasActive {
@@ -247,7 +247,7 @@ func TestDispatcherQueueOnlyAlarmPreservesFIFO(t *testing.T) {
 	var got []string
 	for i := 0; i < 3; i++ {
 		select {
-		case it := <-d.ch:
+		case it := <-d.lanes[3]:
 			got = append(got, it.deliveryID)
 		default:
 			t.Fatalf("alarm consumed a queued item, got %v", got)
@@ -258,7 +258,7 @@ func TestDispatcherQueueOnlyAlarmPreservesFIFO(t *testing.T) {
 		t.Fatalf("queue order after alarm = %v, want %v", got, want)
 	}
 	for _, id := range want {
-		d.ch <- mkItem(id)
+		d.lanes[3] <- mkItem(id)
 	}
 	srv.dispatchMu.Lock()
 	srv.dispatchers[d.key] = d
@@ -305,8 +305,8 @@ func TestDispatcherRunPanicFailsActiveWithoutRequeue(t *testing.T) {
 	ep := config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Admit: defaultCatchAllAdmit()}
 	active := dispatchItem{ep: ep, body: []byte(stuckPayload()), deliveryID: "delivery-active", eventType: "pull_request", payloadHash: "hash-active"}
 	queued := dispatchItem{ep: ep, body: []byte(stuckPayload()), deliveryID: "delivery-queued", eventType: "pull_request", payloadHash: "hash-queued"}
-	d := &dispatcher{server: srv, key: "key:panic-active-test", ch: make(chan dispatchItem, 8), lastActivity: time.Now()}
-	d.ch <- queued
+	d := &dispatcher{server: srv, key: "key:panic-active-test", lanes: makePRLanes(8), lastActivity: time.Now()}
+	d.lanes[3] <- queued
 	srv.dispatchMu.Lock()
 	srv.dispatchers[d.key] = d
 	srv.dispatchMu.Unlock()
@@ -339,7 +339,7 @@ func TestDispatcherActivityRefreshesStamp(t *testing.T) {
 	srv, _ := newWatchdogServer(t, exec)
 	ep := config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Admit: defaultCatchAllAdmit()}
 	item := dispatchItem{ep: ep, body: []byte(stuckPayload()), deliveryID: "delivery-heartbeat", eventType: "pull_request", payloadHash: "hash-hb"}
-	d := &dispatcher{server: srv, key: "key:heartbeat-stamp-test", ch: make(chan dispatchItem, 8)}
+	d := &dispatcher{server: srv, key: "key:heartbeat-stamp-test", lanes: makePRLanes(8)}
 	d.setActive(item)
 	before := d.snapshot().lastActive
 	time.Sleep(20 * time.Millisecond)
@@ -394,7 +394,7 @@ func TestDispatcherSilentStillAlarms(t *testing.T) {
 	srv.TaskRegistry().Upsert("anggasct/occa", "fix/watchdog", "root-1", "thread-1", TaskDispatched)
 	ep := config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Admit: defaultCatchAllAdmit()}
 	item := dispatchItem{ep: ep, body: []byte(stuckPayload()), deliveryID: "delivery-frozen", eventType: "pull_request", payloadHash: "hash-frozen"}
-	d := &dispatcher{server: srv, key: "key:silent-alarm-test", ch: make(chan dispatchItem, 8)}
+	d := &dispatcher{server: srv, key: "key:silent-alarm-test", lanes: makePRLanes(8)}
 	d.setActive(item)
 	silentSince := time.Now().Add(-6 * time.Minute)
 	d.mu.Lock()
@@ -443,7 +443,7 @@ func TestDispatcherCIWaitNoAlarm(t *testing.T) {
 	srv.TaskRegistry().Upsert("anggasct/occa", "fix/watchdog", "root-1", "thread-1", TaskDispatched)
 	ep := config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Admit: defaultCatchAllAdmit()}
 	item := dispatchItem{ep: ep, body: []byte(stuckPayload()), deliveryID: "delivery-ci-wait", eventType: "pull_request", payloadHash: "hash-ci"}
-	d := &dispatcher{server: srv, key: "key:ci-wait-test", ch: make(chan dispatchItem, 8)}
+	d := &dispatcher{server: srv, key: "key:ci-wait-test", lanes: makePRLanes(8)}
 	d.setActive(item)
 	d.mu.Lock()
 	d.activeStartedAt = time.Now().Add(-11 * time.Minute)

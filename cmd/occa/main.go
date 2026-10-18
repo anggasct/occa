@@ -443,6 +443,7 @@ func main() {
 		webhookSrv = webhook.New(cfg.Webhooks, webhookExecutor, db.WebhookDeliveryRepo())
 		webhookSrv.SetTaskRegistry(taskRegistry)
 		webhookSrv.SetChannelStore(db.ChannelRepo())
+		webhookSrv.SetPRQueueRepo(db.PRQueueRepo())
 		webhookSrv.SetStallFreshness(cfg.Runtime.Relay.StallFreshness)
 		webhookSrv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
 			for _, ch := range channels {

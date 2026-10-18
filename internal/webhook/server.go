@@ -45,6 +45,7 @@ type DeliveryStore interface {
 	Prune(ctx context.Context, cutoff int64, keep int) (int, error)
 	FailStale(ctx context.Context, cutoff int64, summary string) (int, error)
 	SetReviewKey(ctx context.Context, id int64, reviewKey string) error
+	SetPRKey(ctx context.Context, id int64, prKey string) error
 	FindReviewDuplicate(ctx context.Context, endpoint, reviewKey string, cutoff int64) (*store.WebhookDelivery, error)
 	CountReviewDeliveries(ctx context.Context, endpoint, reviewKey string, cutoff int64) (int, error)
 }
@@ -93,6 +94,7 @@ type Server struct {
 	threadStarter         ThreadStarter
 	guildResolver         GuildResolver
 	deliveries            DeliveryStore
+	prQueues              store.PRQueueRepo
 	channels              ChannelStore
 	sessions              TakeoverStore
 	workspaceResolver     WorkspaceResolver
@@ -220,11 +222,6 @@ func (s *Server) reviewDedupeCutoff() int64 {
 func (s *Server) maxConcurrentEvents() int { return cap(s.eventSlots) }
 
 func (s *Server) queueCap() int {
-	s.dispatchMu.Lock()
-	defer s.dispatchMu.Unlock()
-	for _, d := range s.dispatchers {
-		return cap(d.ch)
-	}
 	return s.maxQueuedPerKey
 }
 
@@ -306,6 +303,10 @@ func (s *Server) SetThreadStarter(n ThreadStarter) {
 
 func (s *Server) SetChannelStore(c ChannelStore) {
 	s.channels = c
+}
+
+func (s *Server) SetPRQueueRepo(r store.PRQueueRepo) {
+	s.prQueues = r
 }
 
 func (s *Server) SetGuildResolver(fn GuildResolver) {
@@ -648,29 +649,62 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 // enqueue atomically resolves the live dispatcher for a lock identity and
-// appends the item to its queue. Lookup, retirement checks, and the channel
-// send all happen under dispatchMu — retirement also flips exiting under that
-// lock before any drain — so an accepted send is always ordered before
+// appends the item to its priority lane. Lookup, retirement checks, and the
+// lane send all happen under dispatchMu — retirement also flips exiting under
+// that lock before any drain — so an accepted send is always ordered before
 // retirement completes and can never land in a channel nobody will read. A
 // rejected send (queue full) leaves the dispatcher untouched.
 func (s *Server) enqueue(ep config.EndpointConfig, key WebhookExecutionKey, item dispatchItem) (*dispatcher, bool) {
 	lockKey := dispatchLockKey(ep, key, item)
+	lane := laneOfWorkflow(ep.Workflow)
+	if prKey, ok := s.prKeyForItem(ep, key, item); ok {
+		lockKey = "pr:" + prKey
+		item.prKey = prKey
+	}
+	item.lane = lane
 	s.dispatchMu.Lock()
 	defer s.dispatchMu.Unlock()
 	d, ok := s.dispatchers[lockKey]
 	if !ok || d.exiting {
-		d = &dispatcher{server: s, key: lockKey, ch: make(chan dispatchItem, s.maxQueuedPerKey), lastActivity: time.Now()}
+		d = newDispatcher(s, lockKey)
 		s.dispatchers[lockKey] = d
 		s.dispatchWG.Add(1)
 		go d.run(s.shutdownCtx)
 	}
-	select {
-	case d.ch <- item:
-		d.touch()
-		return d, true
-	default:
+	if d.queueLen() >= s.maxQueuedPerKey {
 		return nil, false
 	}
+	if item.prKey != "" {
+		item.queueID = s.mirrorEnqueue(item.prKey, ep.Name, item.eventType, 0, lanePriority(item.lane))
+	}
+	if !d.push(item) {
+		if item.queueID != 0 {
+			s.mirrorDelete(item.queueID)
+		}
+		return nil, false
+	}
+	return d, true
+}
+
+func lanePriority(lane int) int {
+	switch lane {
+	case 0:
+		return 1
+	case 1:
+		return 2
+	case 2:
+		return 3
+	default:
+		return 4
+	}
+}
+
+func (s *Server) prKeyForItem(ep config.EndpointConfig, key WebhookExecutionKey, item dispatchItem) (string, bool) {
+	if ep.Automation == nil {
+		return "", false
+	}
+	envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", ep.CommentTrigger)
+	return prKeyForEndpoint(ep, key, envelope)
 }
 
 func dispatchLockKey(ep config.EndpointConfig, key WebhookExecutionKey, item dispatchItem) string {
@@ -787,12 +821,16 @@ type dispatchItem struct {
 	deliveryID  string
 	eventType   string
 	payloadHash string
+	prKey       string
+	lane        int
+	queueID     int64
 }
 
 type dispatcher struct {
 	server          *Server
 	key             string
-	ch              chan dispatchItem
+	lanes           [numPRLanes]chan dispatchItem
+	notify          chan struct{}
 	exiting         bool
 	mu              sync.Mutex
 	active          dispatchItem
@@ -851,8 +889,8 @@ func (d *dispatcher) snapshot() dispatcherSnapshot {
 		stuckMarked: d.stuckReported,
 	}
 	d.mu.Unlock()
-	snap.queueLen = len(d.ch)
-	snap.queueCap = cap(d.ch)
+	snap.queueLen = d.queueLen()
+	snap.queueCap = d.queueCap()
 	if snap.lastActive.IsZero() {
 		snap.lastActive = snap.startedAt
 	}
@@ -887,35 +925,19 @@ func (d *dispatcher) run(ctx context.Context) {
 	timer := time.NewTimer(d.server.dispatcherIdleTTL)
 	defer timer.Stop()
 	for {
+		if item, ok := d.pop(); ok {
+			d.server.mirrorDelete(item.queueID)
+			d.execute(item, ctx, timer)
+			if d.isExiting() {
+				return
+			}
+			continue
+		}
 		select {
 		case <-ctx.Done():
 			d.retire("shutting down")
 			return
-		case item := <-d.ch:
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-			timer.Reset(d.server.dispatcherIdleTTL)
-			if ctx.Err() != nil {
-				d.server.abandon(item, "shutting down")
-				continue
-			}
-			d.setActive(item)
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						d.server.handleDispatcherPanic(d, item, r)
-					}
-				}()
-				d.handle(item)
-			}()
-			d.clearActive()
-			if d.isExiting() {
-				return
-			}
+		case <-d.notify:
 		case <-timer.C:
 			if !d.tryRetireIdle() {
 				timer.Reset(d.server.dispatcherIdleTTL)
@@ -926,6 +948,30 @@ func (d *dispatcher) run(ctx context.Context) {
 	}
 }
 
+func (d *dispatcher) execute(item dispatchItem, ctx context.Context, timer *time.Timer) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(d.server.dispatcherIdleTTL)
+	if ctx.Err() != nil {
+		d.server.abandon(item, "shutting down")
+		return
+	}
+	d.setActive(item)
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				d.server.handleDispatcherPanic(d, item, r)
+			}
+		}()
+		d.handle(item)
+	}()
+	d.clearActive()
+}
+
 // tryRetireIdle retires the dispatcher only when its queue is empty under the
 // registry lock. Because enqueues take the same lock, a successful retirement
 // freezes an empty channel that no future send can reach; a failed attempt
@@ -934,7 +980,7 @@ func (d *dispatcher) tryRetireIdle() bool {
 	s := d.server
 	s.dispatchMu.Lock()
 	defer s.dispatchMu.Unlock()
-	if len(d.ch) > 0 {
+	if d.queueLen() > 0 {
 		return false
 	}
 	d.exiting = true
@@ -956,13 +1002,8 @@ func (d *dispatcher) retire(reason string) {
 		delete(s.dispatchers, d.key)
 	}
 	s.dispatchMu.Unlock()
-	for {
-		select {
-		case item := <-d.ch:
-			s.abandon(item, reason)
-		default:
-			return
-		}
+	for _, item := range d.drain() {
+		s.abandon(item, reason)
 	}
 }
 
@@ -971,6 +1012,13 @@ func (d *dispatcher) handle(item dispatchItem) {
 	receipt := s.beginExecution(item)
 	if receipt == nil {
 		return
+	}
+	if item.prKey != "" {
+		if err := s.deliveries.SetPRKey(context.Background(), receipt.ID, item.prKey); err != nil {
+			slog.Warn("webhook: pr key stamp failed", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "error", err)
+		}
+		s.prMirrorSetActive(item, receipt.ID)
+		defer s.prMirrorClearActive(item.prKey)
 	}
 	held := false
 	defer func() {
@@ -998,6 +1046,17 @@ func (d *dispatcher) handle(item dispatchItem) {
 			enriched = true
 		}
 		earlyEnvelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", item.ep.CommentTrigger)
+		if !s.automationAllows(item.ep, ExtractExecutionKey(item.body), earlyEnvelope) {
+			held = false
+			s.releaseEvent()
+			slog.Info("webhook: delivery skipped by author policy",
+				"endpoint", item.ep.Name,
+				"delivery_id", item.deliveryID,
+				"event_type", item.eventType,
+			)
+			s.markSkipped(receipt.ID, item.ep, earlyEnvelope, "review-only author")
+			return
+		}
 		if allowed, reason := admitDelivery(item.ep, s.policy, earlyEnvelope); !allowed {
 			held = false
 			s.releaseEvent()
@@ -1404,11 +1463,13 @@ func (s *Server) logDuplicate(item dispatchItem, observed store.WebhookStatus) {
 // now so overload rejections and queue waits leave no rows behind.
 func (s *Server) abandon(item dispatchItem, reason string) {
 	ctx := context.Background()
+	s.mirrorDelete(item.queueID)
 	created, err := s.deliveries.Create(ctx, store.WebhookDelivery{
 		Endpoint:    item.ep.Name,
 		DeliveryID:  item.deliveryID,
 		EventType:   item.eventType,
 		PayloadHash: item.payloadHash,
+		PRKey:       item.prKey,
 		Attempt:     1,
 	})
 	if err != nil {
@@ -1471,8 +1532,14 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 	if eventType == "issue_comment" && caller == "fix" {
 		caller = "review-fix"
 	}
-	if repo, branch := TaskRepoBranch(key, envelope); repo != "" && branch != "" {
-		if _, _, rec, ok := s.tasks.ResolveForDelivery(key, envelope, caller); ok {
+	prKey, hasPRKey := prKeyForEndpoint(ep, key, envelope)
+	if hasPRKey {
+		workCtx.PRKey = prKey
+	}
+	resolvedPR := false
+	if hasPRKey {
+		if rec, ok := s.tasks.ResolvePRThread(prKey); ok {
+			resolvedPR = true
 			if rec.ThreadID != "" {
 				workCtx.ThreadID = rec.ThreadID
 			}
@@ -1480,9 +1547,10 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 				workCtx.RootMessageID = rec.RootMessageID
 			}
 		}
-	} else if eventType == "issue_comment" {
-		if routingRepo, routingBranch, ok := s.commentRoutingIdentity(body, eventType, ep, envelope); ok {
-			if rec, ok := s.tasks.ResolveTaskThread(routingRepo, routingBranch, caller); ok {
+	}
+	if !resolvedPR {
+		if repo, branch := TaskRepoBranch(key, envelope); repo != "" && branch != "" {
+			if _, _, rec, ok := s.tasks.ResolveForDelivery(key, envelope, caller); ok {
 				if rec.ThreadID != "" {
 					workCtx.ThreadID = rec.ThreadID
 				}
@@ -1490,10 +1558,21 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 					workCtx.RootMessageID = rec.RootMessageID
 				}
 			}
-		} else if repo != "" || branch != "" {
-			s.tasks.ResolveTaskThread(repo, branch, caller)
-		} else if parsedRepo, _, ok := parseIssueCommentPR(body); ok {
-			s.tasks.ResolveTaskThread(parsedRepo, "", caller)
+		} else if eventType == "issue_comment" {
+			if routingRepo, routingBranch, ok := s.commentRoutingIdentity(body, eventType, ep, envelope); ok {
+				if rec, ok := s.tasks.ResolveTaskThread(routingRepo, routingBranch, caller); ok {
+					if rec.ThreadID != "" {
+						workCtx.ThreadID = rec.ThreadID
+					}
+					if rec.RootMessageID != "" {
+						workCtx.RootMessageID = rec.RootMessageID
+					}
+				}
+			} else if repo != "" || branch != "" {
+				s.tasks.ResolveTaskThread(repo, branch, caller)
+			} else if parsedRepo, _, ok := parseIssueCommentPR(body); ok {
+				s.tasks.ResolveTaskThread(parsedRepo, "", caller)
+			}
 		}
 	}
 	if lease != nil {
@@ -1631,6 +1710,7 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 	ctx, cancel := context.WithTimeout(context.Background(), s.processingTimeout)
 	defer cancel()
 	err = s.executor(ctx, ep.Platform, ep.ChannelID, wrapped, workCtx)
+	s.prMirrorSync(workCtx)
 
 	switch {
 	case err == nil:
@@ -1724,6 +1804,7 @@ func (s *Server) linkRootCard(ep config.EndpointConfig, workCtx *WebhookWorkCont
 func (s *Server) failDelivery(ep config.EndpointConfig, id int64, deliveryID, eventType string, envelope WebhookEnvelope, summary string, workCtx *WebhookWorkContext) {
 	card := s.terminalCard(ep, envelope, "FAILED", summary, workCtx)
 	s.recordTaskThread(ep, envelope, workCtx, TaskFailed)
+	s.prMirrorSync(workCtx)
 	s.scheduleDeliveryFallback(ep, workCtx)
 	ok, err := s.deliveries.Transition(context.Background(), id, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusFailed, summary)
 	if err != nil {
