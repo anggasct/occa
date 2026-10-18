@@ -34,6 +34,19 @@ func dropSessionParkedColumns(t *testing.T, s *SQLiteStore) {
 	}
 }
 
+func dropPRQueueTables(t *testing.T, s *SQLiteStore) {
+	t.Helper()
+	if _, err := s.db.Exec(`DROP TABLE IF EXISTS pr_queue_items`); err != nil {
+		t.Fatalf("drop pr_queue_items: %v", err)
+	}
+	if _, err := s.db.Exec(`DROP TABLE IF EXISTS pr_queue`); err != nil {
+		t.Fatalf("drop pr_queue: %v", err)
+	}
+	if _, err := s.db.Exec(`ALTER TABLE webhook_delivery DROP COLUMN pr_key`); err != nil {
+		t.Fatalf("drop pr_key: %v", err)
+	}
+}
+
 func TestThreadRootLinkAndLookup(t *testing.T) {
 	st, err := OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
 	if err != nil {

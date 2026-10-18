@@ -97,6 +97,7 @@ type WebhookDelivery struct {
 	DeliveryID   string
 	EventType    string
 	PayloadHash  string
+	PRKey        string
 	Status       WebhookStatus
 	Attempt      int
 	ErrorSummary string
@@ -239,6 +240,8 @@ type WebhookDeliveryRepo interface {
 	// with the same review key updated at/after cutoff, or nil when none.
 	FindReviewDuplicate(ctx context.Context, endpoint, reviewKey string, cutoff int64) (*WebhookDelivery, error)
 	CountReviewDeliveries(ctx context.Context, endpoint, reviewKey string, cutoff int64) (int, error)
+	// SetPRKey stamps the owning PR identity on a delivery.
+	SetPRKey(ctx context.Context, id int64, prKey string) error
 }
 
 type RecoveryEventRepo interface {
@@ -259,5 +262,6 @@ type Store interface {
 	PermissionRuleRepo() PermissionRuleRepo
 	WebhookDeliveryRepo() WebhookDeliveryRepo
 	RecoveryEventRepo() RecoveryEventRepo
+	PRQueueRepo() PRQueueRepo
 	Close() error
 }

@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	schemaVersion    = 18
+	schemaVersion    = 20
 	SchemaVersion    = schemaVersion
 	busyTimeoutMilli = 5000
 )
@@ -35,6 +35,49 @@ var migrations = []func(s *SQLiteStore, tx *sql.Tx) error{
 	addWebhookReviewKey,
 	dropOverrideRoleColumn,
 	addSessionParked,
+	addPRQueue,
+	addPRQueueRetryAt,
+}
+
+func addPRQueueRetryAt(_ *SQLiteStore, tx *sql.Tx) error {
+	if _, err := tx.Exec(`ALTER TABLE pr_queue ADD COLUMN next_retry_at INTEGER NOT NULL DEFAULT 0;`); err != nil {
+		return fmt.Errorf("store: migrate pr queue retry at: %w", err)
+	}
+	return nil
+}
+
+func addPRQueue(_ *SQLiteStore, tx *sql.Tx) error {
+	ddl := `
+CREATE TABLE IF NOT EXISTS pr_queue (
+	pr_key         TEXT PRIMARY KEY,
+	thread_id      TEXT NOT NULL,
+	root_msg_id    TEXT NOT NULL,
+	status         TEXT NOT NULL DEFAULT 'active',
+	active_kind    TEXT NOT NULL DEFAULT '',
+	active_session TEXT NOT NULL DEFAULT '',
+	active_delivery INTEGER NOT NULL DEFAULT 0,
+	active_since   INTEGER NOT NULL DEFAULT 0,
+	retry_count    INTEGER NOT NULL DEFAULT 0,
+	blocked_reason TEXT NOT NULL DEFAULT '',
+	created_at     INTEGER NOT NULL,
+	updated_at     INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pr_queue_items (
+	id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	pr_key      TEXT NOT NULL,
+	endpoint    TEXT NOT NULL,
+	event_type  TEXT NOT NULL DEFAULT '',
+	delivery_id INTEGER NOT NULL DEFAULT 0,
+	priority    INTEGER NOT NULL DEFAULT 4,
+	enqueued_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pr_items ON pr_queue_items (pr_key, priority, id);
+ALTER TABLE webhook_delivery ADD COLUMN pr_key TEXT NOT NULL DEFAULT '';
+`
+	if _, err := tx.Exec(ddl); err != nil {
+		return fmt.Errorf("store: migrate pr queue: %w", err)
+	}
+	return nil
 }
 
 func addSessionParked(_ *SQLiteStore, tx *sql.Tx) error {
@@ -404,6 +447,7 @@ type SQLiteStore struct {
 	usage             *sqliteUsageRepo
 	webhookDeliveries *sqliteWebhookDeliveryRepo
 	recoveryEvents    *sqliteRecoveryEventRepo
+	prQueues          *sqlitePRQueueRepo
 	defaultWorkdir    string
 }
 
@@ -455,6 +499,7 @@ func OpenWithRetention(path, defaultWorkdir string, usage UsageRetention, recove
 	s.usage = &sqliteUsageRepo{db: db, retention: usage.Retention, maxRows: usage.MaxRows}
 	s.webhookDeliveries = &sqliteWebhookDeliveryRepo{db: db}
 	s.recoveryEvents = &sqliteRecoveryEventRepo{db: db, retention: recoveryRetention}
+	s.prQueues = &sqlitePRQueueRepo{db: db}
 	return s, nil
 }
 
@@ -493,6 +538,7 @@ func (s *SQLiteStore) PermissionRuleRepo() PermissionRuleRepo   { return s.permi
 func (s *SQLiteStore) UsageRepo() UsageRepo                     { return s.usage }
 func (s *SQLiteStore) WebhookDeliveryRepo() WebhookDeliveryRepo { return s.webhookDeliveries }
 func (s *SQLiteStore) RecoveryEventRepo() RecoveryEventRepo     { return s.recoveryEvents }
+func (s *SQLiteStore) PRQueueRepo() PRQueueRepo                 { return s.prQueues }
 
 func (s *SQLiteStore) Close() error {
 	return s.db.Close()

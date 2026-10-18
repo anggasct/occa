@@ -227,6 +227,7 @@ func TestPermissionRuleMigrationFromV7PreservesRows(t *testing.T) {
 	dropSessionRootCardColumns(t, s1)
 	dropWebhookReviewKey(t, s1)
 	dropSessionParkedColumns(t, s1)
+	dropPRQueueTables(t, s1)
 	if _, err := s1.db.Exec("PRAGMA user_version=7"); err != nil {
 		t.Fatalf("stamp user_version=7: %v", err)
 	}
@@ -310,6 +311,7 @@ func TestPermissionRuleMigrationRemovesOnlyLegacyCallIDsAndIsIdempotent(t *testi
 	dropSessionRootCardColumns(t, s1)
 	dropWebhookReviewKey(t, s1)
 	dropSessionParkedColumns(t, s1)
+	dropPRQueueTables(t, s1)
 	if _, err := s1.db.Exec("PRAGMA user_version=10"); err != nil {
 		t.Fatalf("stamp version 10: %v", err)
 	}

@@ -13,12 +13,12 @@ type sqliteWebhookDeliveryRepo struct {
 	db *sql.DB
 }
 
-const deliveryColumns = `id, endpoint, delivery_id, event_type, payload_hash, status, attempt, error_summary, created_at, updated_at, started_at, completed_at`
+const deliveryColumns = `id, endpoint, delivery_id, event_type, payload_hash, pr_key, status, attempt, error_summary, created_at, updated_at, started_at, completed_at`
 
 func scanWebhookDelivery(row interface{ Scan(...any) error }) (*WebhookDelivery, error) {
 	var d WebhookDelivery
 	var status string
-	err := row.Scan(&d.ID, &d.Endpoint, &d.DeliveryID, &d.EventType, &d.PayloadHash, &status, &d.Attempt, &d.ErrorSummary, &d.CreatedAt, &d.UpdatedAt, &d.StartedAt, &d.CompletedAt)
+	err := row.Scan(&d.ID, &d.Endpoint, &d.DeliveryID, &d.EventType, &d.PayloadHash, &d.PRKey, &status, &d.Attempt, &d.ErrorSummary, &d.CreatedAt, &d.UpdatedAt, &d.StartedAt, &d.CompletedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -40,11 +40,11 @@ func (r *sqliteWebhookDeliveryRepo) Create(ctx context.Context, d WebhookDeliver
 		d.Attempt = 1
 	}
 	err := r.db.QueryRowContext(ctx,
-		`INSERT INTO webhook_delivery (endpoint, delivery_id, event_type, payload_hash, status, attempt, error_summary, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO webhook_delivery (endpoint, delivery_id, event_type, payload_hash, pr_key, status, attempt, error_summary, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(endpoint, delivery_id) DO NOTHING
 		 RETURNING id`,
-		d.Endpoint, d.DeliveryID, d.EventType, d.PayloadHash, string(d.Status), d.Attempt, d.ErrorSummary, d.CreatedAt, d.UpdatedAt,
+		d.Endpoint, d.DeliveryID, d.EventType, d.PayloadHash, d.PRKey, string(d.Status), d.Attempt, d.ErrorSummary, d.CreatedAt, d.UpdatedAt,
 	).Scan(&d.ID)
 	if errors.Is(err, sql.ErrNoRows) {
 		if _, err := r.db.ExecContext(ctx,
@@ -198,6 +198,17 @@ func (r *sqliteWebhookDeliveryRepo) FailStale(ctx context.Context, cutoff int64,
 		return 0, fmt.Errorf("store: webhook delivery fail stale rows: %w", err)
 	}
 	return int(n), nil
+}
+
+func (r *sqliteWebhookDeliveryRepo) SetPRKey(ctx context.Context, id int64, prKey string) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE webhook_delivery SET pr_key = ?, updated_at = ? WHERE id = ?`,
+		prKey, time.Now().Unix(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("store: webhook delivery set pr key: %w", err)
+	}
+	return nil
 }
 
 func (r *sqliteWebhookDeliveryRepo) SetReviewKey(ctx context.Context, id int64, reviewKey string) error {

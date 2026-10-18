@@ -424,6 +424,9 @@ func requiredTablesForVersion(version int) []string {
 	if version >= 8 {
 		tables = append(tables, "permission_rule")
 	}
+	if version >= 19 {
+		tables = append(tables, "pr_queue", "pr_queue_items")
+	}
 	return tables
 }
 
@@ -468,6 +471,14 @@ func requiredColumnsForVersion(version int) map[string][]string {
 	// three on resume, so a resumed row reads as an ordinary active session.
 	if version >= 18 {
 		columns["session"] = append(columns["session"], "parked", "parked_at", "park_reason")
+	}
+	// v19 adds the per-PR serial queue; v20 adds the retry backoff column.
+	if version >= 19 {
+		columns["pr_queue"] = []string{"pr_key", "thread_id", "root_msg_id", "status", "active_kind", "active_session", "active_delivery", "active_since", "retry_count", "blocked_reason", "created_at", "updated_at"}
+		columns["pr_queue_items"] = []string{"id", "pr_key", "endpoint", "event_type", "delivery_id", "priority", "enqueued_at"}
+	}
+	if version >= 20 {
+		columns["pr_queue"] = append(columns["pr_queue"], "next_retry_at")
 	}
 	return columns
 }
