@@ -1639,7 +1639,7 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		caller = "delivery"
 	}
 	if eventType == "issue_comment" && caller == "fix" {
-		caller = "review-fix"
+		caller = "pr-fix"
 	}
 	prKey, hasPRKey := prKeyForEndpoint(ep, key, envelope)
 	if hasPRKey {

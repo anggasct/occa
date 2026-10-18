@@ -35,7 +35,7 @@ func (f *fakePRHeadResolver) ResolvePRHead(ctx context.Context, repo string, num
 
 func mutableFixEndpoint() config.EndpointConfig {
 	return config.EndpointConfig{
-		Name:           "review-fix",
+		Name:           "pr-fix",
 		Path:           "/fix",
 		Secret:         "s3cret",
 		Platform:       "telegram",

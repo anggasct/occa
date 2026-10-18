@@ -81,7 +81,7 @@ func lockedPromptFile(workflow string) string {
 	case "review":
 		return "webhooks/github-review.md"
 	case "fix":
-		return "webhooks/github-review-fix.md"
+		return "webhooks/github-pr-fix.md"
 	case "merge":
 		return "webhooks/github-merge.md"
 	case "merged":
@@ -219,7 +219,7 @@ func expandRepos(repos []RepoConfig, defaults WebhookDefaults) ([]EndpointConfig
 		for _, workflow := range []string{"review", "fix", "merge", "merged"} {
 			suffix := workflow
 			if workflow == "fix" {
-				suffix = "review-fix"
+				suffix = "pr-fix"
 			}
 			ep := EndpointConfig{
 				Name:           "github-" + short + "-" + suffix,

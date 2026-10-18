@@ -39,7 +39,7 @@ webhooks:
 ## Things to know
 
 - **Startup load.** Locked prompt files are read when the service starts:
-  `webhooks/github-review.md`, `webhooks/github-review-fix.md`,
+  `webhooks/github-review.md`, `webhooks/github-pr-fix.md`,
   `webhooks/github-merge.md`, `webhooks/github-merged.md` (resolved vs the
   config directory, same rules as `prompt_file`). Edit a prompt, then restart
   the service for it to take effect. Missing files fail startup with the exact
@@ -161,7 +161,7 @@ webhooks:
 ## /connect-repo owner/repo
 
 Prints the 4-hook wiring checklist for a repository: one hook per workflow
-(`review`, `review-fix`, `merge`, `merged`) expanded from the repo block,
+(`review`, `pr-fix`, `merge`, `merged`) expanded from the repo block,
 plus the shared secret.
 
 Phase 1 (today, single operator): fine-grained PAT scoped to the repo, e.g.
@@ -190,7 +190,7 @@ matches) — a task never sits silently at 👀.
 ## Webhook checklist (per repo)
 
 - [ ] repo block wired: `provider`, `platform`, `channel_id`, `secret`, `checkout`
-- [ ] 4 hooks created on GitHub: `review`, `review-fix`, `merge`, `merged`
+- [ ] 4 hooks created on GitHub: `review`, `pr-fix`, `merge`, `merged`
 - [ ] one secret shared by the 4 hooks, stored only in `~/.occa/config.yaml`
 - [ ] locked prompt files present in `~/.occa/webhooks`
 - [ ] ping-test ✅ on all 4 before first dispatch

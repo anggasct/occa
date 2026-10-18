@@ -67,8 +67,8 @@ func TestHandleConnectRepo(t *testing.T) {
 	if !seenFix {
 		t.Errorf("checklist must include the fix workflow row:\n%s", got)
 	}
-	if !strings.Contains(got, "/webhooks/github-acme-widget-review-fix") {
-		t.Errorf("checklist must keep the review-fix route suffix:\n%s", got)
+	if !strings.Contains(got, "/webhooks/github-acme-widget-pr-fix") {
+		t.Errorf("checklist must keep the pr-fix route suffix:\n%s", got)
 	}
 	if strings.Contains(got, "…") {
 		t.Errorf("checklist secrets must be directly usable, got truncation marker:\n%s", got)

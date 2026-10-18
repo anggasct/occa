@@ -10,7 +10,7 @@ import (
 func TestResolveTaskThreadCanonicalBothForms(t *testing.T) {
 	reg := NewTaskThreadRegistry()
 	reg.Upsert("acme/widget", "feat/x", "root-1", "thread-1", TaskDispatched)
-	callers := []string{"dispatch", "claim", "review", "review-fix", "merge", "merged", "redispatch", "watchdog", "executor", "audit", "fallback-poll", "delivery-fallback", "dispatch-fallback"}
+	callers := []string{"dispatch", "claim", "review", "pr-fix", "merge", "merged", "redispatch", "watchdog", "executor", "audit", "fallback-poll", "delivery-fallback", "dispatch-fallback"}
 	forms := []struct{ repo, branch string }{
 		{"acme/widget", "feat/x"},
 		{"github.com/acme/widget", "feat/x"},
@@ -53,7 +53,7 @@ func TestResolveForDeliveryEnrichedAndDirectIdentical(t *testing.T) {
 	if TaskThreadKeyForDelivery(direct, envDirect) != TaskThreadKeyForDelivery(enriched, envEnriched) {
 		t.Fatal("enriched and direct canonical keys must match")
 	}
-	for _, caller := range []string{"review", "review-fix", "fix", "merge", "merged"} {
+	for _, caller := range []string{"review", "pr-fix", "fix", "merge", "merged"} {
 		_, _, recDirect, okDirect := reg.ResolveForDelivery(direct, envDirect, caller)
 		_, _, recEnriched, okEnriched := reg.ResolveForDelivery(enriched, envEnriched, caller)
 		if !okDirect || !okEnriched {
@@ -64,7 +64,7 @@ func TestResolveForDeliveryEnrichedAndDirectIdentical(t *testing.T) {
 		}
 	}
 	longKey := WebhookExecutionKey{Repository: "github.com/Acme/Widget", HeadRepository: "github.com/Acme/Widget", Branch: "Feat/X"}
-	_, _, recLong, okLong := reg.ResolveForDelivery(longKey, WebhookEnvelope{}, "review-fix")
+	_, _, recLong, okLong := reg.ResolveForDelivery(longKey, WebhookEnvelope{}, "pr-fix")
 	if !okLong || recLong.ThreadID != "thread-1" {
 		t.Fatalf("long host key miss: %+v %v", recLong, okLong)
 	}
@@ -78,7 +78,7 @@ func TestResolveTaskThreadMissLogsInfo(t *testing.T) {
 	defer slog.SetDefault(prev)
 	reg := NewTaskThreadRegistry()
 	reg.Upsert("acme/widget", "feat/x", "root-1", "thread-1", TaskDispatched)
-	_, ok := reg.ResolveTaskThread("acme/widget", "feat/missing", "review-fix")
+	_, ok := reg.ResolveTaskThread("acme/widget", "feat/missing", "pr-fix")
 	if ok {
 		t.Fatal("missing branch must miss")
 	}
@@ -89,7 +89,7 @@ func TestResolveTaskThreadMissLogsInfo(t *testing.T) {
 	if !strings.Contains(out, "acme/widget#feat/missing") {
 		t.Fatalf("miss must carry canonical key, got %q", out)
 	}
-	if !strings.Contains(out, "review-fix") {
+	if !strings.Contains(out, "pr-fix") {
 		t.Fatalf("miss must carry caller, got %q", out)
 	}
 	buf.Reset()

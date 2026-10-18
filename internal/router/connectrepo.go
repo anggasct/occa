@@ -75,7 +75,7 @@ func connectHooks() []struct {
 		events   []string
 	}{
 		{"review", "review", []string{"pull_request"}},
-		{"fix", "review-fix", []string{"pull_request_review"}},
+		{"fix", "pr-fix", []string{"pull_request_review"}},
 		{"merge", "merge", []string{"pull_request_review", "check_suite"}},
 		{"merged", "merged", []string{"pull_request"}},
 	}
@@ -213,7 +213,7 @@ func (r *Router) connectChecklist(repo string) (string, error) {
 	}
 	hooks := []struct{ workflow, suffix string }{
 		{"review", "review"},
-		{"fix", "review-fix"},
+		{"fix", "pr-fix"},
 		{"merge", "merge"},
 		{"merged", "merged"},
 	}
@@ -228,7 +228,7 @@ func (r *Router) connectChecklist(repo string) (string, error) {
 		"Phase 1 (this instance): fine-grained PAT scoped to "+repo+".",
 		"Create each hook from the endpoint template:",
 		"  gh api repos/"+repo+"/hooks -f name=web -f active=true \\",
-		"    -f config[url]=<relay-public-url>/occa/webhooks/github-"+slug+"-<review|review-fix|merge|merged> \\",
+		"    -f config[url]=<relay-public-url>/occa/webhooks/github-"+slug+"-<review|pr-fix|merge|merged> \\",
 		"    -f config[content_type]=json -f config[secret]=<secret> -f events[]=<event>",
 		"Then append the 4 endpoints to config.yaml and restart occa (config has no hot-reload).",
 		"Ping-test each hook and expect all 4 ✅ before dispatching.",

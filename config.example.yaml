@@ -76,7 +76,7 @@ webhooks:
     thread: true # dispatch deliveries run in the PR thread
     escalation_mention: operator # user or role mentioned when a PR queue blocks on retry exhaustion; empty disables the mention
   repos:
-    - repo: acme/widget # owner/name; expands to github-widget-{review,review-fix,merge,merged}
+    - repo: acme/widget # owner/name; expands to github-widget-{review,pr-fix,merge,merged}
       provider: github # only github is supported
       platform: discord # where runs and audit cards go: discord | telegram
       channel_id: '<channel-id>' # destination chat for runs and audit cards
@@ -90,7 +90,7 @@ webhooks:
       #   authors:
       #     owner-login: full
       # prompt files are locked and resolved vs the config dir:
-      #   webhooks/github-review.md, webhooks/github-review-fix.md,
+      #   webhooks/github-review.md, webhooks/github-pr-fix.md,
       #   webhooks/github-merge.md, webhooks/github-merged.md
       # on_merged: [] # optional post-merge extras (default: just close the PR thread)
       # - prompt_file: "merged-vault.md" # one agent turn with your prompt file (stays in ~/.occa/webhooks, never in this repo)

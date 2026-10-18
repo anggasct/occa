@@ -866,7 +866,7 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 						}
 						if caller == "fix" {
 							if evt, _ := workCtx.Envelope["event_type"].(string); evt == "issue_comment" {
-								caller = "review-fix"
+								caller = "pr-fix"
 							}
 						}
 						if _, _, rec, ok := taskOpts.Registry.ResolveForDelivery(workCtx.Key, workCtx.Envelope, caller); ok {

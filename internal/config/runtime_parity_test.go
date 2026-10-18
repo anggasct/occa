@@ -21,7 +21,7 @@ func TestRuntimeExampleParity(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "webhooks", "example-review.md"), []byte("review"), 0o644); err != nil {
 		t.Fatalf("write prompt: %v", err)
 	}
-	for _, name := range []string{"github-review.md", "github-review-fix.md", "github-merge.md", "github-merged.md"} {
+	for _, name := range []string{"github-review.md", "github-pr-fix.md", "github-merge.md", "github-merged.md"} {
 		if err := os.WriteFile(filepath.Join(dir, "webhooks", name), []byte("locked "+name), 0o644); err != nil {
 			t.Fatalf("write locked prompt: %v", err)
 		}

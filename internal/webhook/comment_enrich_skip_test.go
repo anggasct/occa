@@ -16,8 +16,8 @@ import (
 
 func prodLikeFixEndpoint() config.EndpointConfig {
 	return config.EndpointConfig{
-		Name:           "github-occa-review-fix",
-		Path:           "/webhooks/github-occa-review-fix",
+		Name:           "github-occa-pr-fix",
+		Path:           "/webhooks/github-occa-pr-fix",
 		Secret:         "s3cret",
 		Platform:       "discord",
 		ChannelID:      "chat1",
@@ -173,7 +173,7 @@ func TestNonTriggerBotReportSkipsQuietlyEndToEnd(t *testing.T) {
 	defer ts.Close()
 
 	body := string(realisticIssueCommentBody(178, "## Fix Applied\n\nAll checks pass."))
-	if resp := post(t, ts.URL+"/webhooks/github-occa-review-fix?secret=s3cret", "del-bot-report", "issue_comment", body); resp.StatusCode != http.StatusOK {
+	if resp := post(t, ts.URL+"/webhooks/github-occa-pr-fix?secret=s3cret", "del-bot-report", "issue_comment", body); resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 	receipt := waitForReceiptDeliveryID(t, st, "del-bot-report", store.WebhookStatusSkipped)
@@ -206,7 +206,7 @@ func TestReReviewOnFixSkipsQuietlyEndToEnd(t *testing.T) {
 	defer ts.Close()
 
 	body := string(realisticIssueCommentBody(178, "please re-review"))
-	if resp := post(t, ts.URL+"/webhooks/github-occa-review-fix?secret=s3cret", "del-rereview-on-fix", "issue_comment", body); resp.StatusCode != http.StatusOK {
+	if resp := post(t, ts.URL+"/webhooks/github-occa-pr-fix?secret=s3cret", "del-rereview-on-fix", "issue_comment", body); resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 	receipt := waitForReceiptDeliveryID(t, st, "del-rereview-on-fix", store.WebhookStatusSkipped)
@@ -239,7 +239,7 @@ func TestGenuineFixTriggerCompletesEndToEnd(t *testing.T) {
 	defer ts.Close()
 
 	body := string(realisticIssueCommentBody(178, "please fix review"))
-	if resp := post(t, ts.URL+"/webhooks/github-occa-review-fix?secret=s3cret", "del-fix-trigger", "issue_comment", body); resp.StatusCode != http.StatusOK {
+	if resp := post(t, ts.URL+"/webhooks/github-occa-pr-fix?secret=s3cret", "del-fix-trigger", "issue_comment", body); resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 	waitForReceiptDeliveryID(t, st, "del-fix-trigger", store.WebhookStatusCompleted)

@@ -63,7 +63,7 @@ func TestHandleConnectRepoCreateFailureSkipsFailedHook(t *testing.T) {
 			return true, nil
 		},
 		CreateHook: func(ctx context.Context, repo, hookURL, secret string, events []string) (string, error) {
-			if strings.Contains(hookURL, "review-fix") {
+			if strings.Contains(hookURL, "pr-fix") {
 				return "", errors.New("create boom")
 			}
 			return "hook-id", nil
@@ -88,7 +88,7 @@ func TestHandleConnectRepoCreateFailureSkipsFailedHook(t *testing.T) {
 		t.Fatalf("appended=%d, want 3 (failed hook excluded)", len(appended))
 	}
 	for _, ep := range appended {
-		if ep.Workflow == "fix" || strings.Contains(ep.Path, "review-fix") {
+		if ep.Workflow == "fix" || strings.Contains(ep.Path, "pr-fix") {
 			t.Errorf("failed hook must not be appended: %+v", ep)
 		}
 	}

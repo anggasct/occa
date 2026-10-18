@@ -15,7 +15,7 @@ func TestWebhooksCheckConfigAcceptsExample(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "webhooks"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	for _, name := range []string{"example-review.md", "github-review.md", "github-review-fix.md", "github-merge.md", "github-merged.md"} {
+	for _, name := range []string{"example-review.md", "github-review.md", "github-pr-fix.md", "github-merge.md", "github-merged.md"} {
 		if err := os.WriteFile(filepath.Join(dir, "webhooks", name), []byte("stub "+name), 0o644); err != nil {
 			t.Fatalf("write stub prompt: %v", err)
 		}

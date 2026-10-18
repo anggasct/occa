@@ -10,7 +10,7 @@ import (
 
 func writeRepoPromptFiles(t *testing.T, dir string) {
 	t.Helper()
-	names := []string{"github-review.md", "github-review-fix.md", "github-merge.md", "github-merged.md"}
+	names := []string{"github-review.md", "github-pr-fix.md", "github-merge.md", "github-merged.md"}
 	if err := os.MkdirAll(filepath.Join(dir, "webhooks"), 0o755); err != nil {
 		t.Fatalf("mkdir prompt directory: %v", err)
 	}
@@ -78,13 +78,13 @@ func TestReposExpandLockedEndpoints(t *testing.T) {
 	if got := byWorkflow["review"].Name; got != "github-widget-review" {
 		t.Fatalf("review name = %q", got)
 	}
-	if got := byWorkflow["fix"].Name; got != "github-widget-review-fix" {
+	if got := byWorkflow["fix"].Name; got != "github-widget-pr-fix" {
 		t.Fatalf("fix name = %q", got)
 	}
-	if got := byWorkflow["fix"].Path; got != "/webhooks/github-widget-review-fix" {
+	if got := byWorkflow["fix"].Path; got != "/webhooks/github-widget-pr-fix" {
 		t.Fatalf("fix path = %q", got)
 	}
-	if byWorkflow["fix"].Prompt != "prompt github-review-fix.md" {
+	if byWorkflow["fix"].Prompt != "prompt github-pr-fix.md" {
 		t.Fatalf("fix prompt not loaded from locked file: %q", byWorkflow["fix"].Prompt)
 	}
 	if byWorkflow["review"].Prompt != "prompt github-review.md" {

@@ -10,7 +10,7 @@ import (
 func connectTestEndpoints() []ConnectEndpoint {
 	return []ConnectEndpoint{
 		{Name: "github-acme-widget-review", Path: "/webhooks/github-acme-widget-review", Secret: "s1", Workflow: "review", Platform: "discord", ChannelID: "chan-1", Repo: "acme/widget", Events: []string{"pull_request"}},
-		{Name: "github-acme-widget-review-fix", Path: "/webhooks/github-acme-widget-review-fix", Secret: "s2", Workflow: "fix", Platform: "discord", ChannelID: "chan-1", Repo: "acme/widget", Events: []string{"pull_request_review"}},
+		{Name: "github-acme-widget-pr-fix", Path: "/webhooks/github-acme-widget-pr-fix", Secret: "s2", Workflow: "fix", Platform: "discord", ChannelID: "chan-1", Repo: "acme/widget", Events: []string{"pull_request_review"}},
 	}
 }
 
@@ -121,7 +121,7 @@ func TestAppendConnectEndpointsPrefixPathStillAppended(t *testing.T) {
 		t.Fatalf("read config: %v", err)
 	}
 	if n := strings.Count(string(data), "path: "+endpoints[0].Path+"\n"); n != 1 {
-		t.Errorf("review path must be appended even though review-fix exists (count=%d):\n%s", n, string(data))
+		t.Errorf("review path must be appended even though pr-fix exists (count=%d):\n%s", n, string(data))
 	}
 }
 
