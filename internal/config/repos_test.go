@@ -28,7 +28,6 @@ func repoConfigYAML(repos string) string {
 func TestReposExpandLockedEndpoints(t *testing.T) {
 	t.Setenv("OCCA_ADMIN_ID", "admin123")
 	dir := t.TempDir()
-	writeRepoPromptFiles(t, dir)
 	path := writeConfig(t, dir, repoConfigYAML(`  repos:
     - repo: acme/widget
       provider: github
@@ -84,11 +83,14 @@ func TestReposExpandLockedEndpoints(t *testing.T) {
 	if got := byWorkflow["fix"].Path; got != "/webhooks/github-widget-pr-fix" {
 		t.Fatalf("fix path = %q", got)
 	}
-	if byWorkflow["fix"].Prompt != "prompt github-pr-fix.md" {
-		t.Fatalf("fix prompt not loaded from locked file: %q", byWorkflow["fix"].Prompt)
+	if byWorkflow["fix"].Prompt != BuiltinPrompt("fix") {
+		t.Fatalf("fix prompt should fall back to builtin: %q", byWorkflow["fix"].Prompt)
 	}
-	if byWorkflow["review"].Prompt != "prompt github-review.md" {
-		t.Fatalf("review prompt not loaded from locked file: %q", byWorkflow["review"].Prompt)
+	if byWorkflow["review"].Prompt != BuiltinPrompt("review") {
+		t.Fatalf("review prompt should fall back to builtin: %q", byWorkflow["review"].Prompt)
+	}
+	if byWorkflow["fix"].PromptSource != "builtin" || byWorkflow["review"].PromptSource != "builtin" {
+		t.Fatalf("prompt source should be builtin: fix=%q review=%q", byWorkflow["fix"].PromptSource, byWorkflow["review"].PromptSource)
 	}
 	if ws := byWorkflow["fix"].Workspace; ws.Type != WorkspaceTypeGit || ws.Path != "/tmp/widget" || ws.Mode != WorkspaceModeIsolated {
 		t.Fatalf("fix workspace = %+v, want git isolated /tmp/widget", ws)

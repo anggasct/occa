@@ -566,6 +566,9 @@ func (s *Server) Start(ctx context.Context) error {
 	go s.watchdogLoop()
 
 	slog.Info("webhook server started", "bind", s.bind, "endpoints", len(s.endpoints))
+	for _, ep := range s.endpoints {
+		slog.Info("webhook: endpoint prompt", "endpoint", ep.Name, "prompt_source", ep.PromptSource)
+	}
 	return nil
 }
 
@@ -1621,6 +1624,7 @@ func (s *Server) failAbandonedReceipt(receipt *store.WebhookDelivery, reason str
 func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64, deliveryID, eventType string, attempt int, lease *WorkspaceLease, allowRetryIncomplete func() bool, heartbeat func()) error {
 	key := ExtractExecutionKey(body)
 	envelope := normalizeWebhook(body, eventType, deliveryID, s.verdicts, false, "", ep.CommentTrigger)
+	injectTaskContext(envelope, key, s.dispatchTasks)
 
 	workCtx := &WebhookWorkContext{
 		Key:          key,

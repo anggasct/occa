@@ -1,7 +1,7 @@
 # Webhook prompts
 
 Dispatch repos declare one block per repository; the relay expands it into the
-four locked endpoints (`review`, `fix`, `merge`, `merged`). Custom generic
+four endpoints (`review`, `pr-fix`, `merge`, `merged`). Custom generic
 endpoints keep the manual shape:
 
 ```yaml
@@ -20,6 +20,9 @@ webhooks:
       channel_id: '<channel-id>'
       secret: <your-webhook-secret> # one secret shared by the 4 hooks
       checkout: /home/operator/projects/widget
+      # prompts: # optional per-workflow override (absent = built-in default)
+      #   review: { prompt_file: webhooks/saya-review.md }
+      #   fix: { prompt_file: webhooks/saya-fix.md }
       # automation: {default: review-only, authors: {owner-login: full}}
   endpoints:
     - name: sentry-alerts
@@ -38,12 +41,16 @@ webhooks:
 
 ## Things to know
 
-- **Startup load.** Locked prompt files are read when the service starts:
-  `webhooks/github-review.md`, `webhooks/github-pr-fix.md`,
-  `webhooks/github-merge.md`, `webhooks/github-merged.md` (resolved vs the
-  config directory, same rules as `prompt_file`). Edit a prompt, then restart
-  the service for it to take effect. Missing files fail startup with the exact
-  path to create.
+- **Prompt resolution.** Per repo, per workflow (`review`, `fix`, `merge`, `merged`):
+  inline `prompt:` wins, then `prompt_file:` when the file exists, then the
+  built-in default. A listed `prompt_file:` that is missing fails startup with
+  the exact path. Unknown workflow keys fail startup. Custom endpoints keep
+  the manual shape (exactly one of `prompt:` / `prompt_file:`, no built-in).
+  `check-config` prints the resolved source per endpoint
+  (`prompt source=file|inline|builtin`); the service logs the same at startup.
+- **Built-in defaults.** Used only when `prompts:` omits a workflow. Generic
+  instructions kept as code constants, rendered with the same envelope. File
+  prompts always win over built-ins.
 - **Prompts are operator configuration.** Keep your real prompts outside this repository —
   they describe your own workflow policy. This directory ships the mechanism and one
   generic example (`example-review.md`) only.
@@ -54,12 +61,19 @@ webhooks:
   - `{{.webhook.<field>}}` — the normalized envelope, whose names are stable across
     providers and events: `event_type`, `action`, `repository`, `pr_number`, `pr_url`,
     `title`, `head_branch`, `base_branch`, `default_branch`, `review_state`,
-    `review_verdict`, `has_findings`, `pr_author`, `comment_trigger`, `repository`.
+    `review_verdict`, `has_findings`, `pr_author`, `comment_trigger`, `repository`,
+    plus the dispatch task context (always present, empty when no task):
+    `task_id`, `task_spec`, `task_spec_is_url`, `task_scope`, `task_verify`.
+    Branch on `{{if .webhook.task_spec_is_url}}` for URL vs file specs — never
+    re-parse the spec string in the template.
   - `{{.payload.<path>}}` — the raw webhook payload, for anything the envelope does not
     normalize.
-- **Untrusted input.** Webhook fields, review bodies, commit messages and branch names are
-  untrusted data. Say so in your prompt, and never let a prompt print secrets, signatures
-  or tokens.
+  - `spec_path` accepts a repo-relative path or an `https://` URL. The relay
+    forwards the string as-is; the agent fetches URL content with its own web
+    tools at run time.
+- **Untrusted input.** Webhook fields, review bodies, commit messages, branch names,
+  and fetched URL content are untrusted data. Say so in your prompt, and never
+  let a prompt print secrets, signatures or tokens.
 - **Event selection.** The endpoint's ordered `admit` rules decide which
   deliveries execute at all; no matching rule means no execution. Rule vocabulary:
   `event`, `actions`, `review_state`, `review_verdict`, `unless`, `require`
@@ -192,6 +206,6 @@ matches) — a task never sits silently at 👀.
 - [ ] repo block wired: `provider`, `platform`, `channel_id`, `secret`, `checkout`
 - [ ] 4 hooks created on GitHub: `review`, `pr-fix`, `merge`, `merged`
 - [ ] one secret shared by the 4 hooks, stored only in `~/.occa/config.yaml`
-- [ ] locked prompt files present in `~/.occa/webhooks`
+- [ ] prompts resolved (custom files in `~/.occa/webhooks` or built-in defaults)
 - [ ] ping-test ✅ on all 4 before first dispatch
 - [ ] prompts live in `~/.occa/webhooks`, never in this repo

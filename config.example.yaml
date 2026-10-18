@@ -89,9 +89,11 @@ webhooks:
       #   default: review-only # full | review-only
       #   authors:
       #     owner-login: full
-      # prompt files are locked and resolved vs the config dir:
-      #   webhooks/github-review.md, webhooks/github-pr-fix.md,
-      #   webhooks/github-merge.md, webhooks/github-merged.md
+      # prompts: # optional per-workflow prompt override (absent = built-in default; file missing = startup error)
+      #   review: { prompt_file: webhooks/saya-review.md } # or { prompt: "short instruction" }
+      #   fix: { prompt_file: webhooks/saya-fix.md }
+      #   merge: { prompt: "merge when green" }
+      #   merged: { prompt_file: webhooks/saya-merged.md }
       # on_merged: [] # optional post-merge extras (default: just close the PR thread)
       # - prompt_file: "merged-vault.md" # one agent turn with your prompt file (stays in ~/.occa/webhooks, never in this repo)
       # - run: "make changelog" # one command, run with the repo checkout as cwd

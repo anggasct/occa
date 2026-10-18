@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,6 +35,24 @@ type DispatchRequest struct {
 	SpecPath string `json:"spec_path"`
 	Scope    string `json:"scope"`
 	Verify   string `json:"verify"`
+}
+
+func isSpecURL(s string) bool {
+	t := strings.TrimSpace(s)
+	if t == "" {
+		return false
+	}
+	if !strings.HasPrefix(strings.ToLower(t), "https://") {
+		return false
+	}
+	u, err := url.Parse(t)
+	if err != nil {
+		return false
+	}
+	if strings.ToLower(u.Scheme) != "https" {
+		return false
+	}
+	return strings.TrimSpace(u.Host) != ""
 }
 
 func (req DispatchRequest) Validate() error {
@@ -66,9 +85,15 @@ func (req DispatchRequest) Validate() error {
 	if len([]rune(spec)) > 512 {
 		return fmt.Errorf("spec_path is too long")
 	}
-	for _, part := range strings.Split(spec, "/") {
-		if part == ".." {
-			return fmt.Errorf("spec_path must not escape the repository")
+	if strings.Contains(spec, "://") {
+		if !isSpecURL(spec) {
+			return fmt.Errorf("spec looks like a URL but is not a valid https:// URL with host")
+		}
+	} else {
+		for _, part := range strings.Split(spec, "/") {
+			if part == ".." {
+				return fmt.Errorf("spec_path must not escape the repository")
+			}
 		}
 	}
 	if len([]rune(req.Scope)) > 2000 {
@@ -162,6 +187,34 @@ func (d *DispatchStore) Count() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return len(d.tasks)
+}
+
+func injectTaskContext(envelope WebhookEnvelope, key WebhookExecutionKey, store *DispatchStore) {
+	if envelope == nil {
+		return
+	}
+	empty := func() {
+		envelope["task_id"] = ""
+		envelope["task_spec"] = ""
+		envelope["task_spec_is_url"] = false
+		envelope["task_scope"] = ""
+		envelope["task_verify"] = ""
+	}
+	repo, branch := TaskRepoBranch(key, envelope)
+	if repo == "" || branch == "" || store == nil {
+		empty()
+		return
+	}
+	task, ok := store.LatestFor(repo, branch)
+	if !ok {
+		empty()
+		return
+	}
+	envelope["task_id"] = task.ID
+	envelope["task_spec"] = task.SpecPath
+	envelope["task_spec_is_url"] = isSpecURL(task.SpecPath)
+	envelope["task_scope"] = task.Scope
+	envelope["task_verify"] = task.Verify
 }
 
 func FormatDispatchSummary(task DispatchTask, icons map[string]string) string {

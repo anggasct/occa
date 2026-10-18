@@ -74,6 +74,9 @@ func runWebhooksCheckConfig(args []string) int {
 		if ep.Limits != nil {
 			fmt.Printf(" limits=%d/%s", ep.Limits.MaxRunsPerPR, ep.Limits.Window)
 		}
+		if ep.PromptSource != "" {
+			fmt.Printf(" prompt source=%s", ep.PromptSource)
+		}
 		fmt.Println()
 		for i, rule := range ep.Admit {
 			fmt.Printf("  [%d] event=%s actions=[%s]\n", i, rule.Event, strings.Join(rule.Actions, ","))

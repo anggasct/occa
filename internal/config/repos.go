@@ -22,18 +22,24 @@ type MergedAction struct {
 	Run        string `yaml:"run,omitempty"`
 }
 
+type RepoPromptRef struct {
+	Prompt     string `yaml:"prompt,omitempty"`
+	PromptFile string `yaml:"prompt_file,omitempty"`
+}
+
 type RepoConfig struct {
-	Repo           string              `yaml:"repo"`
-	Provider       string              `yaml:"provider"`
-	Platform       string              `yaml:"platform"`
-	ChannelID      string              `yaml:"channel_id"`
-	Secret         string              `yaml:"secret"`
-	Checkout       string              `yaml:"checkout"`
-	Model          string              `yaml:"model,omitempty"`
-	CommentTrigger map[string][]string `yaml:"comment_trigger,omitempty"`
-	Limits         *EndpointLimits     `yaml:"limits,omitempty"`
-	Automation     RepoAutomation      `yaml:"automation,omitempty"`
-	OnMerged       []MergedAction      `yaml:"on_merged,omitempty"`
+	Repo           string                   `yaml:"repo"`
+	Provider       string                   `yaml:"provider"`
+	Platform       string                   `yaml:"platform"`
+	ChannelID      string                   `yaml:"channel_id"`
+	Secret         string                   `yaml:"secret"`
+	Checkout       string                   `yaml:"checkout"`
+	Model          string                   `yaml:"model,omitempty"`
+	CommentTrigger map[string][]string      `yaml:"comment_trigger,omitempty"`
+	Limits         *EndpointLimits          `yaml:"limits,omitempty"`
+	Automation     RepoAutomation           `yaml:"automation,omitempty"`
+	OnMerged       []MergedAction           `yaml:"on_merged,omitempty"`
+	Prompts        map[string]RepoPromptRef `yaml:"prompts,omitempty"`
 }
 
 type WebhookDefaults struct {
@@ -76,18 +82,28 @@ func lockedAdmitRules(workflow string) []AdmitRule {
 	return nil
 }
 
-func lockedPromptFile(workflow string) string {
-	switch workflow {
-	case "review":
-		return "webhooks/github-review.md"
-	case "fix":
-		return "webhooks/github-pr-fix.md"
-	case "merge":
-		return "webhooks/github-merge.md"
-	case "merged":
-		return "webhooks/github-merged.md"
+func validateRepoPrompts(prompts map[string]RepoPromptRef, context string) error {
+	for workflow, ref := range prompts {
+		if workflow != "review" && workflow != "fix" && workflow != "merge" && workflow != "merged" {
+			return fmt.Errorf("config: %sprompts supports only review, fix, merge and merged workflows, got %q", context, workflow)
+		}
+		hasPrompt := strings.TrimSpace(ref.Prompt) != ""
+		hasFile := strings.TrimSpace(ref.PromptFile) != ""
+		if hasPrompt == hasFile {
+			return fmt.Errorf("config: %sprompts[%s] must define exactly one of prompt, prompt_file", context, workflow)
+		}
 	}
-	return ""
+	return nil
+}
+
+func resolveRepoPrompt(prompts map[string]RepoPromptRef, workflow string) (prompt, promptFile, source string) {
+	if ref, ok := prompts[workflow]; ok {
+		if strings.TrimSpace(ref.Prompt) != "" {
+			return ref.Prompt, "", "inline"
+		}
+		return "", strings.TrimSpace(ref.PromptFile), "file"
+	}
+	return BuiltinPrompt(workflow), "", "builtin"
 }
 
 func resolveTriggers(defaults WebhookDefaults, repo RepoConfig, workflow string) []string {
@@ -215,12 +231,16 @@ func expandRepos(repos []RepoConfig, defaults WebhookDefaults) ([]EndpointConfig
 		if err := validateMergedActions(repo.OnMerged, context); err != nil {
 			return nil, err
 		}
+		if err := validateRepoPrompts(repo.Prompts, context); err != nil {
+			return nil, err
+		}
 		automationCopy := automation
 		for _, workflow := range []string{"review", "fix", "merge", "merged"} {
 			suffix := workflow
 			if workflow == "fix" {
 				suffix = "pr-fix"
 			}
+			prompt, promptFile, source := resolveRepoPrompt(repo.Prompts, workflow)
 			ep := EndpointConfig{
 				Name:           "github-" + short + "-" + suffix,
 				Path:           "/webhooks/github-" + short + "-" + suffix,
@@ -229,7 +249,9 @@ func expandRepos(repos []RepoConfig, defaults WebhookDefaults) ([]EndpointConfig
 				Workflow:       workflow,
 				Platform:       strings.TrimSpace(repo.Platform),
 				ChannelID:      strings.TrimSpace(repo.ChannelID),
-				PromptFile:     lockedPromptFile(workflow),
+				Prompt:         prompt,
+				PromptFile:     promptFile,
+				PromptSource:   source,
 				CommentTrigger: resolveTriggers(defaults, *repo, workflow),
 				Thread:         true,
 				NotifySkip:     boolPtr(false),

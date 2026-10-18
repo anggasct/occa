@@ -98,6 +98,7 @@ type EndpointConfig struct {
 	VerifyEndpoint string            `yaml:"verify_endpoint,omitempty"`
 	OnMerged       []MergedAction    `yaml:"on_merged,omitempty"`
 	Automation     *RepoAutomation   `yaml:"-"`
+	PromptSource   string            `yaml:"-"`
 }
 
 func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
@@ -599,6 +600,15 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 					return Config{}, fmt.Errorf("config: webhooks.endpoints[%d].prompt_file: %w", i, err)
 				}
 				endpoint.Prompt = prompt
+				if endpoint.PromptSource == "" {
+					endpoint.PromptSource = "file"
+				}
+			} else if strings.TrimSpace(endpoint.Prompt) != "" {
+				if endpoint.PromptSource == "" {
+					endpoint.PromptSource = "inline"
+				}
+			} else {
+				return Config{}, fmt.Errorf("config: webhooks.endpoints[%d] must define exactly one of prompt, prompt_file", i)
 			}
 			if strings.TrimSpace(endpoint.Model) != "" {
 				if _, err := relay.ParseModelRef(strings.TrimSpace(endpoint.Model)); err != nil {
