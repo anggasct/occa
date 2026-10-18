@@ -5,6 +5,7 @@ import "time"
 type Config struct {
 	ContextStaleAfter      time.Duration
 	ProgressQuietThreshold time.Duration
+	ProgressStalledAfter   time.Duration
 	MaxQueuedMessages      int
 	MaxPickerSessions      int
 	MaxPickerPages         int

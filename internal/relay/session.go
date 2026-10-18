@@ -17,6 +17,7 @@ type SessionResolution struct {
 	Resumed      bool
 	HadStored    bool
 	TakeoverSeed string
+	StoredID     string
 }
 
 type SessionResolver struct {
@@ -56,6 +57,7 @@ func (r *SessionResolver) ResolveDetailed(ctx context.Context, platform, channel
 		}
 	}
 
+	storedID := sessionID
 	takeoverSeed := ""
 	if threadID != "" {
 		candidate, err := r.repo.TakeoverCandidate(ctx, platform, channelID, threadID)
@@ -65,6 +67,9 @@ func (r *SessionResolver) ResolveDetailed(ctx context.Context, platform, channel
 		if candidate != nil {
 			takeoverSeed = candidate.Seed
 			hadStored = true
+			if storedID == "" {
+				storedID = candidate.SessionID
+			}
 			if candidate.SessionID != "" {
 				exists, err := r.client.SessionExists(ctx, candidate.SessionID)
 				if err != nil {
@@ -90,5 +95,5 @@ func (r *SessionResolver) ResolveDetailed(ctx context.Context, platform, channel
 		return SessionResolution{}, fmt.Errorf("relay: resolve session: persist: %w", err)
 	}
 
-	return SessionResolution{SessionID: sessionID, Resumed: false, HadStored: hadStored, TakeoverSeed: takeoverSeed}, nil
+	return SessionResolution{SessionID: sessionID, Resumed: false, HadStored: hadStored, TakeoverSeed: takeoverSeed, StoredID: storedID}, nil
 }

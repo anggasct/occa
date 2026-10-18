@@ -103,6 +103,7 @@ type responseClient struct {
 	sendCalls    int
 	sendSessions []string
 	sendTexts    []string
+	createCalls  int
 	commandCalls int
 	started      chan struct{}
 	startOnce    sync.Once
@@ -113,7 +114,12 @@ func newResponseClient(dispatch func(context.Context, chan<- relay.Event) error)
 	return &responseClient{started: make(chan struct{}), dispatch: dispatch}
 }
 
-func (c *responseClient) CreateSession(_ context.Context) (string, error) { return "session", nil }
+func (c *responseClient) CreateSession(_ context.Context) (string, error) {
+	c.mu.Lock()
+	c.createCalls++
+	c.mu.Unlock()
+	return "session", nil
+}
 
 func (c *responseClient) GetSession(_ context.Context, _ string) (*relay.SessionInfo, error) {
 	return &relay.SessionInfo{}, nil
@@ -597,7 +603,7 @@ func TestProgressTickerQuietOnly(t *testing.T) {
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 
-	go startProgressTicker(context.Background(), reply, activityCh, stopCh, 2*time.Millisecond, 20*time.Millisecond, nil, "", "", "", nil)
+	go startProgressTicker(context.Background(), reply, activityCh, stopCh, 2*time.Millisecond, 20*time.Millisecond, nil, "", "", "", nil, 0, nil)
 
 	activityDone := make(chan struct{})
 	go func() {
@@ -652,7 +658,7 @@ func TestProgressTickerSkipsIdenticalEdits(t *testing.T) {
 		return time.Now().Add(offset)
 	}
 
-	go startProgressTicker(context.Background(), reply, make(chan struct{}, 1), stopCh, 2*time.Millisecond, 5*time.Millisecond, nil, "", "", "", nowFunc)
+	go startProgressTicker(context.Background(), reply, make(chan struct{}, 1), stopCh, 2*time.Millisecond, 5*time.Millisecond, nil, "", "", "", nowFunc, 0, nil)
 
 	waitForNoticeSend(t, reply)
 
@@ -702,7 +708,7 @@ func TestProgressTickerResumeDeletesNotice(t *testing.T) {
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 
-	go startProgressTicker(context.Background(), reply, activityCh, stopCh, 2*time.Millisecond, 5*time.Millisecond, nil, "", "", "", nil)
+	go startProgressTicker(context.Background(), reply, activityCh, stopCh, 2*time.Millisecond, 5*time.Millisecond, nil, "", "", "", nil, 0, nil)
 
 	waitForNoticeSend(t, reply)
 	activityCh <- struct{}{}
@@ -720,7 +726,7 @@ func TestProgressTickerStopDeletesNotice(t *testing.T) {
 	reply := newResponseReply()
 	stopCh := make(chan struct{})
 
-	go startProgressTicker(context.Background(), reply, make(chan struct{}, 1), stopCh, 5*time.Millisecond, 0, nil, "", "", "", nil)
+	go startProgressTicker(context.Background(), reply, make(chan struct{}, 1), stopCh, 5*time.Millisecond, 0, nil, "", "", "", nil, 0, nil)
 
 	waitForNoticeSend(t, reply)
 	close(stopCh)
@@ -735,7 +741,7 @@ func TestProgressTickerPersistsAndClears(t *testing.T) {
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 
-	go startProgressTicker(context.Background(), reply, activityCh, stopCh, 2*time.Millisecond, 5*time.Millisecond, notices, "telegram", "chat1", "", nil)
+	go startProgressTicker(context.Background(), reply, activityCh, stopCh, 2*time.Millisecond, 5*time.Millisecond, notices, "telegram", "chat1", "", nil, 0, nil)
 
 	waitForNoticeSend(t, reply)
 
@@ -792,7 +798,7 @@ func TestProgressTickerNilNoticesRepoSkipsPersist(t *testing.T) {
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 
-	go startProgressTicker(context.Background(), reply, make(chan struct{}, 1), stopCh, 5*time.Millisecond, 0, nil, "", "", "", nil)
+	go startProgressTicker(context.Background(), reply, make(chan struct{}, 1), stopCh, 5*time.Millisecond, 0, nil, "", "", "", nil, 0, nil)
 
 	waitForNoticeSend(t, reply)
 }

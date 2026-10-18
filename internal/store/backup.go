@@ -463,6 +463,12 @@ func requiredColumnsForVersion(version int) map[string][]string {
 	if version >= 17 {
 		columns["user_override"] = []string{"id", "channel_id", "platform", "user_id", "model", "agent", "created_at", "updated_at"}
 	}
+	// v18 parks timed-out sessions in place: parked flags the row, parked_at
+	// records when, park_reason is idle or permission. SetActive clears all
+	// three on resume, so a resumed row reads as an ordinary active session.
+	if version >= 18 {
+		columns["session"] = append(columns["session"], "parked", "parked_at", "park_reason")
+	}
 	return columns
 }
 

@@ -45,6 +45,7 @@ type RelayRuntime struct {
 type RouterRuntime struct {
 	ContextStaleAfter      time.Duration `yaml:"context_stale_after"`
 	ProgressQuietThreshold time.Duration `yaml:"progress_quiet_threshold"`
+	ProgressStalledAfter   time.Duration `yaml:"progress_stalled_after"`
 	MaxQueuedMessages      int           `yaml:"max_queued_messages"`
 	MaxPickerSessions      int           `yaml:"max_picker_sessions"`
 	MaxPickerPages         int           `yaml:"max_picker_pages"`
@@ -196,6 +197,9 @@ func validateRuntime(rt RuntimeConfig) (RuntimeConfig, error) {
 		return RuntimeConfig{}, err
 	}
 	if err := positive("router", "progress_quiet_threshold", ro.ProgressQuietThreshold); err != nil {
+		return RuntimeConfig{}, err
+	}
+	if err := positive("router", "progress_stalled_after", ro.ProgressStalledAfter); err != nil {
 		return RuntimeConfig{}, err
 	}
 	if err := count("router", "max_queued_messages", ro.MaxQueuedMessages); err != nil {

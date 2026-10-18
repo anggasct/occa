@@ -96,6 +96,7 @@ type Router struct {
 	streamerNoEventTimeout time.Duration
 	contextStaleAfter      time.Duration
 	progressQuietThreshold time.Duration
+	progressStalledAfter   time.Duration
 	maxPickerSessions      int
 	maxPickerPages         int
 	usagePageSize          int
@@ -160,6 +161,7 @@ func NewWithAllowlists(instances InstanceProvider, st store.Store, defaultWorkdi
 		streamerNoEventTimeout: cfg.StreamerNoEventTimeout,
 		contextStaleAfter:      cfg.ContextStaleAfter,
 		progressQuietThreshold: cfg.ProgressQuietThreshold,
+		progressStalledAfter:   cfg.ProgressStalledAfter,
 		maxPickerSessions:      cfg.MaxPickerSessions,
 		maxPickerPages:         cfg.MaxPickerPages,
 		usagePageSize:          cfg.UsagePageSize,
@@ -520,6 +522,7 @@ func (r *Router) executePassthrough(taskCtx context.Context, cancel context.Canc
 		return nil
 	}
 	sessionID := resolution.SessionID
+	sessionID = r.verifyResumedSession(ctx, msg, inst, threadID, userID, resolution, sessionID)
 
 	if preResolveActiveID == "" {
 		r.applyAgentDefault(ctx, msg, inst, sessionID)
@@ -584,6 +587,41 @@ func (r *Router) executePassthrough(taskCtx context.Context, cancel context.Canc
 
 	go r.runResponse(taskCtx, cancel, key, msg, inst, sessionID, events, dispatch)
 	return nil
+}
+
+func (r *Router) verifyResumedSession(ctx context.Context, msg channel.IncomingMessage, inst AgentInstance, threadID, userID string, resolution relay.SessionResolution, sessionID string) string {
+	if resolution.Resumed {
+		parked, _, err := r.store.SessionRepo().ParkState(ctx, msg.Platform, msg.ChannelID, threadID, userID)
+		if err != nil || !parked {
+			return sessionID
+		}
+		exists, err := inst.Client().SessionExists(ctx, sessionID)
+		if err != nil {
+			return sessionID
+		}
+		if exists {
+			if err := r.store.SessionRepo().SetActive(ctx, msg.Platform, msg.ChannelID, threadID, userID, sessionID, inst.PID()); err != nil {
+				slog.Warn("router: resume clear park failed", "platform", msg.Platform, "channel_id", msg.ChannelID, "thread_id", threadID, "user_id", userID, "session_id", sessionID, "error", err)
+			}
+			return sessionID
+		}
+		freshID, err := inst.Client().CreateSession(ctx)
+		if err != nil {
+			return sessionID
+		}
+		if err := r.store.SessionRepo().SetActive(ctx, msg.Platform, msg.ChannelID, threadID, userID, freshID, inst.PID()); err != nil {
+			return sessionID
+		}
+		slog.Info("router: parked session unrevivable, fresh session issued", "platform", msg.Platform, "channel_id", msg.ChannelID, "thread_id", threadID, "user_id", userID, "dead_session_id", sessionID, "session_id", freshID)
+		r.reply(msg, fmt.Sprintf("⚠️ Previous session %s could not be revived on the agent — continuing on fresh session %s. Earlier context is gone; check /status.", sessionID, freshID))
+		return freshID
+	}
+	if resolution.StoredID != "" {
+		r.reply(msg, fmt.Sprintf("⚠️ Previous session %s could not be revived on the agent — continuing on fresh session %s. Earlier context is gone; check /status.", resolution.StoredID, sessionID))
+	} else if resolution.TakeoverSeed != "" {
+		r.reply(msg, fmt.Sprintf("🆕 No prior session to revive — starting fresh session %s from the thread summary.", sessionID))
+	}
+	return sessionID
 }
 
 func (r *Router) registerDefaults() {
@@ -845,6 +883,10 @@ func (r *Router) handleStatus(ctx context.Context, msg channel.IncomingMessage, 
 				break
 			}
 		}
+	}
+	parked, _, _ := r.store.SessionRepo().ParkState(ctx, msg.Platform, msg.ChannelID, threadID, userID)
+	if parked {
+		sessionLine += " (timed out — send a message to resume)"
 	}
 
 	status := fmt.Sprintf("✅ Agent connected\nSession: %s%s%s%s\nUptime: %s\nWorkdir: %s\nLatency: %s\n%s",
@@ -1136,6 +1178,7 @@ func (r *Router) handleSession(ctx context.Context, msg channel.IncomingMessage,
 		if err := r.store.SessionRepo().SetActive(ctx, msg.Platform, msg.ChannelID, threadID, userID, sessionID, inst.PID()); err != nil {
 			return "", fmt.Errorf("session new: %w", err)
 		}
+		slog.Info("session created by operator", "platform", msg.Platform, "channel_id", msg.ChannelID, "thread_id", threadID, "user_id", msg.UserID, "session_id", sessionID)
 		return fmt.Sprintf("✅ New session: %s", sessionID), nil
 
 	case "switch":
@@ -1237,6 +1280,7 @@ func (r *Router) handleReset(ctx context.Context, msg channel.IncomingMessage, _
 	if err := r.store.SessionRepo().SetActive(ctx, msg.Platform, msg.ChannelID, threadID, userID, sessionID, inst.PID()); err != nil {
 		return "", fmt.Errorf("reset: %w", err)
 	}
+	slog.Info("session reset by operator", "platform", msg.Platform, "channel_id", msg.ChannelID, "thread_id", threadID, "user_id", msg.UserID, "session_id", sessionID)
 	return fmt.Sprintf("✅ Session reset. New session: %s", sessionID), nil
 }
 

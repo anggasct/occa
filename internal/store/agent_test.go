@@ -86,6 +86,7 @@ func TestAgentMigrationFromV12(t *testing.T) {
 	}
 	dropSessionRootCardColumns(t, s1)
 	dropWebhookReviewKey(t, s1)
+	dropSessionParkedColumns(t, s1)
 	if _, err := s1.db.Exec("PRAGMA user_version=12"); err != nil {
 		_ = s1.Close()
 		t.Fatalf("stamp user_version=12: %v", err)

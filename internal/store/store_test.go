@@ -465,6 +465,9 @@ func TestOverrideRoleDropMigrationPreservesPreferences(t *testing.T) {
 		`DROP INDEX IF EXISTS idx_session_takeover`,
 		`ALTER TABLE session DROP COLUMN continuable`,
 		`ALTER TABLE session DROP COLUMN takeover_seed`,
+		`ALTER TABLE session DROP COLUMN parked`,
+		`ALTER TABLE session DROP COLUMN parked_at`,
+		`ALTER TABLE session DROP COLUMN park_reason`,
 		`DROP INDEX IF EXISTS idx_webhook_delivery_review`,
 		`ALTER TABLE webhook_delivery DROP COLUMN review_key`,
 		`PRAGMA user_version=16`,
@@ -667,6 +670,7 @@ func TestProgressNoticeMigrationFromV4(t *testing.T) {
 	}
 	dropSessionRootCardColumns(t, s1)
 	dropWebhookReviewKey(t, s1)
+	dropSessionParkedColumns(t, s1)
 	if _, err := s1.db.Exec("PRAGMA user_version=4"); err != nil {
 		t.Fatalf("stamp user_version=4: %v", err)
 	}
@@ -853,6 +857,7 @@ func TestSessionModelMigrationFromV5(t *testing.T) {
 	}
 	dropSessionRootCardColumns(t, s1)
 	dropWebhookReviewKey(t, s1)
+	dropSessionParkedColumns(t, s1)
 	if _, err := s1.db.Exec("PRAGMA user_version=5"); err != nil {
 		t.Fatalf("stamp user_version=5: %v", err)
 	}
@@ -948,6 +953,7 @@ func TestThreadConfigMigrationBackfillsOwnedThreads(t *testing.T) {
 	}
 	dropSessionRootCardColumns(t, s1)
 	dropWebhookReviewKey(t, s1)
+	dropSessionParkedColumns(t, s1)
 	if _, err := s1.db.Exec("PRAGMA user_version=6"); err != nil {
 		t.Fatalf("stamp user_version=6: %v", err)
 	}

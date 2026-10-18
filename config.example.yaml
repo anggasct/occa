@@ -186,6 +186,7 @@ runtime:
   router: # command dispatch, pickers, recovery
     context_stale_after: 15m # cached context older than this counts as stale
     progress_quiet_threshold: 90s # silence before a progress notice is sent
+    progress_stalled_after: 5m # silence without agent output before the notice reports STALLED
     max_queued_messages: 5 # messages buffered per conversation while busy
     max_picker_sessions: 6 # sessions listed per picker page
     max_picker_pages: 5 # picker result pages

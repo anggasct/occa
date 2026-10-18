@@ -47,6 +47,7 @@ func validRuntimeYAML() string {
   router:
     context_stale_after: 15m
     progress_quiet_threshold: 90s
+    progress_stalled_after: 5m
     max_queued_messages: 5
     max_picker_sessions: 6
     max_picker_pages: 5

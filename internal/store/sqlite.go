@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	schemaVersion    = 17
+	schemaVersion    = 18
 	SchemaVersion    = schemaVersion
 	busyTimeoutMilli = 5000
 )
@@ -34,6 +34,20 @@ var migrations = []func(s *SQLiteStore, tx *sql.Tx) error{
 	addSessionRootCard,
 	addWebhookReviewKey,
 	dropOverrideRoleColumn,
+	addSessionParked,
+}
+
+func addSessionParked(_ *SQLiteStore, tx *sql.Tx) error {
+	if _, err := tx.Exec(`ALTER TABLE session ADD COLUMN parked INTEGER NOT NULL DEFAULT 0;`); err != nil {
+		return fmt.Errorf("store: migrate session parked: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE session ADD COLUMN parked_at INTEGER NOT NULL DEFAULT 0;`); err != nil {
+		return fmt.Errorf("store: migrate session parked at: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE session ADD COLUMN park_reason TEXT NOT NULL DEFAULT '';`); err != nil {
+		return fmt.Errorf("store: migrate session park reason: %w", err)
+	}
+	return nil
 }
 
 func dropOverrideRoleColumn(_ *SQLiteStore, tx *sql.Tx) error {

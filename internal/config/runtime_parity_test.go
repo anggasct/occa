@@ -51,7 +51,7 @@ func TestRuntimeExampleParity(t *testing.T) {
 	if rt.Relay.WebhookAbortTimeout != 5*time.Second || rt.Relay.VerifyTimeout != 15*time.Second || rt.Relay.StallFreshness != 2*time.Minute || rt.Relay.NoEventTimeout != 15*time.Minute {
 		t.Fatalf("relay webhook = %+v", rt.Relay)
 	}
-	if rt.Router.ContextStaleAfter != 15*time.Minute || rt.Router.ProgressQuietThreshold != 90*time.Second {
+	if rt.Router.ContextStaleAfter != 15*time.Minute || rt.Router.ProgressQuietThreshold != 90*time.Second || rt.Router.ProgressStalledAfter != 5*time.Minute {
 		t.Fatalf("router flow = %+v", rt.Router)
 	}
 	if rt.Router.MaxQueuedMessages != 5 || rt.Router.MaxPickerSessions != 6 || rt.Router.MaxPickerPages != 5 {
@@ -112,6 +112,27 @@ func TestRuntimeMissingKeyFails(t *testing.T) {
 	}
 	if _, err := Load(rawPath); err == nil {
 		t.Fatal("expected missing runtime.loop.min_interval to fail")
+	}
+}
+
+func TestRuntimeStalledAfterRequired(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
+	with := "discord:\n  allowed_sender_ids:\n    - '123'\n" + validRuntimeYAML()
+	path := writeConfig(t, t.TempDir(), with)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load with progress_stalled_after: %v", err)
+	}
+	if cfg.Runtime.Router.ProgressStalledAfter != 5*time.Minute {
+		t.Fatalf("ProgressStalledAfter = %v, want 5m", cfg.Runtime.Router.ProgressStalledAfter)
+	}
+	without := replaceFirst(with, "    progress_stalled_after: 5m\n", "")
+	rawPath := filepath.Join(t.TempDir(), "missing.yaml")
+	if err := os.WriteFile(rawPath, []byte(without), 0o644); err != nil {
+		t.Fatalf("write raw: %v", err)
+	}
+	if _, err := Load(rawPath); err == nil {
+		t.Fatal("expected missing runtime.router.progress_stalled_after to fail")
 	}
 }
 

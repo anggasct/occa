@@ -7,6 +7,8 @@ import (
 
 var ErrNotFound = errors.New("store: not found")
 
+// Parked marks a timed-out session kept listed for resume: ParkedAt records
+// when, ParkReason is idle or permission. SetActive clears all three on resume.
 type Session struct {
 	ID             int64
 	ChannelID      string
@@ -16,6 +18,9 @@ type Session struct {
 	UserID         string
 	Title          string
 	Active         bool
+	Parked         bool
+	ParkedAt       int64
+	ParkReason     string
 	CreatedAt      int64
 	UpdatedAt      int64
 }
@@ -161,6 +166,8 @@ type SessionRepo interface {
 	TakeoverCandidate(ctx context.Context, platform, channelID, threadID string) (*TakeoverCandidate, error)
 	LinkThreadRoot(ctx context.Context, platform, channelID, threadID, messageID, channel, card string) error
 	ThreadRoot(ctx context.Context, platform, channelID, threadID string) (*ThreadRootCard, error)
+	MarkParked(ctx context.Context, platform, channelID, threadID, userID, reason string) error
+	ParkState(ctx context.Context, platform, channelID, threadID, userID string) (parked bool, reason string, err error)
 }
 
 type ChannelRepo interface {

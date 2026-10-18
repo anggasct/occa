@@ -44,7 +44,7 @@ func (r *sqliteSessionRepo) SetActive(ctx context.Context, platform, channelID, 
 	}
 
 	res, err := tx.ExecContext(ctx,
-		`UPDATE session SET active = 1, thread_id = ?, user_id = ?, agent_pid = ?, updated_at = ? WHERE platform = ? AND channel_id = ? AND agent_session_id = ?`,
+		`UPDATE session SET active = 1, thread_id = ?, user_id = ?, agent_pid = ?, parked = 0, parked_at = 0, park_reason = '', updated_at = ? WHERE platform = ? AND channel_id = ? AND agent_session_id = ?`,
 		threadID, userID, agentPID, now, platform, channelID, sessionID,
 	)
 	if err != nil {
@@ -76,6 +76,41 @@ func (r *sqliteSessionRepo) Deactivate(ctx context.Context, platform, channelID,
 		return fmt.Errorf("store: session deactivate: %w", err)
 	}
 	return nil
+}
+
+func (r *sqliteSessionRepo) MarkParked(ctx context.Context, platform, channelID, threadID, userID, reason string) error {
+	now := time.Now().Unix()
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE session SET parked = 1, parked_at = ?, park_reason = ?, updated_at = ? WHERE platform = ? AND channel_id = ? AND thread_id = ? AND user_id = ? AND active = 1`,
+		now, reason, now, platform, channelID, threadID, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("store: session mark parked: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: session mark parked: rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *sqliteSessionRepo) ParkState(ctx context.Context, platform, channelID, threadID, userID string) (bool, string, error) {
+	var parked int
+	var reason string
+	err := r.db.QueryRowContext(ctx,
+		`SELECT parked, park_reason FROM session WHERE platform = ? AND channel_id = ? AND thread_id = ? AND user_id = ? AND active = 1`,
+		platform, channelID, threadID, userID,
+	).Scan(&parked, &reason)
+	if err == sql.ErrNoRows {
+		return false, "", nil
+	}
+	if err != nil {
+		return false, "", fmt.Errorf("store: session park state: %w", err)
+	}
+	return parked == 1, reason, nil
 }
 
 func (r *sqliteSessionRepo) SetTitle(ctx context.Context, id int64, title string) error {
@@ -124,7 +159,7 @@ func (r *sqliteSessionRepo) ActiveModel(ctx context.Context, platform, channelID
 
 func (r *sqliteSessionRepo) List(ctx context.Context, platform, channelID string) ([]Session, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, channel_id, platform, agent_session_id, thread_id, user_id, title, active, created_at, updated_at FROM session WHERE platform = ? AND channel_id = ? ORDER BY created_at DESC`,
+		`SELECT id, channel_id, platform, agent_session_id, thread_id, user_id, title, active, parked, parked_at, park_reason, created_at, updated_at FROM session WHERE platform = ? AND channel_id = ? ORDER BY created_at DESC`,
 		platform, channelID,
 	)
 	if err != nil {
@@ -135,11 +170,12 @@ func (r *sqliteSessionRepo) List(ctx context.Context, platform, channelID string
 	var sessions []Session
 	for rows.Next() {
 		var s Session
-		var active int
-		if err := rows.Scan(&s.ID, &s.ChannelID, &s.Platform, &s.AgentSessionID, &s.ThreadID, &s.UserID, &s.Title, &active, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		var active, parked int
+		if err := rows.Scan(&s.ID, &s.ChannelID, &s.Platform, &s.AgentSessionID, &s.ThreadID, &s.UserID, &s.Title, &active, &parked, &s.ParkedAt, &s.ParkReason, &s.CreatedAt, &s.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("store: session list: scan: %w", err)
 		}
 		s.Active = active == 1
+		s.Parked = parked == 1
 		sessions = append(sessions, s)
 	}
 	return sessions, rows.Err()
@@ -147,7 +183,7 @@ func (r *sqliteSessionRepo) List(ctx context.Context, platform, channelID string
 
 func (r *sqliteSessionRepo) ListConversation(ctx context.Context, platform, channelID, threadID, userID string) ([]Session, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, channel_id, platform, agent_session_id, thread_id, user_id, title, active, created_at, updated_at FROM session WHERE platform = ? AND channel_id = ? AND thread_id = ? AND user_id = ? ORDER BY created_at DESC`,
+		`SELECT id, channel_id, platform, agent_session_id, thread_id, user_id, title, active, parked, parked_at, park_reason, created_at, updated_at FROM session WHERE platform = ? AND channel_id = ? AND thread_id = ? AND user_id = ? ORDER BY created_at DESC`,
 		platform, channelID, threadID, userID,
 	)
 	if err != nil {
@@ -158,11 +194,12 @@ func (r *sqliteSessionRepo) ListConversation(ctx context.Context, platform, chan
 	var sessions []Session
 	for rows.Next() {
 		var s Session
-		var active int
-		if err := rows.Scan(&s.ID, &s.ChannelID, &s.Platform, &s.AgentSessionID, &s.ThreadID, &s.UserID, &s.Title, &active, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		var active, parked int
+		if err := rows.Scan(&s.ID, &s.ChannelID, &s.Platform, &s.AgentSessionID, &s.ThreadID, &s.UserID, &s.Title, &active, &parked, &s.ParkedAt, &s.ParkReason, &s.CreatedAt, &s.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("store: session list conversation: scan: %w", err)
 		}
 		s.Active = active == 1
+		s.Parked = parked == 1
 		sessions = append(sessions, s)
 	}
 	return sessions, rows.Err()
