@@ -39,6 +39,7 @@ const (
 type DeliveryStore interface {
 	Create(ctx context.Context, d store.WebhookDelivery) (bool, error)
 	Get(ctx context.Context, endpoint, deliveryID string) (*store.WebhookDelivery, error)
+	GetByID(ctx context.Context, id int64) (*store.WebhookDelivery, error)
 	Transition(ctx context.Context, id int64, from []store.WebhookStatus, to store.WebhookStatus, summary string) (bool, error)
 	BumpAttempt(ctx context.Context, id int64) error
 	ClaimStale(ctx context.Context, id, cutoff int64) (bool, error)
@@ -95,6 +96,13 @@ type Server struct {
 	guildResolver         GuildResolver
 	deliveries            DeliveryStore
 	prQueues              store.PRQueueRepo
+	escalationMention     string
+	sessionAborter        func(ctx context.Context, sessionID, workdir string) error
+	operatorAuthorizer    func(platform, userID string) bool
+	promptDir             string
+	retryBackoffs         map[failureClass][]time.Duration
+	retryBodyBuilder      func(ctx context.Context, repo, number, kind string) (body []byte, eventType string, err error)
+	prAuthorResolver      func(ctx context.Context, repo, number string) (string, error)
 	channels              ChannelStore
 	sessions              TakeoverStore
 	workspaceResolver     WorkspaceResolver
@@ -192,6 +200,7 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 		reviewDedupeWindow:    rt.ReviewDedupeWindow,
 		triggerLimits:         triggerLimits,
 		prHeadResolver:        &ghPRHeadResolver{timeout: rt.ProcessingTimeout},
+		escalationMention:     strings.TrimSpace(cfg.Defaults.EscalationMention),
 	}
 	srv.eventSlots = make(chan struct{}, rt.MaxConcurrentEvents)
 	srv.tasks = NewTaskThreadRegistry()
@@ -307,6 +316,22 @@ func (s *Server) SetChannelStore(c ChannelStore) {
 
 func (s *Server) SetPRQueueRepo(r store.PRQueueRepo) {
 	s.prQueues = r
+}
+
+func (s *Server) SetSessionAborter(fn func(ctx context.Context, sessionID, workdir string) error) {
+	s.sessionAborter = fn
+}
+
+func (s *Server) SetOperatorAuthorizer(fn func(platform, userID string) bool) {
+	s.operatorAuthorizer = fn
+}
+
+func (s *Server) SetPromptDir(dir string) {
+	s.promptDir = dir
+}
+
+func (s *Server) SetRetryBodyBuilder(fn func(ctx context.Context, repo, number, kind string) (body []byte, eventType string, err error)) {
+	s.retryBodyBuilder = fn
 }
 
 func (s *Server) SetGuildResolver(fn GuildResolver) {
@@ -497,6 +522,7 @@ func (s *Server) pruneIfDue() {
 
 func (s *Server) Start(ctx context.Context) error {
 	s.recoverStale(ctx)
+	slog.Info("webhook: " + s.RecoverPRQueue())
 
 	mux := http.NewServeMux()
 	if s.dispatchEnabled {
@@ -839,6 +865,11 @@ type dispatcher struct {
 	hasActive       bool
 	lastActivity    time.Time
 	stuckReported   bool
+	backingOff      bool
+	cmdMu           sync.Mutex
+	skipRequested   bool
+	cancelRequested bool
+	retryRequested  bool
 }
 
 func (d *dispatcher) touch() {
@@ -926,6 +957,17 @@ func (d *dispatcher) run(ctx context.Context) {
 	timer := time.NewTimer(d.server.dispatcherIdleTTL)
 	defer timer.Stop()
 	for {
+		if op := d.takeIntent(); op == wakeCancel {
+			prKey := strings.TrimSpace(strings.TrimPrefix(d.key, "pr:"))
+			for _, it := range d.drain() {
+				d.server.mirrorDelete(it.queueID)
+			}
+			if prKey != "" && strings.HasPrefix(d.key, "pr:") && d.server.prQueues != nil {
+				_ = d.server.prQueues.ClearActive(context.Background(), prKey)
+			}
+			slog.Info("webhook: queue cancelled by operator", "lock", d.key)
+			continue
+		}
 		if item, ok := d.pop(); ok {
 			d.server.mirrorDelete(item.queueID)
 			d.execute(item, ctx, timer)
@@ -1015,6 +1057,10 @@ func (d *dispatcher) handle(item dispatchItem) {
 		return
 	}
 	if item.prKey != "" {
+		if blocked, _ := s.prQueueBlocked(item.prKey); blocked {
+			s.markSkipped(receipt.ID, item.ep, normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", item.ep.CommentTrigger), "queue blocked — /retry, /skip or /cancel")
+			return
+		}
 		if err := s.deliveries.SetPRKey(context.Background(), receipt.ID, item.prKey); err != nil {
 			slog.Warn("webhook: pr key stamp failed", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "error", err)
 		}
@@ -1113,6 +1159,32 @@ func (d *dispatcher) handle(item dispatchItem) {
 			held = false
 			s.releaseEvent()
 			s.pruneIfDue()
+			if errors.Is(execErr, errRetryScheduled) && item.prKey != "" {
+				switch d.sleepForRetry(item.prKey, s.shutdownCtx) {
+				case wakeFire:
+					receipt.Attempt++
+					continue
+				case wakeSkip:
+					s.markSkipped(receipt.ID, item.ep, earlyEnvelope, "skipped by operator")
+					return
+				case wakeCancel:
+					s.drainPRQueue(d, item.prKey)
+					s.markSkipped(receipt.ID, item.ep, earlyEnvelope, "cancelled by operator")
+					return
+				default:
+					s.failAbandonedReceipt(receipt, "shutting down")
+					return
+				}
+			}
+			if errors.Is(execErr, errOpSkipped) {
+				s.markSkipped(receipt.ID, item.ep, earlyEnvelope, "skipped by operator")
+				return
+			}
+			if errors.Is(execErr, errOpCancelled) {
+				s.drainPRQueue(d, item.prKey)
+				s.markSkipped(receipt.ID, item.ep, earlyEnvelope, "cancelled by operator")
+				return
+			}
 			if execErr != nil && errors.Is(execErr, relay.ErrWebhookResponseIncomplete) && !incompleteRetried {
 				incompleteRetried = true
 				if tErr := s.deliveries.BumpAttempt(context.Background(), receipt.ID); tErr != nil {
@@ -1746,8 +1818,29 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 
 	ctx, cancel := context.WithTimeout(context.Background(), s.processingTimeout)
 	defer cancel()
+	if workCtx.PRKey != "" && workCtx.SessionID == "" && s.prQueues != nil {
+		if row, rerr := s.prQueues.Get(context.Background(), workCtx.PRKey); rerr == nil && row != nil && strings.TrimSpace(row.ActiveSession) != "" {
+			workCtx.SessionID = strings.TrimSpace(row.ActiveSession)
+		}
+	}
 	err = s.executor(ctx, ep.Platform, ep.ChannelID, wrapped, workCtx)
 	s.prMirrorSync(workCtx)
+
+	if itemPRKey := strings.TrimSpace(workCtx.PRKey); err != nil && itemPRKey != "" && !errors.Is(err, relay.ErrWebhookResponseIncomplete) {
+		timedOut := errors.Is(err, context.DeadlineExceeded) || ctx.Err() == context.DeadlineExceeded
+		if d := s.dispatcherFor(itemPRKey); d != nil {
+			if op := d.takeIntent(); op == wakeCancel {
+				s.markSkipped(id, ep, envelope, "cancelled by operator")
+				return errOpCancelled
+			} else if op == wakeSkip {
+				s.markSkipped(id, ep, envelope, "skipped by operator")
+				return errOpSkipped
+			}
+		}
+		if s.planRetry(ep, itemPRKey, id, err, workCtx, timedOut) {
+			return errRetryScheduled
+		}
+	}
 
 	switch {
 	case err == nil:
@@ -1776,6 +1869,9 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 			}
 		}
 		s.linkRootCard(ep, workCtx, deliveryID, card)
+		if ep.Workflow == "merged" {
+			s.runMergedExtras(ep, envelope, workCtx)
+		}
 		return nil
 	case errors.Is(err, context.DeadlineExceeded), ctx.Err() == context.DeadlineExceeded:
 		s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary(timeoutSummary(s.processingTimeout, s.stallFreshness, workCtx), maxErrorSummaryRunes, ep.Secret), workCtx)

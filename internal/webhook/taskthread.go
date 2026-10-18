@@ -235,6 +235,21 @@ func (t *TaskThreadRegistry) LinkPRThread(prKey string, rec TaskThreadRecord) {
 	t.prThreads[strings.TrimSpace(prKey)] = rec
 }
 
+func (t *TaskThreadRegistry) PRKeyForThread(threadID string) (string, bool) {
+	threadID = strings.TrimSpace(threadID)
+	if t == nil || threadID == "" {
+		return "", false
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	for prKey, rec := range t.prThreads {
+		if strings.TrimSpace(rec.ThreadID) == threadID {
+			return prKey, true
+		}
+	}
+	return "", false
+}
+
 func (t *TaskThreadRegistry) ResolveTaskThread(repo, branch, caller string) (TaskThreadRecord, bool) {
 	canonical := TaskThreadKey(repo, branch)
 	normRepo := normalizeRepoKey(repo)

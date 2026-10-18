@@ -57,6 +57,12 @@ func automationMode(ep config.EndpointConfig, author string) string {
 }
 
 func (s *Server) resolvePRAuthor(ctx context.Context, repo, number string) string {
+	if s.prAuthorResolver != nil {
+		if author, err := s.prAuthorResolver(ctx, repo, number); err == nil {
+			return strings.TrimSpace(author)
+		}
+		return ""
+	}
 	n, err := strconv.Atoi(strings.TrimSpace(number))
 	if err != nil || n <= 0 || strings.TrimSpace(repo) == "" {
 		return ""

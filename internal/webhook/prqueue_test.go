@@ -93,6 +93,7 @@ func prTestEndpoint(workflow, path, mode string) config.EndpointConfig {
 		Prompt:     "do it",
 		Workflow:   workflow,
 		Thread:     true,
+		Repository: "github.com/acme/widget",
 		Admit:      defaultCatchAllAdmit(),
 		Automation: &config.RepoAutomation{Default: mode},
 	}
