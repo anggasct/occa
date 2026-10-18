@@ -1,27 +1,49 @@
 # Webhook prompts
 
-An endpoint can render a markdown prompt file per delivery. The file path comes from
-`prompt_file` and is resolved relative to the directory that holds `config.yaml`
-(an absolute path also works):
+Dispatch repos declare one block per repository; the relay expands it into the
+four locked endpoints (`review`, `fix`, `merge`, `merged`). Custom generic
+endpoints keep the manual shape:
 
 ```yaml
 webhooks:
-  endpoints:
-    - name: github-acme-review
-      path: /webhooks/github-acme-review
-      auth: github_hmac_sha256
-      secret: <your-webhook-secret>
-      workflow: review
+  defaults:
+    comment_trigger:
+      review: ['please re-review']
+      fix: ['please fix review', 'please fix ci']
+    limits:
+      max_runs_per_pr: 3
+      window: 60m
+  repos:
+    - repo: acme/widget
+      provider: github
       platform: discord
+      channel_id: '<channel-id>'
+      secret: <your-webhook-secret> # one secret shared by the 4 hooks
+      checkout: /home/operator/projects/widget
+      # automation: {default: review-only, authors: {owner-login: full}}
+  endpoints:
+    - name: sentry-alerts
+      path: /webhooks/sentry-alerts
+      workflow: custom # locked review/fix/merge/merged come from repos: above
+      secret: <your-webhook-secret>
+      platform: telegram
       channel_id: '<channel-id>'
       prompt_file: webhooks/example-review.md
       thread: true
+      workspace:
+        type: none
+      admit:
+        - event: ping
 ```
 
 ## Things to know
 
-- **Startup load.** Prompt files are read when the service starts. Edit a prompt, then
-  restart the service for it to take effect.
+- **Startup load.** Locked prompt files are read when the service starts:
+  `webhooks/github-review.md`, `webhooks/github-review-fix.md`,
+  `webhooks/github-merge.md`, `webhooks/github-merged.md` (resolved vs the
+  config directory, same rules as `prompt_file`). Edit a prompt, then restart
+  the service for it to take effect. Missing files fail startup with the exact
+  path to create.
 - **Prompts are operator configuration.** Keep your real prompts outside this repository —
   they describe your own workflow policy. This directory ships the mechanism and one
   generic example (`example-review.md`) only.
@@ -52,9 +74,9 @@ webhooks:
   `pr head enrichment failed:` reason and takes no workspace lease. Comments on
   non-PR issues stay skipped with no lookup.
 
-## Task threads (one thread per task)
+## Task threads (one thread per PR)
 
-One task = one parent message + one thread. The parent is a living status line,
+One PR = one parent message + one thread. The parent is a living status line,
 edited per event instead of reposted:
 
 ```
@@ -65,9 +87,11 @@ edited per event instead of reposted:
 ❌ owner/repo#branch — failed (re-dispatch returns to ⏳)
 ```
 
-Webhook events for the same task route by branch name into the task's thread;
-different branches never mix. The thread holds the event detail log (claim, PR
-opened, review verdict, merge); the channel stays at one line per task.
+Webhook events for the same PR land in that PR's thread (at most one run
+active per PR; the rest wait FIFO); different PRs never mix. The thread holds
+the event detail log (claim, PR opened, review verdict, merge); the channel
+stays at one line per task. Tasks dispatched before any event reuse the same
+thread once the first PR event arrives.
 
 Status legend (defaults; override in config without rebuilding):
 
@@ -136,9 +160,9 @@ webhooks:
 
 ## /connect-repo owner/repo
 
-Prints the 4-hook wiring checklist for a repository: one endpoint per workflow
-(`review`, `fix`, `merge`, `merged`) generated from the endpoint
-template, plus per-hook secrets.
+Prints the 4-hook wiring checklist for a repository: one hook per workflow
+(`review`, `review-fix`, `merge`, `merged`) expanded from the repo block,
+plus the shared secret.
 
 Phase 1 (today, single operator): fine-grained PAT scoped to the repo, e.g.
 
@@ -148,7 +172,8 @@ gh api repos/owner/repo/hooks -f name=web -f active=true \
   -f config[content_type]=json -f config[secret]=<secret> -f events[]=<event>
 ```
 
-Append the 4 endpoints to `config.yaml` and restart occa (no hot-reload —
+Append the repo block to `config.yaml` (one secret shared by the 4 hooks,
+`checkout` pointing at the repo) and restart occa (no hot-reload —
 about 5s downtime), then ping-test all 4 and expect ✅ per hook before
 dispatching.
 
@@ -164,8 +189,9 @@ matches) — a task never sits silently at 👀.
 
 ## Webhook checklist (per repo)
 
-- [ ] 4 endpoints wired: `review`, `fix`, `merge`, `merged`
-- [ ] `repository:` bound on git-backed endpoints
-- [ ] secrets unique per endpoint, stored only in `~/.occa/config.yaml`
+- [ ] repo block wired: `provider`, `platform`, `channel_id`, `secret`, `checkout`
+- [ ] 4 hooks created on GitHub: `review`, `review-fix`, `merge`, `merged`
+- [ ] one secret shared by the 4 hooks, stored only in `~/.occa/config.yaml`
+- [ ] locked prompt files present in `~/.occa/webhooks`
 - [ ] ping-test ✅ on all 4 before first dispatch
 - [ ] prompts live in `~/.occa/webhooks`, never in this repo

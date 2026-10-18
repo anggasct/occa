@@ -824,6 +824,7 @@ type dispatchItem struct {
 	prKey       string
 	lane        int
 	queueID     int64
+	requeues    int
 }
 
 type dispatcher struct {
@@ -1068,6 +1069,42 @@ func (d *dispatcher) handle(item dispatchItem) {
 			)
 			s.markSkipped(receipt.ID, item.ep, earlyEnvelope, reason)
 			return
+		}
+		if item.prKey != "" {
+			if item.ep.Workflow != "merged" {
+				if state := strings.TrimSpace(stringValue(earlyEnvelope["pr_state"])); state == "merged" || state == "closed" {
+					held = false
+					s.releaseEvent()
+					dropped := s.drainPRQueue(d, item.prKey)
+					slog.Info("webhook: delivery skipped, PR already terminal",
+						"endpoint", item.ep.Name,
+						"delivery_id", item.deliveryID,
+						"pr_key", item.prKey,
+						"pr_state", state,
+						"dropped", dropped,
+					)
+					s.markSkipped(receipt.ID, item.ep, earlyEnvelope, "PR already "+state)
+					return
+				}
+			}
+			if item.ep.Workflow == "merged" {
+				s.drainPRQueue(d, item.prKey)
+			}
+			if item.ep.Workflow == "merge" && d.hasQueuedHigher() {
+				if item.requeues >= 3 {
+					held = false
+					s.releaseEvent()
+					s.prMirrorBlocked(item.prKey, "merge starved — manual action")
+					s.markSkipped(receipt.ID, item.ep, earlyEnvelope, "merge starved — manual action")
+					return
+				}
+				item.requeues++
+				item.queueID = s.mirrorEnqueue(item.prKey, item.ep.Name, item.eventType, 0, lanePriority(item.lane))
+				held = false
+				s.releaseEvent()
+				d.push(item)
+				return
+			}
 		}
 		lease, werr := s.resolveWorkspace(item)
 		if werr == nil {

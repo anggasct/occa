@@ -98,11 +98,6 @@ func prTestEndpoint(workflow, path, mode string) config.EndpointConfig {
 	}
 }
 
-func prTestBody(number int, branch, author string) string {
-	return fmt.Sprintf(`{"action":"opened","pull_request":{"number":%d,"state":"open","user":{"login":%q},"head":{"ref":%q,"sha":"abc1234def5678","repo":{"full_name":"acme/widget"}},"base":{"ref":"main","repo":{"full_name":"acme/widget"}}},"repository":{"full_name":"acme/widget"}}`,
-		number, author, branch)
-}
-
 func prReviewBody(number int, branch, author, state, commit string) string {
 	return fmt.Sprintf(`{"action":"submitted","pull_request":{"number":%d,"state":"open","user":{"login":%q},"head":{"ref":%q,"sha":"abc1234def5678","repo":{"full_name":"acme/widget"}},"base":{"ref":"main","repo":{"full_name":"acme/widget"}}},"review":{"state":%q,"commit_id":%q,"user":{"login":"reviewer"}},"repository":{"full_name":"acme/widget"}}`,
 		number, author, branch, state, commit)
@@ -368,5 +363,114 @@ func TestPRKeyLockIsolation(t *testing.T) {
 	}
 	if !strings.HasPrefix("pr:"+prKey, "pr:acme/widget#") {
 		t.Fatalf("pr lock prefix wrong: %q", prKey)
+	}
+}
+
+func prClosedBody(number int, merged bool) string {
+	return fmt.Sprintf(`{"action":"closed","pull_request":{"number":%d,"state":"closed","merged":%v,"user":{"login":"owner"},"head":{"ref":"feat/x","sha":"abc1234def5678","repo":{"full_name":"acme/widget"}},"base":{"ref":"main","repo":{"full_name":"acme/widget"}}},"repository":{"full_name":"acme/widget"}}`,
+		number, merged)
+}
+
+func TestMergeDrainRequeueThenBlocked(t *testing.T) {
+	rec := newPRRecorder("thread-pr", nil)
+	srv, st, _ := newPRTestServer(t, rec, []config.EndpointConfig{
+		prTestEndpoint("review", "/review", config.AutomationFull),
+		prTestEndpoint("merge", "/merge", config.AutomationFull),
+	})
+	d := newDispatcher(srv, "pr:acme/widget#7")
+	reviewItem := dispatchItem{
+		ep:          config.EndpointConfig{Name: "github-widget-review", Workflow: "review", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "p", Admit: defaultCatchAllAdmit(), Automation: &config.RepoAutomation{Default: config.AutomationFull}},
+		body:        []byte(prReviewBody(7, "feat/x", "owner", "commented", "c0ffee9")),
+		deliveryID:  "del-drain-review",
+		eventType:   "pull_request_review",
+		payloadHash: "h",
+		prKey:       "acme/widget#7",
+		lane:        1,
+	}
+	if !d.push(reviewItem) {
+		t.Fatal("review push failed")
+	}
+	mergeEp := config.EndpointConfig{Name: "github-widget-merge", Workflow: "merge", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "p", Admit: defaultCatchAllAdmit(), Automation: &config.RepoAutomation{Default: config.AutomationFull}}
+	mergeBody := []byte(prReviewBody(7, "feat/x", "owner", "approved", "c0ffeeb"))
+	mergeItem := dispatchItem{ep: mergeEp, body: mergeBody, deliveryID: "del-drain-merge", eventType: "pull_request_review", payloadHash: "h", prKey: "acme/widget#7", lane: 3}
+	popLane3 := func() dispatchItem {
+		t.Helper()
+		select {
+		case next := <-d.lanes[3]:
+			return next
+		default:
+			t.Fatal("merge item not requeued at back of lane 3")
+			return dispatchItem{}
+		}
+	}
+	backdateReceipt := func() {
+		t.Helper()
+		if _, err := st.DB().Exec(`UPDATE webhook_delivery SET updated_at = 1 WHERE endpoint = 'github-widget-merge' AND delivery_id = 'del-drain-merge'`); err != nil {
+			t.Fatalf("backdate receipt: %v", err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		d.handle(mergeItem)
+		if len(rec.order) != 0 {
+			t.Fatalf("merge must not execute while higher lanes are queued (iter %d)", i)
+		}
+		mergeItem = popLane3()
+		if mergeItem.requeues != i+1 {
+			t.Fatalf("requeues = %d, want %d", mergeItem.requeues, i+1)
+		}
+		backdateReceipt()
+	}
+	d.handle(mergeItem)
+	if len(rec.order) != 0 {
+		t.Fatal("merge must not execute after exhausting requeues")
+	}
+	run, err := st.PRQueueRepo().Get(context.Background(), "acme/widget#7")
+	if err != nil || run == nil || run.Status != store.PRStatusBlocked {
+		t.Fatalf("pr queue = %+v, %v; want blocked", run, err)
+	}
+	d1, err := st.WebhookDeliveryRepo().Get(context.Background(), "github-widget-merge", "del-drain-merge")
+	if err != nil || d1 == nil || d1.Status != store.WebhookStatusSkipped {
+		t.Fatalf("merge receipt = %+v, %v; want skipped", d1, err)
+	}
+}
+
+func TestMergedEventDrainsQueue(t *testing.T) {
+	rec := newPRRecorder("thread-pr", make(chan struct{}))
+	_, st, url := newPRTestServer(t, rec, []config.EndpointConfig{
+		prTestEndpoint("fix", "/fix", config.AutomationFull),
+		prTestEndpoint("merged", "/merged", config.AutomationFull),
+	})
+	if resp := post(t, url+"/fix?secret=s3cret", "del-mq-fix", "pull_request_review", prReviewBody(7, "feat/x", "owner", "changes_requested", "c0ffee10")); resp.StatusCode != http.StatusOK {
+		t.Fatalf("post fix: status %d", resp.StatusCode)
+	}
+	waitForCalls(t, rec, 1)
+	if resp := post(t, url+"/merged?secret=s3cret", "del-mq-merged", "pull_request", prClosedBody(7, true)); resp.StatusCode != http.StatusOK {
+		t.Fatalf("post merged: status %d", resp.StatusCode)
+	}
+	if resp := post(t, url+"/fix?secret=s3cret", "del-mq-fix-2", "pull_request_review", prReviewBody(7, "feat/x", "owner", "changes_requested", "c0ffee11")); resp.StatusCode != http.StatusOK {
+		t.Fatalf("post fix 2: status %d", resp.StatusCode)
+	}
+	close(rec.release)
+	waitForDeliveryStatus(t, st, "github-widget-merged", "del-mq-merged", store.WebhookStatusCompleted)
+	if len(rec.order) != 2 || rec.order[0] != "del-mq-fix" || rec.order[1] != "del-mq-merged" {
+		t.Fatalf("merged must run after drain, dropping queued fix; calls = %v", rec.order)
+	}
+	run, err := st.PRQueueRepo().Get(context.Background(), "acme/widget#7")
+	if err != nil || run == nil || run.Status != store.PRStatusDrained {
+		t.Fatalf("pr queue = %+v, %v; want drained", run, err)
+	}
+}
+
+func TestClosedPRSkipsAndDrains(t *testing.T) {
+	rec := newPRRecorder("thread-pr", nil)
+	_, st, url := newPRTestServer(t, rec, []config.EndpointConfig{
+		prTestEndpoint("review", "/review", config.AutomationFull),
+	})
+	if resp := post(t, url+"/review?secret=s3cret", "del-closed", "pull_request", prClosedBody(7, false)); resp.StatusCode != http.StatusOK {
+		t.Fatalf("post closed: status %d", resp.StatusCode)
+	}
+	waitForDeliveryStatus(t, st, "github-widget-review", "del-closed", store.WebhookStatusSkipped)
+	if len(rec.order) != 0 {
+		t.Fatalf("closed PR must not execute, calls = %v", rec.order)
 	}
 }

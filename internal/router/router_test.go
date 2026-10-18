@@ -468,6 +468,8 @@ func (f *fakeStore) UsageRepo() store.UsageRepo {
 }
 func (f *fakeStore) WebhookDeliveryRepo() store.WebhookDeliveryRepo { return nil }
 
+func (f *fakeStore) PRQueueRepo() store.PRQueueRepo { return nil }
+
 func (f *fakeStore) RecoveryEventRepo() store.RecoveryEventRepo {
 	if f.recoveryEvents == nil {
 		f.recoveryEvents = newFakeRecoveryEventRepo()

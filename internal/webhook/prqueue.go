@@ -163,6 +163,15 @@ func (d *dispatcher) pop() (dispatchItem, bool) {
 	return dispatchItem{}, false
 }
 
+func (d *dispatcher) hasQueuedHigher() bool {
+	for i := 0; i < numPRLanes-1; i++ {
+		if len(d.lanes[i]) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func (d *dispatcher) drain() []dispatchItem {
 	var out []dispatchItem
 	for {
@@ -188,11 +197,36 @@ func (s *Server) mirrorEnqueue(prKey, endpoint, eventType string, deliveryID int
 	return id
 }
 
+func (s *Server) prMirrorBlocked(prKey, reason string) {
+	if s.prQueues == nil || strings.TrimSpace(prKey) == "" {
+		return
+	}
+	if err := s.prQueues.SetBlocked(context.Background(), prKey, reason); err != nil {
+		slog.Warn("webhook: pr blocked mark failed", "pr_key", prKey, "error", err)
+	}
+}
+
 func (s *Server) mirrorDelete(queueID int64) {
 	if s.prQueues == nil || queueID == 0 {
 		return
 	}
 	_ = s.prQueues.DeleteItem(context.Background(), queueID)
+}
+
+// drainPRQueue drops everything still waiting for the PR without executing
+// it. Queued items hold no receipts by design, so there is nothing to
+// terminal-transition; the drop is logged and the merged run itself remains
+// the audit record.
+func (s *Server) drainPRQueue(d *dispatcher, prKey string) int {
+	dropped := 0
+	for _, item := range d.drain() {
+		s.mirrorDelete(item.queueID)
+		dropped++
+	}
+	if dropped > 0 {
+		slog.Info("webhook: pr queue drained", "pr_key", prKey, "dropped", dropped)
+	}
+	return dropped
 }
 
 func (s *Server) prMirrorSetActive(item dispatchItem, deliveryID int64) {

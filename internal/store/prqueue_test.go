@@ -67,8 +67,9 @@ func TestPRQueuePriorityOrder(t *testing.T) {
 		}
 		if next == nil {
 			t.Fatalf("queue drained early after %d pops", len(order))
+		} else {
+			order = append(order, next.DeliveryID)
 		}
-		order = append(order, next.DeliveryID)
 	}
 	for i, want := range []int64{5, 3, 2, 4, 1} {
 		if order[i] != want {

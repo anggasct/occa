@@ -7,7 +7,24 @@ import (
 )
 
 func TestWebhooksCheckConfigAcceptsExample(t *testing.T) {
-	if got := runWebhooksCheckConfig([]string{"--config", filepath.Join("..", "..", "config.example.yaml")}); got != 0 {
+	data, err := os.ReadFile(filepath.Join("..", "..", "config.example.yaml"))
+	if err != nil {
+		t.Fatalf("read example: %v", err)
+	}
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "webhooks"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	for _, name := range []string{"example-review.md", "github-review.md", "github-review-fix.md", "github-merge.md", "github-merged.md"} {
+		if err := os.WriteFile(filepath.Join(dir, "webhooks", name), []byte("stub "+name), 0o644); err != nil {
+			t.Fatalf("write stub prompt: %v", err)
+		}
+	}
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if got := runWebhooksCheckConfig([]string{"--config", path}); got != 0 {
 		t.Fatalf("check-config exit = %d, want 0", got)
 	}
 }
