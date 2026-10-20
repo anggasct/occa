@@ -34,21 +34,22 @@ func TestFormatPhaseBannerSingleLine(t *testing.T) {
 	}
 }
 
-func TestFormatThreadStatusShape(t *testing.T) {
-	got := FormatThreadStatus("🔨 FIX", "Step 10 (fix-ci run)", "2 CI jobs still red", "push + re-review")
-	if !strings.HasPrefix(got, "📌 STATUS: ") {
-		t.Fatalf("STATUS must start with pinned marker, got %q", got)
-	}
-	for _, want := range []string{"🔨 FIX", "Step 10 (fix-ci run)", "2 CI jobs still red", "next: push + re-review"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("STATUS %q must contain %q", got, want)
-		}
+func TestFormatThreadStatusLineShape(t *testing.T) {
+	got := FormatThreadStatusLine(PhaseFix, "merge (1)", "CI (check_suite)", "push + re-review", "", nil)
+	want := "📌 Status — 🔨 fix · queued: merge (1) · waiting: CI (check_suite) · next: push + re-review"
+	if got != want {
+		t.Fatalf("STATUS line = %q, want %q", got, want)
 	}
 	if lines := strings.Count(got, "\n") + 1; lines > 4 {
 		t.Errorf("STATUS must be max 4 lines, got %d: %q", lines, got)
 	}
 	if strings.Contains(got, "━━━") {
 		t.Errorf("STATUS must not carry a card separator: %q", got)
+	}
+	action := FormatThreadStatusLine(PhaseBlocked, "merge (1)", "", "", "retry exhausted — run /retry, /skip or /cancel", nil)
+	wantAction := "📌 Status — 🔴 blocked · queued: merge (1) · ACTION: retry exhausted — run /retry, /skip or /cancel"
+	if action != wantAction {
+		t.Fatalf("STATUS action line = %q, want %q", action, wantAction)
 	}
 }
 
@@ -125,14 +126,14 @@ func TestThreadStatusEditsInPlace(t *testing.T) {
 		return nil
 	})
 	ctx := context.Background()
-	first := srv.ensureThreadStatus(ctx, "discord", "chan-1", "thread-1", "acme/widget", "feat/x", "review", "review run del-1", "analyzing")
+	first := srv.ensureThreadStatus(ctx, "discord", "chan-1", "thread-1", "acme/widget", "feat/x", "", ThreadStatusUpdate{Phase: PhaseReview, Next: "review"})
 	if first != "status-1" {
 		t.Fatalf("first STATUS must send, got %q", first)
 	}
 	if len(sent) != 1 || len(edited) != 0 {
 		t.Fatalf("first STATUS must append once: sent=%d edited=%d", len(sent), len(edited))
 	}
-	second := srv.ensureThreadStatus(ctx, "discord", "chan-1", "thread-1", "acme/widget", "feat/x", "review", "review run del-1", "still analyzing")
+	second := srv.ensureThreadStatus(ctx, "discord", "chan-1", "thread-1", "acme/widget", "feat/x", "", ThreadStatusUpdate{Phase: PhaseReview, Next: "review"})
 	if second != "status-1" {
 		t.Fatalf("second STATUS must reuse message ID, got %q", second)
 	}
@@ -142,7 +143,7 @@ func TestThreadStatusEditsInPlace(t *testing.T) {
 	if len(edited) != 1 {
 		t.Fatalf("second STATUS must edit in place, edited=%d", len(edited))
 	}
-	if !strings.HasPrefix(sent[0], "📌 STATUS: ") || !strings.Contains(edited[0], "📌 STATUS: ") {
+	if !strings.HasPrefix(sent[0], "📌 Status — ") || !strings.Contains(edited[0], "📌 Status — ") {
 		t.Errorf("STATUS texts must carry pinned marker: sent=%q edited=%q", sent[0], edited[0])
 	}
 }

@@ -58,6 +58,12 @@ webhooks:
     merged: ✅ # merged workflow closed the task
     event: 📨 # generic webhook event line
     failed: ❌ # delivery failed (re-dispatch returns to ⏳)
+    queued: ⏳ # phase: PR accepted, waiting for its turn
+    dispatch: 🛠️ # phase: dispatch task running on the PR branch
+    review: 👀 # phase: review run active
+    fix: 🔨 # phase: fix run active
+    merge: 🔀 # phase: merge run or merge gate active
+    blocked: 🔴 # phase: operator action required
   status_colors: # embed color per status, as 24-bit decimal (text cards carry the icon; embeds consume the color)
     dispatched: 3447003 # blue
     claimed: 3447003 # blue
@@ -75,6 +81,14 @@ webhooks:
       window: 60m # sliding window for the trigger cap
     thread: true # dispatch deliveries run in the PR thread
     escalation_mention: operator # user or role mentioned when a PR queue blocks on retry exhaustion; empty disables the mention
+    verbose_steps: false # per-step tool lines in the PR thread; off by default, a run posts one tool summary
+    status_icons: # phase icons of the operator surface (overrides webhooks.status_icons)
+      queued: ⏳ # phase: PR accepted, waiting for its turn
+      dispatch: 🛠️ # phase: dispatch task running on the PR branch
+      review: 👀 # phase: review run active
+      fix: 🔨 # phase: fix run active
+      merge: 🔀 # phase: merge run or merge gate active
+      blocked: 🔴 # phase: operator action required
   repos:
     - repo: acme/widget # owner/name; expands to github-widget-{review,pr-fix,merge,merged}
       provider: github # only github is supported

@@ -74,6 +74,10 @@ type DispatchConfig struct {
 
 var knownTaskStatuses = []string{"dispatched", "claimed", "pr_opened", "merged", "event", "failed"}
 
+// knownPhaseIcons are the phase keys of the operator surface. They share the
+// status_icons map so an operator can restyle a phase without a rebuild.
+var knownPhaseIcons = []string{"queued", "dispatch", "review", "fix", "merge", "merged", "blocked", "failed"}
+
 type EndpointConfig struct {
 	Name           string            `yaml:"name"`
 	Path           string            `yaml:"path"`
@@ -509,6 +513,14 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 	}
 	fc.Runtime = runtimeCfg
 
+	if err := validateTaskStatusConfig(fc.Webhooks.StatusIcons, fc.Webhooks.StatusColors); err != nil {
+		return Config{}, err
+	}
+	if err := validateTaskStatusConfig(fc.Webhooks.Defaults.StatusIcons, nil); err != nil {
+		return Config{}, err
+	}
+	fc.Webhooks.StatusIcons = mergeStatusIcons(fc.Webhooks.StatusIcons, fc.Webhooks.Defaults.StatusIcons)
+
 	if len(fc.Webhooks.Endpoints) > 0 || len(fc.Webhooks.Repos) > 0 {
 		if fc.Webhooks.Bind == "" {
 			fc.Webhooks.Bind = "127.0.0.1:8787"
@@ -537,9 +549,6 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 			return Config{}, err
 		}
 		fc.Webhooks.Policy = policy
-		if err := validateTaskStatusConfig(fc.Webhooks.StatusIcons, fc.Webhooks.StatusColors); err != nil {
-			return Config{}, err
-		}
 		if fc.Webhooks.FallbackPollAfter < 0 {
 			return Config{}, fmt.Errorf("config: webhooks.fallback_poll_after must not be negative")
 		}
@@ -685,10 +694,16 @@ func validateTaskStatusConfig(icons map[string]string, colors map[string]int) er
 	for _, status := range knownTaskStatuses {
 		known[status] = true
 	}
+	iconKeys := make([]string, 0, len(knownTaskStatuses)+len(knownPhaseIcons))
+	iconKeys = append(iconKeys, knownTaskStatuses...)
+	iconKeys = append(iconKeys, knownPhaseIcons...)
+	for _, phase := range knownPhaseIcons {
+		known[phase] = true
+	}
 	for key, icon := range icons {
 		name := strings.TrimSpace(strings.ToLower(key))
 		if !known[name] {
-			return fmt.Errorf("config: webhooks.status_icons key %q is unknown (want one of %s)", key, strings.Join(knownTaskStatuses, ", "))
+			return fmt.Errorf("config: webhooks.status_icons key %q is unknown (want one of %s)", key, strings.Join(iconKeys, ", "))
 		}
 		if strings.TrimSpace(icon) == "" {
 			return fmt.Errorf("config: webhooks.status_icons[%q] must not be empty", key)
@@ -859,4 +874,20 @@ func expandHome(path string) (string, error) {
 		return "", fmt.Errorf("config: home dir: %w", err)
 	}
 	return filepath.Join(home, strings.TrimPrefix(path, "~")), nil
+}
+
+// mergeStatusIcons layers the phase overrides of webhooks.defaults on top of
+// the global status icon map.
+func mergeStatusIcons(base, overrides map[string]string) map[string]string {
+	if len(overrides) == 0 {
+		return base
+	}
+	merged := make(map[string]string, len(base)+len(overrides))
+	for key, value := range base {
+		merged[strings.ToLower(strings.TrimSpace(key))] = value
+	}
+	for key, value := range overrides {
+		merged[strings.ToLower(strings.TrimSpace(key))] = value
+	}
+	return merged
 }

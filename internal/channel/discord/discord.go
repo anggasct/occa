@@ -629,6 +629,74 @@ func (a *Adapter) SendNotificationWithButtons(channelID, text string, buttons []
 	return msg.ID, nil
 }
 
+// SendNotificationMention posts a notification that can ping a single user.
+// The escalation path of the product is the only caller: every other send
+// keeps mentions suppressed.
+func (a *Adapter) SendNotificationMention(channelID, text string, mentionUserID string) (string, error) {
+	if a.session == nil {
+		return "", errors.New("discord: session not ready")
+	}
+	content := render.Clamp(text, render.DiscordLimit)
+	msg, err := a.session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+		Content: content,
+		AllowedMentions: &discordgo.MessageAllowedMentions{
+			Parse: []discordgo.AllowedMentionType{discordgo.AllowedMentionTypeUsers},
+			Users: []string{strings.TrimSpace(mentionUserID)},
+		},
+		Flags: discordgo.MessageFlagsSuppressEmbeds,
+	})
+	if err != nil {
+		return "", fmt.Errorf("discord: send notification mention: %w", err)
+	}
+	return msg.ID, nil
+}
+
+// ResolveMentionID maps a username or user id to a Discord user id. It is
+// fail-closed: an unknown name resolves to nothing so the caller can post
+// without a ping.
+func (a *Adapter) ResolveMentionID(_ context.Context, name string) (string, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", false
+	}
+	if isDiscordSnowflake(name) {
+		return name, true
+	}
+	if a.session == nil {
+		return "", false
+	}
+	for _, guild := range a.session.State.Guilds {
+		if guild == nil {
+			continue
+		}
+		members, err := a.session.GuildMembersSearch(guild.ID, name, 100)
+		if err != nil {
+			continue
+		}
+		for _, member := range members {
+			if member == nil || member.User == nil {
+				continue
+			}
+			if strings.EqualFold(member.User.Username, name) || strings.EqualFold(member.Nick, name) {
+				return member.User.ID, true
+			}
+		}
+	}
+	return "", false
+}
+
+func isDiscordSnowflake(value string) bool {
+	if len(value) < 17 || len(value) > 20 {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func (a *Adapter) EditNotificationWithButtons(channelID, messageID, text string, buttons []channel.Button) error {
 	if a.session == nil {
 		return errors.New("discord: session not ready")
@@ -1042,6 +1110,7 @@ func componentRows(buttons []channel.Button) []discordgo.MessageComponent {
 				Label:    safeButtonLabel(b.Label),
 				Style:    discordgo.SecondaryButton,
 				CustomID: b.Value,
+				Disabled: b.Disabled,
 			}
 		}
 		if b.Row == 0 {

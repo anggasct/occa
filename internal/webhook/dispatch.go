@@ -537,7 +537,10 @@ func (s *Server) openDispatchThread(task DispatchTask, platform, channelID, root
 		_ = s.notifyThread(ctx, platform, threadTargetFor(platform, channelID, threadID), opener)
 	}
 	s.postPhaseBannerIfChanged(ctx, platform, channelID, threadID, task.Repo, task.Branch, "dispatch", "")
-	s.ensureThreadStatus(ctx, platform, channelID, threadID, task.Repo, task.Branch, "dispatch", "dispatch run "+shortDeliveryID(task.ID), "dispatched")
+	s.ensureThreadStatus(ctx, platform, channelID, threadID, task.Repo, task.Branch, "", ThreadStatusUpdate{
+		Phase: PhaseDispatch,
+		Next:  NextStepForPhase(PhaseDispatch),
+	})
 	if fresh, ok := s.tasks.Lookup(task.Repo, task.Branch); ok {
 		return fresh, true
 	}

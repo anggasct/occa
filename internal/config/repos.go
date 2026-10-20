@@ -47,6 +47,8 @@ type WebhookDefaults struct {
 	Limits            *EndpointLimits     `yaml:"limits,omitempty"`
 	Thread            *bool               `yaml:"thread,omitempty"`
 	EscalationMention string              `yaml:"escalation_mention,omitempty"`
+	VerboseSteps      bool                `yaml:"verbose_steps,omitempty"`
+	StatusIcons       map[string]string   `yaml:"status_icons,omitempty"`
 }
 
 var defaultReviewTriggers = []string{"please re-review"}

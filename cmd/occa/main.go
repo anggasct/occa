@@ -439,7 +439,14 @@ func main() {
 			NoEventTimeout:      cfg.Runtime.Relay.NoEventTimeout,
 			WebhookAbortTimeout: cfg.Runtime.Relay.WebhookAbortTimeout,
 			VerifyTimeout:       cfg.Runtime.Relay.VerifyTimeout,
-		}, webhook.TaskOptions{Registry: taskRegistry, Icons: cfg.Webhooks.StatusIcons, Colors: cfg.Webhooks.StatusColors})
+		}, webhook.TaskOptions{
+			Registry:     taskRegistry,
+			Icons:        cfg.Webhooks.StatusIcons,
+			Colors:       cfg.Webhooks.StatusColors,
+			PRQueues:     db.PRQueueRepo(),
+			Endpoints:    cfg.Webhooks.Endpoints,
+			VerboseSteps: cfg.Webhooks.Defaults.VerboseSteps,
+		})
 
 		webhookSrv = webhook.New(cfg.Webhooks, webhookExecutor, db.WebhookDeliveryRepo())
 		webhookSrv.SetTaskRegistry(taskRegistry)
@@ -497,6 +504,33 @@ func main() {
 				}
 			}
 			return "", errors.New("webhook channel adapter unavailable")
+		})
+		webhookSrv.SetMentionResolver(func(ctx context.Context, platform, name string) (string, bool) {
+			for _, ch := range channels {
+				if ch.Name() != platform {
+					continue
+				}
+				resolver, ok := ch.(channel.MentionResolver)
+				if !ok {
+					return "", false
+				}
+				return resolver.ResolveMentionID(ctx, name)
+			}
+			return "", false
+		})
+		webhookSrv.SetMentionNotifier(func(ctx context.Context, platform, channelID, text, mentionUserID string) error {
+			for _, ch := range channels {
+				if ch.Name() != platform {
+					continue
+				}
+				sender, ok := ch.(channel.MessageSenderMention)
+				if !ok {
+					return errors.New("channel adapter does not support mentions")
+				}
+				_, err := sender.SendNotificationMention(channelID, text, mentionUserID)
+				return err
+			}
+			return errors.New("webhook channel adapter unavailable")
 		})
 		webhookSrv.SetGuildResolver(func(ctx context.Context, platform, channelID string) string {
 			for _, ch := range channels {
@@ -730,70 +764,50 @@ func guildIDForButtons(ch channel.Channel, channelID, threadID string) string {
 	return ""
 }
 
-func refreshThreadBannerAndStatus(ch channel.Channel, reg *webhook.TaskThreadRegistry, platform, channelID, threadID, repo, branch string, workCtx *webhook.WebhookWorkContext, lastEvent string) {
+func refreshThreadBannerAndStatus(ch channel.Channel, taskOpts webhook.TaskOptions, platform, channelID, threadID, repo, branch string, workCtx *webhook.WebhookWorkContext, lastEvent string) {
+	reg := taskOpts.Registry
 	if reg == nil || strings.TrimSpace(threadID) == "" || strings.TrimSpace(repo) == "" || strings.TrimSpace(branch) == "" {
 		return
 	}
 	workflow := ""
-	deliveryID := ""
+	prKey := ""
 	if workCtx != nil {
 		workflow = workCtx.Workflow
-		deliveryID = workCtx.DeliveryID
+		prKey = strings.TrimSpace(workCtx.PRKey)
 	}
-	phase, icon := webhook.ThreadPhaseForWorkflow(workflow)
-	if rec, ok := reg.Lookup(repo, branch); ok {
-		prev := strings.TrimSpace(rec.Phase)
-		if prev == "" || prev != phase {
-			banner := webhook.FormatPhaseBanner(workflow, lastEvent)
-			target := threadID
-			if platform == "telegram" && !strings.Contains(channelID, ":") {
-				target = channelID + ":" + threadID
-			}
-			if strings.TrimSpace(banner) != "" {
-				_, _ = notifySend(ch, target, banner)
-			}
-		}
-	} else {
-		banner := webhook.FormatPhaseBanner(workflow, lastEvent)
-		target := threadID
-		if platform == "telegram" && !strings.Contains(channelID, ":") {
-			target = channelID + ":" + threadID
-		}
-		if strings.TrimSpace(banner) != "" {
-			_, _ = notifySend(ch, target, banner)
-		}
-	}
-	reg.SetPhase(repo, branch, phase)
-	stepRun := strings.TrimSpace(workflow)
-	if stepRun == "" {
-		stepRun = "run"
-	}
-	if len(strings.TrimSpace(deliveryID)) >= 8 {
-		stepRun += " run " + strings.TrimSpace(deliveryID)[:8]
-	} else if strings.TrimSpace(deliveryID) != "" {
-		stepRun += " run " + strings.TrimSpace(deliveryID)
-	}
-	next := ""
-	switch phase {
-	case "REVIEW":
-		next = "fix or merge gate"
-	case "FIX":
-		next = "push + re-review"
-	case "MERGE":
-		next = "merge or fix"
-	}
-	text := webhook.ThreadStatusText(phase, icon, stepRun, lastEvent, next)
+	phase, _ := webhook.ThreadPhaseForWorkflow(workflow)
 	target := threadID
 	if platform == "telegram" && !strings.Contains(channelID, ":") {
 		target = channelID + ":" + threadID
 	}
-	if rec, ok := reg.Lookup(repo, branch); ok && strings.TrimSpace(rec.StatusMessageID) != "" {
-		if err := notifyEdit(ch, target, strings.TrimSpace(rec.StatusMessageID), text); err == nil {
+	banner := ""
+	if rec, ok := reg.Lookup(repo, branch); ok {
+		if strings.TrimSpace(rec.Phase) != phase {
+			banner = webhook.FormatPhaseBanner(workflow, lastEvent)
+		}
+	} else {
+		banner = webhook.FormatPhaseBanner(workflow, lastEvent)
+	}
+	if strings.TrimSpace(banner) != "" {
+		_, _ = notifySend(ch, target, banner)
+	}
+	reg.SetPhase(repo, branch, phase)
+	surfacePhase := webhook.PhaseForWorkflow(workflow)
+	text := webhook.FormatThreadStatusLine(
+		surfacePhase,
+		webhook.QueueSnapshot(taskOpts.PRQueues, taskOpts.Endpoints, prKey),
+		"",
+		webhook.NextStepForPhase(surfacePhase),
+		"",
+		taskOpts.Icons,
+	)
+	if msgID := reg.StatusMessageIDKeyed(repo, branch, prKey); msgID != "" {
+		if err := notifyEdit(ch, target, msgID, text); err == nil {
 			return
 		}
 	}
 	if msgID, err := notifySend(ch, target, text); err == nil && strings.TrimSpace(msgID) != "" {
-		reg.SetStatusMessage(repo, branch, msgID)
+		reg.SetStatusMessageKeyed(repo, branch, prKey, msgID)
 	}
 }
 
@@ -893,7 +907,9 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 				starter, _ := ch.(channel.ThreadStarter)
 
 				reused := workCtx.RootMessageID != ""
-				if reused && taskOpts.Registry != nil {
+				prKey := strings.TrimSpace(workCtx.PRKey)
+				prSurface := prKey != ""
+				if reused && taskOpts.Registry != nil && !prSurface {
 					if repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope); repo != "" && branch != "" {
 						if _, ok := taskOpts.Registry.ResolveTaskThread(repo, branch, "executor"); ok {
 							buttons := webhook.TaskParentButtons(platform, guildIDForButtons(ch, channelID, workCtx.ThreadID), workCtx.Envelope, repo, branch, workCtx.ThreadID)
@@ -904,9 +920,14 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 								}
 							}
 							if strings.TrimSpace(workCtx.ThreadID) != "" {
-								refreshThreadBannerAndStatus(ch, taskOpts.Registry, platform, channelID, workCtx.ThreadID, repo, branch, workCtx, "run started")
+								refreshThreadBannerAndStatus(ch, taskOpts, platform, channelID, workCtx.ThreadID, repo, branch, workCtx, "run started")
 							}
 						}
+					}
+				}
+				if reused && prSurface && strings.TrimSpace(workCtx.ThreadID) != "" {
+					if repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope); repo != "" && branch != "" {
+						refreshThreadBannerAndStatus(ch, taskOpts, platform, channelID, workCtx.ThreadID, repo, branch, workCtx, "run started")
 					}
 				}
 				if reused && workCtx.ThreadID == "" && useThread && starter != nil {
@@ -922,15 +943,31 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 								taskOpts.Registry.Upsert(repo, branch, workCtx.RootMessageID, threadID, taskStatus)
 							}
 						}
+						if prSurface {
+							opener := webhook.FormatPRThreadOpener(workCtx.Envelope)
+							if strings.TrimSpace(opener) != "" {
+								_, _ = notifySend(ch, targetChannelID, opener)
+							}
+						}
 					}
 				}
 
 				if !reused && useThread && starter != nil && sender != nil {
 					rootCard := webhook.FormatRootCard(workCtx.Envelope, workCtx.Workflow, "RUNNING", "", "", platform)
 					repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope)
-					buttons := webhook.TaskParentButtons(platform, guildIDForButtons(ch, channelID, ""), workCtx.Envelope, repo, branch, "")
-					rootCard = webhook.WithTaskHeaderWithButtons(rootCard, workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons, platform, buttons)
-					rootMsgID, err := notifySendWithButtons(ch, channelID, webhook.FormatWebhookMessage(rootCard), buttons)
+					parentText := ""
+					var buttons []channel.Button
+					if prSurface {
+						prNumber := strings.TrimSpace(webhook.EnvelopeString(workCtx.Envelope, "pr_number"))
+						phase := webhook.PhaseForWorkflow(workCtx.Workflow)
+						parentText = webhook.FormatPhaseParent(repo, prNumber, phase, taskOpts.Icons)
+						buttons = webhook.PhaseParentButtons(platform, guildIDForButtons(ch, channelID, ""), webhook.EnvelopeString(workCtx.Envelope, "pr_url"), "", repo, branch, webhook.MergeGateEnabled(taskOpts.PRQueues, taskOpts.Endpoints, prKey))
+					} else {
+						buttons = webhook.TaskParentButtons(platform, guildIDForButtons(ch, channelID, ""), workCtx.Envelope, repo, branch, "")
+						rootCard = webhook.WithTaskHeaderWithButtons(rootCard, workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons, platform, buttons)
+						parentText = webhook.FormatWebhookMessage(rootCard)
+					}
+					rootMsgID, err := notifySendWithButtons(ch, channelID, parentText, buttons)
 					if err != nil {
 						slog.Warn("webhook: failed to send root card; falling back to channel", "channel_id", channelID, "error", err)
 					} else {
@@ -951,12 +988,20 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 								if repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope); repo != "" && branch != "" {
 									taskOpts.Registry.Upsert(repo, branch, rootMsgID, threadID, taskStatus)
 									threadButtons := webhook.TaskParentButtons(platform, guildIDForButtons(ch, channelID, threadID), workCtx.Envelope, repo, branch, threadID)
-									_ = notifyEditWithButtons(ch, channelID, rootMsgID, webhook.FormatWebhookMessage(rootCard), threadButtons)
-									opener := webhook.FormatThreadOpener(workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons)
-									if strings.TrimSpace(opener) != "" {
-										_, _ = notifySend(ch, targetChannelID, opener)
+									if prSurface {
+										threadButtons = webhook.PhaseParentButtons(platform, guildIDForButtons(ch, channelID, threadID), webhook.EnvelopeString(workCtx.Envelope, "pr_url"), threadID, repo, branch, webhook.MergeGateEnabled(taskOpts.PRQueues, taskOpts.Endpoints, prKey))
+										_ = notifyEditWithButtons(ch, channelID, rootMsgID, parentText, threadButtons)
+										if opener := webhook.FormatPRThreadOpener(workCtx.Envelope); strings.TrimSpace(opener) != "" {
+											_, _ = notifySend(ch, targetChannelID, opener)
+										}
+									} else {
+										_ = notifyEditWithButtons(ch, channelID, rootMsgID, webhook.FormatWebhookMessage(rootCard), threadButtons)
+										opener := webhook.FormatThreadOpener(workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons)
+										if strings.TrimSpace(opener) != "" {
+											_, _ = notifySend(ch, targetChannelID, opener)
+										}
 									}
-									refreshThreadBannerAndStatus(ch, taskOpts.Registry, platform, channelID, threadID, repo, branch, workCtx, "dispatched")
+									refreshThreadBannerAndStatus(ch, taskOpts, platform, channelID, threadID, repo, branch, workCtx, "dispatched")
 								}
 							}
 						}
@@ -996,6 +1041,7 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 						},
 					)
 					streamer = relay.NewStreamerWithSink(sink, outboundRenderer, render.PlatformFor(platform), relayCfg.NoEventTimeout)
+					streamer.SetVerboseSteps(taskOpts.VerboseSteps)
 				}
 
 				turn := relay.WebhookTurn{
@@ -1040,7 +1086,7 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 							_, _ = notifySend(ch, targetChannelID, slim)
 							if taskOpts.Registry != nil {
 								if repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope); repo != "" && branch != "" {
-									refreshThreadBannerAndStatus(ch, taskOpts.Registry, platform, channelID, workCtx.ThreadID, repo, branch, workCtx, webhook.FormatGateOutcome(workCtx.Envelope, workCtx.Workflow, "FAILED"))
+									refreshThreadBannerAndStatus(ch, taskOpts, platform, channelID, workCtx.ThreadID, repo, branch, workCtx, webhook.FormatGateOutcome(workCtx.Envelope, workCtx.Workflow, "FAILED"))
 								}
 							}
 						} else if platform == "discord" {
@@ -1079,7 +1125,7 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 						_, _ = notifySend(ch, targetChannelID, slim)
 						if taskOpts.Registry != nil {
 							if repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope); repo != "" && branch != "" {
-								refreshThreadBannerAndStatus(ch, taskOpts.Registry, platform, channelID, workCtx.ThreadID, repo, branch, workCtx, webhook.FormatGateOutcome(workCtx.Envelope, workCtx.Workflow, "COMPLETED"))
+								refreshThreadBannerAndStatus(ch, taskOpts, platform, channelID, workCtx.ThreadID, repo, branch, workCtx, webhook.FormatGateOutcome(workCtx.Envelope, workCtx.Workflow, "COMPLETED"))
 							}
 						}
 					} else if platform == "discord" {

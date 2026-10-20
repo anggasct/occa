@@ -14,6 +14,7 @@ import (
 
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/config"
+	"github.com/anggasct/occa/internal/store"
 )
 
 type TaskStatus string
@@ -174,18 +175,37 @@ type TaskThreadRecord struct {
 	SpecPath        string
 	StatusMessageID string
 	Phase           string
+	SurfacePhase    string
+	PRNumber        string
+}
+
+// SurfaceUpdate carries the state of a PR channel parent.
+type SurfaceUpdate struct {
+	RootMessageID   string
+	Repo            string
+	PRNumber        string
+	PRURL           string
+	Branch          string
+	ThreadID        string
+	Phase           string
+	StatusMessageID string
 }
 
 type TaskThreadRegistry struct {
 	mu        sync.RWMutex
 	records   map[string]TaskThreadRecord
-	prThreads map[string]TaskThreadRecord
+	prThreads map[string]string
+	surfaces  map[string]SurfaceUpdate
 	icons     map[string]string
 	colors    map[string]int
 }
 
 func NewTaskThreadRegistry() *TaskThreadRegistry {
-	return &TaskThreadRegistry{records: make(map[string]TaskThreadRecord), prThreads: make(map[string]TaskThreadRecord)}
+	return &TaskThreadRegistry{
+		records:   make(map[string]TaskThreadRecord),
+		prThreads: make(map[string]string),
+		surfaces:  make(map[string]SurfaceUpdate),
+	}
 }
 
 func (t *TaskThreadRegistry) SetStatusConfig(icons map[string]string, colors map[string]int) {
@@ -219,7 +239,11 @@ func (t *TaskThreadRegistry) ResolvePRThread(prKey string) (TaskThreadRecord, bo
 	}
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	rec, ok := t.prThreads[strings.TrimSpace(prKey)]
+	taskKey, ok := t.prThreads[strings.TrimSpace(prKey)]
+	if !ok {
+		return TaskThreadRecord{}, false
+	}
+	rec, ok := t.records[taskKey]
 	return rec, ok
 }
 
@@ -230,9 +254,9 @@ func (t *TaskThreadRegistry) LinkPRThread(prKey string, rec TaskThreadRecord) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.prThreads == nil {
-		t.prThreads = make(map[string]TaskThreadRecord)
+		t.prThreads = make(map[string]string)
 	}
-	t.prThreads[strings.TrimSpace(prKey)] = rec
+	t.prThreads[strings.TrimSpace(prKey)] = TaskThreadKey(rec.Repo, rec.Branch)
 }
 
 func (t *TaskThreadRegistry) PRKeyForThread(threadID string) (string, bool) {
@@ -242,7 +266,11 @@ func (t *TaskThreadRegistry) PRKeyForThread(threadID string) (string, bool) {
 	}
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	for prKey, rec := range t.prThreads {
+	for prKey, taskKey := range t.prThreads {
+		rec, ok := t.records[taskKey]
+		if !ok {
+			continue
+		}
 		if strings.TrimSpace(rec.ThreadID) == threadID {
 			return prKey, true
 		}
@@ -314,6 +342,8 @@ func (t *TaskThreadRegistry) UpsertWithSpec(repo, branch, rootID, threadID strin
 		SpecPath:        specPath,
 		StatusMessageID: prev.StatusMessageID,
 		Phase:           prev.Phase,
+		SurfacePhase:    prev.SurfacePhase,
+		PRNumber:        prev.PRNumber,
 	}
 	t.records[key] = rec
 	return rec
@@ -349,6 +379,150 @@ func (t *TaskThreadRegistry) SetPhase(repo, branch, phase string) TaskThreadReco
 	prev.UpdatedAt = time.Now()
 	t.records[key] = prev
 	return prev
+}
+
+// SetSurface records the state of the channel parent for a PR. The parent is
+// the index surface: one line, edited only when the phase changes.
+func (t *TaskThreadRegistry) SetSurface(prKey string, update SurfaceUpdate) TaskThreadRecord {
+	if t == nil || strings.TrimSpace(prKey) == "" {
+		return TaskThreadRecord{}
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.surfaces == nil {
+		t.surfaces = make(map[string]SurfaceUpdate)
+	}
+	key := strings.TrimSpace(prKey)
+	surface := t.surfaces[key]
+	if id := strings.TrimSpace(update.RootMessageID); id != "" {
+		surface.RootMessageID = id
+	}
+	if number := strings.TrimSpace(update.PRNumber); number != "" {
+		surface.PRNumber = number
+	}
+	if url := strings.TrimSpace(update.PRURL); url != "" {
+		surface.PRURL = url
+	}
+	if branch := strings.TrimSpace(update.Branch); branch != "" {
+		surface.Branch = branch
+	}
+	if threadID := strings.TrimSpace(update.ThreadID); threadID != "" {
+		surface.ThreadID = threadID
+	}
+	surface.Phase = strings.TrimSpace(update.Phase)
+	t.surfaces[key] = surface
+
+	if t.records == nil {
+		t.records = make(map[string]TaskThreadRecord)
+	}
+	taskKey, ok := t.prThreads[key]
+	if !ok {
+		taskKey = TaskThreadKey(update.Repo, update.Branch)
+		if t.prThreads == nil {
+			t.prThreads = make(map[string]string)
+		}
+		t.prThreads[key] = taskKey
+	}
+	prev := t.records[taskKey]
+	if strings.TrimSpace(update.Repo) != "" {
+		prev.Repo = normalizeRepoKey(update.Repo)
+	}
+	if surface.PRNumber != "" {
+		prev.PRNumber = surface.PRNumber
+	}
+	prev.SurfacePhase = surface.Phase
+	if surface.RootMessageID != "" {
+		prev.RootMessageID = surface.RootMessageID
+	}
+	if surface.ThreadID != "" {
+		prev.ThreadID = surface.ThreadID
+	}
+	prev.UpdatedAt = time.Now()
+	t.records[taskKey] = prev
+	return prev
+}
+
+// SurfaceDetail returns the full state of a PR channel parent.
+func (t *TaskThreadRegistry) SurfaceDetail(prKey string) (SurfaceUpdate, bool) {
+	if t == nil || strings.TrimSpace(prKey) == "" {
+		return SurfaceUpdate{}, false
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	surface, ok := t.surfaces[strings.TrimSpace(prKey)]
+	if !ok {
+		return SurfaceUpdate{}, false
+	}
+	return surface, true
+}
+
+// SetSurfaceStatusMessage records the id of the thread state line of a PR.
+func (t *TaskThreadRegistry) SetSurfaceStatusMessage(prKey, msgID string) {
+	if t == nil || strings.TrimSpace(prKey) == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.surfaces == nil {
+		t.surfaces = make(map[string]SurfaceUpdate)
+	}
+	key := strings.TrimSpace(prKey)
+	surface := t.surfaces[key]
+	surface.StatusMessageID = strings.TrimSpace(msgID)
+	t.surfaces[key] = surface
+}
+
+// SetStatusMessageKeyed records the id of the thread state line. PR surfaces
+// are tracked per PR, the legacy task path per repo and branch.
+func (t *TaskThreadRegistry) SetStatusMessageKeyed(repo, branch, prKey, msgID string) {
+	if strings.TrimSpace(prKey) != "" {
+		t.SetSurfaceStatusMessage(prKey, msgID)
+		return
+	}
+	t.SetStatusMessage(repo, branch, msgID)
+}
+
+// StatusMessageIDKeyed returns the id of the thread state line.
+func (t *TaskThreadRegistry) StatusMessageIDKeyed(repo, branch, prKey string) string {
+	if strings.TrimSpace(prKey) != "" {
+		if id := t.SurfaceStatusMessageID(prKey); id != "" {
+			return id
+		}
+	}
+	if rec, ok := t.Lookup(repo, branch); ok {
+		return strings.TrimSpace(rec.StatusMessageID)
+	}
+	return ""
+}
+
+// SurfaceStatusMessageID returns the id of the thread state line of a PR.
+func (t *TaskThreadRegistry) SurfaceStatusMessageID(prKey string) string {
+	if t == nil || strings.TrimSpace(prKey) == "" {
+		return ""
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	surface, ok := t.surfaces[strings.TrimSpace(prKey)]
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(surface.StatusMessageID)
+}
+
+// SurfaceState returns the parent message id, the phase currently shown on
+// the parent and the PR number of a PR surface.
+func (t *TaskThreadRegistry) SurfaceState(prKey string) (string, Phase, string, bool) {
+	if t == nil || strings.TrimSpace(prKey) == "" {
+		return "", "", "", false
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	surface, ok := t.surfaces[strings.TrimSpace(prKey)]
+	if !ok {
+		return "", "", "", false
+	}
+	phase, _ := ParsePhase(surface.Phase)
+	return strings.TrimSpace(surface.RootMessageID), phase, strings.TrimSpace(surface.PRNumber), true
 }
 
 func (t *TaskThreadRegistry) Snapshot() map[string]TaskThreadRecord {
@@ -512,9 +686,12 @@ func WithTaskHeaderWithButtons(card string, envelope WebhookEnvelope, workflow s
 }
 
 type TaskOptions struct {
-	Registry *TaskThreadRegistry
-	Icons    map[string]string
-	Colors   map[string]int
+	Registry     *TaskThreadRegistry
+	Icons        map[string]string
+	Colors       map[string]int
+	PRQueues     store.PRQueueRepo
+	Endpoints    []config.EndpointConfig
+	VerboseSteps bool
 }
 
 func (s *Server) recordTaskThread(ep config.EndpointConfig, envelope WebhookEnvelope, workCtx *WebhookWorkContext, status TaskStatus) {
@@ -686,6 +863,10 @@ func TaskLinkButtons(platform, guildID, prURL, threadID string) []channel.Button
 }
 
 func TaskActionButtons(repo, branch string) []channel.Button {
+	return TaskActionButtonsWithMerge(repo, branch, true)
+}
+
+func TaskActionButtonsWithMerge(repo, branch string, mergeEnabled bool) []channel.Button {
 	repo = strings.TrimSpace(repo)
 	branch = strings.TrimSpace(branch)
 	if repo == "" || branch == "" {
@@ -698,7 +879,7 @@ func TaskActionButtons(repo, branch string) []channel.Button {
 		return nil
 	}
 	return []channel.Button{
-		{Label: "Merge", Value: mergeID, Row: 1},
+		{Label: "Merge", Value: mergeID, Row: 1, Disabled: !mergeEnabled},
 		{Label: "Re-dispatch", Value: redispatchID, Row: 1},
 	}
 }

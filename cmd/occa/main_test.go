@@ -523,8 +523,11 @@ func TestWebhookExecutorWithThread(t *testing.T) {
 
 	var foundToolBubble, foundOutput, foundTerminalSlim, foundStatus, foundBanner bool
 	for _, text := range threadMsgs {
-		if strings.Contains(text, "⚙️") {
+		if strings.Contains(text, "tool calls") {
 			foundToolBubble = true
+		}
+		if strings.Contains(text, "[Step ") {
+			t.Errorf("per-step tool lines must stay off by default: %q", text)
 		}
 		if strings.Contains(text, "Analysis output line.") {
 			foundOutput = true
@@ -536,7 +539,7 @@ func TestWebhookExecutorWithThread(t *testing.T) {
 				foundTerminalSlim = true
 			}
 		}
-		if strings.HasPrefix(text, "📌 STATUS: ") {
+		if strings.HasPrefix(text, "📌 Status — ") {
 			foundStatus = true
 		}
 		if text == "🔍 REVIEW started" {
@@ -579,19 +582,15 @@ func TestWebhookExecutorWithThread(t *testing.T) {
 		t.Error("parent must keep action buttons, got none on parent send/edit")
 	}
 
-	if len(discordCh.editedMessages) == 0 {
-		t.Error("expected Streamer to edit working message with tool rollup")
-	} else {
-		foundRollup := false
-		for _, e := range discordCh.editedMessages {
-			if strings.Contains(e.text, "6 tool calls") {
-				foundRollup = true
-				break
-			}
+	foundRollup := false
+	for _, m := range discordCh.sentMessages {
+		if strings.Contains(m.text, "6 tool calls") {
+			foundRollup = true
+			break
 		}
-		if !foundRollup {
-			t.Errorf("edited messages do not contain tool rollup: %+v", discordCh.editedMessages)
-		}
+	}
+	if !foundRollup {
+		t.Errorf("sent messages do not contain the tool summary: %+v", discordCh.sentMessages)
 	}
 }
 
@@ -734,8 +733,11 @@ func TestWebhookExecutorTelegramProgressCard(t *testing.T) {
 
 	var foundToolNotice, foundOutput bool
 	for _, m := range tgCh.sentMessages {
-		if strings.Contains(m.text, "⚙️") {
+		if strings.Contains(m.text, "tool calls") {
 			foundToolNotice = true
+		}
+		if strings.Contains(m.text, "[Step ") {
+			t.Errorf("per-step tool lines must stay off by default: %q", m.text)
 		}
 		if strings.Contains(m.text, "Analysis report output.") {
 			foundOutput = true
