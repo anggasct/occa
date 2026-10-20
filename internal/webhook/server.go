@@ -112,7 +112,6 @@ type Server struct {
 	sessionAborter        func(ctx context.Context, sessionID, workdir string) error
 	sessionLiveness       SessionLiveness
 	prStateResolver       PRStateResolver
-	prStateTTL            time.Duration
 	activeRunsMu          sync.Mutex
 	activeRuns            map[string]*activeRun
 	prStateMu             sync.Mutex
@@ -1235,6 +1234,9 @@ func (d *dispatcher) handle(item dispatchItem) {
 							"delivery_id", item.deliveryID,
 							"pr_key", item.prKey,
 						)
+						return
+					}
+					if !s.retryStillAllowed(item.ep, item.prKey, receipt.ID) {
 						return
 					}
 					receipt.Attempt++

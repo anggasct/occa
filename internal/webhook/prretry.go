@@ -325,7 +325,11 @@ func (s *Server) planRetry(ep config.EndpointConfig, prKey string, receiptID int
 	if err != nil || row == nil {
 		return false
 	}
-	state, stateErr := s.livePRState(ctx, prKey)
+	wait := backoffs[0]
+	if row.RetryCount < len(backoffs) {
+		wait = backoffs[row.RetryCount]
+	}
+	state, stateErr := s.livePRState(ctx, prKey, wait)
 	switch {
 	case stateErr != nil || state == "":
 		slog.Error("webhook: retry refused, PR state unresolvable",
@@ -355,10 +359,6 @@ func (s *Server) planRetry(ep config.EndpointConfig, prKey string, receiptID int
 		s.escalateBlocked(ep, prKey, row, class, row.RetryCount, max)
 		return false
 	}
-	wait := backoffs[0]
-	if row.RetryCount < len(backoffs) {
-		wait = backoffs[row.RetryCount]
-	}
 	fireAt := time.Now().Add(wait).Unix()
 	if err := s.prQueues.SetRetryState(ctx, prKey, row.RetryCount+1, fireAt); err != nil {
 		slog.Warn("webhook: retry persist failed", "endpoint", ep.Name, "pr_key", prKey, "error", err)
@@ -374,6 +374,22 @@ func (s *Server) planRetry(ep config.EndpointConfig, prKey string, receiptID int
 		"retry", fmt.Sprintf("%d/%d", row.RetryCount+1, max),
 		"backoff", wait.String(),
 	)
+	return true
+}
+
+// retryStillAllowed re-reads the live PR state before a retry executes: the
+// PR may have reached a terminal state while the attempt waited for its
+// backoff. An unresolvable state does not stop an already decided retry.
+func (s *Server) retryStillAllowed(ep config.EndpointConfig, prKey string, receiptID int64) bool {
+	state, err := s.livePRState(context.Background(), prKey, 0)
+	if err != nil {
+		slog.Warn("webhook: retry state unknown at execution", "endpoint", ep.Name, "pr_key", prKey, "error", err)
+		return true
+	}
+	if state == PRStateMerged || state == PRStateClosed {
+		s.refuseRetryForTerminalPR(ep, prKey, receiptID, state)
+		return false
+	}
 	return true
 }
 

@@ -21,8 +21,6 @@ const (
 	PRStateClosed = "closed"
 )
 
-const defaultPRStateCacheTTL = 30 * time.Second
-
 const prStateCacheMaxEntries = 256
 
 type prStateCacheEntry struct {
@@ -30,7 +28,6 @@ type prStateCacheEntry struct {
 	err   error
 	at    time.Time
 }
-
 type activeRun struct {
 	mu         sync.Mutex
 	key        string
@@ -119,20 +116,6 @@ func (s *Server) SetPRStateResolver(fn PRStateResolver) {
 	s.prStateResolver = fn
 }
 
-func (s *Server) SetPRStateCacheTTL(d time.Duration) {
-	s.prStateTTL = d
-}
-
-func (s *Server) prStateCacheTTL() time.Duration {
-	if s.prStateTTL < 0 {
-		return 0
-	}
-	if s.prStateTTL > 0 {
-		return s.prStateTTL
-	}
-	return defaultPRStateCacheTTL
-}
-
 // sessionAlive reports whether the agent behind the run is still working. A
 // live agent that is silent is slow, not stuck: declaring it stuck would kill
 // a healthy run and release its key to a second writer.
@@ -155,7 +138,11 @@ func (s *Server) sessionAlive(prKey, endpoint, deliveryID string) bool {
 	return alive
 }
 
-func (s *Server) livePRState(ctx context.Context, prKey string) (string, error) {
+// livePRState resolves the live state of a PR. The answer is reused only for
+// the horizon the caller passes: a retry decision reuses the reading until
+// the next attempt would fire, so the attempt itself always reads a fresh
+// state while a burst of decisions on one PR costs a single lookup.
+func (s *Server) livePRState(ctx context.Context, prKey string, horizon time.Duration) (string, error) {
 	repo, number, ok := splitPRKey(prKey)
 	if !ok {
 		return "", fmt.Errorf("webhook: live PR state: malformed pr key %q", prKey)
@@ -163,7 +150,7 @@ func (s *Server) livePRState(ctx context.Context, prKey string) (string, error) 
 	s.prStateMu.Lock()
 	entry, cached := s.prStateCache[prKey]
 	s.prStateMu.Unlock()
-	if cached && time.Since(entry.at) < s.prStateCacheTTL() {
+	if cached && horizon > 0 && time.Since(entry.at) < horizon {
 		return entry.state, entry.err
 	}
 	resolver := s.prStateResolver
@@ -176,19 +163,25 @@ func (s *Server) livePRState(ctx context.Context, prKey string) (string, error) 
 		s.prStateCache = make(map[string]prStateCacheEntry)
 	}
 	s.prStateCache[prKey] = prStateCacheEntry{state: state, err: err, at: time.Now()}
-	s.prunePRStateCache(time.Now())
+	s.prunePRStateCache()
 	s.prStateMu.Unlock()
 	return state, err
 }
 
-func (s *Server) prunePRStateCache(now time.Time) {
+func (s *Server) prunePRStateCache() {
 	if len(s.prStateCache) <= prStateCacheMaxEntries {
 		return
 	}
+	oldestKey := ""
+	var oldest time.Time
 	for key, entry := range s.prStateCache {
-		if now.Sub(entry.at) >= s.prStateCacheTTL() {
-			delete(s.prStateCache, key)
+		if oldestKey == "" || entry.at.Before(oldest) {
+			oldestKey = key
+			oldest = entry.at
 		}
+	}
+	if oldestKey != "" {
+		delete(s.prStateCache, oldestKey)
 	}
 }
 

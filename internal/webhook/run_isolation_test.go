@@ -450,12 +450,20 @@ func TestLivePRStateLookupOncePerPRKey(t *testing.T) {
 	if _, err := st.PRQueueRepo().EnsurePR(ctx, "acme/widget#7", "", ""); err != nil {
 		t.Fatalf("ensure pr: %v", err)
 	}
+	srv.retryBackoffs = map[failureClass][]time.Duration{
+		failureBuild: {50 * time.Millisecond},
+	}
 	ep := prTestEndpoint("fix", "/fix", config.AutomationFull)
 	for i := 0; i < 3; i++ {
 		srv.planRetry(ep, "acme/widget#7", 0, errors.New("boom"), &WebhookWorkContext{}, false, false)
 	}
 	if got := atomic.LoadInt64(&lookups); got != 1 {
-		t.Fatalf("live PR state lookups = %d, want 1 per pr_key", got)
+		t.Fatalf("live PR state lookups = %d, want 1 for a burst of decisions on one PR", got)
+	}
+	time.Sleep(80 * time.Millisecond)
+	srv.planRetry(ep, "acme/widget#7", 0, errors.New("boom"), &WebhookWorkContext{}, false, false)
+	if got := atomic.LoadInt64(&lookups); got != 2 {
+		t.Fatalf("live PR state lookups = %d, want a fresh reading once the next attempt is due", got)
 	}
 }
 
