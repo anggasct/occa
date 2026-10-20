@@ -98,6 +98,9 @@ func TestWatchdogAbortsSessionBeforeKeyRelease(t *testing.T) {
 	})
 	srv.SetDispatcherStuckAfter(time.Minute)
 	srv.SetDispatcherWatchdogInterval(time.Hour)
+	srv.SetSessionLiveness(func(ctx context.Context, sessionID, workdir string) (bool, error) {
+		return false, nil
+	})
 
 	ep := config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Admit: defaultCatchAllAdmit()}
 	item := dispatchItem{ep: ep, body: []byte(stuckPayload()), deliveryID: "delivery-stuck-abort", eventType: "pull_request", payloadHash: "hash-abort", prKey: "acme/widget#7"}
@@ -110,7 +113,7 @@ func TestWatchdogAbortsSessionBeforeKeyRelease(t *testing.T) {
 	srv.dispatchMu.Lock()
 	srv.dispatchers[d.key] = d
 	srv.dispatchMu.Unlock()
-	run := srv.beginActiveRun(item.prKey, ep.Name, item.deliveryID, "/tmp/widget/worktree", true)
+	run := srv.beginActiveRun(item.prKey, ep.Name, item.deliveryID, "/tmp/widget/worktree")
 	run.setSession("ses-stuck-1")
 	srv.TaskRegistry().Upsert("anggasct/occa", "fix/watchdog", "root-1", "thread-1", TaskDispatched)
 
@@ -175,6 +178,9 @@ func TestWatchdogReleasesKeyWhenAbortFails(t *testing.T) {
 	})
 	srv.SetDispatcherStuckAfter(time.Minute)
 	srv.SetDispatcherWatchdogInterval(time.Hour)
+	srv.SetSessionLiveness(func(ctx context.Context, sessionID, workdir string) (bool, error) {
+		return false, nil
+	})
 
 	ep := config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Admit: defaultCatchAllAdmit()}
 	item := dispatchItem{ep: ep, body: []byte(stuckPayload()), deliveryID: "delivery-abort-fail", eventType: "pull_request", payloadHash: "hash-abort-fail", prKey: "acme/widget#7"}
@@ -187,7 +193,7 @@ func TestWatchdogReleasesKeyWhenAbortFails(t *testing.T) {
 	srv.dispatchMu.Lock()
 	srv.dispatchers[d.key] = d
 	srv.dispatchMu.Unlock()
-	run := srv.beginActiveRun(item.prKey, ep.Name, item.deliveryID, "/tmp/widget/worktree", true)
+	run := srv.beginActiveRun(item.prKey, ep.Name, item.deliveryID, "/tmp/widget/worktree")
 	run.setSession("ses-stuck-2")
 
 	created, err := st.WebhookDeliveryRepo().Create(context.Background(), store.WebhookDelivery{
@@ -234,8 +240,11 @@ func TestWatchdogReleasesKeyWhenAbortFails(t *testing.T) {
 	if err != nil || failed == nil || failed.Status != store.WebhookStatusFailed {
 		t.Fatalf("stuck delivery receipt = %+v %v; want failed", failed, err)
 	}
-	if !strings.Contains(failed.ErrorSummary, "stuck") || !strings.Contains(failed.ErrorSummary, "session aborted") {
+	if !strings.Contains(failed.ErrorSummary, "stuck") || !strings.Contains(failed.ErrorSummary, "session abort failed") {
 		t.Fatalf("stuck delivery summary = %q", failed.ErrorSummary)
+	}
+	if strings.Contains(failed.ErrorSummary, "session aborted") {
+		t.Fatalf("a failed abort must not be reported as an aborted session: %q", failed.ErrorSummary)
 	}
 	if !strings.Contains(card, "could not abort the agent session") {
 		t.Fatalf("stuck card must report the failed abort: %q", card)
@@ -271,7 +280,7 @@ func TestWatchdogKeepsLiveRunAlive(t *testing.T) {
 	d.lastActivity = time.Now().Add(-10 * time.Minute)
 	d.activeStartedAt = time.Now().Add(-10 * time.Minute)
 	d.mu.Unlock()
-	run := srv.beginActiveRun(item.prKey, ep.Name, item.deliveryID, "/tmp/widget/worktree", true)
+	run := srv.beginActiveRun(item.prKey, ep.Name, item.deliveryID, "/tmp/widget/worktree")
 	run.setSession("ses-live-1")
 	srv.SetSessionLiveness(func(ctx context.Context, sessionID, workdir string) (bool, error) {
 		return true, nil
@@ -306,6 +315,9 @@ func TestWatchdogAbortedDeliveryIsFailedAndNotRerun(t *testing.T) {
 	srv, st, _, url := newIsolationServer(t, exec)
 	srv.SetDispatcherStuckAfter(50 * time.Millisecond)
 	srv.SetDispatcherWatchdogInterval(time.Hour)
+	srv.SetSessionLiveness(func(ctx context.Context, sessionID, workdir string) (bool, error) {
+		return false, nil
+	})
 	srv.SetSessionAborter(func(ctx context.Context, sessionID, workdir string) error {
 		close(release)
 		return nil
@@ -437,7 +449,7 @@ func TestRetryFailsClosedWhenLivePRStateUnknown(t *testing.T) {
 	}
 }
 
-func TestLivePRStateLookupOncePerPRKey(t *testing.T) {
+func TestLivePRStateResolvesPerDecision(t *testing.T) {
 	var lookups int64
 	srv, st, _, _ := newIsolationServer(t, func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		return nil
@@ -457,20 +469,58 @@ func TestLivePRStateLookupOncePerPRKey(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		srv.planRetry(ep, "acme/widget#7", 0, errors.New("boom"), &WebhookWorkContext{}, false, false)
 	}
-	if got := atomic.LoadInt64(&lookups); got != 1 {
-		t.Fatalf("live PR state lookups = %d, want 1 for a burst of decisions on one PR", got)
+	if got := atomic.LoadInt64(&lookups); got != 3 {
+		t.Fatalf("live PR state lookups = %d, want one per retry decision", got)
 	}
-	time.Sleep(80 * time.Millisecond)
+}
+
+func TestLivePRStateDecisionDoesNotReuseEarlierReading(t *testing.T) {
+	var lookups int64
+	var state atomic.Value
+	state.Store(PRStateOpen)
+	srv, st, _, _ := newIsolationServer(t, func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+		return nil
+	})
+	srv.SetPRStateResolver(func(ctx context.Context, repo, number string) (string, error) {
+		atomic.AddInt64(&lookups, 1)
+		return state.Load().(string), nil
+	})
+	ctx := context.Background()
+	if _, err := st.PRQueueRepo().EnsurePR(ctx, "acme/widget#7", "", ""); err != nil {
+		t.Fatalf("ensure pr: %v", err)
+	}
+	srv.retryBackoffs = map[failureClass][]time.Duration{
+		failureBuild: {50 * time.Millisecond},
+	}
+	ep := prTestEndpoint("fix", "/fix", config.AutomationFull)
 	srv.planRetry(ep, "acme/widget#7", 0, errors.New("boom"), &WebhookWorkContext{}, false, false)
+	if got := atomic.LoadInt64(&lookups); got != 1 {
+		t.Fatalf("live PR state lookups = %d, want 1 for the first decision", got)
+	}
+	state.Store(PRStateMerged)
+	row, err := st.PRQueueRepo().Get(ctx, "acme/widget#7")
+	if err != nil || row == nil {
+		t.Fatalf("pr row = %+v %v", row, err)
+	}
+	if srv.planRetry(ep, "acme/widget#7", 0, errors.New("boom"), &WebhookWorkContext{}, false, false) {
+		t.Fatal("a retry on a merged PR must be refused")
+	}
 	if got := atomic.LoadInt64(&lookups); got != 2 {
-		t.Fatalf("live PR state lookups = %d, want a fresh reading once the next attempt is due", got)
+		t.Fatalf("live PR state lookups = %d, want the next decision to resolve again", got)
 	}
 }
 
 func TestMergedDeliveryRunsWithoutAgentTurn(t *testing.T) {
 	logs := captureServerLogs(t)
 	turn := make(chan struct{})
+	var mu sync.Mutex
+	var turnPRKey, turnThreadID, turnRootID string
 	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+		mu.Lock()
+		turnPRKey = workCtx.PRKey
+		turnThreadID = workCtx.ThreadID
+		turnRootID = workCtx.RootMessageID
+		mu.Unlock()
 		close(turn)
 		return nil
 	}
@@ -484,6 +534,12 @@ func TestMergedDeliveryRunsWithoutAgentTurn(t *testing.T) {
 	case <-turn:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the post-merge work never ran")
+	}
+	mu.Lock()
+	prKey, threadID, rootID := turnPRKey, turnThreadID, turnRootID
+	mu.Unlock()
+	if prKey != "" || threadID != "" || rootID != "" {
+		t.Fatalf("the post-merge work must not run as a queue-lane turn: pr_key=%q thread=%q root=%q", prKey, threadID, rootID)
 	}
 	rec, ok := srv.tasks.Lookup("acme/widget", "feat/x")
 	if !ok || !isTaskTerminal(rec.Status) {
@@ -653,6 +709,9 @@ func TestPR199IncidentShape(t *testing.T) {
 	srv, st, rec, url := newIsolationServer(t, exec)
 	srv.SetDispatcherStuckAfter(80 * time.Millisecond)
 	srv.SetDispatcherWatchdogInterval(time.Hour)
+	srv.SetSessionLiveness(func(ctx context.Context, sessionID, workdir string) (bool, error) {
+		return false, nil
+	})
 
 	var prState atomic.Value
 	prState.Store(PRStateOpen)
@@ -734,4 +793,223 @@ func waitForSurfacePhase(t *testing.T, srv *Server, prKey string, want Phase) {
 	}
 	_, phase, _, _ := srv.prSurfaceState(prKey)
 	t.Fatalf("surface phase = %q, want %q", phase, want)
+}
+
+func waitForLog(t *testing.T, logs *logCapture, message string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(logs.all(message)) > 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("log line %q never appeared", message)
+}
+
+func TestRetryExecutionRefusedWhenPRMergedAfterScheduling(t *testing.T) {
+	logs := captureServerLogs(t)
+	var calls int64
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+		atomic.AddInt64(&calls, 1)
+		return errors.New("agent exploded")
+	}
+	srv, st, _, url := newIsolationServer(t, exec)
+	var state atomic.Value
+	state.Store(PRStateOpen)
+	srv.SetPRStateResolver(func(ctx context.Context, repo, number string) (string, error) {
+		return state.Load().(string), nil
+	})
+	srv.retryBackoffs = map[failureClass][]time.Duration{
+		failureBuild: {2 * time.Second},
+	}
+
+	if resp := post(t, url+"/fix?secret=s3cret", "del-retry-merged", "pull_request_review", prReviewBody(7, "feat/x", "owner", "changes_requested", "c0ffeea")); resp.StatusCode != http.StatusOK {
+		t.Fatalf("post: status %d", resp.StatusCode)
+	}
+	waitForLog(t, logs, "webhook: retry scheduled")
+	state.Store(PRStateMerged)
+
+	waitForDeliveryStatus(t, st, "github-widget-fix", "del-retry-merged", store.WebhookStatusSkipped)
+	receipt, err := st.WebhookDeliveryRepo().Get(context.Background(), "github-widget-fix", "del-retry-merged")
+	if err != nil || receipt == nil {
+		t.Fatalf("get receipt: %v", err)
+	}
+	if !strings.Contains(receipt.ErrorSummary, "PR already merged") {
+		t.Fatalf("refused retry summary = %q, want PR already merged", receipt.ErrorSummary)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if got := atomic.LoadInt64(&calls); got != 1 {
+		t.Fatalf("a merged PR must not start a second agent turn, executor calls = %d", got)
+	}
+}
+
+func TestWatchdogKeepsMutableWorkspaceRunAlive(t *testing.T) {
+	logs := captureServerLogs(t)
+	srv, _ := newWatchdogServer(t, func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+		return nil
+	})
+	srv.SetDispatcherStuckAfter(time.Minute)
+	srv.SetDispatcherWatchdogInterval(time.Hour)
+
+	ep := config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Admit: defaultCatchAllAdmit()}
+	item := dispatchItem{ep: ep, body: []byte(stuckPayload()), deliveryID: "delivery-mutable", eventType: "pull_request", payloadHash: "hash-mutable", prKey: "acme/widget#7"}
+	d := &dispatcher{server: srv, key: "pr:acme/widget#7", lanes: makePRLanes(8)}
+	d.setActive(item)
+	srv.dispatchMu.Lock()
+	srv.dispatchers[d.key] = d
+	srv.dispatchMu.Unlock()
+	d.mu.Lock()
+	d.lastActivity = time.Now().Add(-10 * time.Minute)
+	d.activeStartedAt = time.Now().Add(-10 * time.Minute)
+	d.mu.Unlock()
+	run := srv.beginActiveRun(item.prKey, ep.Name, item.deliveryID, "/tmp/widget/shared")
+	run.setSession("ses-mutable-1")
+
+	aborted := false
+	srv.SetSessionAborter(func(ctx context.Context, sessionID, workdir string) error {
+		aborted = true
+		return nil
+	})
+	srv.SetSessionLiveness(func(ctx context.Context, sessionID, workdir string) (bool, error) {
+		return true, nil
+	})
+
+	if n := srv.sweepStuckDispatchers(time.Now()); n != 0 {
+		t.Fatalf("a live agent on a shared workspace must not be declared stuck, sweep = %d", n)
+	}
+	if aborted {
+		t.Fatal("a live agent must not be aborted")
+	}
+	if len(logs.all("webhook: dispatcher stuck, key released")) != 0 {
+		t.Fatal("a live run must not log a stuck dispatcher")
+	}
+}
+
+func TestWatchdogDoesNotAbortRunWithUnknownLiveness(t *testing.T) {
+	logs := captureServerLogs(t)
+	srv, st := newWatchdogServer(t, func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+		return nil
+	})
+	srv.SetDispatcherStuckAfter(time.Minute)
+	srv.SetDispatcherWatchdogInterval(time.Hour)
+
+	ep := config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Admit: defaultCatchAllAdmit()}
+	item := dispatchItem{ep: ep, body: []byte(stuckPayload()), deliveryID: "delivery-unknown-liveness", eventType: "pull_request", payloadHash: "hash-unknown", prKey: "acme/widget#7"}
+	d := &dispatcher{server: srv, key: "pr:acme/widget#7", lanes: makePRLanes(8)}
+	d.setActive(item)
+	srv.dispatchMu.Lock()
+	srv.dispatchers[d.key] = d
+	srv.dispatchMu.Unlock()
+	d.mu.Lock()
+	d.lastActivity = time.Now().Add(-10 * time.Minute)
+	d.activeStartedAt = time.Now().Add(-10 * time.Minute)
+	d.mu.Unlock()
+	run := srv.beginActiveRun(item.prKey, ep.Name, item.deliveryID, "")
+	run.setSession("ses-unknown-1")
+
+	created, err := st.WebhookDeliveryRepo().Create(context.Background(), store.WebhookDelivery{
+		Endpoint: ep.Name, DeliveryID: item.deliveryID, EventType: item.eventType, PayloadHash: item.payloadHash,
+	})
+	if err != nil || !created {
+		t.Fatalf("create receipt: %v", err)
+	}
+	receipt, err := st.WebhookDeliveryRepo().Get(context.Background(), ep.Name, item.deliveryID)
+	if err != nil || receipt == nil {
+		t.Fatalf("get receipt: %v", err)
+	}
+	if ok, tErr := st.WebhookDeliveryRepo().Transition(context.Background(), receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived}, store.WebhookStatusProcessing, ""); tErr != nil || !ok {
+		t.Fatalf("claim receipt: %v %v", ok, tErr)
+	}
+
+	aborted := false
+	srv.SetSessionAborter(func(ctx context.Context, sessionID, workdir string) error {
+		aborted = true
+		return nil
+	})
+
+	if n := srv.sweepStuckDispatchers(time.Now()); n != 1 {
+		t.Fatalf("sweep handled %d dispatchers, want 1", n)
+	}
+	if aborted {
+		t.Fatal("a run whose liveness could not be established must not be aborted")
+	}
+	after, err := st.WebhookDeliveryRepo().Get(context.Background(), ep.Name, item.deliveryID)
+	if err != nil || after == nil {
+		t.Fatalf("get receipt: %v", err)
+	}
+	if after.Status == store.WebhookStatusFailed {
+		t.Fatalf("a run with unknown liveness must not get a terminal receipt: %+v", after)
+	}
+	if strings.Contains(after.ErrorSummary, "abort") {
+		t.Fatalf("a run with unknown liveness must not claim an abort: %q", after.ErrorSummary)
+	}
+	records := logs.all("webhook: dispatcher stuck, session not aborted, still running")
+	if len(records) != 1 {
+		t.Fatalf("session outcome log lines = %d, want 1", len(records))
+	}
+}
+
+func TestWatchdogReceiptDoesNotClaimAbortWhenAbortImpossible(t *testing.T) {
+	logs := captureServerLogs(t)
+	srv, st := newWatchdogServer(t, func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+		return nil
+	})
+	srv.SetDispatcherStuckAfter(time.Minute)
+	srv.SetDispatcherWatchdogInterval(time.Hour)
+	srv.SetSessionLiveness(func(ctx context.Context, sessionID, workdir string) (bool, error) {
+		return false, nil
+	})
+
+	ep := config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Admit: defaultCatchAllAdmit()}
+	item := dispatchItem{ep: ep, body: []byte(stuckPayload()), deliveryID: "delivery-no-abort", eventType: "pull_request", payloadHash: "hash-no-abort", prKey: "acme/widget#7"}
+	d := &dispatcher{server: srv, key: "pr:acme/widget#7", lanes: makePRLanes(8)}
+	d.setActive(item)
+	srv.dispatchMu.Lock()
+	srv.dispatchers[d.key] = d
+	srv.dispatchMu.Unlock()
+	d.mu.Lock()
+	d.lastActivity = time.Now().Add(-10 * time.Minute)
+	d.activeStartedAt = time.Now().Add(-10 * time.Minute)
+	d.mu.Unlock()
+	run := srv.beginActiveRun(item.prKey, ep.Name, item.deliveryID, "/tmp/widget/worktree")
+	run.setSession("ses-no-abort-1")
+
+	created, err := st.WebhookDeliveryRepo().Create(context.Background(), store.WebhookDelivery{
+		Endpoint: ep.Name, DeliveryID: item.deliveryID, EventType: item.eventType, PayloadHash: item.payloadHash,
+	})
+	if err != nil || !created {
+		t.Fatalf("create receipt: %v", err)
+	}
+	receipt, err := st.WebhookDeliveryRepo().Get(context.Background(), ep.Name, item.deliveryID)
+	if err != nil || receipt == nil {
+		t.Fatalf("get receipt: %v", err)
+	}
+	if ok, tErr := st.WebhookDeliveryRepo().Transition(context.Background(), receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived}, store.WebhookStatusProcessing, ""); tErr != nil || !ok {
+		t.Fatalf("claim receipt: %v %v", ok, tErr)
+	}
+
+	if n := srv.sweepStuckDispatchers(time.Now()); n != 1 {
+		t.Fatalf("sweep handled %d dispatchers, want 1", n)
+	}
+	failed, err := st.WebhookDeliveryRepo().Get(context.Background(), ep.Name, item.deliveryID)
+	if err != nil || failed == nil || failed.Status != store.WebhookStatusFailed {
+		t.Fatalf("stuck delivery receipt = %+v %v; want failed", failed, err)
+	}
+	if strings.Contains(failed.ErrorSummary, "session aborted") {
+		t.Fatalf("a delivery must not claim an aborted session when no abort ran: %q", failed.ErrorSummary)
+	}
+	if !strings.Contains(failed.ErrorSummary, "stuck") {
+		t.Fatalf("stuck delivery summary = %q", failed.ErrorSummary)
+	}
+	records := logs.all("webhook: dispatcher stuck, session not aborted, still running")
+	if len(records) != 1 {
+		t.Fatalf("session outcome log lines = %d, want 1", len(records))
+	}
+	if got := attrValue(records[0], "session_still_running"); got != "true" {
+		t.Fatalf("session_still_running = %q, want true", got)
+	}
+	if len(logs.all("webhook: dispatcher stuck, session aborted")) != 0 {
+		t.Fatal("the log must not claim an aborted session when no abort ran")
+	}
 }

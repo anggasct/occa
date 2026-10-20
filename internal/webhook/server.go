@@ -114,8 +114,6 @@ type Server struct {
 	prStateResolver       PRStateResolver
 	activeRunsMu          sync.Mutex
 	activeRuns            map[string]*activeRun
-	prStateMu             sync.Mutex
-	prStateCache          map[string]prStateCacheEntry
 	operatorAuthorizer    func(platform, userID string) bool
 	promptDir             string
 	retryBackoffs         map[failureClass][]time.Duration
@@ -206,7 +204,6 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 		deliveries:            deliveries,
 		dispatchers:           make(map[string]*dispatcher),
 		activeRuns:            make(map[string]*activeRun),
-		prStateCache:          make(map[string]prStateCacheEntry),
 		shutdownCtx:           shutdownCtx,
 		shutdownCancel:        shutdownCancel,
 		maxBodySize:           int64(rt.MaxBodySize),
@@ -987,13 +984,13 @@ func (d *dispatcher) markStuckReported() {
 	d.mu.Unlock()
 }
 
-func (d *dispatcher) markWatchdogAborted() {
+func (d *dispatcher) markWatchdogTookOver() {
 	d.mu.Lock()
 	d.watchdogAborted = true
 	d.mu.Unlock()
 }
 
-func (d *dispatcher) wasWatchdogAborted() bool {
+func (d *dispatcher) watchdogTookOver() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.watchdogAborted
@@ -1228,8 +1225,8 @@ func (d *dispatcher) handle(item dispatchItem) {
 			if errors.Is(execErr, errRetryScheduled) && item.prKey != "" {
 				switch d.sleepForRetry(item.prKey, s.shutdownCtx) {
 				case wakeFire:
-					if d.wasWatchdogAborted() {
-						slog.Error("webhook: retry dropped, run aborted by watchdog",
+					if d.watchdogTookOver() {
+						slog.Error("webhook: retry dropped, run taken over by watchdog",
 							"endpoint", item.ep.Name,
 							"delivery_id", item.deliveryID,
 							"pr_key", item.prKey,
@@ -1727,12 +1724,10 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		workCtx.PRKey = prKey
 	}
 	workdir := ""
-	privateWorkspace := false
 	if lease != nil {
 		workdir = lease.Path
-		privateWorkspace = lease.Mode == config.WorkspaceModeIsolated
 	}
-	run := s.beginActiveRun(workCtx.PRKey, ep.Name, deliveryID, workdir, privateWorkspace)
+	run := s.beginActiveRun(workCtx.PRKey, ep.Name, deliveryID, workdir)
 	resolvedPR := false
 	if hasPRKey {
 		if rec, ok := s.tasks.ResolvePRThread(prKey); ok {
@@ -1933,13 +1928,15 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 	err = s.executor(ctx, ep.Platform, ep.ChannelID, wrapped, workCtx)
 	s.prMirrorSync(workCtx)
 
-	if aborted, abortOK := run.abortedState(); aborted {
-		slog.Error("webhook: delivery aborted by watchdog",
-			"endpoint", ep.Name,
-			"delivery_id", deliveryID,
-			"session_id", workCtx.SessionID,
-			"session_abort_ok", abortOK,
-		)
+	if run.watchdogTookOver() {
+		if aborted, abortOK := run.abortedState(); aborted {
+			slog.Error("webhook: delivery aborted by watchdog",
+				"endpoint", ep.Name,
+				"delivery_id", deliveryID,
+				"session_id", workCtx.SessionID,
+				"session_abort_ok", abortOK,
+			)
+		}
 		if itemPRKey := strings.TrimSpace(workCtx.PRKey); itemPRKey != "" && err != nil && !errors.Is(err, relay.ErrWebhookResponseIncomplete) {
 			s.planRetry(ep, itemPRKey, id, err, workCtx, false, true)
 		}

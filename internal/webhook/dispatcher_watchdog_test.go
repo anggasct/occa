@@ -243,7 +243,7 @@ func TestDispatcherQueueOnlyAlarmPreservesFIFO(t *testing.T) {
 	if snap.queueLen != 3 || snap.hasActive {
 		t.Fatalf("unexpected snapshot for queue-only alarm: %+v", snap)
 	}
-	srv.alarmStuckDispatcher(d, snap, time.Now(), time.Minute)
+	srv.alarmStuckDispatcher(d, snap, time.Now(), time.Minute, livenessUnknown)
 	var got []string
 	for i := 0; i < 3; i++ {
 		select {
@@ -263,7 +263,7 @@ func TestDispatcherQueueOnlyAlarmPreservesFIFO(t *testing.T) {
 	srv.dispatchMu.Lock()
 	srv.dispatchers[d.key] = d
 	srv.dispatchMu.Unlock()
-	srv.alarmStuckDispatcher(d, d.snapshot(), time.Now(), time.Minute)
+	srv.alarmStuckDispatcher(d, d.snapshot(), time.Now(), time.Minute, livenessUnknown)
 	srv.releaseStuckDispatcher(d)
 	deadline := time.Now().Add(5 * time.Second)
 	for {

@@ -131,7 +131,7 @@ func (s *Server) abortPRSession(ctx context.Context, prKey, repo string) (string
 	sessionID := ""
 	workdir := ""
 	if run := s.activeRunFor(prKey, "", ""); run != nil {
-		sessionID, workdir, _ = run.identity()
+		sessionID, workdir = run.identity()
 	}
 	if sessionID == "" && s.prQueues != nil {
 		if row, err := s.prQueues.Get(ctx, prKey); err == nil && row != nil {

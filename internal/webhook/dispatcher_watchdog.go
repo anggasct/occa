@@ -56,8 +56,9 @@ func (s *Server) watchdogLoop() {
 func (s *Server) sweepStuckDispatchers(now time.Time) int {
 	after := s.stuckAfter()
 	type candidate struct {
-		d    *dispatcher
-		snap dispatcherSnapshot
+		d        *dispatcher
+		snap     dispatcherSnapshot
+		liveness sessionLivenessState
 	}
 	var stuck []candidate
 	s.dispatchMu.Lock()
@@ -80,20 +81,21 @@ func (s *Server) sweepStuckDispatchers(now time.Time) int {
 			if now.Sub(last) < after {
 				continue
 			}
-			if s.sessionAlive(snap.active.prKey, snap.active.ep.Name, snap.active.deliveryID) {
+			liveness := s.probeSessionLiveness(snap.active.prKey, snap.active.ep.Name, snap.active.deliveryID)
+			if liveness == livenessAlive {
 				continue
 			}
-			stuck = append(stuck, candidate{d, snap})
+			stuck = append(stuck, candidate{d, snap, liveness})
 			continue
 		}
 		if snap.queueLen > 0 && !snap.lastActive.IsZero() && now.Sub(snap.lastActive) >= after {
-			stuck = append(stuck, candidate{d, snap})
+			stuck = append(stuck, candidate{d, snap, livenessUnknown})
 		}
 	}
 	s.dispatchMu.Unlock()
 	for _, c := range stuck {
 		c.d.markStuckReported()
-		s.alarmStuckDispatcher(c.d, c.snap, now, after)
+		s.alarmStuckDispatcher(c.d, c.snap, now, after, c.liveness)
 		s.releaseStuckDispatcher(c.d)
 	}
 	return len(stuck)
@@ -109,7 +111,7 @@ func stuckRepoBranch(s *Server, item dispatchItem) (string, string) {
 	return normalizeRepoKey(key.Repository), normalizeBranchKey(key.Branch)
 }
 
-func (s *Server) alarmStuckDispatcher(d *dispatcher, snap dispatcherSnapshot, now time.Time, after time.Duration) {
+func (s *Server) alarmStuckDispatcher(d *dispatcher, snap dispatcherSnapshot, now time.Time, after time.Duration, liveness sessionLivenessState) {
 	item := snap.active
 	if !snap.hasActive && snap.queueLen > 0 {
 		s.dispatchMu.Lock()
@@ -133,9 +135,10 @@ func (s *Server) alarmStuckDispatcher(d *dispatcher, snap dispatcherSnapshot, no
 		stuckSince = snap.startedAt
 	}
 	elapsed := now.Sub(stuckSince).Round(time.Second)
-	sessionID, abortOK, aborted := "", false, false
-	if snap.hasActive {
-		sessionID, abortOK, aborted = s.abortStuckSession(item, repo)
+	sessionID, workdir := s.stuckSessionIdentity(item, repo)
+	abortOK, aborted := false, false
+	if snap.hasActive && liveness == livenessDead {
+		abortOK, aborted = s.abortStuckSession(item, sessionID, workdir)
 	}
 	abortClause := "watchdog released the key so the next item proceeds."
 	switch {
@@ -143,7 +146,10 @@ func (s *Server) alarmStuckDispatcher(d *dispatcher, snap dispatcherSnapshot, no
 		abortClause = "watchdog aborted the agent session and released the key so the next item proceeds."
 	case aborted:
 		abortClause = "watchdog could not abort the agent session and released the key so the next item proceeds."
+	case sessionID != "":
+		abortClause = "watchdog released the key without aborting the agent session, which is still running."
 	}
+	summary, logMessage := stuckSessionOutcome(abortOK, aborted)
 	card := fmt.Sprintf("🚨 STUCK dispatcher %s#%s · delivery %s · stuck since %s (%s, threshold %s) · queue %d/%d — %s Check delivery log and sessions.",
 		repo, branch, strings.TrimSpace(item.deliveryID), stuckSince.UTC().Format(time.RFC3339), elapsed, after, snap.queueLen, snap.queueCap, abortClause)
 	slog.Error("webhook: dispatcher stuck, key released",
@@ -157,10 +163,19 @@ func (s *Server) alarmStuckDispatcher(d *dispatcher, snap dispatcherSnapshot, no
 		"session_id", sessionID,
 		"session_aborted", aborted,
 		"session_abort_ok", abortOK,
+		"session_still_running", !aborted || !abortOK,
 	)
-	if aborted {
-		d.markWatchdogAborted()
-		s.failStuckDelivery(item, sessionID, abortOK)
+	slog.Error(logMessage,
+		"delivery_id", strings.TrimSpace(item.deliveryID),
+		"session_id", sessionID,
+		"session_aborted", aborted,
+		"session_abort_ok", abortOK,
+		"session_still_running", !aborted || !abortOK,
+	)
+	if liveness == livenessDead {
+		d.markWatchdogTookOver()
+		s.markRunTakenOver(item)
+		s.failStuckDelivery(item, sessionID, summary)
 	}
 	if repo == "" || branch == "" || branch == "-" {
 		return
@@ -189,33 +204,47 @@ func (s *Server) alarmStuckDispatcher(d *dispatcher, snap dispatcherSnapshot, no
 // abortStuckSession kills the agent session of a run the watchdog declared
 // stuck. Releasing the key without killing the run leaves two writers on the
 // same PR surface, so the abort happens first and the key is released even
-// when the abort fails.
-func (s *Server) abortStuckSession(item dispatchItem, repo string) (string, bool, bool) {
-	sessionID, workdir := s.stuckSessionIdentity(item, repo)
+// when the abort fails. A session that cannot be reached is left running and
+// reported as such: an abort that never ran must not be reported as one.
+func (s *Server) abortStuckSession(item dispatchItem, sessionID, workdir string) (bool, bool) {
 	if sessionID == "" {
-		return "", false, false
+		return false, false
 	}
-	abortOK := false
-	if s.sessionAborter != nil && workdir != "" {
-		if err := s.sessionAborter(context.Background(), sessionID, workdir); err != nil {
-			slog.Error("webhook: dispatcher stuck, session abort failed",
-				"delivery_id", strings.TrimSpace(item.deliveryID),
-				"session_id", sessionID,
-				"error", err,
-			)
-		} else {
-			abortOK = true
-		}
+	if s.sessionAborter == nil || workdir == "" {
+		slog.Warn("webhook: dispatcher stuck, session abort not possible",
+			"delivery_id", strings.TrimSpace(item.deliveryID),
+			"session_id", sessionID,
+		)
+		return false, false
 	}
+	if err := s.sessionAborter(context.Background(), sessionID, workdir); err != nil {
+		slog.Error("webhook: dispatcher stuck, session abort failed",
+			"delivery_id", strings.TrimSpace(item.deliveryID),
+			"session_id", sessionID,
+			"error", err,
+		)
+		s.markRunAborted(item, false)
+		return false, true
+	}
+	s.markRunAborted(item, true)
+	return true, true
+}
+
+func (s *Server) markRunAborted(item dispatchItem, ok bool) {
 	if run := s.activeRunFor(item.prKey, item.ep.Name, item.deliveryID); run != nil {
-		run.markAborted(abortOK)
+		run.markAborted(ok)
 	}
-	return sessionID, abortOK, true
+}
+
+func (s *Server) markRunTakenOver(item dispatchItem) {
+	if run := s.activeRunFor(item.prKey, item.ep.Name, item.deliveryID); run != nil {
+		run.markTakenOver()
+	}
 }
 
 func (s *Server) stuckSessionIdentity(item dispatchItem, repo string) (string, string) {
 	if run := s.activeRunFor(item.prKey, item.ep.Name, item.deliveryID); run != nil {
-		sessionID, workdir, _ := run.identity()
+		sessionID, workdir := run.identity()
 		if sessionID != "" {
 			return sessionID, workdir
 		}
@@ -234,7 +263,10 @@ func (s *Server) stuckSessionIdentity(item dispatchItem, repo string) (string, s
 	return sessionID, s.checkoutForRepo(repo)
 }
 
-func (s *Server) failStuckDelivery(item dispatchItem, sessionID string, abortOK bool) {
+// failStuckDelivery records the stuck delivery with the summary of what
+// happened to the agent session: only an abort that ran may be reported as an
+// aborted session.
+func (s *Server) failStuckDelivery(item dispatchItem, sessionID, summary string) {
 	deliveryID := strings.TrimSpace(item.deliveryID)
 	if deliveryID == "" {
 		return
@@ -243,7 +275,6 @@ func (s *Server) failStuckDelivery(item dispatchItem, sessionID string, abortOK 
 	if err != nil || receipt == nil {
 		return
 	}
-	summary := "stuck — session aborted"
 	ok, tErr := s.deliveries.Transition(context.Background(), receipt.ID,
 		[]store.WebhookStatus{store.WebhookStatusReceived, store.WebhookStatusAccepted, store.WebhookStatusProcessing},
 		store.WebhookStatusFailed, summary)
@@ -253,13 +284,20 @@ func (s *Server) failStuckDelivery(item dispatchItem, sessionID string, abortOK 
 	}
 	if !ok {
 		slog.Warn("webhook: stuck delivery transition lost race", "delivery_id", deliveryID, "session_id", sessionID)
-		return
 	}
-	slog.Error("webhook: dispatcher stuck, session aborted",
-		"delivery_id", deliveryID,
-		"session_id", sessionID,
-		"session_abort_ok", abortOK,
-	)
+}
+
+// stuckSessionOutcome words the session outcome of a stuck run. Only an abort
+// that ran may be reported as an aborted session.
+func stuckSessionOutcome(abortOK, aborted bool) (string, string) {
+	switch {
+	case aborted && abortOK:
+		return "stuck — session aborted", "webhook: dispatcher stuck, session aborted"
+	case aborted:
+		return "stuck — session abort failed, still running", "webhook: dispatcher stuck, session abort failed, still running"
+	default:
+		return "stuck — session not aborted, still running", "webhook: dispatcher stuck, session not aborted, still running"
+	}
 }
 
 func (s *Server) releaseStuckDispatcher(old *dispatcher) {
