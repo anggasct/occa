@@ -243,9 +243,11 @@ func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelo
 
 	threadID := ""
 	rootID := ""
+	prKey := ""
 	if wCtx != nil {
 		threadID = wCtx.ThreadID
 		rootID = wCtx.RootMessageID
+		prKey = strings.TrimSpace(wCtx.PRKey)
 	}
 	if (threadID == "" || rootID == "") && s.tasks != nil {
 		if repo, branch := TaskRepoBranch(WebhookExecutionKey{}, envelope); repo != "" && branch != "" {
@@ -258,6 +260,13 @@ func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelo
 				}
 			}
 		}
+	}
+	if prKey == "" {
+		prKey = s.prKeyForEnvelope(ep, envelope)
+	}
+	if prKey != "" {
+		s.emitPRAudit(ctx, ep, envelope, status, reason, prKey, threadID)
+		return
 	}
 	targetChannel := auditTargetChannel(ep.Platform, ep.ChannelID, threadID)
 
@@ -283,18 +292,12 @@ func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelo
 		} else {
 			if repo, branch := TaskRepoBranch(WebhookExecutionKey{}, envelope); repo != "" && branch != "" && threadID != "" {
 				s.postPhaseBannerIfChanged(ctx, ep.Platform, ep.ChannelID, threadID, repo, branch, ep.Workflow, reason)
-				last := strings.TrimSpace(status)
-				if r := strings.TrimSpace(reason); r != "" {
-					last += ": " + clipTaskField(r, 120)
-				}
-				if outcome := FormatGateOutcome(envelope, ep.Workflow, status); outcome != "" && outcome != "gate checked, "+strings.ToLower(strings.TrimSpace(status)) {
-					last = outcome
-				}
-				stepRun := strings.TrimSpace(ep.Workflow)
-				if short := shortDeliveryID(stringValue(envelope["delivery_id"])); short != "" {
-					stepRun += " run " + short
-				}
-				s.ensureThreadStatus(ctx, ep.Platform, ep.ChannelID, threadID, repo, branch, ep.Workflow, stepRun, last)
+				phase := PhaseForWorkflow(ep.Workflow)
+				s.ensureThreadStatus(ctx, ep.Platform, ep.ChannelID, threadID, repo, branch, "", ThreadStatusUpdate{
+					Phase:   phase,
+					Waiting: waitingReasonForGate(envelope),
+					Next:    NextStepForPhase(phase),
+				})
 			}
 			if status == "SKIP" && threadID != "" {
 				s.postThreadDetail(ctx, ep, threadID, envelope, status, reason)
@@ -338,18 +341,12 @@ func (s *Server) postThreadDetail(ctx context.Context, ep config.EndpointConfig,
 	}
 	if repo != "" && branch != "" {
 		s.postPhaseBannerIfChanged(ctx, ep.Platform, ep.ChannelID, threadID, repo, branch, ep.Workflow, reason)
-		last := strings.TrimSpace(status)
-		if r := strings.TrimSpace(reason); r != "" {
-			last += ": " + clipTaskField(r, 120)
-		}
-		if outcome := FormatGateOutcome(envelope, ep.Workflow, status); outcome != "" && outcome != "gate checked, "+strings.ToLower(status) {
-			last = outcome
-		}
-		stepRun := strings.TrimSpace(ep.Workflow)
-		if short := shortDeliveryID(stringValue(envelope["delivery_id"])); short != "" {
-			stepRun += " run " + short
-		}
-		s.ensureThreadStatus(ctx, ep.Platform, ep.ChannelID, threadID, repo, branch, ep.Workflow, stepRun, last)
+		phase := PhaseForWorkflow(ep.Workflow)
+		s.ensureThreadStatus(ctx, ep.Platform, ep.ChannelID, threadID, repo, branch, "", ThreadStatusUpdate{
+			Phase:   phase,
+			Waiting: waitingReasonForGate(envelope),
+			Next:    NextStepForPhase(phase),
+		})
 	}
 	if strings.TrimSpace(slim) == "" {
 		return
@@ -372,4 +369,35 @@ func timeoutSummary(budget, stallFreshness time.Duration, workCtx *WebhookWorkCo
 		model = workCtx.Model.String()
 	}
 	return summary + " — " + relay.ClassifyTimeoutFailure(workCtx.Progress, budget, model, stallFreshness)
+}
+
+// emitPRAudit writes the PR surfaces: the channel parent stays one line, the
+// thread carries the state line and a single run outcome message.
+func (s *Server) emitPRAudit(ctx context.Context, ep config.EndpointConfig, envelope WebhookEnvelope, status, reason, prKey, threadID string) {
+	phase := s.currentSurfacePhase(prKey)
+	if phase == "" {
+		phase = PhaseForWorkflow(ep.Workflow)
+	}
+	if strings.EqualFold(strings.TrimSpace(status), "FAILED") {
+		phase = PhaseFailed
+	}
+	s.syncPhaseParent(ctx, ep, prKey, envelope, phase)
+	if strings.TrimSpace(threadID) == "" {
+		return
+	}
+	taskRepo, branch := TaskRepoBranch(WebhookExecutionKey{}, envelope)
+	s.postPhaseBannerIfChanged(ctx, ep.Platform, ep.ChannelID, threadID, taskRepo, branch, ep.Workflow, reason)
+	s.ensureThreadStatus(ctx, ep.Platform, ep.ChannelID, threadID, taskRepo, branch, prKey, ThreadStatusUpdate{
+		Phase:   phase,
+		Waiting: s.queueWaiting(ctx, prKey, phase),
+		Next:    NextStepForPhase(phase),
+	})
+	outcome := redactAuditSummary(FormatRunOutcome(envelope, ep.Workflow, status, reason, NextStepForPhase(phase)), ep.Secret)
+	if strings.TrimSpace(outcome) == "" {
+		return
+	}
+	target := threadTargetFor(ep.Platform, ep.ChannelID, threadID)
+	if err := s.notifyThread(ctx, ep.Platform, target, outcome); err != nil {
+		slog.Warn("webhook: run outcome post failed", "endpoint", ep.Name, "pr_key", prKey, "error", err)
+	}
 }

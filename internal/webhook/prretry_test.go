@@ -109,6 +109,19 @@ func TestRetryModelErrorThreeTimesThenBlocked(t *testing.T) {
 		mu.Unlock()
 		return nil
 	}
+	srv.SetMentionResolver(func(ctx context.Context, platform, name string) (string, bool) {
+		if name == "operator" {
+			return "user-42", true
+		}
+		return "", false
+	})
+	var mentionCalls []string
+	srv.SetMentionNotifier(func(ctx context.Context, platform, channelID, text, mentionUserID string) error {
+		mu.Lock()
+		mentionCalls = append(mentionCalls, channelID+"|"+mentionUserID+"|"+text)
+		mu.Unlock()
+		return nil
+	})
 	srv.escalationMention = "operator"
 	body := prReviewBody(7, "feat/x", "owner", "commented", "c0ffee-retry-1")
 	if resp := post(t, url+"/review?secret=s3cret", "del-retry-1", "pull_request_review", body); resp.StatusCode != http.StatusOK {
@@ -124,14 +137,28 @@ func TestRetryModelErrorThreeTimesThenBlocked(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
+	if len(mentionCalls) != 1 {
+		t.Fatalf("mention notifications = %d, want exactly one: %v", len(mentionCalls), mentionCalls)
+	}
+	if !strings.HasPrefix(mentionCalls[0], "chat1|user-42|") {
+		t.Fatalf("mention notification = %q, want the channel and the resolved user id", mentionCalls[0])
+	}
+	for _, want := range []string{"needs you", "Action: /retry · /skip · /cancel"} {
+		if !strings.Contains(mentionCalls[0], want) {
+			t.Errorf("escalation copy %q must contain %q", mentionCalls[0], want)
+		}
+	}
+	if strings.Contains(mentionCalls[0], "@operator") {
+		t.Errorf("escalation copy %q must not carry a bare name, the mention is rendered from the resolved id", mentionCalls[0])
+	}
 	mentions := 0
 	for _, text := range mentioned {
 		if strings.Contains(text, "@operator") {
 			mentions++
 		}
 	}
-	if mentions != 1 {
-		t.Fatalf("@operator mention posted %d times, want exactly once: %v", mentions, mentioned)
+	if mentions != 0 {
+		t.Fatalf("plain notifications must stay mention-free, got %d: %v", mentions, mentioned)
 	}
 }
 

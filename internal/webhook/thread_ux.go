@@ -3,34 +3,7 @@ package webhook
 import (
 	"context"
 	"strings"
-	"unicode/utf8"
 )
-
-func nextHintForPhase(phase string) string {
-	switch strings.TrimSpace(phase) {
-	case "REVIEW":
-		return "fix or merge gate"
-	case "FIX":
-		return "push + re-review"
-	case "MERGE":
-		return "merge or fix"
-	case "DONE":
-		return ""
-	default:
-		return ""
-	}
-}
-
-func shortDeliveryID(id string) string {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return ""
-	}
-	if len(id) > 8 {
-		return id[:8]
-	}
-	return id
-}
 
 func ThreadPhaseForWorkflow(workflow string) (string, string) {
 	w := strings.ToLower(strings.TrimSpace(workflow))
@@ -80,54 +53,6 @@ func FormatPhaseBanner(workflow, detail string) string {
 	out = strings.ReplaceAll(out, "\n", " ")
 	out = strings.Join(strings.Fields(out), " ")
 	return out
-}
-
-func FormatThreadStatus(phaseLabel, stepRun, lastEvent, next string) string {
-	clean := func(s string) string {
-		s = strings.ReplaceAll(s, "\n", " ")
-		return strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
-	}
-	phaseLabel, stepRun, lastEvent, next = clean(phaseLabel), clean(stepRun), clean(lastEvent), clean(next)
-	var parts []string
-	if phaseLabel != "" {
-		parts = append(parts, phaseLabel)
-	}
-	if stepRun != "" {
-		parts = append(parts, stepRun)
-	}
-	if lastEvent != "" {
-		parts = append(parts, lastEvent)
-	}
-	joined := strings.Join(parts, " · ")
-	if strings.TrimSpace(next) != "" {
-		if joined != "" {
-			joined += " · next: " + strings.TrimSpace(next)
-		} else {
-			joined = "next: " + strings.TrimSpace(next)
-		}
-	}
-	if joined == "" {
-		joined = "tracking"
-	}
-	out := "📌 STATUS: " + joined
-	if utf8.RuneCountInString(out) > 500 {
-		out = string([]rune(out)[:500])
-	}
-	return out
-}
-
-func ThreadStatusText(phase, icon, stepRun, lastEvent, next string) string {
-	phase = strings.TrimSpace(phase)
-	icon = strings.TrimSpace(icon)
-	label := strings.TrimSpace(phase)
-	if icon != "" {
-		if label != "" {
-			label = icon + " " + label
-		} else {
-			label = icon
-		}
-	}
-	return FormatThreadStatus(label, stepRun, lastEvent, next)
 }
 
 func FormatGateOutcome(envelope WebhookEnvelope, workflow, deliveryStatus string) string {
@@ -257,32 +182,4 @@ func (s *Server) postPhaseBannerIfChanged(ctx context.Context, platform, channel
 	}
 	s.tasks.SetPhase(repo, branch, phase)
 	return true
-}
-
-func (s *Server) ensureThreadStatus(ctx context.Context, platform, channelID, threadID, repo, branch, workflow, stepRun, lastEvent string) string {
-	if s == nil || s.tasks == nil {
-		return ""
-	}
-	phase, icon := ThreadPhaseForWorkflow(workflow)
-	next := nextHintForPhase(phase)
-	text := ThreadStatusText(phase, icon, stepRun, lastEvent, next)
-	target := threadTargetFor(platform, channelID, threadID)
-	if strings.TrimSpace(target) == "" {
-		return ""
-	}
-	var existing string
-	if rec, ok := s.tasks.Lookup(repo, branch); ok {
-		existing = strings.TrimSpace(rec.StatusMessageID)
-	}
-	if existing != "" {
-		if err := s.editThread(ctx, platform, target, existing, text); err == nil {
-			return existing
-		}
-	}
-	msgID, err := s.sendThread(ctx, platform, target, text)
-	if err != nil || strings.TrimSpace(msgID) == "" {
-		return strings.TrimSpace(msgID)
-	}
-	s.tasks.SetStatusMessage(repo, branch, msgID)
-	return msgID
 }

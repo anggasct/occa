@@ -431,7 +431,26 @@ func (s *Server) handleRedispatch(w http.ResponseWriter, r *http.Request, req Di
 		}
 	}
 	summary := FormatDispatchSummary(task, s.statusIcons)
-	if strings.TrimSpace(rec.RootMessageID) != "" && platform != "" && channelID != "" {
+	if prKey, isPRSurface := s.tasks.PRKeyForTask(TaskThreadKey(task.Repo, task.Branch)); isPRSurface {
+		// The channel parent is the index surface of a PR: a re-dispatch
+		// re-renders its phase line instead of writing the dispatch card
+		// over it. The card belongs in the thread.
+		s.reopenPRSurface(prKey)
+		repo, number, _ := splitPRKey(prKey)
+		envelope := WebhookEnvelope{"repository": repo, "pr_number": number}
+		if detail, ok := s.tasks.SurfaceDetail(prKey); ok {
+			envelope["pr_url"] = detail.PRURL
+			envelope["head_branch"] = detail.Branch
+		}
+		ep := config.EndpointConfig{
+			Name:       task.Repo,
+			Platform:   platform,
+			ChannelID:  channelID,
+			Workflow:   "dispatch",
+			Repository: task.Repo,
+		}
+		s.syncPhaseParent(ctx, ep, prKey, envelope, PhaseQueued)
+	} else if strings.TrimSpace(rec.RootMessageID) != "" && platform != "" && channelID != "" {
 		if err := s.editParent(ctx, platform, channelID, rec.RootMessageID, summary, nil); err != nil {
 			slog.Warn("webhook: redispatch parent edit failed", "repo", task.Repo, "branch", task.Branch, "error", err)
 		}
@@ -537,7 +556,10 @@ func (s *Server) openDispatchThread(task DispatchTask, platform, channelID, root
 		_ = s.notifyThread(ctx, platform, threadTargetFor(platform, channelID, threadID), opener)
 	}
 	s.postPhaseBannerIfChanged(ctx, platform, channelID, threadID, task.Repo, task.Branch, "dispatch", "")
-	s.ensureThreadStatus(ctx, platform, channelID, threadID, task.Repo, task.Branch, "dispatch", "dispatch run "+shortDeliveryID(task.ID), "dispatched")
+	s.ensureThreadStatus(ctx, platform, channelID, threadID, task.Repo, task.Branch, "", ThreadStatusUpdate{
+		Phase: PhaseDispatch,
+		Next:  NextStepForPhase(PhaseDispatch),
+	})
 	if fresh, ok := s.tasks.Lookup(task.Repo, task.Branch); ok {
 		return fresh, true
 	}

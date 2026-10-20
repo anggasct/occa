@@ -27,10 +27,11 @@ type Attachment struct {
 }
 
 type Button struct {
-	Label string
-	Value string
-	Row   int
-	URL   string
+	Label    string
+	Value    string
+	Row      int
+	URL      string
+	Disabled bool
 }
 
 type MenuCommand struct {
@@ -141,6 +142,19 @@ type MessageSender interface {
 
 type MessageSenderWithButtons interface {
 	SendNotificationWithButtons(channelID string, text string, buttons []Button) (string, error)
+}
+
+// MentionResolver resolves a username to a platform user id so an
+// escalation can ping the operator.
+type MentionResolver interface {
+	ResolveMentionID(ctx context.Context, name string) (string, bool)
+}
+
+// MessageSenderMention sends a notification that may ping a single user. The
+// mention is the escalation channel of the product: every other path stays
+// mention-free.
+type MessageSenderMention interface {
+	SendNotificationMention(channelID string, text string, mentionUserID string) (string, error)
 }
 
 type MessageEditor interface {

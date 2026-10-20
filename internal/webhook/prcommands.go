@@ -208,6 +208,8 @@ func (s *Server) operatorRetry(ctx context.Context, msg channel.IncomingMessage,
 		if err := s.prQueues.Unblock(ctx, prKey); err != nil {
 			return "", true, err
 		}
+		s.reopenPRSurface(prKey)
+		s.clearEscalated(prKey)
 	}
 	repo, number, _ := splitPRKey(prKey)
 	if err := s.enqueueSyntheticRetry(ctx, repo, number, kind, prKey); err != nil {
@@ -238,6 +240,8 @@ func (s *Server) operatorCancel(ctx context.Context, msg channel.IncomingMessage
 			if uerr := s.prQueues.Unblock(ctx, prKey); uerr != nil {
 				return "", true, uerr
 			}
+			s.reopenPRSurface(prKey)
+			s.clearEscalated(prKey)
 		}
 	}
 	d := s.liveDispatcher(prKey)

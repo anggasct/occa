@@ -249,22 +249,41 @@ func (s *Server) escalateBlocked(ep config.EndpointConfig, prKey string, row *st
 		slog.Warn("webhook: block mark failed", "pr_key", prKey, "error", err)
 		return
 	}
+	if !s.markEscalated(prKey) {
+		return
+	}
+	// A new blocking episode freezes the parent again: the operator has to
+	// act before the parent leaves the blocked phase.
+	s.tasks.ClearReopen(prKey)
 	threadID := strings.TrimSpace(row.ThreadID)
+	repo, prNumber, _ := splitPRKey(prKey)
 	if threadID == "" {
 		if rec, ok := s.tasks.ResolvePRThread(prKey); ok {
 			threadID = strings.TrimSpace(rec.ThreadID)
 		}
 	}
-	mention := strings.TrimSpace(s.escalationMention)
-	statusLine := "🔴 BLOCKED — " + reason + fmt.Sprintf(" · retry %d/%d", used, max)
-	if threadID != "" {
-		repo, _, _ := splitPRKey(prKey)
-		s.ensureThreadStatus(context.Background(), ep.Platform, ep.ChannelID, threadID, repo, "", row.ActiveKind, kind+" run", statusLine)
-		target := threadTargetFor(ep.Platform, ep.ChannelID, threadID)
-		if mention != "" {
-			_ = s.notifyThread(context.Background(), ep.Platform, target, "@"+mention+" — action required in this thread: /retry, /skip or /cancel.")
+	ctx := context.Background()
+	what := fmt.Sprintf("%s run failed %d/%d times", kind, used, max)
+	why := class.label()
+	envelope := WebhookEnvelope{"repository": repo, "pr_number": prNumber}
+	if rec, ok := s.tasks.ResolvePRThread(prKey); ok {
+		if strings.TrimSpace(rec.Branch) != "" {
+			envelope["head_branch"] = rec.Branch
 		}
 	}
+	s.syncPhaseParent(ctx, ep, prKey, envelope, PhaseBlocked)
+	if threadID != "" {
+		s.ensureThreadStatus(ctx, ep.Platform, ep.ChannelID, threadID, repo, "", prKey, ThreadStatusUpdate{
+			Phase:  PhaseBlocked,
+			Action: mergeActionAsk,
+		})
+		threadLine := FormatEscalationCopy(repo, prNumber, PhaseBlocked, what, why, s.statusIcons)
+		target := threadTargetFor(ep.Platform, ep.ChannelID, threadID)
+		if err := s.notifyThread(ctx, ep.Platform, target, threadLine); err != nil {
+			slog.Warn("webhook: escalation thread line failed", "endpoint", ep.Name, "pr_key", prKey, "error", err)
+		}
+	}
+	s.escalateToChannel(ctx, ep, repo, prNumber, PhaseBlocked, what, why)
 	slog.Error("webhook: PR blocked after retry exhaustion",
 		"endpoint", ep.Name,
 		"pr_key", prKey,

@@ -456,9 +456,24 @@ func TestMergedEventDrainsQueue(t *testing.T) {
 	if len(rec.order) != 2 || rec.order[0] != "del-mq-fix" || rec.order[1] != "del-mq-merged" {
 		t.Fatalf("merged must run after drain, dropping queued fix; calls = %v", rec.order)
 	}
-	run, err := st.PRQueueRepo().Get(context.Background(), "acme/widget#7")
-	if err != nil || run == nil || run.Status != store.PRStatusDrained {
-		t.Fatalf("pr queue = %+v, %v; want drained", run, err)
+	waitForPRStatus(t, st, "acme/widget#7", store.PRStatusDrained)
+}
+
+// waitForPRStatus waits until the PR queue row of a key reaches a status. The
+// delivery is marked completed before the queue is drained, so the drain is
+// only observable after it happened.
+func waitForPRStatus(t *testing.T, st *store.SQLiteStore, prKey string, want store.PRStatus) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		run, err := st.PRQueueRepo().Get(context.Background(), prKey)
+		if err == nil && run != nil && run.Status == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pr queue row = %+v, %v; want %s", run, err, want)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

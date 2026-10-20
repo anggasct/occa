@@ -55,6 +55,7 @@ type Streamer struct {
 	now                        func() time.Time
 	workingEditInterval        time.Duration
 	stopCallbackData           string
+	verboseSteps               bool
 }
 
 type toolPhaseState struct {
@@ -106,7 +107,14 @@ func NewStreamerWithSink(sink Sink, renderer render.Renderer, platform render.Pl
 		typingInterval:      typingInterval,
 		now:                 time.Now,
 		workingEditInterval: 2 * time.Second,
+		verboseSteps:        true,
 	}
+}
+
+// SetVerboseSteps toggles the per-step tool lines. When they are off the run
+// posts a single tool summary line instead of a stream of step notices.
+func (s *Streamer) SetVerboseSteps(verbose bool) {
+	s.verboseSteps = verbose
 }
 
 func (s *Streamer) SetPermissionPromptHandler(handler PermissionPromptHandler) {
@@ -482,6 +490,9 @@ func formatDuration(d time.Duration) string {
 }
 
 func (s *Streamer) updateWorking(working *workingState) {
+	if !s.verboseSteps {
+		return
+	}
 	if working.handle == nil && working.ref == nil {
 		s.stripStaleCards(nil)
 		handle, rendered, err := s.sendWorking(working.pending)
@@ -571,6 +582,22 @@ func (s *Streamer) flushWorking(working *workingState) {
 	s.lastWorkingRendered = working.rendered
 }
 
+// sendRollup posts the tool summary of a run as its own message. It is used
+// when the per-step lines are suppressed and no working card exists.
+func (s *Streamer) sendRollup(text string) {
+	if s.sink == nil {
+		return
+	}
+	handle, err := s.sink.Send(context.Background(), text)
+	if err != nil {
+		slog.Warn("streaming: tool summary send failed", "error", err)
+		return
+	}
+	if handle != nil {
+		s.cards = append(s.cards, sentCard{handle: handle, rendered: text})
+	}
+}
+
 func (s *Streamer) resetToolPhase(phase *toolPhaseState) {
 	if phase.working.handle != nil || phase.working.ref != nil {
 		s.queueWorking(&phase.working)
@@ -634,15 +661,19 @@ func (s *Streamer) resolveWorking(working *workingState, success bool, total int
 		handle = s.lastWorkingHandle
 	}
 	s.stripStaleCards(handle)
-	if handle == nil {
-		return
-	}
 	icon := "⚠️"
 	if success {
 		icon = "✅"
 	}
 	text := s.renderedSingle(s.rollupText(icon, total, types, reasoning))
 	if text == "" {
+		return
+	}
+	if handle == nil {
+		if s.verboseSteps {
+			return
+		}
+		s.sendRollup(text)
 		return
 	}
 	var err error

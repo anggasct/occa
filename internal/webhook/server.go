@@ -77,6 +77,16 @@ type EditorWithButtons func(ctx context.Context, platform, channelID, messageID,
 
 type GuildResolver func(ctx context.Context, platform, channelID string) string
 
+// MentionResolver maps a configured escalation name to a platform user id.
+type MentionResolver func(ctx context.Context, platform, name string) (string, bool)
+
+// MentionNotifier posts a channel message that may ping a single user.
+type MentionNotifier func(ctx context.Context, platform, channelID, text, mentionUserID string) error
+
+// MergeGateChecker reports whether the merge gate would pass for a PR right
+// now. A nil checker falls back to the queue-state gate.
+type MergeGateChecker func(ctx context.Context, prKey string) bool
+
 type Server struct {
 	bind                  string
 	bindAddr              string
@@ -89,6 +99,8 @@ type Server struct {
 	sender                Sender
 	senderButtons         SenderWithButtons
 	editorButtons         EditorWithButtons
+	rawSenderButtons      SenderWithButtons
+	rawEditorButtons      EditorWithButtons
 	rawNotifier           Notifier
 	rawSender             Sender
 	rawEditor             Editor
@@ -152,15 +164,25 @@ type Server struct {
 	branchExists          BranchExistsChecker
 	statusIcons           map[string]string
 	statusColors          map[string]int
+	endpointsByName       map[string]config.EndpointConfig
+	mentionResolver       MentionResolver
+	mentionNotifier       MentionNotifier
+	mergeGate             MergeGateChecker
+	escalationMu          sync.Mutex
+	escalated             map[string]bool
 }
 
 func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) *Server {
 	endpoints := make(map[string]config.EndpointConfig, len(cfg.Endpoints))
+	endpointsByName := make(map[string]config.EndpointConfig, len(cfg.Endpoints))
 	triggerLimits := make(map[string]config.EndpointLimits, len(cfg.Endpoints))
 	for _, ep := range cfg.Endpoints {
 		ep.Auth = strings.TrimSpace(strings.ToLower(ep.Auth))
 		ep.Workflow = strings.TrimSpace(strings.ToLower(ep.Workflow))
 		endpoints[ep.Path] = ep
+		if name := strings.TrimSpace(ep.Name); name != "" {
+			endpointsByName[name] = ep
+		}
 		if ep.Limits != nil {
 			triggerLimits[ep.Name] = *ep.Limits
 		}
@@ -171,6 +193,7 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 	srv := &Server{
 		bind:                  cfg.Bind,
 		endpoints:             endpoints,
+		endpointsByName:       endpointsByName,
 		policy:                policy,
 		verdicts:              policy.verdicts,
 		executor:              executor,
@@ -214,6 +237,7 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 	}
 	srv.dispatchToken = strings.TrimSpace(cfg.Dispatch.Token)
 	srv.dispatchTasks = NewDispatchStore()
+	srv.escalated = make(map[string]bool)
 	srv.fallbackAfter = cfg.FallbackPollAfter
 	srv.branchChecker = ghBranchPRChecker
 	srv.branchExists = ghBranchExistsChecker
@@ -285,8 +309,10 @@ func (s *Server) SetSender(n Sender) {
 func (s *Server) SetSenderWithButtons(n SenderWithButtons) {
 	if n == nil {
 		s.senderButtons = nil
+		s.rawSenderButtons = nil
 		return
 	}
+	s.rawSenderButtons = n
 	s.senderButtons = func(ctx context.Context, platform, channelID, text string, buttons []channel.Button) (string, error) {
 		return n(ctx, platform, channelID, FormatWebhookMessage(text), buttons)
 	}
@@ -295,8 +321,10 @@ func (s *Server) SetSenderWithButtons(n SenderWithButtons) {
 func (s *Server) SetEditorWithButtons(n EditorWithButtons) {
 	if n == nil {
 		s.editorButtons = nil
+		s.rawEditorButtons = nil
 		return
 	}
+	s.rawEditorButtons = n
 	s.editorButtons = func(ctx context.Context, platform, channelID, messageID, text string, buttons []channel.Button) error {
 		return n(ctx, platform, channelID, messageID, FormatWebhookMessage(text), buttons)
 	}
@@ -332,6 +360,18 @@ func (s *Server) SetPromptDir(dir string) {
 
 func (s *Server) SetRetryBodyBuilder(fn func(ctx context.Context, repo, number, kind string) (body []byte, eventType string, err error)) {
 	s.retryBodyBuilder = fn
+}
+
+func (s *Server) SetMentionResolver(fn MentionResolver) {
+	s.mentionResolver = fn
+}
+
+func (s *Server) SetMentionNotifier(fn MentionNotifier) {
+	s.mentionNotifier = fn
+}
+
+func (s *Server) SetMergeGate(fn MergeGateChecker) {
+	s.mergeGate = fn
 }
 
 func (s *Server) SetGuildResolver(fn GuildResolver) {
@@ -1120,6 +1160,7 @@ func (d *dispatcher) handle(item dispatchItem) {
 			return
 		}
 		if item.prKey != "" {
+			s.markPRQueued(item.prKey, item.ep, earlyEnvelope)
 			if item.ep.Workflow != "merged" {
 				if state := strings.TrimSpace(stringValue(earlyEnvelope["pr_state"])); state == "merged" || state == "closed" {
 					held = false
@@ -1310,7 +1351,10 @@ func (s *Server) failWorkspace(item dispatchItem, receipt *store.WebhookDelivery
 	target := threadTargetFor(item.ep.Platform, item.ep.ChannelID, threadID)
 	if repo, branch := TaskRepoBranch(WebhookExecutionKey{}, envelope); repo != "" && branch != "" {
 		s.postPhaseBannerIfChanged(context.Background(), item.ep.Platform, item.ep.ChannelID, threadID, repo, branch, item.ep.Workflow, summary)
-		s.ensureThreadStatus(context.Background(), item.ep.Platform, item.ep.ChannelID, threadID, repo, branch, item.ep.Workflow, item.ep.Workflow+" run "+shortDeliveryID(item.deliveryID), FormatGateOutcome(envelope, item.ep.Workflow, "FAILED"))
+		s.ensureThreadStatus(context.Background(), item.ep.Platform, item.ep.ChannelID, threadID, repo, branch, "", ThreadStatusUpdate{
+			Phase:   PhaseFailed,
+			Waiting: waitingReasonForGate(envelope),
+		})
 	}
 	if strings.TrimSpace(summary) != "" {
 		slim = strings.TrimSpace(slim) + "\n" + strings.TrimSpace(summary)
@@ -1716,6 +1760,9 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		s.markSkipped(id, ep, envelope, reason)
 		return nil
 	}
+	if workCtx.PRKey != "" {
+		s.recordMergeGate(workCtx.PRKey, envelope)
+	}
 
 	if reviewKey := reviewDedupeKey(envelope); reviewKey != "" && id != 0 {
 		prior, err := s.deliveries.FindReviewDuplicate(context.Background(), ep.Name, reviewKey, s.reviewDedupeCutoff())
@@ -1822,6 +1869,12 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 
 	ctx, cancel := context.WithTimeout(context.Background(), s.processingTimeout)
 	defer cancel()
+	if workCtx.PRKey != "" {
+		phase := PhaseForWorkflow(ep.Workflow)
+		if rootID, _ := s.syncPhaseParent(ctx, ep, workCtx.PRKey, envelope, phase); rootID != "" {
+			workCtx.RootMessageID = rootID
+		}
+	}
 	if workCtx.PRKey != "" && workCtx.SessionID == "" && s.prQueues != nil {
 		if row, rerr := s.prQueues.Get(context.Background(), workCtx.PRKey); rerr == nil && row != nil && strings.TrimSpace(row.ActiveSession) != "" {
 			workCtx.SessionID = strings.TrimSpace(row.ActiveSession)
