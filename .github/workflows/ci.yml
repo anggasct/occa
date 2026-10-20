@@ -47,7 +47,7 @@ jobs:
           out=$(grep -rnE '[0-9]+ \* time\.(Milli)?[Ss]econd|[0-9]+ \* time\.Minute|[0-9]+ \* time\.Hour' --include='*.go' internal/ cmd/ | grep -v _test.go || true)
           echo "$out"
           count=$(printf '%s\n' "$out" | grep -c . || true)
-          test "$count" -eq 16 || (echo "expected 16 mechanism lines, got $count"; exit 1)
+          test "$count" -eq 21 || (echo "expected 21 mechanism lines, got $count"; exit 1)
           printf '%s\n' "$out" | grep -q "internal/relay/client.go" && (echo "policy literal in relay/client.go"; exit 1) || true
           printf '%s\n' "$out" | grep -q "internal/relay/discovery.go" && (echo "policy literal in relay/discovery.go"; exit 1) || true
           printf '%s\n' "$out" | grep -q "internal/relay/webhook.go" && (echo "policy literal in relay/webhook.go"; exit 1) || true
