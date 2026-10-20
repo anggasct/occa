@@ -189,6 +189,29 @@ type SurfaceUpdate struct {
 	ThreadID        string
 	Phase           string
 	StatusMessageID string
+	Reopened        bool
+}
+
+// SurfaceGate holds the approval and CI state a delivery reported for a PR.
+// The merge gate reads it to decide whether the merge button may be pressed.
+type SurfaceGate struct {
+	Approval string
+	CI       string
+}
+
+// Allows reports whether the approval and CI half of the merge gate passes.
+// An unknown state is not a failure: the binary only knows what it has seen.
+func (g SurfaceGate) Allows() bool {
+	if approval := strings.TrimSpace(g.Approval); approval != "" && approval != "approved" {
+		return false
+	}
+	switch strings.TrimSpace(g.CI) {
+	case "success":
+		return true
+	case "pending", "failure":
+		return false
+	}
+	return true
 }
 
 type TaskThreadRegistry struct {
@@ -196,6 +219,7 @@ type TaskThreadRegistry struct {
 	records   map[string]TaskThreadRecord
 	prThreads map[string]string
 	surfaces  map[string]SurfaceUpdate
+	gates     map[string]SurfaceGate
 	icons     map[string]string
 	colors    map[string]int
 }
@@ -205,6 +229,7 @@ func NewTaskThreadRegistry() *TaskThreadRegistry {
 		records:   make(map[string]TaskThreadRecord),
 		prThreads: make(map[string]string),
 		surfaces:  make(map[string]SurfaceUpdate),
+		gates:     make(map[string]SurfaceGate),
 	}
 }
 
@@ -257,6 +282,112 @@ func (t *TaskThreadRegistry) LinkPRThread(prKey string, rec TaskThreadRecord) {
 		t.prThreads = make(map[string]string)
 	}
 	t.prThreads[strings.TrimSpace(prKey)] = TaskThreadKey(rec.Repo, rec.Branch)
+}
+
+// PRKeyForTask returns the PR key of the surface that owns a task record.
+func (t *TaskThreadRegistry) PRKeyForTask(taskKey string) (string, bool) {
+	taskKey = strings.TrimSpace(taskKey)
+	if t == nil || taskKey == "" {
+		return "", false
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	for prKey, key := range t.prThreads {
+		if key == taskKey {
+			return prKey, true
+		}
+	}
+	return "", false
+}
+
+// ReopenSurface marks a PR surface as actionable again. The operator acted on
+// a blocked PR, so the next phase change may edit the channel parent again.
+func (t *TaskThreadRegistry) ReopenSurface(prKey string) {
+	if t == nil || strings.TrimSpace(prKey) == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.surfaces == nil {
+		t.surfaces = make(map[string]SurfaceUpdate)
+	}
+	key := strings.TrimSpace(prKey)
+	surface := t.surfaces[key]
+	surface.Reopened = true
+	t.surfaces[key] = surface
+}
+
+// SurfaceReopened reports whether the operator acted on the PR since it was
+// blocked.
+func (t *TaskThreadRegistry) SurfaceReopened(prKey string) bool {
+	if t == nil || strings.TrimSpace(prKey) == "" {
+		return false
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.surfaces[strings.TrimSpace(prKey)].Reopened
+}
+
+// ClearReopen forgets the operator action on a PR: a new blocking episode
+// freezes the parent again.
+func (t *TaskThreadRegistry) ClearReopen(prKey string) {
+	if t == nil || strings.TrimSpace(prKey) == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.surfaces == nil {
+		return
+	}
+	key := strings.TrimSpace(prKey)
+	surface, ok := t.surfaces[key]
+	if !ok {
+		return
+	}
+	surface.Reopened = false
+	t.surfaces[key] = surface
+}
+
+// SetGate records the approval and CI state a delivery reported for a PR.
+func (t *TaskThreadRegistry) SetGate(prKey string, gate SurfaceGate) {
+	if t == nil || strings.TrimSpace(prKey) == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.gates == nil {
+		t.gates = make(map[string]SurfaceGate)
+	}
+	key := strings.TrimSpace(prKey)
+	current := t.gates[key]
+	if approval := strings.TrimSpace(gate.Approval); approval != "" {
+		current.Approval = approval
+	}
+	if ci := strings.TrimSpace(gate.CI); ci != "" {
+		current.CI = ci
+	}
+	t.gates[key] = current
+}
+
+// Gate returns the approval and CI state known for a PR.
+func (t *TaskThreadRegistry) Gate(prKey string) (SurfaceGate, bool) {
+	if t == nil || strings.TrimSpace(prKey) == "" {
+		return SurfaceGate{}, false
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	gate, ok := t.gates[strings.TrimSpace(prKey)]
+	return gate, ok
+}
+
+// GateAllows reports whether the approval and CI half of the merge gate
+// passes for a PR.
+func (t *TaskThreadRegistry) GateAllows(prKey string) bool {
+	gate, ok := t.Gate(prKey)
+	if !ok {
+		return true
+	}
+	return gate.Allows()
 }
 
 func (t *TaskThreadRegistry) PRKeyForThread(threadID string) (string, bool) {
@@ -705,6 +836,7 @@ func (s *Server) recordTaskThread(ep config.EndpointConfig, envelope WebhookEnve
 	rec := s.tasks.Upsert(repo, branch, workCtx.RootMessageID, workCtx.ThreadID, status)
 	if strings.TrimSpace(workCtx.PRKey) != "" {
 		s.tasks.LinkPRThread(workCtx.PRKey, rec)
+		s.refreshPhaseParentButtons(context.Background(), ep, workCtx.PRKey, envelope)
 	}
 }
 

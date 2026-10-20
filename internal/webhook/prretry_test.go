@@ -143,10 +143,13 @@ func TestRetryModelErrorThreeTimesThenBlocked(t *testing.T) {
 	if !strings.HasPrefix(mentionCalls[0], "chat1|user-42|") {
 		t.Fatalf("mention notification = %q, want the channel and the resolved user id", mentionCalls[0])
 	}
-	for _, want := range []string{"needs you", "Action: /retry · /skip · /cancel", "@operator"} {
+	for _, want := range []string{"needs you", "Action: /retry · /skip · /cancel"} {
 		if !strings.Contains(mentionCalls[0], want) {
 			t.Errorf("escalation copy %q must contain %q", mentionCalls[0], want)
 		}
+	}
+	if strings.Contains(mentionCalls[0], "@operator") {
+		t.Errorf("escalation copy %q must not carry a bare name, the mention is rendered from the resolved id", mentionCalls[0])
 	}
 	mentions := 0
 	for _, text := range mentioned {

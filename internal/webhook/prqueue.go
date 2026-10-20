@@ -249,6 +249,9 @@ func (s *Server) prMirrorSetActive(item dispatchItem, deliveryID int64) {
 	if err := s.prQueues.SetActive(context.Background(), item.prKey, kind, "", deliveryID); err != nil {
 		slog.Warn("webhook: pr active mark failed", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "pr_key", item.prKey, "error", err)
 	}
+	// A new run starts: the PR left the blocked state, so the next blocking
+	// episode escalates to the channel again.
+	s.clearEscalated(item.prKey)
 }
 
 func (s *Server) prMirrorSync(workCtx *WebhookWorkContext) {

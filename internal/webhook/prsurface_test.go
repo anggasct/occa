@@ -2,6 +2,8 @@ package webhook
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -409,10 +411,13 @@ func TestEscalationPostsOneChannelMessageWithMention(t *testing.T) {
 	if mentions[0].channelID != "chan-1" {
 		t.Errorf("escalation must be posted in the channel, got %q", mentions[0].channelID)
 	}
-	for _, want := range []string{"🔴 acme/widget#181 — blocked needs you", "Action: /retry · /skip · /cancel", "@operator"} {
+	for _, want := range []string{"🔴 acme/widget#181 — blocked needs you", "Action: /retry · /skip · /cancel"} {
 		if !strings.Contains(mentions[0].text, want) {
 			t.Errorf("escalation copy %q must contain %q", mentions[0].text, want)
 		}
+	}
+	if strings.Contains(mentions[0].text, "@operator") {
+		t.Errorf("escalation copy %q must not carry a bare name, the mention is rendered from the resolved id", mentions[0].text)
 	}
 	rec.mu.Lock()
 	users := append([]string(nil), rec.mentionUsers...)
@@ -480,6 +485,219 @@ func TestEscalationWithoutResolvableMentionStillPosts(t *testing.T) {
 	}
 	if escalations != 1 {
 		t.Fatalf("an unresolved mention must still post the escalation once, got %d", escalations)
+	}
+}
+
+func TestBlockedParentLeavesBlockedAfterOperatorAction(t *testing.T) {
+	srv, st, rec := newSurfaceServer(t)
+	ep := srv.endpoints["/review"]
+	ctx := context.Background()
+	prKey := "acme/widget#181"
+	envelope := surfaceEnvelope()
+
+	srv.syncPhaseParent(ctx, ep, prKey, envelope, PhaseBlocked)
+	if _, err := st.PRQueueRepo().EnsurePR(ctx, prKey, "thread-9", "parent-1"); err != nil {
+		t.Fatalf("ensure pr: %v", err)
+	}
+	if err := st.PRQueueRepo().SetBlocked(ctx, prKey, "retry exhausted"); err != nil {
+		t.Fatalf("block pr: %v", err)
+	}
+
+	srv.syncPhaseParent(ctx, ep, prKey, envelope, PhaseReview)
+	if _, edited, _, _ := rec.snapshot(); len(edited) != 0 {
+		t.Fatalf("a blocked parent must stay frozen until the operator acts: %+v", edited)
+	}
+
+	if _, _, err := srv.operatorCancel(ctx, channel.IncomingMessage{}, prKey); err != nil {
+		t.Fatalf("operator cancel: %v", err)
+	}
+
+	srv.syncPhaseParent(ctx, ep, prKey, envelope, PhaseReview)
+	_, edited, _, _ := rec.snapshot()
+	if len(edited) != 1 {
+		t.Fatalf("the parent must be edited after the operator acted: %+v", edited)
+	}
+	if !strings.HasSuffix(edited[0].text, " — review") {
+		t.Errorf("parent %q must show the new phase", edited[0].text)
+	}
+	if !phaseParentPattern.MatchString(edited[0].text) {
+		t.Errorf("parent %q must match the one-line phase contract", edited[0].text)
+	}
+}
+
+func TestSecondBlockingEpisodeEscalatesAgain(t *testing.T) {
+	srv, st, rec := newSurfaceServer(t)
+	ctx := context.Background()
+	prKey := "acme/widget#181"
+	ep := srv.endpoints["/review"]
+	srv.escalationMention = "operator"
+
+	if _, err := st.PRQueueRepo().EnsurePR(ctx, prKey, "thread-9", "parent-1"); err != nil {
+		t.Fatalf("ensure pr: %v", err)
+	}
+	row, err := st.PRQueueRepo().Get(ctx, prKey)
+	if err != nil || row == nil {
+		t.Fatalf("get pr: %v", err)
+	}
+	srv.escalateBlocked(ep, prKey, row, failureBuild, 3, 3)
+	if _, _, _, mentions := rec.snapshot(); len(mentions) != 1 {
+		t.Fatalf("first blocking episode must post one channel message, got %d", len(mentions))
+	}
+
+	srv.prMirrorSetActive(dispatchItem{ep: ep, prKey: prKey}, 7)
+	row, err = st.PRQueueRepo().Get(ctx, prKey)
+	if err != nil || row == nil {
+		t.Fatalf("get pr: %v", err)
+	}
+	srv.escalateBlocked(ep, prKey, row, failureBuild, 3, 3)
+	_, _, _, mentions := rec.snapshot()
+	if len(mentions) != 2 {
+		t.Fatalf("a second blocking episode must post a fresh channel message, got %d", len(mentions))
+	}
+	for i, mention := range mentions {
+		if !strings.Contains(mention.text, "needs you") {
+			t.Errorf("escalation %d must carry the required copy: %q", i, mention.text)
+		}
+	}
+}
+
+func TestMergeButtonFollowsApprovalAndCIState(t *testing.T) {
+	srv, _, rec := newSurfaceServer(t)
+	ep := srv.endpoints["/review"]
+	ctx := context.Background()
+	prKey := "acme/widget#181"
+
+	srv.recordMergeGate(prKey, WebhookEnvelope{"review_verdict": "approved", "status": "completed", "conclusion": "failure"})
+	srv.syncPhaseParent(ctx, ep, prKey, surfaceEnvelope(), PhaseMerge)
+	sent, _, _, _ := rec.snapshot()
+	if len(sent) != 1 {
+		t.Fatalf("expected one parent send, got %d", len(sent))
+	}
+	if !buttonDisabled(sent[0].buttons, "Merge") {
+		t.Error("merge must be disabled while the checks are red")
+	}
+
+	srv.recordMergeGate(prKey, WebhookEnvelope{"review_verdict": "approved", "status": "completed", "conclusion": "success"})
+	srv.syncPhaseParent(ctx, ep, prKey, surfaceEnvelope(), PhaseReview)
+	_, edited, _, _ := rec.snapshot()
+	if len(edited) != 1 {
+		t.Fatalf("expected one parent edit, got %d", len(edited))
+	}
+	if buttonDisabled(edited[0].buttons, "Merge") {
+		t.Error("merge must be enabled while the gate would pass")
+	}
+
+	srv.recordMergeGate(prKey, WebhookEnvelope{"review_verdict": "request_changes"})
+	srv.syncPhaseParent(ctx, ep, prKey, surfaceEnvelope(), PhaseFix)
+	_, edited, _, _ = rec.snapshot()
+	if len(edited) != 2 {
+		t.Fatalf("expected two parent edits, got %d", len(edited))
+	}
+	if !buttonDisabled(edited[1].buttons, "Merge") {
+		t.Error("merge must be disabled while the review asks for changes")
+	}
+}
+
+func TestPRParentCarriesFourButtonsAfterFirstPhase(t *testing.T) {
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+		workCtx.ThreadID = "thread-7"
+		return nil
+	}
+	srv, st, url := newSurfaceHarness(t, exec)
+	rec := &surfaceRecorder{}
+	srv.SetSenderWithButtons(func(_ context.Context, _, channelID, text string, buttons []channel.Button) (string, error) {
+		rec.add(&rec.sent, surfaceMessage{channelID: channelID, messageID: "parent-1", text: text, buttons: buttons})
+		return "parent-1", nil
+	})
+	srv.SetEditorWithButtons(func(_ context.Context, _, channelID, messageID, text string, buttons []channel.Button) error {
+		rec.add(&rec.edited, surfaceMessage{channelID: channelID, messageID: messageID, text: text, buttons: buttons})
+		return nil
+	})
+	srv.SetEditor(func(_ context.Context, _, channelID, messageID, text string) error {
+		rec.add(&rec.edited, surfaceMessage{channelID: channelID, messageID: messageID, text: text})
+		return nil
+	})
+	srv.SetSender(func(_ context.Context, _, channelID, text string) (string, error) {
+		rec.add(&rec.threadSent, surfaceMessage{channelID: channelID, messageID: "status-1", text: text})
+		return "status-1", nil
+	})
+	srv.SetNotifier(func(_ context.Context, _, channelID, text string) error {
+		rec.add(&rec.notified, surfaceMessage{channelID: channelID, text: text})
+		return nil
+	})
+
+	body := `{"action":"submitted","pull_request":{"number":7,"state":"open","html_url":"https://github.com/acme/widget/pull/7","user":{"login":"owner"},"head":{"ref":"feat/x","sha":"abc1234def5678","repo":{"full_name":"acme/widget"}},"base":{"ref":"main","repo":{"full_name":"acme/widget"}}},"review":{"state":"commented","commit_id":"c0ffee-buttons","user":{"login":"reviewer"}},"repository":{"full_name":"acme/widget"}}`
+	if resp := post(t, url+"/review?secret=s3cret", "del-buttons-1", "pull_request_review", body); resp.StatusCode != 200 {
+		t.Fatalf("post: status %d", resp.StatusCode)
+	}
+	waitForDeliveryStatus(t, st, "github-widget-review", "del-buttons-1", store.WebhookStatusCompleted)
+	waitForParentWrites(t, rec, 3)
+
+	sent, edited, _, _ := rec.snapshot()
+	parentWrites := append(append([]surfaceMessage(nil), sent...), edited...)
+	if len(parentWrites) == 0 {
+		t.Fatal("a PR delivery must write the channel parent")
+	}
+	last := parentWrites[len(parentWrites)-1]
+	labels := buttonLabels(last.buttons)
+	want := []string{"Open PR", "Open thread", "Merge", "Re-dispatch"}
+	if len(labels) != len(want) {
+		t.Fatalf("parent buttons = %v, want %v", labels, want)
+	}
+	for i, label := range want {
+		if labels[i] != label {
+			t.Errorf("parent button %d = %q, want %q", i, labels[i], label)
+		}
+	}
+	if !phaseParentPattern.MatchString(last.text) {
+		t.Errorf("parent %q must match the one-line phase contract", last.text)
+	}
+}
+
+// newSurfaceHarness starts a webhook server whose endpoints live on Discord,
+// so the parent carries the thread link button.
+func newSurfaceHarness(t *testing.T, exec func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error) (*Server, *store.SQLiteStore, string) {
+	t.Helper()
+	cfg := config.WebhookConfig{
+		Bind:    "127.0.0.1:0",
+		Policy:  testPolicy(),
+		Runtime: testRuntime(),
+		Endpoints: withAdmitDefaults([]config.EndpointConfig{
+			surfaceEndpoint("review", "github-widget-review", "/review"),
+			surfaceEndpoint("fix", "github-widget-fix", "/fix"),
+			surfaceEndpoint("merge", "github-widget-merge", "/merge"),
+			surfaceEndpoint("merged", "github-widget-merged", "/merged"),
+		}),
+	}
+	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "surface.db"), "")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	srv := New(cfg, exec, st.WebhookDeliveryRepo())
+	srv.SetChannelStore(st.ChannelRepo())
+	srv.SetPRQueueRepo(st.PRQueueRepo())
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	return srv, st, ts.URL
+}
+
+// waitForParentWrites waits until the recorded channel parent carries the
+// expected number of writes.
+func waitForParentWrites(t *testing.T, rec *surfaceRecorder, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		sent, edited, _, _ := rec.snapshot()
+		if len(sent)+len(edited) >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("parent writes = %d, want %d", len(sent)+len(edited), want)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

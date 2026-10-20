@@ -1760,6 +1760,9 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		s.markSkipped(id, ep, envelope, reason)
 		return nil
 	}
+	if workCtx.PRKey != "" {
+		s.recordMergeGate(workCtx.PRKey, envelope)
+	}
 
 	if reviewKey := reviewDedupeKey(envelope); reviewKey != "" && id != 0 {
 		prior, err := s.deliveries.FindReviewDuplicate(context.Background(), ep.Name, reviewKey, s.reviewDedupeCutoff())

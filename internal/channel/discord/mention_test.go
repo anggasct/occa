@@ -36,7 +36,7 @@ func TestSendNotificationMentionAllowsOnlyTheResolvedUser(t *testing.T) {
 	})
 
 	a := &Adapter{session: session}
-	if _, err := a.SendNotificationMention("chan-1", "🔴 acme/widget#181 — blocked needs you\n@operator", "user-42"); err != nil {
+	if _, err := a.SendNotificationMention("chan-1", "🔴 acme/widget#181 — blocked needs you", "user-42"); err != nil {
 		t.Fatalf("SendNotificationMention: %v", err)
 	}
 	var payload mentionPayload
@@ -51,6 +51,33 @@ func TestSendNotificationMentionAllowsOnlyTheResolvedUser(t *testing.T) {
 	}
 	if !strings.Contains(payload.Content, "needs you") {
 		t.Errorf("escalation copy = %q, want the required copy", payload.Content)
+	}
+	if !strings.Contains(payload.Content, "<@user-42>") {
+		t.Errorf("escalation content = %q, want the mention token of the resolved id", payload.Content)
+	}
+}
+
+func TestSendNotificationMentionKeepsOneToken(t *testing.T) {
+	var sentBody string
+	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/channels/chan-1/messages") {
+			b, _ := io.ReadAll(r.Body)
+			sentBody = string(b)
+			return []byte(`{"id":"msg-123","channel_id":"chan-1"}`), http.StatusOK
+		}
+		return []byte(`{}`), http.StatusOK
+	})
+
+	a := &Adapter{session: session}
+	if _, err := a.SendNotificationMention("chan-1", "🔴 acme/widget#181 — blocked needs you\n<@user-42>", "user-42"); err != nil {
+		t.Fatalf("SendNotificationMention: %v", err)
+	}
+	var payload mentionPayload
+	if err := json.Unmarshal([]byte(sentBody), &payload); err != nil {
+		t.Fatalf("decode payload: %v (%s)", err, sentBody)
+	}
+	if got := strings.Count(payload.Content, "<@user-42>"); got != 1 {
+		t.Errorf("mention tokens = %d, want exactly one: %q", got, payload.Content)
 	}
 }
 

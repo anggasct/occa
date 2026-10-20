@@ -252,6 +252,9 @@ func (s *Server) escalateBlocked(ep config.EndpointConfig, prKey string, row *st
 	if !s.markEscalated(prKey) {
 		return
 	}
+	// A new blocking episode freezes the parent again: the operator has to
+	// act before the parent leaves the blocked phase.
+	s.tasks.ClearReopen(prKey)
 	threadID := strings.TrimSpace(row.ThreadID)
 	repo, prNumber, _ := splitPRKey(prKey)
 	if threadID == "" {

@@ -189,7 +189,10 @@ func (s *Server) mergeGateAllows(ctx context.Context, prKey string) bool {
 	if s.mergeGate != nil {
 		return s.mergeGate(ctx, prKey)
 	}
-	return s.defaultMergeGate(ctx, prKey)
+	if !s.defaultMergeGate(ctx, prKey) {
+		return false
+	}
+	return s.tasks.GateAllows(prKey)
 }
 
 func (s *Server) defaultMergeGate(ctx context.Context, prKey string) bool {
@@ -242,6 +245,19 @@ func MergeGateEnabled(queues store.PRQueueRepo, endpoints []config.EndpointConfi
 	return mergeGateAllows(context.Background(), queues, kindOf, prKey)
 }
 
+// MergeGateAllows reports whether the merge gate would pass for a PR right
+// now: no other queued or active item waits for it, the last observed review
+// approves it and the last observed checks are green.
+func MergeGateAllows(queues store.PRQueueRepo, endpoints []config.EndpointConfig, registry *TaskThreadRegistry, prKey string) bool {
+	if !MergeGateEnabled(queues, endpoints, prKey) {
+		return false
+	}
+	if registry == nil {
+		return true
+	}
+	return registry.GateAllows(prKey)
+}
+
 func (s *Server) phaseParentButtons(ep config.EndpointConfig, prKey, repo, branch, prURL, threadID string) []channel.Button {
 	mergeEnabled := s.mergeGateAllows(context.Background(), prKey)
 	return PhaseParentButtons(ep.Platform, s.guildIDFor(ep.Platform, ep.ChannelID, threadID), prURL, threadID, repo, branch, mergeEnabled)
@@ -269,7 +285,8 @@ func (s *Server) syncPhaseParent(ctx context.Context, ep config.EndpointConfig, 
 		if previous == phase {
 			return rootID, false
 		}
-		if IsTerminalPhase(previous) {
+		// A blocked parent stays frozen until the operator acts on the PR.
+		if IsTerminalPhase(previous) && (previous != PhaseBlocked || !s.tasks.SurfaceReopened(prKey)) {
 			return rootID, false
 		}
 	}
@@ -316,8 +333,59 @@ func (s *Server) syncPhaseParent(ctx context.Context, ep config.EndpointConfig, 
 		ThreadID:      threadID,
 		Phase:         string(phase),
 	})
+	s.tasks.ClearReopen(prKey)
 	slog.Info("webhook: phase parent updated", "pr_key", prKey, "from_phase", string(previous), "to_phase", string(phase))
 	return rootID, true
+}
+
+// refreshPhaseParentButtons re-renders the channel parent once the thread of
+// a PR is known: the button set changes, the phase line does not.
+func (s *Server) refreshPhaseParentButtons(ctx context.Context, ep config.EndpointConfig, prKey string, envelope WebhookEnvelope) {
+	if s == nil || s.tasks == nil || strings.TrimSpace(prKey) == "" {
+		return
+	}
+	rootID, phase, _, known := s.prSurfaceState(prKey)
+	if !known || rootID == "" || phase == "" {
+		return
+	}
+	detail, ok := s.tasks.SurfaceDetail(prKey)
+	if !ok {
+		return
+	}
+	threadID := strings.TrimSpace(detail.ThreadID)
+	if threadID == "" {
+		if rec, ok := s.tasks.ResolvePRThread(prKey); ok {
+			threadID = strings.TrimSpace(rec.ThreadID)
+		}
+	}
+	if threadID == "" || threadID == strings.TrimSpace(detail.ThreadID) {
+		return
+	}
+	repo, prNumber := repoAndNumber(prKey, envelope)
+	branch := strings.TrimSpace(stringValue(envelope["head_branch"]))
+	if branch == "" {
+		branch = strings.TrimSpace(detail.Branch)
+	}
+	prURL := strings.TrimSpace(stringValue(envelope["pr_url"]))
+	if prURL == "" {
+		prURL = strings.TrimSpace(detail.PRURL)
+	}
+	text := FormatPhaseParent(repo, prNumber, phase, s.statusIcons)
+	buttons := s.phaseParentButtons(ep, prKey, repo, branch, prURL, threadID)
+	if err := s.editPhaseParent(ctx, ep.Platform, ep.ChannelID, rootID, text, buttons); err != nil {
+		slog.Warn("webhook: phase parent button refresh failed", "pr_key", prKey, "phase", string(phase), "error", err)
+		return
+	}
+	s.tasks.SetSurface(prKey, SurfaceUpdate{
+		RootMessageID: rootID,
+		Repo:          repo,
+		PRNumber:      prNumber,
+		PRURL:         prURL,
+		Branch:        branch,
+		ThreadID:      threadID,
+		Phase:         string(phase),
+	})
+	slog.Info("webhook: phase parent buttons refreshed", "pr_key", prKey, "phase", string(phase))
 }
 
 func (s *Server) ensureThreadStatus(ctx context.Context, platform, channelID, threadID, repo, branch, prKey string, update ThreadStatusUpdate) string {
@@ -359,17 +427,17 @@ func (s *Server) escalateToChannel(ctx context.Context, ep config.EndpointConfig
 			slog.Warn("webhook: escalation mention unresolved, posting without mention", "endpoint", ep.Name, "mention", mention)
 		}
 	}
-	if userID != "" {
-		text += "\n@" + mention
-		if s.mentionNotifier != nil {
-			if err := s.mentionNotifier(ctx, ep.Platform, ep.ChannelID, text, userID); err != nil {
-				slog.Warn("webhook: escalation channel notification failed", "endpoint", ep.Name, "channel_id", ep.ChannelID, "error", err)
-			}
-			slog.Info("webhook: escalation posted to channel", "endpoint", ep.Name, "mention_resolved", true)
-			return
+	if userID != "" && s.mentionNotifier != nil {
+		// The adapter renders the mention token for the resolved id: a bare
+		// name in the body is inert text and never pings anyone.
+		if err := s.mentionNotifier(ctx, ep.Platform, ep.ChannelID, text, userID); err != nil {
+			slog.Warn("webhook: escalation channel notification failed", "endpoint", ep.Name, "channel_id", ep.ChannelID, "error", err)
 		}
+		slog.Info("webhook: escalation posted to channel", "endpoint", ep.Name, "mention_resolved", true)
+		return
+	}
+	if userID != "" {
 		slog.Warn("webhook: escalation mention notifier unavailable, posting without mention", "endpoint", ep.Name)
-		text = strings.TrimSuffix(text, "\n@"+mention)
 	}
 	if s.rawNotifier != nil {
 		if err := s.rawNotifier(ctx, ep.Platform, ep.ChannelID, text); err != nil {
@@ -397,6 +465,10 @@ func (s *Server) resolveMention(ctx context.Context, platform, name string) (str
 	return s.mentionResolver(ctx, platform, name)
 }
 
+// markEscalated claims the escalation of a PR. The claim is held while the
+// escalation is posted, so two concurrent failures post one channel message.
+// The blocking episode itself is carried by the queue row: a PR that blocks
+// again after the operator acted posts a fresh escalation.
 func (s *Server) markEscalated(prKey string) bool {
 	if s == nil {
 		return false
@@ -411,6 +483,61 @@ func (s *Server) markEscalated(prKey string) bool {
 	}
 	s.escalated[prKey] = true
 	return true
+}
+
+// clearEscalated releases the escalation claim of a PR.
+func (s *Server) clearEscalated(prKey string) {
+	if s == nil {
+		return
+	}
+	s.escalationMu.Lock()
+	defer s.escalationMu.Unlock()
+	delete(s.escalated, prKey)
+}
+
+// recordMergeGate remembers the approval and CI state a delivery reported so
+// the merge button is disabled while the merge gate would fail.
+func (s *Server) recordMergeGate(prKey string, envelope WebhookEnvelope) {
+	if s == nil || s.tasks == nil || strings.TrimSpace(prKey) == "" {
+		return
+	}
+	gate := SurfaceGate{Approval: approvalState(envelope), CI: ciState(envelope)}
+	if gate.Approval == "" && gate.CI == "" {
+		return
+	}
+	s.tasks.SetGate(prKey, gate)
+}
+
+// approvalState reads the review verdict a delivery carries.
+func approvalState(envelope WebhookEnvelope) string {
+	switch strings.ToLower(strings.TrimSpace(stringValue(envelope["review_verdict"]))) {
+	case "approved":
+		return "approved"
+	case "request_changes", "requested_changes", "changes_requested":
+		return "changes_requested"
+	}
+	switch strings.ToLower(strings.TrimSpace(stringValue(envelope["review_state"]))) {
+	case "approved":
+		return "approved"
+	case "changes_requested":
+		return "changes_requested"
+	}
+	return ""
+}
+
+// ciState reads the check-suite state a delivery carries.
+func ciState(envelope WebhookEnvelope) string {
+	switch strings.ToLower(strings.TrimSpace(stringValue(envelope["conclusion"]))) {
+	case "success":
+		return "success"
+	case "failure", "timed_out", "cancelled", "canceled", "action_required", "startup_failure", "stale":
+		return "failure"
+	}
+	switch strings.ToLower(strings.TrimSpace(stringValue(envelope["status"]))) {
+	case "queued", "in_progress", "pending", "waiting", "requested":
+		return "pending"
+	}
+	return ""
 }
 
 func repoAndNumber(prKey string, envelope WebhookEnvelope) (string, string) {
@@ -438,6 +565,15 @@ func (s *Server) currentSurfacePhase(prKey string) Phase {
 		return ""
 	}
 	return phase
+}
+
+// reopenPRSurface unfreezes the channel parent of a PR: the operator acted on
+// a blocked PR, so the next phase change edits the parent again.
+func (s *Server) reopenPRSurface(prKey string) {
+	if s == nil || s.tasks == nil || strings.TrimSpace(prKey) == "" {
+		return
+	}
+	s.tasks.ReopenSurface(prKey)
 }
 
 func (s *Server) queueWaiting(ctx context.Context, prKey string, phase Phase) string {

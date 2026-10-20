@@ -961,7 +961,7 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 						prNumber := strings.TrimSpace(webhook.EnvelopeString(workCtx.Envelope, "pr_number"))
 						phase := webhook.PhaseForWorkflow(workCtx.Workflow)
 						parentText = webhook.FormatPhaseParent(repo, prNumber, phase, taskOpts.Icons)
-						buttons = webhook.PhaseParentButtons(platform, guildIDForButtons(ch, channelID, ""), webhook.EnvelopeString(workCtx.Envelope, "pr_url"), "", repo, branch, webhook.MergeGateEnabled(taskOpts.PRQueues, taskOpts.Endpoints, prKey))
+						buttons = webhook.PhaseParentButtons(platform, guildIDForButtons(ch, channelID, ""), webhook.EnvelopeString(workCtx.Envelope, "pr_url"), "", repo, branch, webhook.MergeGateAllows(taskOpts.PRQueues, taskOpts.Endpoints, taskOpts.Registry, prKey))
 					} else {
 						buttons = webhook.TaskParentButtons(platform, guildIDForButtons(ch, channelID, ""), workCtx.Envelope, repo, branch, "")
 						rootCard = webhook.WithTaskHeaderWithButtons(rootCard, workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons, platform, buttons)
@@ -989,7 +989,7 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 									taskOpts.Registry.Upsert(repo, branch, rootMsgID, threadID, taskStatus)
 									threadButtons := webhook.TaskParentButtons(platform, guildIDForButtons(ch, channelID, threadID), workCtx.Envelope, repo, branch, threadID)
 									if prSurface {
-										threadButtons = webhook.PhaseParentButtons(platform, guildIDForButtons(ch, channelID, threadID), webhook.EnvelopeString(workCtx.Envelope, "pr_url"), threadID, repo, branch, webhook.MergeGateEnabled(taskOpts.PRQueues, taskOpts.Endpoints, prKey))
+										threadButtons = webhook.PhaseParentButtons(platform, guildIDForButtons(ch, channelID, threadID), webhook.EnvelopeString(workCtx.Envelope, "pr_url"), threadID, repo, branch, webhook.MergeGateAllows(taskOpts.PRQueues, taskOpts.Endpoints, taskOpts.Registry, prKey))
 										_ = notifyEditWithButtons(ch, channelID, rootMsgID, parentText, threadButtons)
 										if opener := webhook.FormatPRThreadOpener(workCtx.Envelope); strings.TrimSpace(opener) != "" {
 											_, _ = notifySend(ch, targetChannelID, opener)

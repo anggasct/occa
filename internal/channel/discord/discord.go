@@ -631,17 +631,26 @@ func (a *Adapter) SendNotificationWithButtons(channelID, text string, buttons []
 
 // SendNotificationMention posts a notification that can ping a single user.
 // The escalation path of the product is the only caller: every other send
-// keeps mentions suppressed.
+// keeps mentions suppressed. The mention token is rendered here: an allowed
+// mention only permits a ping, it does not create one, so the body must
+// carry "<@id>" for the resolved user.
 func (a *Adapter) SendNotificationMention(channelID, text string, mentionUserID string) (string, error) {
 	if a.session == nil {
 		return "", errors.New("discord: session not ready")
 	}
+	mentionUserID = strings.TrimSpace(mentionUserID)
 	content := render.Clamp(text, render.DiscordLimit)
+	if mentionUserID != "" {
+		token := "<@" + mentionUserID + ">"
+		if !strings.Contains(content, token) {
+			content = render.Clamp(text, render.DiscordLimit-utf8.RuneCountInString(token)-1) + "\n" + token
+		}
+	}
 	msg, err := a.session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
 		Content: content,
 		AllowedMentions: &discordgo.MessageAllowedMentions{
 			Parse: []discordgo.AllowedMentionType{discordgo.AllowedMentionTypeUsers},
-			Users: []string{strings.TrimSpace(mentionUserID)},
+			Users: []string{mentionUserID},
 		},
 		Flags: discordgo.MessageFlagsSuppressEmbeds,
 	})

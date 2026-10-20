@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/anggasct/occa/internal/channel"
 )
 
 func redispatchBody() string {
@@ -200,6 +202,81 @@ func TestRedispatchOpenReusesSameParentThreadWithOriginalSpec(t *testing.T) {
 	}
 	if after.SpecPath != "specs/orig.md" {
 		t.Errorf("record spec = %q, want specs/orig.md", after.SpecPath)
+	}
+}
+
+func TestRedispatchKeepsPRParentOneLine(t *testing.T) {
+	srv := newDispatchServer(t, dispatchEndpoints("acme/widget"))
+	srv.tasks.UpsertWithSpec("acme/widget", "feat/x", "root-1", "thread-1", TaskClaimed, "specs/orig.md")
+	srv.tasks.SetSurface("acme/widget#181", SurfaceUpdate{
+		RootMessageID: "root-1",
+		Repo:          "acme/widget",
+		PRNumber:      "181",
+		PRURL:         "https://github.com/acme/widget/pull/181",
+		Branch:        "feat/x",
+		ThreadID:      "thread-1",
+		Phase:         string(PhaseReview),
+	})
+	srv.SetBranchChecker(func(ctx context.Context, repo, branch string) (BranchPRResult, error) {
+		return BranchPRResult{Found: true, Number: "181", URL: "https://github.com/acme/widget/pull/181", State: "OPEN"}, nil
+	})
+	srv.SetBranchExistsChecker(func(ctx context.Context, repo, branch string) (bool, error) {
+		return true, nil
+	})
+	var mu sync.Mutex
+	var parentWrites []string
+	var threadWrites []string
+	srv.SetEditorWithButtons(func(_ context.Context, _, _, messageID, text string, _ []channel.Button) error {
+		mu.Lock()
+		parentWrites = append(parentWrites, messageID+"|"+text)
+		mu.Unlock()
+		return nil
+	})
+	srv.SetEditor(func(_ context.Context, _, _, messageID, text string) error {
+		mu.Lock()
+		parentWrites = append(parentWrites, messageID+"|"+text)
+		mu.Unlock()
+		return nil
+	})
+	srv.SetSender(func(_ context.Context, _, _, _ string) (string, error) {
+		mu.Lock()
+		parentWrites = append(parentWrites, "sent|")
+		mu.Unlock()
+		return "parent-new", nil
+	})
+	srv.SetNotifier(func(_ context.Context, _, target, text string) error {
+		mu.Lock()
+		threadWrites = append(threadWrites, target+"|"+text)
+		mu.Unlock()
+		return nil
+	})
+
+	rec := postDispatch(t, srv, "dispatch-token", redispatchBody())
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("redispatch status = %d, want 201: %s", rec.Code, rec.Body.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(parentWrites) != 1 {
+		t.Fatalf("parent writes = %d, want one phase re-render: %v", len(parentWrites), parentWrites)
+	}
+	if !strings.HasPrefix(parentWrites[0], "root-1|") {
+		t.Errorf("parent write %q must re-render the existing parent", parentWrites[0])
+	}
+	text := parentWrites[0]
+	if !phaseParentPattern.MatchString(text) {
+		t.Errorf("parent write %q must match the one-line phase contract", text)
+	}
+	for _, banned := range []string{"task-", "feat/x", "specs/", "━━━", "Dispatched", "Spec:", "Re-dispatch requested"} {
+		if strings.Contains(text, banned) {
+			t.Errorf("parent write %q must not carry %q", text, banned)
+		}
+	}
+	if len(threadWrites) != 1 {
+		t.Fatalf("thread posts = %d, want the dispatch card in the thread: %v", len(threadWrites), threadWrites)
+	}
+	if !strings.Contains(threadWrites[0], "thread-1") {
+		t.Errorf("dispatch card must land in the PR thread, got %q", threadWrites[0])
 	}
 }
 
