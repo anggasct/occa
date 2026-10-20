@@ -30,6 +30,7 @@ type WebhookTurn struct {
 	AbortTimeout  time.Duration
 	VerifyTimeout time.Duration
 	OnEvent       func(ev Event)
+	OnSession     func(sessionID string)
 	Streamer      *Streamer
 }
 
@@ -52,6 +53,9 @@ func (t WebhookTurn) Run(ctx context.Context) (res WebhookTurnResult, err error)
 	}
 	res.SessionID = sessionID
 	slog.Info("relay: webhook session created", t.attrs(sessionID)...)
+	if t.OnSession != nil {
+		t.OnSession(sessionID)
+	}
 
 	completed := false
 	defer func() {

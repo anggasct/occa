@@ -52,6 +52,7 @@ type WebhookWorkContext struct {
 	PRKey          string
 	StartTime      time.Time
 	Heartbeat      func()
+	ReportSession  func(sessionID string)
 }
 
 func ExtractExecutionKey(body []byte) WebhookExecutionKey {

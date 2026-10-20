@@ -237,11 +237,17 @@ func escalateReason(kind string, class failureClass, used, max int) string {
 }
 
 func (s *Server) escalateBlocked(ep config.EndpointConfig, prKey string, row *store.PRRun, class failureClass, used, max int) {
+	s.escalateBlockedReason(ep, prKey, row, class, used, max, "", "")
+}
+
+func (s *Server) escalateBlockedReason(ep config.EndpointConfig, prKey string, row *store.PRRun, class failureClass, used, max int, reason, why string) {
 	kind := strings.TrimSpace(row.ActiveKind)
 	if kind == "" {
 		kind = "run"
 	}
-	reason := escalateReason(kind, class, used, max)
+	if reason == "" {
+		reason = escalateReason(kind, class, used, max)
+	}
 	if row.Status == store.PRStatusBlocked {
 		return
 	}
@@ -264,7 +270,9 @@ func (s *Server) escalateBlocked(ep config.EndpointConfig, prKey string, row *st
 	}
 	ctx := context.Background()
 	what := fmt.Sprintf("%s run failed %d/%d times", kind, used, max)
-	why := class.label()
+	if why == "" {
+		why = class.label()
+	}
 	envelope := WebhookEnvelope{"repository": repo, "pr_number": prNumber}
 	if rec, ok := s.tasks.ResolvePRThread(prKey); ok {
 		if strings.TrimSpace(rec.Branch) != "" {
@@ -296,8 +304,10 @@ func (s *Server) escalateBlocked(ep config.EndpointConfig, prKey string, row *st
 // planRetry classifies an executor failure for a PR run. It returns true when
 // a backoff retry was persisted and the caller should re-execute; on retry
 // exhaustion it escalates (blocked + mention) and returns false so the normal
-// failure path records the terminal receipt.
-func (s *Server) planRetry(ep config.EndpointConfig, prKey string, receiptID int64, execErr error, workCtx *WebhookWorkContext, timedOut bool) bool {
+// failure path records the terminal receipt. A run the watchdog already
+// killed is never scheduled again: the live PR state is still resolved so a
+// terminal PR is reported as refused.
+func (s *Server) planRetry(ep config.EndpointConfig, prKey string, receiptID int64, execErr error, workCtx *WebhookWorkContext, timedOut, runDead bool) bool {
 	if s.prQueues == nil || strings.TrimSpace(prKey) == "" {
 		return false
 	}
@@ -313,6 +323,32 @@ func (s *Server) planRetry(ep config.EndpointConfig, prKey string, receiptID int
 	ctx := context.Background()
 	row, err := s.prQueues.Get(ctx, prKey)
 	if err != nil || row == nil {
+		return false
+	}
+	state, stateErr := s.livePRState(ctx, prKey)
+	switch {
+	case stateErr != nil || state == "":
+		slog.Error("webhook: retry refused, PR state unresolvable",
+			"endpoint", ep.Name,
+			"pr_key", prKey,
+			"error", stateErr,
+		)
+		if runDead {
+			return false
+		}
+		s.escalateBlockedReason(ep, prKey, row, class, row.RetryCount, max,
+			"live PR state unresolvable — retry refused (fail-closed)", "live PR state unknown")
+		return false
+	case state == PRStateMerged || state == PRStateClosed:
+		s.refuseRetryForTerminalPR(ep, prKey, receiptID, state)
+		return false
+	}
+	if runDead {
+		slog.Error("webhook: retry not scheduled, run aborted by watchdog",
+			"endpoint", ep.Name,
+			"pr_key", prKey,
+			"pr_state", state,
+		)
 		return false
 	}
 	if row.RetryCount >= max {
@@ -339,6 +375,35 @@ func (s *Server) planRetry(ep config.EndpointConfig, prKey string, receiptID int
 		"backoff", wait.String(),
 	)
 	return true
+}
+
+// refuseRetryForTerminalPR stops a retry whose PR already reached a terminal
+// state: the delivery is skipped and the queue is drained, so no second run
+// can write to a merged or closed PR.
+func (s *Server) refuseRetryForTerminalPR(ep config.EndpointConfig, prKey string, receiptID int64, state string) {
+	slog.Error("webhook: retry refused, PR terminal",
+		"endpoint", ep.Name,
+		"pr_key", prKey,
+		"pr_state", state,
+	)
+	if d := s.dispatcherFor(prKey); d != nil {
+		s.drainPRQueue(d, prKey)
+	}
+	s.skipDeliveryQuiet(ep, receiptID, "PR already "+state)
+}
+
+func (s *Server) skipDeliveryQuiet(ep config.EndpointConfig, id int64, reason string) {
+	if id == 0 {
+		return
+	}
+	ok, err := s.deliveries.Transition(context.Background(), id, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusSkipped, reason)
+	if err != nil {
+		slog.Error("webhook: skip transition failed", "endpoint", ep.Name, "delivery_id", id, "error", err)
+		return
+	}
+	if !ok {
+		slog.Info("webhook: skip transition skipped, delivery not processing", "endpoint", ep.Name, "delivery_id", id)
+	}
 }
 
 // RecoverPRQueue reconciles persisted PR-queue state after a restart without

@@ -80,6 +80,9 @@ func (s *Server) sweepStuckDispatchers(now time.Time) int {
 			if now.Sub(last) < after {
 				continue
 			}
+			if s.sessionAlive(snap.active.prKey, snap.active.ep.Name, snap.active.deliveryID) {
+				continue
+			}
 			stuck = append(stuck, candidate{d, snap})
 			continue
 		}
@@ -130,8 +133,19 @@ func (s *Server) alarmStuckDispatcher(d *dispatcher, snap dispatcherSnapshot, no
 		stuckSince = snap.startedAt
 	}
 	elapsed := now.Sub(stuckSince).Round(time.Second)
-	card := fmt.Sprintf("🚨 STUCK dispatcher %s#%s · delivery %s · stuck since %s (%s, threshold %s) · queue %d/%d — watchdog released the key so the next item proceeds. Check delivery log and sessions.",
-		repo, branch, strings.TrimSpace(item.deliveryID), stuckSince.UTC().Format(time.RFC3339), elapsed, after, snap.queueLen, snap.queueCap)
+	sessionID, abortOK, aborted := "", false, false
+	if snap.hasActive {
+		sessionID, abortOK, aborted = s.abortStuckSession(item, repo)
+	}
+	abortClause := "watchdog released the key so the next item proceeds."
+	switch {
+	case aborted && abortOK:
+		abortClause = "watchdog aborted the agent session and released the key so the next item proceeds."
+	case aborted:
+		abortClause = "watchdog could not abort the agent session and released the key so the next item proceeds."
+	}
+	card := fmt.Sprintf("🚨 STUCK dispatcher %s#%s · delivery %s · stuck since %s (%s, threshold %s) · queue %d/%d — %s Check delivery log and sessions.",
+		repo, branch, strings.TrimSpace(item.deliveryID), stuckSince.UTC().Format(time.RFC3339), elapsed, after, snap.queueLen, snap.queueCap, abortClause)
 	slog.Error("webhook: dispatcher stuck, key released",
 		"lock", d.key,
 		"repo", repo,
@@ -140,7 +154,14 @@ func (s *Server) alarmStuckDispatcher(d *dispatcher, snap dispatcherSnapshot, no
 		"stuck_since", stuckSince.UTC().Format(time.RFC3339),
 		"elapsed", elapsed.String(),
 		"queue", fmt.Sprintf("%d/%d", snap.queueLen, snap.queueCap),
+		"session_id", sessionID,
+		"session_aborted", aborted,
+		"session_abort_ok", abortOK,
 	)
+	if aborted {
+		d.markWatchdogAborted()
+		s.failStuckDelivery(item, sessionID, abortOK)
+	}
 	if repo == "" || branch == "" || branch == "-" {
 		return
 	}
@@ -163,6 +184,82 @@ func (s *Server) alarmStuckDispatcher(d *dispatcher, snap dispatcherSnapshot, no
 	if err := s.notifier(context.Background(), item.ep.Platform, target, card); err != nil {
 		slog.Warn("webhook: stuck alarm card failed", "repo", repo, "branch", branch, "delivery_id", strings.TrimSpace(item.deliveryID), "error", err)
 	}
+}
+
+// abortStuckSession kills the agent session of a run the watchdog declared
+// stuck. Releasing the key without killing the run leaves two writers on the
+// same PR surface, so the abort happens first and the key is released even
+// when the abort fails.
+func (s *Server) abortStuckSession(item dispatchItem, repo string) (string, bool, bool) {
+	sessionID, workdir := s.stuckSessionIdentity(item, repo)
+	if sessionID == "" {
+		return "", false, false
+	}
+	abortOK := false
+	if s.sessionAborter != nil && workdir != "" {
+		if err := s.sessionAborter(context.Background(), sessionID, workdir); err != nil {
+			slog.Error("webhook: dispatcher stuck, session abort failed",
+				"delivery_id", strings.TrimSpace(item.deliveryID),
+				"session_id", sessionID,
+				"error", err,
+			)
+		} else {
+			abortOK = true
+		}
+	}
+	if run := s.activeRunFor(item.prKey, item.ep.Name, item.deliveryID); run != nil {
+		run.markAborted(abortOK)
+	}
+	return sessionID, abortOK, true
+}
+
+func (s *Server) stuckSessionIdentity(item dispatchItem, repo string) (string, string) {
+	if run := s.activeRunFor(item.prKey, item.ep.Name, item.deliveryID); run != nil {
+		sessionID, workdir, _ := run.identity()
+		if sessionID != "" {
+			return sessionID, workdir
+		}
+	}
+	if s.prQueues == nil || strings.TrimSpace(item.prKey) == "" {
+		return "", ""
+	}
+	row, err := s.prQueues.Get(context.Background(), item.prKey)
+	if err != nil || row == nil {
+		return "", ""
+	}
+	sessionID := strings.TrimSpace(row.ActiveSession)
+	if sessionID == "" {
+		return "", ""
+	}
+	return sessionID, s.checkoutForRepo(repo)
+}
+
+func (s *Server) failStuckDelivery(item dispatchItem, sessionID string, abortOK bool) {
+	deliveryID := strings.TrimSpace(item.deliveryID)
+	if deliveryID == "" {
+		return
+	}
+	receipt, err := s.deliveries.Get(context.Background(), item.ep.Name, deliveryID)
+	if err != nil || receipt == nil {
+		return
+	}
+	summary := "stuck — session aborted"
+	ok, tErr := s.deliveries.Transition(context.Background(), receipt.ID,
+		[]store.WebhookStatus{store.WebhookStatusReceived, store.WebhookStatusAccepted, store.WebhookStatusProcessing},
+		store.WebhookStatusFailed, summary)
+	if tErr != nil {
+		slog.Error("webhook: stuck delivery transition failed", "delivery_id", deliveryID, "error", tErr)
+		return
+	}
+	if !ok {
+		slog.Warn("webhook: stuck delivery transition lost race", "delivery_id", deliveryID, "session_id", sessionID)
+		return
+	}
+	slog.Error("webhook: dispatcher stuck, session aborted",
+		"delivery_id", deliveryID,
+		"session_id", sessionID,
+		"session_abort_ok", abortOK,
+	)
 }
 
 func (s *Server) releaseStuckDispatcher(old *dispatcher) {

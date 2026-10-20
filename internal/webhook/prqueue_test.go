@@ -164,6 +164,7 @@ func newPRTestServer(t *testing.T, rec *prRecorder, endpoints []config.EndpointC
 	srv := New(cfg, rec.exec, st.WebhookDeliveryRepo())
 	srv.SetChannelStore(st.ChannelRepo())
 	srv.SetPRQueueRepo(st.PRQueueRepo())
+	setOpenPRState(srv)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleRequest)
 	ts := httptest.NewServer(mux)
@@ -453,8 +454,12 @@ func TestMergedEventDrainsQueue(t *testing.T) {
 	}
 	close(rec.release)
 	waitForDeliveryStatus(t, st, "github-widget-merged", "del-mq-merged", store.WebhookStatusCompleted)
-	if len(rec.order) != 2 || rec.order[0] != "del-mq-fix" || rec.order[1] != "del-mq-merged" {
-		t.Fatalf("merged must run after drain, dropping queued fix; calls = %v", rec.order)
+	waitForCalls(t, rec, 2)
+	rec.mu.Lock()
+	order := append([]string(nil), rec.order...)
+	rec.mu.Unlock()
+	if len(order) != 2 || order[0] != "del-mq-fix" || order[1] != "del-mq-merged" {
+		t.Fatalf("merged must run after drain, dropping queued fix; calls = %v", order)
 	}
 	waitForPRStatus(t, st, "acme/widget#7", store.PRStatusDrained)
 }

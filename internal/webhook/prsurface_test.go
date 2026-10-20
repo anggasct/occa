@@ -92,6 +92,7 @@ func newSurfaceServer(t *testing.T) (*Server, *store.SQLiteStore, *surfaceRecord
 	}, st.WebhookDeliveryRepo())
 	srv.SetChannelStore(st.ChannelRepo())
 	srv.SetPRQueueRepo(st.PRQueueRepo())
+	setOpenPRState(srv)
 	rec := &surfaceRecorder{}
 	srv.SetSenderWithButtons(func(_ context.Context, _, channelID, text string, buttons []channel.Button) (string, error) {
 		rec.add(&rec.sent, surfaceMessage{channelID: channelID, messageID: "parent-1", text: text, buttons: buttons})
@@ -677,6 +678,7 @@ func newSurfaceHarness(t *testing.T, exec func(ctx context.Context, platform, ch
 	srv := New(cfg, exec, st.WebhookDeliveryRepo())
 	srv.SetChannelStore(st.ChannelRepo())
 	srv.SetPRQueueRepo(st.PRQueueRepo())
+	setOpenPRState(srv)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleRequest)
 	ts := httptest.NewServer(mux)

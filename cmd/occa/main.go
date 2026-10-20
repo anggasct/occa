@@ -577,6 +577,13 @@ func main() {
 			}
 			return inst.Client().AbortSession(ctx, sessionID)
 		})
+		webhookSrv.SetSessionLiveness(func(ctx context.Context, sessionID, workdir string) (bool, error) {
+			if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(workdir) == "" {
+				return false, nil
+			}
+			_, alive := manager.Running(workdir)
+			return alive, nil
+		})
 		{
 			cfgPath := strings.TrimSpace(configPath)
 			if cfgPath == "" {
@@ -1063,6 +1070,11 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 						switch ev.Type {
 						case relay.EventDelta, relay.EventTool, relay.EventReasoning, relay.EventSegment:
 							workCtx.Heartbeat()
+						}
+					},
+					OnSession: func(sessionID string) {
+						if workCtx.ReportSession != nil {
+							workCtx.ReportSession(sessionID)
 						}
 					},
 				}

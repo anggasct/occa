@@ -74,6 +74,7 @@ func operatorTestServer(t *testing.T, authorizer func(platform, userID string) b
 	srv := New(cfg, exec, st.WebhookDeliveryRepo())
 	srv.SetChannelStore(st.ChannelRepo())
 	srv.SetPRQueueRepo(st.PRQueueRepo())
+	setOpenPRState(srv)
 	if authorizer != nil {
 		srv.SetOperatorAuthorizer(authorizer)
 	}
@@ -251,6 +252,7 @@ func backoffHarness(t *testing.T, failFirst bool) (*Server, *store.SQLiteStore, 
 	srv := New(cfg, exec, st.WebhookDeliveryRepo())
 	srv.SetChannelStore(st.ChannelRepo())
 	srv.SetPRQueueRepo(st.PRQueueRepo())
+	setOpenPRState(srv)
 	srv.SetOperatorAuthorizer(func(platform, userID string) bool { return true })
 	srv.retryBackoffs = map[failureClass][]time.Duration{
 		failureModel: {30 * time.Second},

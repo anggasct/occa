@@ -287,6 +287,12 @@ func (s *Server) syncPhaseParent(ctx context.Context, ep config.EndpointConfig, 
 		}
 		// A blocked parent stays frozen until the operator acts on the PR.
 		if IsTerminalPhase(previous) && (previous != PhaseBlocked || !s.tasks.SurfaceReopened(prKey)) {
+			slog.Info("webhook: write refused, PR terminal",
+				"pr_key", prKey,
+				"surface", "parent",
+				"run", string(phase),
+				"phase", string(previous),
+			)
 			return rootID, false
 		}
 	}
@@ -392,6 +398,14 @@ func (s *Server) ensureThreadStatus(ctx context.Context, platform, channelID, th
 	if s == nil || s.tasks == nil || strings.TrimSpace(threadID) == "" {
 		return ""
 	}
+	if s.prSurfaceFrozen(prKey, update.Phase) {
+		slog.Info("webhook: write refused, PR terminal",
+			"pr_key", prKey,
+			"surface", "thread status",
+			"run", string(update.Phase),
+		)
+		return ""
+	}
 	queued := strings.TrimSpace(update.Queued)
 	if queued == "" && strings.TrimSpace(prKey) != "" {
 		queued = s.queueSnapshot(ctx, prKey)
@@ -413,6 +427,25 @@ func (s *Server) ensureThreadStatus(ctx context.Context, platform, channelID, th
 	}
 	s.tasks.SetStatusMessageKeyed(repo, branch, prKey, msgID)
 	return msgID
+}
+
+// prSurfaceFrozen reports whether a write to the PR surface must be refused:
+// the PR reached a terminal phase and the run asks for a different one.
+func (s *Server) prSurfaceFrozen(prKey string, phase Phase) bool {
+	if s == nil || s.tasks == nil || strings.TrimSpace(prKey) == "" {
+		return false
+	}
+	_, current, _, known := s.prSurfaceState(prKey)
+	if !known || current == "" || current == phase {
+		return false
+	}
+	if !IsTerminalPhase(current) {
+		return false
+	}
+	if current == PhaseBlocked && s.tasks.SurfaceReopened(prKey) {
+		return false
+	}
+	return true
 }
 
 func (s *Server) escalateToChannel(ctx context.Context, ep config.EndpointConfig, repo, prNumber string, phase Phase, what, why string) {
