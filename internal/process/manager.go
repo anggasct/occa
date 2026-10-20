@@ -180,6 +180,30 @@ func (m *Manager) Running(workdir string) (int, bool) {
 	return 0, false
 }
 
+// ErrNoLiveAgent marks a lookup that found no running agent for a workdir.
+var ErrNoLiveAgent = errors.New("process: no live agent for workdir")
+
+// Existing returns the running agent instance for the workdir without
+// spawning one. An abort must never start an agent to kill it: a lookup that
+// finds nothing reports that there is nothing to abort.
+func (m *Manager) Existing(workdir string) (*Instance, error) {
+	workdir = NormalizeWorkdir(workdir)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.pool[workdir]
+	if !ok {
+		return nil, ErrNoLiveAgent
+	}
+	select {
+	case <-e.ready:
+		if e.err == nil && e.inst != nil && !e.inst.dead.Load() && e.inst.PID() > 0 {
+			return e.inst, nil
+		}
+	default:
+	}
+	return nil, ErrNoLiveAgent
+}
+
 func (m *Manager) ForceStop(workdir string) {
 	workdir = NormalizeWorkdir(workdir)
 	m.mu.Lock()

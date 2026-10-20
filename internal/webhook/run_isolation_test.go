@@ -258,11 +258,6 @@ func TestWatchdogKeepsLiveRunAlive(t *testing.T) {
 	})
 	srv.SetDispatcherStuckAfter(time.Minute)
 	srv.SetDispatcherWatchdogInterval(time.Hour)
-	var card string
-	srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
-		card = text
-		return nil
-	})
 	ep := config.EndpointConfig{Name: "github", Platform: "telegram", ChannelID: "chat1", Admit: defaultCatchAllAdmit()}
 	item := dispatchItem{ep: ep, body: []byte(stuckPayload()), deliveryID: "delivery-live", eventType: "pull_request", payloadHash: "hash-live", prKey: "acme/widget#7"}
 	d := &dispatcher{server: srv, key: "pr:acme/widget#7", lanes: makePRLanes(8)}
@@ -285,14 +280,19 @@ func TestWatchdogKeepsLiveRunAlive(t *testing.T) {
 	srv.SetSessionLiveness(func(ctx context.Context, sessionID, workdir string) (bool, error) {
 		return true, nil
 	})
-	if n := srv.sweepStuckDispatchers(time.Now()); n != 0 {
-		t.Fatalf("a live agent must not be declared stuck, sweep = %d", n)
+	aborted := false
+	srv.SetSessionAborter(func(ctx context.Context, sessionID, workdir string) error {
+		aborted = true
+		return nil
+	})
+	if n := srv.sweepStuckDispatchers(time.Now()); n != 1 {
+		t.Fatalf("a live but silent agent must fall back to the elapsed rule, sweep = %d", n)
 	}
-	if card != "" {
-		t.Fatalf("a live run must not raise a stuck card: %q", card)
+	if !aborted {
+		t.Fatal("the watchdog must abort the session it declares stuck")
 	}
-	if len(logs.all("webhook: dispatcher stuck, key released")) != 0 {
-		t.Fatal("a live run must not log a stuck dispatcher")
+	if len(logs.all("webhook: dispatcher stuck, session aborted")) != 1 {
+		t.Fatal("the watchdog must report the aborted session")
 	}
 }
 
@@ -622,6 +622,7 @@ func TestMergedDocsUpdateWritesNoSurface(t *testing.T) {
 	}
 	item := dispatchItem{ep: ep, body: []byte(mergedBody(7)), deliveryID: "del-merged-surface", eventType: "pull_request", payloadHash: "hash-merged-surface", prKey: prKey}
 	srv.handleMergedDelivery(item, receipt, envelope, nil)
+	sentBefore, editedBefore, _, _ := rec.snapshot()
 
 	select {
 	case <-turn:
@@ -630,17 +631,18 @@ func TestMergedDocsUpdateWritesNoSurface(t *testing.T) {
 	}
 	time.Sleep(200 * time.Millisecond)
 	sent, edited, _, _ := rec.snapshot()
-	if len(sent) != 1 {
-		t.Fatalf("parent writes = %d, want the single terminal phase line", len(sent))
+	parentWrites := append(append([]surfaceMessage(nil), sent...), edited...)
+	if len(parentWrites) != 1 {
+		t.Fatalf("parent writes = %d, want the single terminal phase line", len(parentWrites))
 	}
-	if !strings.Contains(sent[0].text, "merged") {
-		t.Fatalf("parent line = %q, want the merged phase", sent[0].text)
+	if !strings.Contains(parentWrites[0].text, "merged") {
+		t.Fatalf("parent line = %q, want the merged phase", parentWrites[0].text)
 	}
 	if len(rec.threadSent) != 1 {
 		t.Fatalf("thread state line writes = %d, want the single terminal state line", len(rec.threadSent))
 	}
-	if len(edited) != 0 {
-		t.Fatalf("the post-merge work must not edit the parent or the state line: %+v", edited)
+	if len(sent) != len(sentBefore) || len(edited) != len(editedBefore) {
+		t.Fatalf("the post-merge work must not write to the surface: %+v %+v", sent, edited)
 	}
 }
 
@@ -859,10 +861,6 @@ func TestWatchdogKeepsMutableWorkspaceRunAlive(t *testing.T) {
 	srv.dispatchMu.Lock()
 	srv.dispatchers[d.key] = d
 	srv.dispatchMu.Unlock()
-	d.mu.Lock()
-	d.lastActivity = time.Now().Add(-10 * time.Minute)
-	d.activeStartedAt = time.Now().Add(-10 * time.Minute)
-	d.mu.Unlock()
 	run := srv.beginActiveRun(item.prKey, ep.Name, item.deliveryID, "/tmp/widget/shared")
 	run.setSession("ses-mutable-1")
 
@@ -875,6 +873,9 @@ func TestWatchdogKeepsMutableWorkspaceRunAlive(t *testing.T) {
 		return true, nil
 	})
 
+	// A live session with a fresh heartbeat is not stuck, in a shared
+	// workspace as well as in an isolated one.
+	d.touch()
 	if n := srv.sweepStuckDispatchers(time.Now()); n != 0 {
 		t.Fatalf("a live agent on a shared workspace must not be declared stuck, sweep = %d", n)
 	}
@@ -883,6 +884,19 @@ func TestWatchdogKeepsMutableWorkspaceRunAlive(t *testing.T) {
 	}
 	if len(logs.all("webhook: dispatcher stuck, key released")) != 0 {
 		t.Fatal("a live run must not log a stuck dispatcher")
+	}
+
+	// A live session that stopped reporting progress falls back to the
+	// elapsed rule: the watchdog declares it stuck and aborts it.
+	d.mu.Lock()
+	d.lastActivity = time.Now().Add(-10 * time.Minute)
+	d.activeStartedAt = time.Now().Add(-10 * time.Minute)
+	d.mu.Unlock()
+	if n := srv.sweepStuckDispatchers(time.Now()); n != 1 {
+		t.Fatalf("a silent agent on a shared workspace must be declared stuck, sweep = %d", n)
+	}
+	if !aborted {
+		t.Fatal("the watchdog must abort the session it declares stuck")
 	}
 }
 
@@ -938,11 +952,14 @@ func TestWatchdogDoesNotAbortRunWithUnknownLiveness(t *testing.T) {
 	if err != nil || after == nil {
 		t.Fatalf("get receipt: %v", err)
 	}
-	if after.Status == store.WebhookStatusFailed {
-		t.Fatalf("a run with unknown liveness must not get a terminal receipt: %+v", after)
+	if after.Status != store.WebhookStatusFailed {
+		t.Fatalf("a stuck delivery must reach a terminal receipt: %+v", after)
 	}
-	if strings.Contains(after.ErrorSummary, "abort") {
+	if strings.Contains(after.ErrorSummary, "session aborted") {
 		t.Fatalf("a run with unknown liveness must not claim an abort: %q", after.ErrorSummary)
+	}
+	if !strings.Contains(after.ErrorSummary, "stuck") {
+		t.Fatalf("stuck delivery summary = %q", after.ErrorSummary)
 	}
 	records := logs.all("webhook: dispatcher stuck, session not aborted, still running")
 	if len(records) != 1 {
@@ -1002,7 +1019,7 @@ func TestWatchdogReceiptDoesNotClaimAbortWhenAbortImpossible(t *testing.T) {
 	if !strings.Contains(failed.ErrorSummary, "stuck") {
 		t.Fatalf("stuck delivery summary = %q", failed.ErrorSummary)
 	}
-	records := logs.all("webhook: dispatcher stuck, session not aborted, still running")
+	records := logs.all("webhook: dispatcher stuck, no session to abort")
 	if len(records) != 1 {
 		t.Fatalf("session outcome log lines = %d, want 1", len(records))
 	}

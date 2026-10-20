@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -24,22 +25,52 @@ const (
 const prStateLookupTimeout = 20 * time.Second
 
 type activeRun struct {
-	mu         sync.Mutex
-	key        string
-	prKey      string
-	endpoint   string
-	deliveryID string
-	sessionID  string
-	workdir    string
-	aborted    bool
-	abortOK    bool
-	takenOver  bool
+	mu           sync.Mutex
+	key          string
+	prKey        string
+	endpoint     string
+	deliveryID   string
+	sessionID    string
+	workdir      string
+	lastProgress time.Time
+	aborted      bool
+	abortOK      bool
+	takenOver    bool
 }
 
 func (r *activeRun) setSession(sessionID string) {
 	r.mu.Lock()
 	r.sessionID = strings.TrimSpace(sessionID)
 	r.mu.Unlock()
+}
+
+// setWorkdir records the workdir the agent runs in. The lease path is known
+// before the turn starts; a delivery without a git workspace reports the
+// resolved workdir while the turn runs.
+func (r *activeRun) setWorkdir(workdir string) {
+	workdir = strings.TrimSpace(workdir)
+	if workdir == "" {
+		return
+	}
+	r.mu.Lock()
+	r.workdir = workdir
+	r.mu.Unlock()
+}
+
+// noteProgress records that the agent produced output. The watchdog reads it
+// as the heartbeat of a run.
+func (r *activeRun) noteProgress() {
+	r.mu.Lock()
+	r.lastProgress = time.Now()
+	r.mu.Unlock()
+}
+
+// progressAt returns the last moment the run showed progress. A run that has
+// not reported progress yet reports no heartbeat at all.
+func (r *activeRun) progressAt() time.Time {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastProgress
 }
 
 func (r *activeRun) identity() (string, string) {
@@ -135,12 +166,26 @@ const (
 	livenessAlive
 )
 
+func (l sessionLivenessState) String() string {
+	switch l {
+	case livenessDead:
+		return "dead"
+	case livenessAlive:
+		return "alive"
+	default:
+		return "unknown"
+	}
+}
+
+// ErrNoLiveAgent marks an abort that found no running agent: there was
+// nothing to abort.
+var ErrNoLiveAgent = errors.New("webhook: no live agent to abort")
+
 // probeSessionLiveness reports whether the agent behind the run is still
-// working. A live agent that is silent is slow, not stuck: declaring it stuck
-// would kill a healthy run and release its key to a second writer. The probe
-// runs for every run that carries a session and a workdir, so the rule holds
-// independently of the workspace mode. An unknown verdict must never be
-// treated as a dead session.
+// working. The probe runs for every run that carries a session and a workdir,
+// so the rule holds independently of the workspace mode: a delivery without a
+// git workspace reports the workdir its agent runs in. An unknown verdict must
+// never be treated as a dead session.
 func (s *Server) probeSessionLiveness(prKey, endpoint, deliveryID string) sessionLivenessState {
 	if s.sessionLiveness == nil {
 		return livenessUnknown

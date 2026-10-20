@@ -594,6 +594,57 @@ func TestWebhookExecutorWithThread(t *testing.T) {
 	}
 }
 
+func TestWebhookExecutorVerboseStepsReachesStreamer(t *testing.T) {
+	run := func(verbose bool) []string {
+		t.Helper()
+		discordCh := &mockDiscordChannel{
+			name:         "discord",
+			nextMsgID:    "msg-root-1",
+			nextThreadID: "thread-999",
+		}
+		events := []relay.Event{
+			{Type: relay.EventTool, Delta: "bash", ToolContext: "git status"},
+			{Type: relay.EventTool, Delta: "read_file", ToolContext: "main.go"},
+			{Type: relay.EventDelta, Delta: "Analysis output line."},
+		}
+		agentClient := &mockRelayClient{events: events}
+		manager := &mockAgentManager{client: agentClient}
+		exec := newWebhookExecutor([]channel.Channel{discordCh}, manager, mockChannelStore{}, "/tmp",
+			relay.Config{NoEventTimeout: 15 * time.Minute, WebhookAbortTimeout: 5 * time.Second, VerifyTimeout: 15 * time.Second},
+			webhook.TaskOptions{Registry: webhook.NewTaskThreadRegistry(), VerboseSteps: verbose})
+		workCtx := &webhook.WebhookWorkContext{
+			Thread:     true,
+			Workflow:   "github_reviewer",
+			Envelope:   webhook.WebhookEnvelope{"repository": "acme/widget", "pr_number": "42", "head_branch": "feat/thread"},
+			DeliveryID: "del-verbose",
+		}
+		if err := exec(context.Background(), "discord", "chan-main", "prompt text", workCtx); err != nil {
+			t.Fatalf("executor returned error: %v", err)
+		}
+		var texts []string
+		for _, m := range discordCh.sentMessages {
+			texts = append(texts, m.text)
+		}
+		return texts
+	}
+
+	for _, text := range run(false) {
+		if strings.Contains(text, "[Step ") {
+			t.Fatalf("verbose_steps off must not post step lines: %q", text)
+		}
+	}
+	found := false
+	for _, text := range run(true) {
+		if strings.Contains(text, "[Step ") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("verbose_steps on must post the step lines")
+	}
+}
+
 func TestWebhookExecutorThreadCreationFallback(t *testing.T) {
 	discordCh := &mockDiscordChannel{
 		name:           "discord",

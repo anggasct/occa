@@ -116,7 +116,9 @@ func TestDispatcherStuckFlagReleasesKey(t *testing.T) {
 	}
 	waitForStatus(t, st, "github", "delivery-next", store.WebhookStatusCompleted)
 	close(releaseStuck)
-	waitForStatus(t, st, "github", "delivery-stuck", store.WebhookStatusCompleted)
+	// The watchdog owns the run it declared stuck: the delivery ends in a
+	// terminal receipt even when the agent turn returns afterwards.
+	waitForStatus(t, st, "github", "delivery-stuck", store.WebhookStatusFailed)
 }
 
 func TestDispatcherPanicRebuildsWithoutOrphan(t *testing.T) {

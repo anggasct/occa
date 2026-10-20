@@ -115,17 +115,17 @@ func FormatThreadSlimCard(envelope WebhookEnvelope, workflow string, status Task
 			head = "task"
 		}
 	}
-	lines := []string{icon + " " + strings.TrimSpace(head)}
+	parts := []string{icon + " " + strings.TrimSpace(head)}
 	if verdict := reviewVerdictLine(envelope); verdict != "" {
-		lines = append(lines, verdict)
+		parts = append(parts, verdict)
 	}
 	if link := FormatTaskLinks(prURL); link != "" {
-		lines = append(lines, link)
+		parts = append(parts, link)
 	}
 	if outcome := FormatGateOutcome(envelope, workflow, string(status)); outcome != "" && (status == TaskMerged || status == TaskFailed || status == TaskPROpened) {
-		lines = append(lines, outcome)
+		parts = append(parts, outcome)
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(parts, " · ")
 }
 
 func FormatThreadOpener(envelope WebhookEnvelope, workflow string, status TaskStatus, icons map[string]string) string {

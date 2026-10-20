@@ -252,11 +252,18 @@ func TestParentCarriesExactlyFourButtons(t *testing.T) {
 	srv.tasks.LinkPRThread(prKey, rec2)
 
 	srv.syncPhaseParent(ctx, ep, prKey, surfaceEnvelope(), PhaseReview)
-	sent, _, _, _ := rec.snapshot()
-	if len(sent) != 1 {
-		t.Fatalf("expected one parent send, got %d", len(sent))
+	sent, edited, _, _ := rec.snapshot()
+	parent := surfaceMessage{}
+	switch {
+	case len(sent) == 1:
+		parent = sent[0]
+	case len(edited) == 1:
+		// The task parent is the PR parent: one parent per task.
+		parent = edited[0]
+	default:
+		t.Fatalf("expected one parent write, got %d sent and %d edited", len(sent), len(edited))
 	}
-	labels := buttonLabels(sent[0].buttons)
+	labels := buttonLabels(parent.buttons)
 	want := []string{"Open PR", "Open thread", "Merge", "Re-dispatch"}
 	if len(labels) != len(want) {
 		t.Fatalf("parent buttons = %v, want %v", labels, want)
@@ -266,7 +273,7 @@ func TestParentCarriesExactlyFourButtons(t *testing.T) {
 			t.Errorf("parent button %d = %q, want %q", i, labels[i], label)
 		}
 	}
-	if buttonDisabled(sent[0].buttons, "Merge") {
+	if buttonDisabled(parent.buttons, "Merge") {
 		t.Error("merge must be enabled while the gate would pass")
 	}
 
@@ -274,11 +281,11 @@ func TestParentCarriesExactlyFourButtons(t *testing.T) {
 		t.Fatalf("enqueue: %v", err)
 	}
 	srv.syncPhaseParent(ctx, ep, prKey, surfaceEnvelope(), PhaseFix)
-	_, edited, _, _ := rec.snapshot()
-	if len(edited) != 1 {
-		t.Fatalf("expected one parent edit, got %d", len(edited))
+	_, edited, _, _ = rec.snapshot()
+	if len(edited) != 2 {
+		t.Fatalf("expected two parent edits, got %d", len(edited))
 	}
-	if !buttonDisabled(edited[0].buttons, "Merge") {
+	if !buttonDisabled(edited[len(edited)-1].buttons, "Merge") {
 		t.Error("merge must be disabled while another item waits for the PR")
 	}
 }
@@ -758,12 +765,15 @@ func TestPRDeliveryWritesOneLineParentAndOneOutcome(t *testing.T) {
 	waitForSurface(t, rec, 1)
 
 	sent, edited, notified, _ := rec.snapshot()
-	if len(sent) != 1 {
-		t.Fatalf("a first PR must post exactly one parent, got %d: %+v", len(sent), sent)
+	if len(sent) != 0 {
+		t.Fatalf("the task parent is the PR parent, no second parent may be posted: %+v", sent)
 	}
-	parentWrites := append(append([]surfaceMessage(nil), sent...), edited...)
+	parentWrites := edited
 	if len(parentWrites) != 2 {
-		t.Fatalf("parent writes = %d, want one creation and one phase change: %+v", len(parentWrites), parentWrites)
+		t.Fatalf("parent writes = %d, want one parent edited per phase: %+v", len(parentWrites), parentWrites)
+	}
+	if parentWrites[0].messageID != parentWrites[1].messageID {
+		t.Fatalf("the phase changes must edit one parent: %+v", parentWrites)
 	}
 	phases := []string{"queued", "review"}
 	for i, msg := range parentWrites {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -154,6 +155,13 @@ func (s *Server) abortPRSession(ctx context.Context, prKey, repo string) (string
 		return sessionID, false
 	}
 	if err := s.sessionAborter(ctx, sessionID, workdir); err != nil {
+		if errors.Is(err, ErrNoLiveAgent) {
+			slog.Info("webhook: merged delivery found no live agent to abort",
+				"pr_key", prKey,
+				"session_id", sessionID,
+			)
+			return sessionID, true
+		}
 		slog.Error("webhook: merged delivery session abort failed",
 			"pr_key", prKey,
 			"session_id", sessionID,
@@ -224,7 +232,9 @@ func (s *Server) runMergedDocsUpdate(ctx context.Context, ep config.EndpointConf
 }
 
 // mergedDocsEnvelope drops the branch so the post-merge work cannot resolve
-// the PR task thread and write to its parent or state line.
+// the PR task thread and write to its parent or state line. The key stays
+// present with an empty value: a prompt that interpolates it must render,
+// not fail on a missing key.
 func mergedDocsEnvelope(envelope WebhookEnvelope) WebhookEnvelope {
 	out := WebhookEnvelope{}
 	for key, value := range envelope {
@@ -233,6 +243,7 @@ func mergedDocsEnvelope(envelope WebhookEnvelope) WebhookEnvelope {
 		}
 		out[key] = value
 	}
+	out["head_branch"] = ""
 	return out
 }
 

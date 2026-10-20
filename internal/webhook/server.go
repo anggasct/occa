@@ -87,6 +87,10 @@ type MentionNotifier func(ctx context.Context, platform, channelID, text, mentio
 // now. A nil checker falls back to the queue-state gate.
 type MergeGateChecker func(ctx context.Context, prKey string) bool
 
+// Pinner pins a message in its channel. A nil pinner leaves the message
+// unpinned.
+type Pinner func(ctx context.Context, platform, channelID, messageID string) error
+
 type Server struct {
 	bind                  string
 	bindAddr              string
@@ -106,6 +110,7 @@ type Server struct {
 	rawEditor             Editor
 	threadStarter         ThreadStarter
 	guildResolver         GuildResolver
+	pinner                Pinner
 	deliveries            DeliveryStore
 	prQueues              store.PRQueueRepo
 	escalationMention     string
@@ -377,6 +382,10 @@ func (s *Server) SetMentionNotifier(fn MentionNotifier) {
 
 func (s *Server) SetMergeGate(fn MergeGateChecker) {
 	s.mergeGate = fn
+}
+
+func (s *Server) SetPinner(fn Pinner) {
+	s.pinner = fn
 }
 
 func (s *Server) SetGuildResolver(fn GuildResolver) {
@@ -1121,6 +1130,19 @@ func (d *dispatcher) handle(item dispatchItem) {
 		s.handleMergedWorkflow(item, receipt, d)
 		return
 	}
+	if item.prKey != "" && strings.EqualFold(strings.TrimSpace(item.ep.Workflow), "merge") {
+		if verdict, blocked := s.mergeGateBlocked(item.prKey); blocked {
+			envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", item.ep.CommentTrigger)
+			slog.Info("webhook: merge refused, review verdict blocks the gate",
+				"endpoint", item.ep.Name,
+				"delivery_id", item.deliveryID,
+				"pr_key", item.prKey,
+				"review_verdict", verdict,
+			)
+			s.markSkipped(receipt.ID, item.ep, envelope, "merge blocked: "+verdict+" on the current head")
+			return
+		}
+	}
 	if item.prKey != "" {
 		if blocked, _ := s.prQueueBlocked(item.prKey); blocked {
 			s.markSkipped(receipt.ID, item.ep, normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", item.ep.CommentTrigger), "queue blocked — /retry, /skip or /cancel")
@@ -1728,6 +1750,16 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		workdir = lease.Path
 	}
 	run := s.beginActiveRun(workCtx.PRKey, ep.Name, deliveryID, workdir)
+	if heartbeat != nil {
+		progress := heartbeat
+		workCtx.Heartbeat = func() {
+			run.noteProgress()
+			progress()
+		}
+	}
+	workCtx.ReportWorkdir = func(workdir string) {
+		run.setWorkdir(workdir)
+	}
 	resolvedPR := false
 	if hasPRKey {
 		if rec, ok := s.tasks.ResolvePRThread(prKey); ok {
@@ -1806,7 +1838,13 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		return nil
 	}
 	if workCtx.PRKey != "" {
-		s.recordMergeGate(workCtx.PRKey, envelope)
+		verdict := s.recordMergeGate(workCtx.PRKey, envelope)
+		if verdict != "" && strings.EqualFold(strings.TrimSpace(ep.Workflow), "merge") &&
+			strings.TrimSpace(stringValue(envelope["review_verdict"])) == "" {
+			// The merge lane renders the verdict the gate holds, not the
+			// one this delivery happened to carry.
+			envelope["review_verdict"] = verdict
+		}
 	}
 
 	if reviewKey := reviewDedupeKey(envelope); reviewKey != "" && id != 0 {
@@ -1925,8 +1963,15 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 			workCtx.SessionID = strings.TrimSpace(row.ActiveSession)
 		}
 	}
+	fixHeadBefore := ""
+	if isFixWorkflow(ep.Workflow) && strings.TrimSpace(workCtx.PRKey) != "" {
+		fixHeadBefore = normalizeRevision(stringValue(envelope["head_sha"]))
+	}
 	err = s.executor(ctx, ep.Platform, ep.ChannelID, wrapped, workCtx)
 	s.prMirrorSync(workCtx)
+	if err == nil && fixHeadBefore != "" {
+		s.queueReviewAfterFix(workCtx.PRKey, fixHeadBefore)
+	}
 
 	if run.watchdogTookOver() {
 		if aborted, abortOK := run.abortedState(); aborted {

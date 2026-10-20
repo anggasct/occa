@@ -98,11 +98,17 @@ func TestHandleDispatchSuccess(t *testing.T) {
 	}
 	summary := FormatDispatchSummary(task, nil)
 	lines := strings.Split(strings.TrimSpace(summary), "\n")
-	if len(lines) != 2 {
-		t.Errorf("dispatch summary must be 2 lines, got %q", summary)
+	if len(lines) != 1 {
+		t.Errorf("dispatch summary must be one line, got %q", summary)
+	}
+	if strings.Contains(summary, "specs/feat-x.md") {
+		t.Errorf("dispatch summary must not carry the task brief: %q", summary)
 	}
 	if !strings.Contains(summary, "⏳") || !strings.Contains(summary, task.ID) {
 		t.Errorf("summary = %q", summary)
+	}
+	if brief := FormatDispatchBrief(task); !strings.Contains(brief, "specs/feat-x.md") {
+		t.Errorf("dispatch brief = %q, want the spec path", brief)
 	}
 }
 
@@ -300,8 +306,11 @@ func TestHandleDispatchPostsSummary(t *testing.T) {
 	if !strings.Contains(posts[0], "Dispatched") || !strings.Contains(posts[0], payload["task_id"]) {
 		t.Errorf("summary = %q, want Dispatched with %q", posts[0], payload["task_id"])
 	}
-	if !strings.Contains(posts[0], "acme/widget#feat/x") || !strings.Contains(posts[0], "specs/feat-x.md") {
-		t.Errorf("summary missing repo/branch/spec: %q", posts[0])
+	if !strings.Contains(posts[0], "acme/widget#feat/x") {
+		t.Errorf("summary missing repo/branch: %q", posts[0])
+	}
+	if strings.Contains(posts[0], "specs/feat-x.md") {
+		t.Errorf("the channel parent must not carry the task brief: %q", posts[0])
 	}
 }
 
@@ -562,9 +571,14 @@ func TestScheduleDispatchFallbackFires(t *testing.T) {
 	if !foundFallback {
 		t.Fatalf("fallback finding missing in posts = %v, want Fallback poll", posts)
 	}
-	for i := range platforms {
-		if platforms[i] != "discord" || channels[i] != "thread-456" {
-			t.Errorf("post %d target = %s/%s, want discord/thread-456", i, platforms[i], channels[i])
+	for i, text := range posts {
+		if !strings.Contains(text, "Fallback poll") {
+			continue
+		}
+		// The fallback finding is an operator notice, not a thread card: it
+		// belongs to the channel, never to the task thread.
+		if platforms[i] != "discord" || channels[i] != "chan-1" {
+			t.Errorf("fallback post %d target = %s/%s, want discord/chan-1", i, platforms[i], channels[i])
 		}
 	}
 }

@@ -53,6 +53,10 @@ type WebhookWorkContext struct {
 	StartTime      time.Time
 	Heartbeat      func()
 	ReportSession  func(sessionID string)
+	// ReportWorkdir carries the workdir the agent actually runs in. A
+	// delivery without a git workspace has no lease path, and the watchdog
+	// needs the real workdir to reach the agent session.
+	ReportWorkdir func(workdir string)
 }
 
 func ExtractExecutionKey(body []byte) WebhookExecutionKey {

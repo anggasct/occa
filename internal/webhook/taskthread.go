@@ -197,6 +197,9 @@ type SurfaceUpdate struct {
 type SurfaceGate struct {
 	Approval string
 	CI       string
+	// Commit is the commit the verdict was observed on. A verdict on
+	// another commit does not clear a blocking one unless it is the head.
+	Commit string
 }
 
 // Allows reports whether the approval and CI half of the merge gate passes.
@@ -222,14 +225,19 @@ type TaskThreadRegistry struct {
 	gates     map[string]SurfaceGate
 	icons     map[string]string
 	colors    map[string]int
+	// statusByThread holds the thread state line per thread. The state line
+	// belongs to the thread, not to a (repo, branch, PR) key: the dispatch
+	// writer and the PR-queue writer must edit the same message.
+	statusByThread map[string]string
 }
 
 func NewTaskThreadRegistry() *TaskThreadRegistry {
 	return &TaskThreadRegistry{
-		records:   make(map[string]TaskThreadRecord),
-		prThreads: make(map[string]string),
-		surfaces:  make(map[string]SurfaceUpdate),
-		gates:     make(map[string]SurfaceGate),
+		records:        make(map[string]TaskThreadRecord),
+		prThreads:      make(map[string]string),
+		surfaces:       make(map[string]SurfaceUpdate),
+		gates:          make(map[string]SurfaceGate),
+		statusByThread: make(map[string]string),
 	}
 }
 
@@ -362,6 +370,9 @@ func (t *TaskThreadRegistry) SetGate(prKey string, gate SurfaceGate) {
 	current := t.gates[key]
 	if approval := strings.TrimSpace(gate.Approval); approval != "" {
 		current.Approval = approval
+		if commit := strings.TrimSpace(gate.Commit); commit != "" {
+			current.Commit = commit
+		}
 	}
 	if ci := strings.TrimSpace(gate.CI); ci != "" {
 		current.CI = ci
@@ -603,6 +614,31 @@ func (t *TaskThreadRegistry) SetSurfaceStatusMessage(prKey, msgID string) {
 	t.surfaces[key] = surface
 }
 
+// SetStatusMessageForThread records the id of the thread state line of a
+// thread. Every writer of a thread's state line edits this one message.
+func (t *TaskThreadRegistry) SetStatusMessageForThread(threadID, msgID string) {
+	if t == nil || strings.TrimSpace(threadID) == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.statusByThread == nil {
+		t.statusByThread = make(map[string]string)
+	}
+	t.statusByThread[strings.TrimSpace(threadID)] = strings.TrimSpace(msgID)
+}
+
+// StatusMessageIDForThread returns the id of the thread state line of a
+// thread.
+func (t *TaskThreadRegistry) StatusMessageIDForThread(threadID string) string {
+	if t == nil || strings.TrimSpace(threadID) == "" {
+		return ""
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return strings.TrimSpace(t.statusByThread[strings.TrimSpace(threadID)])
+}
+
 // SetStatusMessageKeyed records the id of the thread state line. PR surfaces
 // are tracked per PR, the legacy task path per repo and branch.
 func (t *TaskThreadRegistry) SetStatusMessageKeyed(repo, branch, prKey, msgID string) {
@@ -638,6 +674,22 @@ func (t *TaskThreadRegistry) SurfaceStatusMessageID(prKey string) string {
 		return ""
 	}
 	return strings.TrimSpace(surface.StatusMessageID)
+}
+
+// SurfaceRootOwner returns the PR whose channel parent is a given message.
+// A parent belongs to one PR: a second PR may not edit it.
+func (t *TaskThreadRegistry) SurfaceRootOwner(rootID string) (string, bool) {
+	if t == nil || strings.TrimSpace(rootID) == "" {
+		return "", false
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	for prKey, surface := range t.surfaces {
+		if strings.TrimSpace(surface.RootMessageID) == strings.TrimSpace(rootID) {
+			return prKey, true
+		}
+	}
+	return "", false
 }
 
 // SurfaceState returns the parent message id, the phase currently shown on

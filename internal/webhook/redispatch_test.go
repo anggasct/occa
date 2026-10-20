@@ -172,8 +172,8 @@ func TestRedispatchOpenReusesSameParentThreadWithOriginalSpec(t *testing.T) {
 	if !strings.Contains(editTexts[0], "Dispatched") || !strings.Contains(editTexts[0], task.ID) {
 		t.Errorf("parent re-edit must be dispatched with new task id: %q", editTexts[0])
 	}
-	if !strings.Contains(editTexts[0], "specs/orig.md") {
-		t.Errorf("parent re-edit must carry original spec: %q", editTexts[0])
+	if strings.Contains(editTexts[0], "specs/orig.md") {
+		t.Errorf("the channel parent must not carry the task brief: %q", editTexts[0])
 	}
 	if len(notifyTexts) != 1 {
 		t.Fatalf("thread posts = %d, want exactly 1 separator in same thread", len(notifyTexts))
@@ -181,8 +181,12 @@ func TestRedispatchOpenReusesSameParentThreadWithOriginalSpec(t *testing.T) {
 	if notifyTargets[0] != "thread-1" {
 		t.Errorf("retry thread target = %q, want existing thread-1", notifyTargets[0])
 	}
-	if !strings.Contains(notifyTexts[0], "---") || !strings.Contains(strings.ToLower(notifyTexts[0]), "re-dispatch") {
+	if !strings.Contains(strings.ToLower(notifyTexts[0]), "re-dispatch") {
 		t.Errorf("thread post must be retry separator: %q", notifyTexts[0])
+	}
+	head := strings.SplitN(notifyTexts[0], "\n", 2)[0]
+	if !strings.Contains(head, "Spec: specs/orig.md") {
+		t.Errorf("the thread separator must carry the brief: %q", notifyTexts[0])
 	}
 	if !strings.Contains(notifyTexts[0], "specs/orig.md") {
 		t.Errorf("separator must carry original spec: %q", notifyTexts[0])

@@ -380,19 +380,39 @@ func (s *Server) planRetry(ep config.EndpointConfig, prKey string, receiptID int
 
 // retryStillAllowed re-resolves the live PR state before a retry attempt
 // starts: the PR may have reached a terminal state while the attempt waited
-// for its backoff. An unresolvable state does not stop an already decided
-// retry.
+// for its backoff. An unresolvable state fails closed — the attempt is
+// refused and the PR is escalated. A retry that cannot read the PR state may
+// start a second agent turn on a merged PR, and that is the incident this
+// guard exists to stop.
 func (s *Server) retryStillAllowed(ep config.EndpointConfig, prKey string, receiptID int64) bool {
 	state, err := s.newPRStateDecision(prKey).resolve(context.Background())
-	if err != nil {
-		slog.Warn("webhook: retry state unknown at execution", "endpoint", ep.Name, "pr_key", prKey, "error", err)
-		return true
+	if err != nil || state == "" {
+		slog.Error("webhook: retry refused, PR state unresolvable",
+			"endpoint", ep.Name,
+			"pr_key", prKey,
+			"error", err,
+		)
+		s.refuseRetryUnresolvableState(ep, prKey, receiptID)
+		return false
 	}
 	if state == PRStateMerged || state == PRStateClosed {
 		s.refuseRetryForTerminalPR(ep, prKey, receiptID, state)
 		return false
 	}
 	return true
+}
+
+// refuseRetryUnresolvableState fails closed: the attempt is skipped and the
+// PR is escalated, so an unreadable PR state never starts a second agent turn.
+func (s *Server) refuseRetryUnresolvableState(ep config.EndpointConfig, prKey string, receiptID int64) {
+	if s.prQueues != nil {
+		if row, err := s.prQueues.Get(context.Background(), prKey); err == nil && row != nil {
+			max, _ := s.retryPolicyFor(failureModel)
+			s.escalateBlockedReason(ep, prKey, row, failureModel, row.RetryCount, max,
+				"live PR state unresolvable — retry refused (fail-closed)", "live PR state unknown")
+		}
+	}
+	s.skipDeliveryQuiet(ep, receiptID, "PR state unresolvable — retry refused (fail-closed)")
 }
 
 // refuseRetryForTerminalPR stops a retry whose PR already reached a terminal

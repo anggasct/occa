@@ -217,14 +217,25 @@ func injectTaskContext(envelope WebhookEnvelope, key WebhookExecutionKey, store 
 	envelope["task_verify"] = task.Verify
 }
 
+// FormatDispatchSummary renders the channel parent of a dispatched task. It
+// is one line: the task brief belongs in the task record and the thread, not
+// in the channel.
 func FormatDispatchSummary(task DispatchTask, icons map[string]string) string {
-	head := normalizeRepoKey(task.Repo) + "#" + strings.TrimSpace(task.Branch)
+	head := normalizeRepoKey(task.Repo) + "#" + normalizeBranchKey(task.Branch)
 	first := TaskIcon(TaskDispatched, icons) + " Dispatched " + head + " · " + task.ID
-	second := "Spec: " + task.SpecPath
-	if strings.TrimSpace(task.Verify) != "" {
-		second += " · Verify: " + strings.TrimSpace(task.Verify)
+	return first
+}
+
+// FormatDispatchBrief renders the task brief that belongs in the thread.
+func FormatDispatchBrief(task DispatchTask) string {
+	parts := make([]string, 0, 2)
+	if spec := strings.TrimSpace(task.SpecPath); spec != "" {
+		parts = append(parts, "Spec: "+spec)
 	}
-	return first + "\n" + second
+	if verify := strings.TrimSpace(task.Verify); verify != "" {
+		parts = append(parts, "Verify: "+verify)
+	}
+	return strings.Join(parts, " · ")
 }
 
 func FormatDispatchFailed(task DispatchTask, icons map[string]string, attempts int) string {
@@ -346,7 +357,11 @@ func isRedispatchScope(scope string) bool {
 }
 
 func FormatRedispatchSeparator(task DispatchTask, icons map[string]string) string {
-	return "---\n🔁 Re-dispatch requested — retrying in this thread.\n" + FormatDispatchSummary(task, icons)
+	separator := "🔁 Re-dispatch requested — retrying in this thread. · " + FormatDispatchSummary(task, icons)
+	if brief := FormatDispatchBrief(task); brief != "" {
+		separator += " · " + brief
+	}
+	return separator
 }
 
 func (s *Server) handleRedispatch(w http.ResponseWriter, r *http.Request, req DispatchRequest) bool {
@@ -552,6 +567,13 @@ func (s *Server) openDispatchThread(task DispatchTask, platform, channelID, root
 	}
 	ctx := context.Background()
 	opener := FormatThreadOpener(WebhookEnvelope{"repository": task.Repo, "head_branch": task.Branch}, "dispatch", TaskDispatched, s.statusIcons)
+	if brief := FormatDispatchBrief(task); brief != "" {
+		if opener == "" {
+			opener = brief
+		} else {
+			opener += " · " + brief
+		}
+	}
 	if strings.TrimSpace(opener) != "" {
 		_ = s.notifyThread(ctx, platform, threadTargetFor(platform, channelID, threadID), opener)
 	}
@@ -694,23 +716,9 @@ func (s *Server) pollBranchOnce(repo, branch, platform, channelID, threadID stri
 		slog.Info("webhook: fallback poll no PR, thread-only suppressed top-level", "repo", repo, "branch", branch)
 		return
 	}
-	target := channelID
-	threadTarget := ""
-	if platform == "discord" && threadID != "" {
-		target = threadID
-		threadTarget = threadID
-	} else if platform == "telegram" && threadID != "" && !strings.Contains(channelID, ":") {
-		target = channelID + ":" + threadID
-		threadTarget = target
-	}
-	if err := s.notifier(context.Background(), platform, target, finding); err != nil {
+	// The finding belongs to the channel, not to the task thread: the thread
+	// carries the state line and one outcome line per run.
+	if err := s.notifier(context.Background(), platform, channelID, finding); err != nil {
 		slog.Warn("webhook: fallback poll notify failed", "repo", repo, "branch", branch, "error", err)
-		if threadTarget != "" && target == threadTarget && result.Found {
-			if fallbackErr := s.notifier(context.Background(), platform, channelID, finding); fallbackErr != nil {
-				slog.Warn("webhook: fallback poll parent fallback failed", "repo", repo, "branch", branch, "error", fallbackErr)
-			} else {
-				slog.Info("webhook: fallback poll fell back to parent", "repo", repo, "branch", branch)
-			}
-		}
 	}
 }

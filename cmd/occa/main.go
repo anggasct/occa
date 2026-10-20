@@ -494,6 +494,20 @@ func main() {
 			}
 			return errors.New("webhook channel adapter unavailable")
 		})
+		webhookSrv.SetPinner(func(ctx context.Context, platform, channelID, messageID string) error {
+			for _, ch := range channels {
+				if ch.Name() != platform {
+					continue
+				}
+				if pinner, ok := ch.(interface {
+					PinNotification(channelID, messageID string) error
+				}); ok {
+					return pinner.PinNotification(channelID, messageID)
+				}
+				return errors.New("webhook channel adapter cannot pin messages")
+			}
+			return errors.New("webhook channel adapter unavailable")
+		})
 		webhookSrv.SetThreadStarter(func(ctx context.Context, platform, channelID, messageID, name string) (string, error) {
 			for _, ch := range channels {
 				if ch.Name() == platform {
@@ -568,20 +582,34 @@ func main() {
 			return false
 		})
 		webhookSrv.SetSessionAborter(func(ctx context.Context, sessionID, workdir string) error {
-			if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(workdir) == "" {
-				return errors.New("webhook: abort needs session and workdir")
+			if strings.TrimSpace(sessionID) == "" {
+				return errors.New("webhook: abort needs a session id")
 			}
-			inst, err := manager.Instance(ctx, workdir)
+			dir := strings.TrimSpace(workdir)
+			if dir == "" {
+				dir = strings.TrimSpace(cfg.Agent.DefaultWorkdir)
+			}
+			// The lookup never spawns: an abort must not start an agent
+			// process to kill it. A workdir without a running agent has
+			// nothing to abort.
+			inst, err := manager.Existing(dir)
 			if err != nil {
+				if errors.Is(err, process.ErrNoLiveAgent) {
+					return fmt.Errorf("%w: %v", webhook.ErrNoLiveAgent, err)
+				}
 				return err
 			}
 			return inst.Client().AbortSession(ctx, sessionID)
 		})
 		webhookSrv.SetSessionLiveness(func(ctx context.Context, sessionID, workdir string) (bool, error) {
-			if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(workdir) == "" {
+			if strings.TrimSpace(sessionID) == "" {
 				return false, nil
 			}
-			_, alive := manager.Running(workdir)
+			dir := strings.TrimSpace(workdir)
+			if dir == "" {
+				dir = strings.TrimSpace(cfg.Agent.DefaultWorkdir)
+			}
+			_, alive := manager.Running(dir)
 			return alive, nil
 		})
 		{
@@ -1029,6 +1057,9 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 				}
 
 				workdir := resolveWebhookWorkdir(ctx, channelRepo, defaultWorkdir, platform, channelID, workCtx.Worktree)
+				if workCtx.ReportWorkdir != nil {
+					workCtx.ReportWorkdir(workdir)
+				}
 
 				inst, err := manager.Instance(ctx, workdir)
 				if err != nil {
@@ -1094,8 +1125,13 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 				if err != nil {
 					if workCtx.RootMessageID != "" {
 						if workCtx.ThreadID != "" {
-							slim := webhook.FormatThreadSlimCard(workCtx.Envelope, workCtx.Workflow, webhook.TaskFailed, taskOpts.Icons)
-							_, _ = notifySend(ch, targetChannelID, slim)
+							// A PR thread carries one outcome line per run,
+							// written by the PR surface path. A second card
+							// here would put the v1 card back in the thread.
+							if strings.TrimSpace(workCtx.PRKey) == "" {
+								slim := webhook.FormatThreadSlimCard(workCtx.Envelope, workCtx.Workflow, webhook.TaskFailed, taskOpts.Icons)
+								_, _ = notifySend(ch, targetChannelID, slim)
+							}
 							if taskOpts.Registry != nil {
 								if repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope); repo != "" && branch != "" {
 									refreshThreadBannerAndStatus(ch, taskOpts, platform, channelID, workCtx.ThreadID, repo, branch, workCtx, webhook.FormatGateOutcome(workCtx.Envelope, workCtx.Workflow, "FAILED"))
@@ -1133,8 +1169,10 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 
 				if workCtx.RootMessageID != "" {
 					if workCtx.ThreadID != "" {
-						slim := webhook.FormatThreadSlimCard(workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons)
-						_, _ = notifySend(ch, targetChannelID, slim)
+						if strings.TrimSpace(workCtx.PRKey) == "" {
+							slim := webhook.FormatThreadSlimCard(workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons)
+							_, _ = notifySend(ch, targetChannelID, slim)
+						}
 						if taskOpts.Registry != nil {
 							if repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope); repo != "" && branch != "" {
 								refreshThreadBannerAndStatus(ch, taskOpts, platform, channelID, workCtx.ThreadID, repo, branch, workCtx, webhook.FormatGateOutcome(workCtx.Envelope, workCtx.Workflow, "COMPLETED"))

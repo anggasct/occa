@@ -281,6 +281,12 @@ func (s *Server) syncPhaseParent(ctx context.Context, ep config.EndpointConfig, 
 		return "", false
 	}
 	rootID, previous, _, known := s.prSurfaceState(prKey)
+	if !known && strings.TrimSpace(rootID) == "" {
+		// The task that opened this PR already has a channel parent: the
+		// dispatch parent. Reusing it keeps one parent per task in the
+		// channel instead of a second one for the same work.
+		rootID = s.reusableTaskParent(ep, prKey)
+	}
 	if known {
 		if previous == phase {
 			return rootID, false
@@ -342,6 +348,32 @@ func (s *Server) syncPhaseParent(ctx context.Context, ep config.EndpointConfig, 
 	s.tasks.ClearReopen(prKey)
 	slog.Info("webhook: phase parent updated", "pr_key", prKey, "from_phase", string(previous), "to_phase", string(phase))
 	return rootID, true
+}
+
+// reusableTaskParent returns the channel parent of the task that owns a PR,
+// when that parent lives in the channel this endpoint writes to. A parent in
+// another channel cannot be edited from here, so a new one is posted instead.
+func (s *Server) reusableTaskParent(ep config.EndpointConfig, prKey string) string {
+	if s == nil || s.tasks == nil {
+		return ""
+	}
+	rec, ok := s.tasks.ResolvePRThread(prKey)
+	if !ok || strings.TrimSpace(rec.RootMessageID) == "" {
+		return ""
+	}
+	rootID := strings.TrimSpace(rec.RootMessageID)
+	if owner, taken := s.tasks.SurfaceRootOwner(rootID); taken && owner != prKey {
+		return ""
+	}
+	repo, _, _ := splitPRKey(prKey)
+	platform, channelID := s.dispatchNotifyTarget(repo)
+	if platform == "" || channelID == "" {
+		return ""
+	}
+	if platform != ep.Platform || channelID != ep.ChannelID {
+		return ""
+	}
+	return strings.TrimSpace(rec.RootMessageID)
 }
 
 // refreshPhaseParentButtons re-renders the channel parent once the thread of
@@ -415,7 +447,7 @@ func (s *Server) ensureThreadStatus(ctx context.Context, platform, channelID, th
 	if strings.TrimSpace(target) == "" {
 		return ""
 	}
-	existing := s.tasks.StatusMessageIDKeyed(repo, branch, prKey)
+	existing := s.tasks.StatusMessageIDForThread(threadID)
 	if existing != "" {
 		if err := s.editThread(ctx, platform, target, existing, text); err == nil {
 			return existing
@@ -425,8 +457,25 @@ func (s *Server) ensureThreadStatus(ctx context.Context, platform, channelID, th
 	if err != nil || strings.TrimSpace(msgID) == "" {
 		return strings.TrimSpace(msgID)
 	}
+	s.tasks.SetStatusMessageForThread(threadID, msgID)
 	s.tasks.SetStatusMessageKeyed(repo, branch, prKey, msgID)
+	s.pinThreadStatus(ctx, platform, target, msgID)
 	return msgID
+}
+
+// pinThreadStatus pins the thread state line so the operator finds the
+// current phase without hunting through the thread. Pinning is best-effort:
+// a platform without pin support must not fail the write.
+func (s *Server) pinThreadStatus(ctx context.Context, platform, target, msgID string) {
+	if s == nil || s.pinner == nil {
+		return
+	}
+	if strings.TrimSpace(target) == "" || strings.TrimSpace(msgID) == "" {
+		return
+	}
+	if err := s.pinner(ctx, platform, target, msgID); err != nil {
+		slog.Warn("webhook: thread status pin failed", "platform", platform, "message_id", msgID, "error", err)
+	}
 }
 
 // prSurfaceFrozen reports whether a write to the PR surface must be refused:
@@ -529,16 +578,68 @@ func (s *Server) clearEscalated(prKey string) {
 }
 
 // recordMergeGate remembers the approval and CI state a delivery reported so
-// the merge button is disabled while the merge gate would fail.
-func (s *Server) recordMergeGate(prKey string, envelope WebhookEnvelope) {
+// the merge button is disabled while the merge gate would fail. The gate is
+// the single place the verdict is computed: a REQUEST_CHANGES verdict blocks
+// the merge until a later approval supersedes it.
+func (s *Server) recordMergeGate(prKey string, envelope WebhookEnvelope) string {
 	if s == nil || s.tasks == nil || strings.TrimSpace(prKey) == "" {
-		return
+		return ""
 	}
-	gate := SurfaceGate{Approval: approvalState(envelope), CI: ciState(envelope)}
+	gate := SurfaceGate{
+		Approval: approvalState(envelope),
+		CI:       ciState(envelope),
+		Commit:   strings.TrimSpace(stringValue(envelope["review_commit"])),
+	}
 	if gate.Approval == "" && gate.CI == "" {
-		return
+		return s.mergeGateVerdict(prKey)
+	}
+	current, known := s.tasks.Gate(prKey)
+	if gate.Approval == "approved" && known && strings.TrimSpace(current.Approval) == "changes_requested" &&
+		!s.approvalSupersedesBlock(prKey, current, gate) {
+		// The approval is not on the head that carries the blocking
+		// review: the block stands.
+		gate.Approval = ""
+		gate.Commit = ""
 	}
 	s.tasks.SetGate(prKey, gate)
+	return s.mergeGateVerdict(prKey)
+}
+
+// approvalSupersedesBlock reports whether an approval clears a recorded
+// REQUEST_CHANGES verdict. A later review on the same commit wins, and an
+// approval on another commit wins only when it is the current head.
+func (s *Server) approvalSupersedesBlock(prKey string, current, approval SurfaceGate) bool {
+	blockedCommit := strings.TrimSpace(current.Commit)
+	approvedCommit := strings.TrimSpace(approval.Commit)
+	if blockedCommit == "" || approvedCommit == "" || blockedCommit == approvedCommit {
+		return true
+	}
+	head := s.livePRHeadSHA(context.Background(), prKey)
+	return head != "" && head == approvedCommit
+}
+
+// mergeGateVerdict returns the review verdict the merge gate holds for a PR
+// and whether it blocks the merge.
+func (s *Server) mergeGateVerdict(prKey string) string {
+	if s == nil || s.tasks == nil {
+		return ""
+	}
+	gate, ok := s.tasks.Gate(prKey)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(gate.Approval)
+}
+
+// mergeGateBlocked reports whether the recorded review verdict blocks the
+// merge. A REQUEST_CHANGES verdict blocks it, also when the review is a
+// self-review by the PR author.
+func (s *Server) mergeGateBlocked(prKey string) (string, bool) {
+	verdict := s.mergeGateVerdict(prKey)
+	if verdict == "" || verdict == "approved" {
+		return verdict, false
+	}
+	return verdict, true
 }
 
 // approvalState reads the review verdict a delivery carries.
