@@ -60,7 +60,10 @@ func FormatGateOutcome(envelope WebhookEnvelope, workflow, deliveryStatus string
 	w = strings.TrimPrefix(w, "github_")
 	status := strings.ToUpper(strings.TrimSpace(deliveryStatus))
 	prState := strings.ToLower(strings.TrimSpace(stringValue(envelope["pr_state"])))
-	verdict := strings.ToUpper(strings.TrimSpace(stringValue(envelope["review_verdict"])))
+	verdict := strings.ToUpper(strings.TrimSpace(stringValue(envelope["gate_verdict"])))
+	if verdict == "" {
+		verdict = strings.ToUpper(strings.TrimSpace(stringValue(envelope["review_verdict"])))
+	}
 	conclusion := strings.ToLower(strings.TrimSpace(stringValue(envelope["conclusion"])))
 	merged := false
 	if v, ok := envelope["merged"].(bool); ok {

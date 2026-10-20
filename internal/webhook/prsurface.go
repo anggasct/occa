@@ -131,11 +131,66 @@ func FormatRunOutcome(envelope WebhookEnvelope, workflow, status, reason, next s
 }
 
 func outcomeVerdict(envelope WebhookEnvelope) string {
-	verdict := strings.ToUpper(strings.TrimSpace(stringValue(envelope["review_verdict"])))
+	verdict := strings.ToUpper(strings.TrimSpace(stringValue(envelope["gate_verdict"])))
+	if verdict == "" {
+		verdict = strings.ToUpper(strings.TrimSpace(stringValue(envelope["review_verdict"])))
+	}
 	if verdict == "" {
 		return ""
 	}
 	return "verdict: " + verdict
+}
+
+// gateVerdict returns the review verdict the merge gate holds for a PR. The
+// gate is the one place the verdict is computed, so every lane that renders a
+// surface shows the same one.
+func (s *Server) gateVerdict(prKey string) string {
+	if s == nil || s.tasks == nil {
+		return ""
+	}
+	return s.mergeGateVerdict(prKey)
+}
+
+// withGateVerdict returns the envelope with the verdict the merge gate holds
+// added to it. A lane that renders a surface reads the verdict from there, so
+// the run outcome, the thread card and the merge button cannot disagree.
+func withGateVerdict(envelope WebhookEnvelope, verdict string) WebhookEnvelope {
+	verdict = gateVerdictText(verdict)
+	if verdict == "" {
+		return envelope
+	}
+	out := make(WebhookEnvelope, len(envelope)+1)
+	for key, value := range envelope {
+		out[key] = value
+	}
+	out["gate_verdict"] = verdict
+	return out
+}
+
+// gateVerdictText renders the gate verdict the way a review verdict is
+// rendered, so a lane that fills the verdict in shows the same token as a
+// lane that carries one.
+func gateVerdictText(verdict string) string {
+	switch strings.ToLower(strings.TrimSpace(verdict)) {
+	case "changes_requested", "request_changes", "requested_changes":
+		return "REQUEST_CHANGES"
+	case "approved":
+		return "APPROVED"
+	}
+	return strings.TrimSpace(verdict)
+}
+
+// gateEnvelope returns the envelope with the verdict the merge gate holds for
+// its PR added to it.
+func (s *Server) gateEnvelope(ep config.EndpointConfig, envelope WebhookEnvelope) WebhookEnvelope {
+	if s == nil || ep.Automation == nil {
+		return envelope
+	}
+	prKey := s.prKeyForEnvelope(ep, envelope)
+	if strings.TrimSpace(prKey) == "" {
+		return envelope
+	}
+	return withGateVerdict(envelope, s.gateVerdict(prKey))
 }
 
 func outcomeMarker(workflow string) (string, string) {
@@ -730,7 +785,11 @@ func waitingReasonForGate(envelope WebhookEnvelope) string {
 	if conclusion == "failure" || conclusion == "failed" {
 		return "CI (check_suite)"
 	}
-	switch strings.ToUpper(strings.TrimSpace(stringValue(envelope["review_verdict"]))) {
+	verdict := strings.ToUpper(strings.TrimSpace(stringValue(envelope["gate_verdict"])))
+	if verdict == "" {
+		verdict = strings.ToUpper(strings.TrimSpace(stringValue(envelope["review_verdict"])))
+	}
+	switch verdict {
 	case "REQUEST_CHANGES", "REQUESTED_CHANGES", "CHANGES_REQUESTED":
 		return "approval"
 	}
