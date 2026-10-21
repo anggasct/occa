@@ -30,6 +30,7 @@ type WebhookTurn struct {
 	AbortTimeout  time.Duration
 	VerifyTimeout time.Duration
 	OnEvent       func(ev Event)
+	OnSession     func(sessionID string)
 	Streamer      *Streamer
 }
 
@@ -52,6 +53,9 @@ func (t WebhookTurn) Run(ctx context.Context) (res WebhookTurnResult, err error)
 	}
 	res.SessionID = sessionID
 	slog.Info("relay: webhook session created", t.attrs(sessionID)...)
+	if t.OnSession != nil {
+		t.OnSession(sessionID)
+	}
 
 	completed := false
 	defer func() {
@@ -129,6 +133,10 @@ func (t WebhookTurn) Run(ctx context.Context) (res WebhookTurnResult, err error)
 				res.Progress.LastDeltaAt = now
 				res.Progress.DeltaCount++
 				buf.WriteString(ev.Delta)
+			case "permission_asked":
+				t.denyUnhandledPermission(ctx, ev)
+			case "question_asked":
+				t.rejectUnhandledQuestion(ctx, ev)
 			case "done":
 				res.Output = buf.String()
 				closeStreamer()
@@ -175,6 +183,73 @@ func (t WebhookTurn) verify(sessionID, output string) error {
 		}
 	}
 	return fmt.Errorf("%w: no completed assistant message for session", ErrWebhookResponseIncomplete)
+}
+
+// denyUnhandledPermission rejects a permission request this lane cannot
+// answer. The webhook lane has no permission-prompt handler, so an unanswered
+// request leaves the tool call running forever: the agent freezes, the
+// delivery stays in processing and the PR lock stays held. A denial is a
+// result the agent reports and the run ends.
+func (t WebhookTurn) denyUnhandledPermission(ctx context.Context, ev Event) {
+	if ev.Permission == nil {
+		return
+	}
+	requestID := strings.TrimSpace(ev.Permission.ID)
+	tool := strings.TrimSpace(ev.Permission.Tool)
+	if requestID == "" {
+		slog.Warn("webhook: permission denied, no handler", "tool", tool, "reason", "no request id")
+		return
+	}
+	if err := replyPermission(ctx, t.Client, requestID, PermissionReject); err != nil {
+		slog.Error("webhook: permission denied, no handler", "tool", tool, "request_id", requestID, "error", err)
+		return
+	}
+	slog.Warn("webhook: permission denied, no handler", "tool", tool, "request_id", requestID)
+}
+
+// replyPermission answers a permission request without taking the turn down
+// when the client misbehaves: a failed denial must not end the run silently.
+func replyPermission(ctx context.Context, client Client, requestID string, reply PermissionReply) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("relay: reply permission: %v", r)
+		}
+	}()
+	if client == nil {
+		return errors.New("relay: reply permission: nil client")
+	}
+	return client.ReplyPermission(ctx, requestID, reply)
+}
+
+// rejectUnhandledQuestion rejects a question this lane cannot answer, for the
+// same reason a permission request is denied: an unanswered question leaves
+// the tool call running until the run times out.
+func (t WebhookTurn) rejectUnhandledQuestion(ctx context.Context, ev Event) {
+	if ev.Question == nil {
+		return
+	}
+	requestID := strings.TrimSpace(ev.Question.ID)
+	if requestID == "" {
+		slog.Warn("webhook: question denied, no handler", "reason", "no request id")
+		return
+	}
+	if err := rejectQuestion(ctx, t.Client, requestID); err != nil {
+		slog.Error("webhook: question denied, no handler", "request_id", requestID, "error", err)
+		return
+	}
+	slog.Warn("webhook: question denied, no handler", "request_id", requestID)
+}
+
+func rejectQuestion(ctx context.Context, client Client, requestID string) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("relay: reject question: %v", r)
+		}
+	}()
+	if client == nil {
+		return errors.New("relay: reject question: nil client")
+	}
+	return client.RejectQuestion(ctx, requestID)
 }
 
 func (t WebhookTurn) attrs(sessionID string, extra ...any) []any {

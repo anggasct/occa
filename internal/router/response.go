@@ -130,19 +130,36 @@ func (c *responseCoordinator) drain(key responseKey) []queuedMessage {
 	return q
 }
 
+// popNext hands out the first queued message for key and keeps the rest
+// queued, so the remainder is still there for the turn that runs next.
+func (c *responseCoordinator) popNext(key responseKey) (queuedMessage, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	q := c.queues[key]
+	if len(q) == 0 {
+		return queuedMessage{}, false
+	}
+	next := q[0]
+	if len(q) == 1 {
+		delete(c.queues, key)
+	} else {
+		c.queues[key] = q[1:]
+	}
+	return next, true
+}
+
+// pushFront puts a message back at the head of the queue for key. A message
+// that cannot start now must not be dropped: the operator already sent it.
+func (c *responseCoordinator) pushFront(key responseKey, msg queuedMessage) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.queues[key] = append([]queuedMessage{msg}, c.queues[key]...)
+}
+
 func (c *responseCoordinator) queueDepth(key responseKey) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.queues[key])
-}
-
-func (c *responseCoordinator) requeuePrefix(key responseKey, msgs []queuedMessage) {
-	if len(msgs) == 0 {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.queues[key] = append(msgs, c.queues[key]...)
 }
 
 func (c *responseCoordinator) release(key responseKey) {
@@ -243,8 +260,7 @@ func (r *Router) runResponse(
 		inst.End()
 		r.responses.release(key)
 		slog.Info("response finished", "platform", key.platform, "channel_id", key.channelID, "thread_id", key.threadID, "user_id", key.userID, "outcome", outcome, "elapsed", time.Since(started).Truncate(time.Millisecond))
-		drained := r.responses.drain(key)
-		r.dispatchDrained(key, drained)
+		r.dispatchQueued(key)
 	}()
 
 	progressStopCh := make(chan struct{})

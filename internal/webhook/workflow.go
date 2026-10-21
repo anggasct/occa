@@ -293,9 +293,10 @@ func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelo
 			if repo, branch := TaskRepoBranch(WebhookExecutionKey{}, envelope); repo != "" && branch != "" && threadID != "" {
 				s.postPhaseBannerIfChanged(ctx, ep.Platform, ep.ChannelID, threadID, repo, branch, ep.Workflow, reason)
 				phase := PhaseForWorkflow(ep.Workflow)
+				gated := s.gateEnvelope(ep, envelope)
 				s.ensureThreadStatus(ctx, ep.Platform, ep.ChannelID, threadID, repo, branch, "", ThreadStatusUpdate{
 					Phase:   phase,
-					Waiting: waitingReasonForGate(envelope),
+					Waiting: waitingReasonForGate(gated),
 					Next:    NextStepForPhase(phase),
 				})
 			}
@@ -330,6 +331,7 @@ func (s *Server) postThreadDetail(ctx context.Context, ep config.EndpointConfig,
 	}
 	repo, branch := TaskRepoBranch(WebhookExecutionKey{}, envelope)
 	taskStatus := TaskStatusForAudit(status, ep.Workflow)
+	envelope = s.gateEnvelope(ep, envelope)
 	slim := redactAuditSummary(FormatThreadSlimCard(envelope, ep.Workflow, taskStatus, s.statusIcons), ep.Secret)
 	var target string
 	if ep.Platform == "telegram" && !strings.Contains(ep.ChannelID, ":") {
@@ -385,12 +387,20 @@ func (s *Server) emitPRAudit(ctx context.Context, ep config.EndpointConfig, enve
 	if strings.TrimSpace(threadID) == "" {
 		return
 	}
+	envelope = withGateVerdict(envelope, s.gateVerdict(prKey))
 	taskRepo, branch := TaskRepoBranch(WebhookExecutionKey{}, envelope)
 	s.postPhaseBannerIfChanged(ctx, ep.Platform, ep.ChannelID, threadID, taskRepo, branch, ep.Workflow, reason)
+	waiting, action := s.queueState(ctx, prKey, phase)
+	if action == "" {
+		if gateReason := waitingReasonForGate(envelope); gateReason != "" {
+			waiting = gateReason
+		}
+	}
 	s.ensureThreadStatus(ctx, ep.Platform, ep.ChannelID, threadID, taskRepo, branch, prKey, ThreadStatusUpdate{
 		Phase:   phase,
-		Waiting: s.queueWaiting(ctx, prKey, phase),
+		Waiting: waiting,
 		Next:    NextStepForPhase(phase),
+		Action:  action,
 	})
 	outcome := redactAuditSummary(FormatRunOutcome(envelope, ep.Workflow, status, reason, NextStepForPhase(phase)), ep.Secret)
 	if strings.TrimSpace(outcome) == "" {

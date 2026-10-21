@@ -34,6 +34,7 @@ func newRecoveryHarness(t *testing.T) (*Server, *store.SQLiteStore) {
 	srv := New(cfg, exec, st.WebhookDeliveryRepo())
 	srv.SetChannelStore(st.ChannelRepo())
 	srv.SetPRQueueRepo(st.PRQueueRepo())
+	setOpenPRState(srv)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleRequest)
 	ts := httptest.NewServer(mux)

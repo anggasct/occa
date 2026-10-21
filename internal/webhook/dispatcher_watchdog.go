@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"runtime/debug"
@@ -56,8 +57,9 @@ func (s *Server) watchdogLoop() {
 func (s *Server) sweepStuckDispatchers(now time.Time) int {
 	after := s.stuckAfter()
 	type candidate struct {
-		d    *dispatcher
-		snap dispatcherSnapshot
+		d        *dispatcher
+		snap     dispatcherSnapshot
+		liveness sessionLivenessState
 	}
 	var stuck []candidate
 	s.dispatchMu.Lock()
@@ -70,27 +72,33 @@ func (s *Server) sweepStuckDispatchers(now time.Time) int {
 			continue
 		}
 		if snap.hasActive {
-			last := snap.lastActive
-			if last.IsZero() {
-				last = snap.startedAt
+			if d.isBackingOff() {
+				// A retry backoff is a known wait, not a stuck run.
+				continue
 			}
+			last := s.runHeartbeat(snap)
 			if last.IsZero() {
 				continue
 			}
 			if now.Sub(last) < after {
 				continue
 			}
-			stuck = append(stuck, candidate{d, snap})
+			// The liveness probe is the primary signal, the elapsed time the
+			// fallback: a run whose agent is gone and a run whose agent is
+			// alive but silent past the threshold are both stuck. Only a run
+			// with a fresh heartbeat is left alone.
+			liveness := s.probeSessionLiveness(snap.active.prKey, snap.active.ep.Name, snap.active.deliveryID)
+			stuck = append(stuck, candidate{d, snap, liveness})
 			continue
 		}
 		if snap.queueLen > 0 && !snap.lastActive.IsZero() && now.Sub(snap.lastActive) >= after {
-			stuck = append(stuck, candidate{d, snap})
+			stuck = append(stuck, candidate{d, snap, livenessUnknown})
 		}
 	}
 	s.dispatchMu.Unlock()
 	for _, c := range stuck {
 		c.d.markStuckReported()
-		s.alarmStuckDispatcher(c.d, c.snap, now, after)
+		s.alarmStuckDispatcher(c.d, c.snap, now, after, c.liveness)
 		s.releaseStuckDispatcher(c.d)
 	}
 	return len(stuck)
@@ -106,7 +114,24 @@ func stuckRepoBranch(s *Server, item dispatchItem) (string, string) {
 	return normalizeRepoKey(key.Repository), normalizeBranchKey(key.Branch)
 }
 
-func (s *Server) alarmStuckDispatcher(d *dispatcher, snap dispatcherSnapshot, now time.Time, after time.Duration) {
+// runHeartbeat returns the last moment the active run showed progress. The
+// run reports it on every agent event, so it measures the agent itself; a
+// run that has not reported yet, and a dispatcher without a run, fall back to
+// the dispatcher activity.
+func (s *Server) runHeartbeat(snap dispatcherSnapshot) time.Time {
+	if run := s.activeRunFor(snap.active.prKey, snap.active.ep.Name, snap.active.deliveryID); run != nil {
+		if at := run.progressAt(); !at.IsZero() {
+			return at
+		}
+	}
+	last := snap.lastActive
+	if last.IsZero() {
+		last = snap.startedAt
+	}
+	return last
+}
+
+func (s *Server) alarmStuckDispatcher(d *dispatcher, snap dispatcherSnapshot, now time.Time, after time.Duration, liveness sessionLivenessState) {
 	item := snap.active
 	if !snap.hasActive && snap.queueLen > 0 {
 		s.dispatchMu.Lock()
@@ -130,8 +155,20 @@ func (s *Server) alarmStuckDispatcher(d *dispatcher, snap dispatcherSnapshot, no
 		stuckSince = snap.startedAt
 	}
 	elapsed := now.Sub(stuckSince).Round(time.Second)
-	card := fmt.Sprintf("🚨 STUCK dispatcher %s#%s · delivery %s · stuck since %s (%s, threshold %s) · queue %d/%d — watchdog released the key so the next item proceeds. Check delivery log and sessions.",
-		repo, branch, strings.TrimSpace(item.deliveryID), stuckSince.UTC().Format(time.RFC3339), elapsed, after, snap.queueLen, snap.queueCap)
+	sessionID, workdir := s.stuckSessionIdentity(item, repo)
+	outcome := s.abortStuckSession(item, sessionID, workdir)
+	abortClause := "watchdog released the key so the next item proceeds."
+	switch outcome {
+	case stuckAbortDone:
+		abortClause = "watchdog aborted the agent session and released the key so the next item proceeds."
+	case stuckAbortFailed:
+		abortClause = "watchdog could not abort the agent session and released the key so the next item proceeds."
+	case stuckAbortNotPossible:
+		abortClause = "watchdog released the key without aborting the agent session, which is still running."
+	}
+	summary, logMessage := stuckSessionOutcome(outcome, liveness)
+	card := fmt.Sprintf("🚨 STUCK dispatcher %s#%s · delivery %s · stuck since %s (%s, threshold %s) · queue %d/%d — %s Check delivery log and sessions.",
+		repo, branch, strings.TrimSpace(item.deliveryID), stuckSince.UTC().Format(time.RFC3339), elapsed, after, snap.queueLen, snap.queueCap, abortClause)
 	slog.Error("webhook: dispatcher stuck, key released",
 		"lock", d.key,
 		"repo", repo,
@@ -140,7 +177,26 @@ func (s *Server) alarmStuckDispatcher(d *dispatcher, snap dispatcherSnapshot, no
 		"stuck_since", stuckSince.UTC().Format(time.RFC3339),
 		"elapsed", elapsed.String(),
 		"queue", fmt.Sprintf("%d/%d", snap.queueLen, snap.queueCap),
+		"session_id", sessionID,
+		"session_liveness", liveness.String(),
+		"session_aborted", outcome == stuckAbortDone,
+		"session_abort_ok", outcome == stuckAbortDone,
+		"session_still_running", outcome == stuckAbortFailed || outcome == stuckAbortNotPossible,
 	)
+	slog.Error(logMessage,
+		"delivery_id", strings.TrimSpace(item.deliveryID),
+		"session_id", sessionID,
+		"session_liveness", liveness.String(),
+		"session_aborted", outcome == stuckAbortDone,
+		"session_abort_ok", outcome == stuckAbortDone,
+		"session_still_running", outcome == stuckAbortFailed || outcome == stuckAbortNotPossible,
+	)
+	// The watchdog owns the run it declares stuck: the delivery reaches a
+	// terminal receipt whatever the session outcome, and the dispatcher must
+	// not run it a second time.
+	d.markWatchdogTookOver()
+	s.markRunTakenOver(item)
+	s.failStuckDelivery(item, sessionID, summary)
 	if repo == "" || branch == "" || branch == "-" {
 		return
 	}
@@ -162,6 +218,138 @@ func (s *Server) alarmStuckDispatcher(d *dispatcher, snap dispatcherSnapshot, no
 	}
 	if err := s.notifier(context.Background(), item.ep.Platform, target, card); err != nil {
 		slog.Warn("webhook: stuck alarm card failed", "repo", repo, "branch", branch, "delivery_id", strings.TrimSpace(item.deliveryID), "error", err)
+	}
+}
+
+// stuckAbortOutcome is what the watchdog managed to do with the session of a
+// run it declared stuck.
+type stuckAbortOutcome int
+
+const (
+	// stuckAbortNone means there was nothing to abort: no session, or the
+	// agent behind it is gone.
+	stuckAbortNone stuckAbortOutcome = iota
+	// stuckAbortNotPossible means a session exists but cannot be reached, so
+	// it may still be running.
+	stuckAbortNotPossible
+	// stuckAbortFailed means the abort ran and failed.
+	stuckAbortFailed
+	// stuckAbortDone means the abort ran and the session was stopped.
+	stuckAbortDone
+)
+
+// abortStuckSession kills the agent session of a run the watchdog declared
+// stuck. Releasing the key without killing the run leaves two writers on the
+// same PR surface, so the abort happens first and the key is released even
+// when the abort fails. The abort never starts an agent: a workdir without a
+// running agent has nothing to abort, and a session that cannot be reached is
+// left running and reported as such.
+func (s *Server) abortStuckSession(item dispatchItem, sessionID, workdir string) stuckAbortOutcome {
+	if sessionID == "" {
+		return stuckAbortNone
+	}
+	if s.sessionAborter == nil || workdir == "" {
+		slog.Warn("webhook: dispatcher stuck, session abort not possible",
+			"delivery_id", strings.TrimSpace(item.deliveryID),
+			"session_id", sessionID,
+			"reason", "no abort capability",
+		)
+		return stuckAbortNotPossible
+	}
+	if err := s.sessionAborter(context.Background(), sessionID, workdir); err != nil {
+		if errors.Is(err, ErrNoLiveAgent) {
+			slog.Info("webhook: dispatcher stuck, no live agent to abort",
+				"delivery_id", strings.TrimSpace(item.deliveryID),
+				"session_id", sessionID,
+			)
+			s.markRunAborted(item, false)
+			return stuckAbortNone
+		}
+		slog.Error("webhook: dispatcher stuck, session abort failed",
+			"delivery_id", strings.TrimSpace(item.deliveryID),
+			"session_id", sessionID,
+			"error", err,
+		)
+		s.markRunAborted(item, false)
+		return stuckAbortFailed
+	}
+	s.markRunAborted(item, true)
+	return stuckAbortDone
+}
+
+func (s *Server) markRunAborted(item dispatchItem, ok bool) {
+	if run := s.activeRunFor(item.prKey, item.ep.Name, item.deliveryID); run != nil {
+		run.markAborted(ok)
+	}
+}
+
+func (s *Server) markRunTakenOver(item dispatchItem) {
+	if run := s.activeRunFor(item.prKey, item.ep.Name, item.deliveryID); run != nil {
+		run.markTakenOver()
+	}
+}
+
+func (s *Server) stuckSessionIdentity(item dispatchItem, repo string) (string, string) {
+	if run := s.activeRunFor(item.prKey, item.ep.Name, item.deliveryID); run != nil {
+		sessionID, workdir := run.identity()
+		if sessionID != "" {
+			return sessionID, workdir
+		}
+	}
+	if s.prQueues == nil || strings.TrimSpace(item.prKey) == "" {
+		return "", ""
+	}
+	row, err := s.prQueues.Get(context.Background(), item.prKey)
+	if err != nil || row == nil {
+		return "", ""
+	}
+	sessionID := strings.TrimSpace(row.ActiveSession)
+	if sessionID == "" {
+		return "", ""
+	}
+	return sessionID, s.checkoutForRepo(repo)
+}
+
+// failStuckDelivery records the stuck delivery with the summary of what
+// happened to the agent session: only an abort that ran may be reported as an
+// aborted session.
+func (s *Server) failStuckDelivery(item dispatchItem, sessionID, summary string) {
+	deliveryID := strings.TrimSpace(item.deliveryID)
+	if deliveryID == "" {
+		return
+	}
+	receipt, err := s.deliveries.Get(context.Background(), item.ep.Name, deliveryID)
+	if err != nil || receipt == nil {
+		return
+	}
+	ok, tErr := s.deliveries.Transition(context.Background(), receipt.ID,
+		[]store.WebhookStatus{store.WebhookStatusReceived, store.WebhookStatusAccepted, store.WebhookStatusProcessing},
+		store.WebhookStatusFailed, summary)
+	if tErr != nil {
+		slog.Error("webhook: stuck delivery transition failed", "delivery_id", deliveryID, "error", tErr)
+		return
+	}
+	if !ok {
+		slog.Warn("webhook: stuck delivery transition lost race", "delivery_id", deliveryID, "session_id", sessionID)
+	}
+}
+
+// stuckSessionOutcome words the session outcome of a stuck run. Only an abort
+// that ran may be reported as an aborted session; a run whose agent is gone
+// has nothing left to abort.
+func stuckSessionOutcome(outcome stuckAbortOutcome, liveness sessionLivenessState) (string, string) {
+	switch outcome {
+	case stuckAbortDone:
+		return "stuck — session aborted", "webhook: dispatcher stuck, session aborted"
+	case stuckAbortFailed:
+		return "stuck — session abort failed, still running", "webhook: dispatcher stuck, session abort failed, still running"
+	case stuckAbortNotPossible:
+		if liveness == livenessDead {
+			return "stuck — no session to abort", "webhook: dispatcher stuck, no session to abort"
+		}
+		return "stuck — session not aborted, still running", "webhook: dispatcher stuck, session not aborted, still running"
+	default:
+		return "stuck — no session to abort", "webhook: dispatcher stuck, no session to abort"
 	}
 }
 

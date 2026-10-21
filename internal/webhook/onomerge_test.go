@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/anggasct/occa/internal/config"
 	"github.com/anggasct/occa/internal/store"
@@ -46,6 +47,7 @@ func newMergedHarness(t *testing.T, ep config.EndpointConfig, promptDir string) 
 	srv := New(muxCfg, exec, st.WebhookDeliveryRepo())
 	srv.SetChannelStore(st.ChannelRepo())
 	srv.SetPRQueueRepo(st.PRQueueRepo())
+	setOpenPRState(srv)
 	if promptDir != "" {
 		srv.SetPromptDir(promptDir)
 	}
@@ -80,13 +82,40 @@ func seedProcessingDelivery(t *testing.T, st *store.SQLiteStore, endpoint, deliv
 	return receipt.ID
 }
 
+func runMergedDelivery(t *testing.T, srv *Server, st *store.SQLiteStore, ep config.EndpointConfig, deliveryID string, number int) {
+	t.Helper()
+	seedProcessingDelivery(t, st, ep.Name, deliveryID, "pull_request")
+	receipt, err := st.WebhookDeliveryRepo().Get(context.Background(), ep.Name, deliveryID)
+	if err != nil || receipt == nil {
+		t.Fatalf("get receipt: %v", err)
+	}
+	item := dispatchItem{ep: ep, body: []byte(mergedBody(number)), deliveryID: deliveryID, eventType: "pull_request", payloadHash: deliveryID}
+	envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, srv.verdicts, false, "", ep.CommentTrigger)
+	srv.handleMergedDelivery(item, receipt, envelope, nil)
+}
+
+func waitForMergedCalls(t *testing.T, mu *sync.Mutex, calls *[]mergedCall, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		got := len(*calls)
+		mu.Unlock()
+		if got >= want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	t.Fatalf("merged calls = %d, want %d", len(*calls), want)
+}
+
 func TestOnMergedDefaultNoExtraCalls(t *testing.T) {
 	ep := prTestEndpoint("merged", "/merged", config.AutomationFull)
 	srv, st, calls, mu := newMergedHarness(t, ep, "")
-	id := seedProcessingDelivery(t, st, ep.Name, "del-m-1", "pull_request")
-	if err := srv.executeDelivery(ep, []byte(mergedBody(7)), id, "del-m-1", "pull_request", 1, nil, nil, nil); err != nil {
-		t.Fatalf("executeDelivery: %v", err)
-	}
+	runMergedDelivery(t, srv, st, ep, "del-m-1", 7)
+	waitForMergedCalls(t, mu, calls, 1)
 	mu.Lock()
 	defer mu.Unlock()
 	if len(*calls) != 1 {
@@ -102,10 +131,8 @@ func TestOnMergedPromptFileRendersContext(t *testing.T) {
 	ep := prTestEndpoint("merged", "/merged", config.AutomationFull)
 	ep.OnMerged = []config.MergedAction{{PromptFile: "merged-note.md"}}
 	srv, st, calls, mu := newMergedHarness(t, ep, dir)
-	id := seedProcessingDelivery(t, st, ep.Name, "del-m-2", "pull_request")
-	if err := srv.executeDelivery(ep, []byte(mergedBody(42)), id, "del-m-2", "pull_request", 1, nil, nil, nil); err != nil {
-		t.Fatalf("executeDelivery: %v", err)
-	}
+	runMergedDelivery(t, srv, st, ep, "del-m-2", 42)
+	waitForMergedCalls(t, mu, calls, 2)
 	mu.Lock()
 	defer mu.Unlock()
 	if len(*calls) != 2 {
@@ -123,10 +150,8 @@ func TestOnMergedMissingPromptSkips(t *testing.T) {
 	ep := prTestEndpoint("merged", "/merged", config.AutomationFull)
 	ep.OnMerged = []config.MergedAction{{PromptFile: "nope.md"}}
 	srv, st, calls, mu := newMergedHarness(t, ep, t.TempDir())
-	id := seedProcessingDelivery(t, st, ep.Name, "del-m-3", "pull_request")
-	if err := srv.executeDelivery(ep, []byte(mergedBody(7)), id, "del-m-3", "pull_request", 1, nil, nil, nil); err != nil {
-		t.Fatalf("executeDelivery: %v", err)
-	}
+	runMergedDelivery(t, srv, st, ep, "del-m-3", 7)
+	waitForMergedCalls(t, mu, calls, 1)
 	mu.Lock()
 	defer mu.Unlock()
 	if len(*calls) != 1 {
@@ -169,12 +194,17 @@ func TestOnMergedRunCommand(t *testing.T) {
 	srv := New(muxCfg, exec, st.WebhookDeliveryRepo())
 	srv.SetChannelStore(st.ChannelRepo())
 	srv.SetPRQueueRepo(st.PRQueueRepo())
-	id := seedProcessingDelivery(t, st, mergeEp.Name, "del-m-4", "pull_request")
-	if err := srv.executeDelivery(mergeEp, []byte(mergedBody(7)), id, "del-m-4", "pull_request", 1, nil, nil, nil); err != nil {
-		t.Fatalf("executeDelivery: %v", err)
-	}
-	if _, err := os.Stat(sentinel); err != nil {
-		t.Fatalf("merged run: command did not execute in checkout dir: %v", err)
+	setOpenPRState(srv)
+	runMergedDelivery(t, srv, st, mergeEp, "del-m-4", 7)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(sentinel); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("merged run: command did not execute in checkout dir: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	mu.Lock()
 	defer mu.Unlock()

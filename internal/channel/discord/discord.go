@@ -775,6 +775,23 @@ func (a *Adapter) StartThread(channelID, messageID, name string) (string, error)
 	return thread.ID, nil
 }
 
+// PinNotification pins a message in its channel so the operator finds it
+// without scrolling the thread.
+func (a *Adapter) PinNotification(channelID, messageID string) error {
+	if a.session == nil {
+		return errors.New("discord: session not ready")
+	}
+	channelID = strings.TrimSpace(channelID)
+	messageID = strings.TrimSpace(messageID)
+	if channelID == "" || messageID == "" {
+		return errors.New("discord: pin notification: empty channel or message id")
+	}
+	if err := a.session.ChannelMessagePin(channelID, messageID); err != nil {
+		return fmt.Errorf("discord: pin notification: %w", err)
+	}
+	return nil
+}
+
 func (a *Adapter) DeleteMessage(channelID, messageID string) error {
 	if a.session == nil {
 		return fmt.Errorf("discord: delete message: session not ready")

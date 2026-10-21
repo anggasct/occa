@@ -96,15 +96,21 @@ func (s *Server) dispatcherFor(prKey string) *dispatcher {
 	return s.dispatchers["pr:"+strings.TrimSpace(prKey)]
 }
 
-func (s *Server) prQueueBlocked(prKey string) (bool, error) {
+// blockedQueueRow returns the queue row of a PR whose queue is blocked. The
+// row carries the block reason and the kind that failed, so a surface can
+// name the PR and the reason instead of a generic phrase.
+func (s *Server) blockedQueueRow(ctx context.Context, prKey string) (*store.PRRun, error) {
 	if s.prQueues == nil || strings.TrimSpace(prKey) == "" {
-		return false, nil
+		return nil, nil
 	}
-	row, err := s.prQueues.Get(context.Background(), prKey)
+	row, err := s.prQueues.Get(ctx, prKey)
 	if err != nil || row == nil {
-		return false, err
+		return nil, err
 	}
-	return row.Status == store.PRStatusBlocked, nil
+	if row.Status != store.PRStatusBlocked {
+		return nil, nil
+	}
+	return row, nil
 }
 
 type retryWake int
@@ -237,11 +243,17 @@ func escalateReason(kind string, class failureClass, used, max int) string {
 }
 
 func (s *Server) escalateBlocked(ep config.EndpointConfig, prKey string, row *store.PRRun, class failureClass, used, max int) {
+	s.escalateBlockedReason(ep, prKey, row, class, used, max, "", "")
+}
+
+func (s *Server) escalateBlockedReason(ep config.EndpointConfig, prKey string, row *store.PRRun, class failureClass, used, max int, reason, why string) {
 	kind := strings.TrimSpace(row.ActiveKind)
 	if kind == "" {
 		kind = "run"
 	}
-	reason := escalateReason(kind, class, used, max)
+	if reason == "" {
+		reason = escalateReason(kind, class, used, max)
+	}
 	if row.Status == store.PRStatusBlocked {
 		return
 	}
@@ -264,7 +276,9 @@ func (s *Server) escalateBlocked(ep config.EndpointConfig, prKey string, row *st
 	}
 	ctx := context.Background()
 	what := fmt.Sprintf("%s run failed %d/%d times", kind, used, max)
-	why := class.label()
+	if why == "" {
+		why = class.label()
+	}
 	envelope := WebhookEnvelope{"repository": repo, "pr_number": prNumber}
 	if rec, ok := s.tasks.ResolvePRThread(prKey); ok {
 		if strings.TrimSpace(rec.Branch) != "" {
@@ -275,7 +289,7 @@ func (s *Server) escalateBlocked(ep config.EndpointConfig, prKey string, row *st
 	if threadID != "" {
 		s.ensureThreadStatus(ctx, ep.Platform, ep.ChannelID, threadID, repo, "", prKey, ThreadStatusUpdate{
 			Phase:  PhaseBlocked,
-			Action: mergeActionAsk,
+			Action: blockedQueueText(prKey, reason, blockedQueueCommand),
 		})
 		threadLine := FormatEscalationCopy(repo, prNumber, PhaseBlocked, what, why, s.statusIcons)
 		target := threadTargetFor(ep.Platform, ep.ChannelID, threadID)
@@ -296,8 +310,11 @@ func (s *Server) escalateBlocked(ep config.EndpointConfig, prKey string, row *st
 // planRetry classifies an executor failure for a PR run. It returns true when
 // a backoff retry was persisted and the caller should re-execute; on retry
 // exhaustion it escalates (blocked + mention) and returns false so the normal
-// failure path records the terminal receipt.
-func (s *Server) planRetry(ep config.EndpointConfig, prKey string, receiptID int64, execErr error, workCtx *WebhookWorkContext, timedOut bool) bool {
+// failure path records the terminal receipt. A run the watchdog already
+// killed is never scheduled again: the live PR state is still resolved so a
+// terminal PR is reported as refused. The live state is resolved for this
+// decision only, so a later decision sees the PR as it is now.
+func (s *Server) planRetry(ep config.EndpointConfig, prKey string, receiptID int64, execErr error, workCtx *WebhookWorkContext, timedOut, runDead bool) bool {
 	if s.prQueues == nil || strings.TrimSpace(prKey) == "" {
 		return false
 	}
@@ -313,6 +330,32 @@ func (s *Server) planRetry(ep config.EndpointConfig, prKey string, receiptID int
 	ctx := context.Background()
 	row, err := s.prQueues.Get(ctx, prKey)
 	if err != nil || row == nil {
+		return false
+	}
+	state, stateErr := s.newPRStateDecision(prKey).resolve(ctx)
+	switch {
+	case stateErr != nil || state == "":
+		slog.Error("webhook: retry refused, PR state unresolvable",
+			"endpoint", ep.Name,
+			"pr_key", prKey,
+			"error", stateErr,
+		)
+		if runDead {
+			return false
+		}
+		s.escalateBlockedReason(ep, prKey, row, class, row.RetryCount, max,
+			"live PR state unresolvable — retry refused (fail-closed)", "live PR state unknown")
+		return false
+	case state == PRStateMerged || state == PRStateClosed:
+		s.refuseRetryForTerminalPR(ep, prKey, receiptID, state)
+		return false
+	}
+	if runDead {
+		slog.Error("webhook: retry not scheduled, run aborted by watchdog",
+			"endpoint", ep.Name,
+			"pr_key", prKey,
+			"pr_state", state,
+		)
 		return false
 	}
 	if row.RetryCount >= max {
@@ -339,6 +382,72 @@ func (s *Server) planRetry(ep config.EndpointConfig, prKey string, receiptID int
 		"backoff", wait.String(),
 	)
 	return true
+}
+
+// retryStillAllowed re-resolves the live PR state before a retry attempt
+// starts: the PR may have reached a terminal state while the attempt waited
+// for its backoff. An unresolvable state fails closed — the attempt is
+// refused and the PR is escalated. A retry that cannot read the PR state may
+// start a second agent turn on a merged PR, and that is the incident this
+// guard exists to stop.
+func (s *Server) retryStillAllowed(ep config.EndpointConfig, prKey string, receiptID int64) bool {
+	state, err := s.newPRStateDecision(prKey).resolve(context.Background())
+	if err != nil || state == "" {
+		slog.Error("webhook: retry refused, PR state unresolvable",
+			"endpoint", ep.Name,
+			"pr_key", prKey,
+			"error", err,
+		)
+		s.refuseRetryUnresolvableState(ep, prKey, receiptID)
+		return false
+	}
+	if state == PRStateMerged || state == PRStateClosed {
+		s.refuseRetryForTerminalPR(ep, prKey, receiptID, state)
+		return false
+	}
+	return true
+}
+
+// refuseRetryUnresolvableState fails closed: the attempt is skipped and the
+// PR is escalated, so an unreadable PR state never starts a second agent turn.
+func (s *Server) refuseRetryUnresolvableState(ep config.EndpointConfig, prKey string, receiptID int64) {
+	if s.prQueues != nil {
+		if row, err := s.prQueues.Get(context.Background(), prKey); err == nil && row != nil {
+			max, _ := s.retryPolicyFor(failureModel)
+			s.escalateBlockedReason(ep, prKey, row, failureModel, row.RetryCount, max,
+				"live PR state unresolvable — retry refused (fail-closed)", "live PR state unknown")
+		}
+	}
+	s.skipDeliveryQuiet(ep, receiptID, "PR state unresolvable — retry refused (fail-closed)")
+}
+
+// refuseRetryForTerminalPR stops a retry whose PR already reached a terminal
+// state: the delivery is skipped and the queue is drained, so no second run
+// can write to a merged or closed PR.
+func (s *Server) refuseRetryForTerminalPR(ep config.EndpointConfig, prKey string, receiptID int64, state string) {
+	slog.Error("webhook: retry refused, PR terminal",
+		"endpoint", ep.Name,
+		"pr_key", prKey,
+		"pr_state", state,
+	)
+	if d := s.dispatcherFor(prKey); d != nil {
+		s.drainPRQueue(d, prKey)
+	}
+	s.skipDeliveryQuiet(ep, receiptID, "PR already "+state)
+}
+
+func (s *Server) skipDeliveryQuiet(ep config.EndpointConfig, id int64, reason string) {
+	if id == 0 {
+		return
+	}
+	ok, err := s.deliveries.Transition(context.Background(), id, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusSkipped, reason)
+	if err != nil {
+		slog.Error("webhook: skip transition failed", "endpoint", ep.Name, "delivery_id", id, "error", err)
+		return
+	}
+	if !ok {
+		slog.Info("webhook: skip transition skipped, delivery not processing", "endpoint", ep.Name, "delivery_id", id)
+	}
 }
 
 // RecoverPRQueue reconciles persisted PR-queue state after a restart without

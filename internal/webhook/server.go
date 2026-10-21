@@ -87,6 +87,10 @@ type MentionNotifier func(ctx context.Context, platform, channelID, text, mentio
 // now. A nil checker falls back to the queue-state gate.
 type MergeGateChecker func(ctx context.Context, prKey string) bool
 
+// Pinner pins a message in its channel. A nil pinner leaves the message
+// unpinned.
+type Pinner func(ctx context.Context, platform, channelID, messageID string) error
+
 type Server struct {
 	bind                  string
 	bindAddr              string
@@ -106,10 +110,15 @@ type Server struct {
 	rawEditor             Editor
 	threadStarter         ThreadStarter
 	guildResolver         GuildResolver
+	pinner                Pinner
 	deliveries            DeliveryStore
 	prQueues              store.PRQueueRepo
 	escalationMention     string
 	sessionAborter        func(ctx context.Context, sessionID, workdir string) error
+	sessionLiveness       SessionLiveness
+	prStateResolver       PRStateResolver
+	activeRunsMu          sync.Mutex
+	activeRuns            map[string]*activeRun
 	operatorAuthorizer    func(platform, userID string) bool
 	promptDir             string
 	retryBackoffs         map[failureClass][]time.Duration
@@ -199,6 +208,7 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 		executor:              executor,
 		deliveries:            deliveries,
 		dispatchers:           make(map[string]*dispatcher),
+		activeRuns:            make(map[string]*activeRun),
 		shutdownCtx:           shutdownCtx,
 		shutdownCancel:        shutdownCancel,
 		maxBodySize:           int64(rt.MaxBodySize),
@@ -372,6 +382,10 @@ func (s *Server) SetMentionNotifier(fn MentionNotifier) {
 
 func (s *Server) SetMergeGate(fn MergeGateChecker) {
 	s.mergeGate = fn
+}
+
+func (s *Server) SetPinner(fn Pinner) {
+	s.pinner = fn
 }
 
 func (s *Server) SetGuildResolver(fn GuildResolver) {
@@ -908,6 +922,7 @@ type dispatcher struct {
 	hasActive       bool
 	lastActivity    time.Time
 	stuckReported   bool
+	watchdogAborted bool
 	backingOff      bool
 	cmdMu           sync.Mutex
 	skipRequested   bool
@@ -976,6 +991,18 @@ func (d *dispatcher) markStuckReported() {
 	d.mu.Lock()
 	d.stuckReported = true
 	d.mu.Unlock()
+}
+
+func (d *dispatcher) markWatchdogTookOver() {
+	d.mu.Lock()
+	d.watchdogAborted = true
+	d.mu.Unlock()
+}
+
+func (d *dispatcher) watchdogTookOver() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.watchdogAborted
 }
 
 // run serially executes queued deliveries until the queue stays idle for the
@@ -1099,9 +1126,26 @@ func (d *dispatcher) handle(item dispatchItem) {
 	if receipt == nil {
 		return
 	}
+	if item.ep.Workflow == "merged" {
+		s.handleMergedWorkflow(item, receipt, d)
+		return
+	}
+	if item.prKey != "" && strings.EqualFold(strings.TrimSpace(item.ep.Workflow), "merge") {
+		if verdict, blocked := s.mergeGateBlocked(item.prKey); blocked {
+			envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", item.ep.CommentTrigger)
+			slog.Info("webhook: merge refused, review verdict blocks the gate",
+				"endpoint", item.ep.Name,
+				"delivery_id", item.deliveryID,
+				"pr_key", item.prKey,
+				"review_verdict", verdict,
+			)
+			s.markSkipped(receipt.ID, item.ep, envelope, "merge blocked: "+verdict+" on the current head")
+			return
+		}
+	}
 	if item.prKey != "" {
-		if blocked, _ := s.prQueueBlocked(item.prKey); blocked {
-			s.markSkipped(receipt.ID, item.ep, normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", item.ep.CommentTrigger), "queue blocked — /retry, /skip or /cancel")
+		if row, _ := s.blockedQueueRow(context.Background(), item.prKey); row != nil {
+			s.markSkipped(receipt.ID, item.ep, normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", item.ep.CommentTrigger), blockedQueueSkipReason(item.prKey, row.BlockedReason, row.ActiveKind))
 			return
 		}
 		if err := s.deliveries.SetPRKey(context.Background(), receipt.ID, item.prKey); err != nil {
@@ -1177,9 +1221,6 @@ func (d *dispatcher) handle(item dispatchItem) {
 					return
 				}
 			}
-			if item.ep.Workflow == "merged" {
-				s.drainPRQueue(d, item.prKey)
-			}
 			if item.ep.Workflow == "merge" && d.hasQueuedHigher() {
 				if item.requeues >= 3 {
 					held = false
@@ -1206,6 +1247,17 @@ func (d *dispatcher) handle(item dispatchItem) {
 			if errors.Is(execErr, errRetryScheduled) && item.prKey != "" {
 				switch d.sleepForRetry(item.prKey, s.shutdownCtx) {
 				case wakeFire:
+					if d.watchdogTookOver() {
+						slog.Error("webhook: retry dropped, run taken over by watchdog",
+							"endpoint", item.ep.Name,
+							"delivery_id", item.deliveryID,
+							"pr_key", item.prKey,
+						)
+						return
+					}
+					if !s.retryStillAllowed(item.ep, item.prKey, receipt.ID) {
+						return
+					}
 					receipt.Attempt++
 					continue
 				case wakeSkip:
@@ -1693,6 +1745,21 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 	if hasPRKey {
 		workCtx.PRKey = prKey
 	}
+	workdir := ""
+	if lease != nil {
+		workdir = lease.Path
+	}
+	run := s.beginActiveRun(workCtx.PRKey, ep.Name, deliveryID, workdir)
+	if heartbeat != nil {
+		progress := heartbeat
+		workCtx.Heartbeat = func() {
+			run.noteProgress()
+			progress()
+		}
+	}
+	workCtx.ReportWorkdir = func(workdir string) {
+		run.setWorkdir(workdir)
+	}
 	resolvedPR := false
 	if hasPRKey {
 		if rec, ok := s.tasks.ResolvePRThread(prKey); ok {
@@ -1740,6 +1807,16 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 			}
 		}()
 	}
+	workCtx.ReportSession = func(sessionID string) {
+		workCtx.SessionID = strings.TrimSpace(sessionID)
+		run.setSession(workCtx.SessionID)
+		if workCtx.PRKey != "" && s.prQueues != nil {
+			if err := s.prQueues.UpdateSession(context.Background(), workCtx.PRKey, workCtx.SessionID); err != nil {
+				slog.Warn("webhook: pr session stamp failed", "pr_key", workCtx.PRKey, "error", err)
+			}
+		}
+	}
+	defer s.endActiveRun(run)
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -1761,7 +1838,13 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		return nil
 	}
 	if workCtx.PRKey != "" {
-		s.recordMergeGate(workCtx.PRKey, envelope)
+		verdict := s.recordMergeGate(workCtx.PRKey, envelope)
+		if verdict != "" && strings.EqualFold(strings.TrimSpace(ep.Workflow), "merge") &&
+			strings.TrimSpace(stringValue(envelope["review_verdict"])) == "" {
+			// The merge lane renders the verdict the gate holds, not the
+			// one this delivery happened to carry.
+			envelope["review_verdict"] = verdict
+		}
 	}
 
 	if reviewKey := reviewDedupeKey(envelope); reviewKey != "" && id != 0 {
@@ -1880,8 +1963,30 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 			workCtx.SessionID = strings.TrimSpace(row.ActiveSession)
 		}
 	}
+	fixHeadBefore := ""
+	if isFixWorkflow(ep.Workflow) && strings.TrimSpace(workCtx.PRKey) != "" {
+		fixHeadBefore = normalizeRevision(stringValue(envelope["head_sha"]))
+	}
 	err = s.executor(ctx, ep.Platform, ep.ChannelID, wrapped, workCtx)
 	s.prMirrorSync(workCtx)
+	if err == nil && fixHeadBefore != "" {
+		s.queueReviewAfterFix(workCtx.PRKey, fixHeadBefore)
+	}
+
+	if run.watchdogTookOver() {
+		if aborted, abortOK := run.abortedState(); aborted {
+			slog.Error("webhook: delivery aborted by watchdog",
+				"endpoint", ep.Name,
+				"delivery_id", deliveryID,
+				"session_id", workCtx.SessionID,
+				"session_abort_ok", abortOK,
+			)
+		}
+		if itemPRKey := strings.TrimSpace(workCtx.PRKey); itemPRKey != "" && err != nil && !errors.Is(err, relay.ErrWebhookResponseIncomplete) {
+			s.planRetry(ep, itemPRKey, id, err, workCtx, false, true)
+		}
+		return err
+	}
 
 	if itemPRKey := strings.TrimSpace(workCtx.PRKey); err != nil && itemPRKey != "" && !errors.Is(err, relay.ErrWebhookResponseIncomplete) {
 		timedOut := errors.Is(err, context.DeadlineExceeded) || ctx.Err() == context.DeadlineExceeded
@@ -1894,7 +1999,7 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 				return errOpSkipped
 			}
 		}
-		if s.planRetry(ep, itemPRKey, id, err, workCtx, timedOut) {
+		if s.planRetry(ep, itemPRKey, id, err, workCtx, timedOut, false) {
 			return errRetryScheduled
 		}
 	}
@@ -1926,9 +2031,6 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 			}
 		}
 		s.linkRootCard(ep, workCtx, deliveryID, card)
-		if ep.Workflow == "merged" {
-			s.runMergedExtras(ep, envelope, workCtx)
-		}
 		return nil
 	case errors.Is(err, context.DeadlineExceeded), ctx.Err() == context.DeadlineExceeded:
 		s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary(timeoutSummary(s.processingTimeout, s.stallFreshness, workCtx), maxErrorSummaryRunes, ep.Secret), workCtx)
