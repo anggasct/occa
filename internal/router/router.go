@@ -444,30 +444,53 @@ func (r *Router) passthrough(ctx context.Context, msg channel.IncomingMessage) e
 	return nil
 }
 
-func (r *Router) dispatchDrained(key responseKey, drained []queuedMessage) {
-	for i, qmsg := range drained {
-		if r.passthroughQueued(qmsg) {
-			if len(drained[i+1:]) > 0 {
-				r.responses.requeuePrefix(key, drained[i+1:])
-			}
+// queuedDispatch reports what happened to a queued message handed to the
+// dispatcher.
+type queuedDispatch int
+
+const (
+	// queuedDispatched means the message started its own turn.
+	queuedDispatched queuedDispatch = iota
+	// queuedBusy means another turn holds the slot, so the message stays queued.
+	queuedBusy
+	// queuedDropped means the message can no longer run.
+	queuedDropped
+)
+
+// dispatchQueued hands the queued messages of a conversation to the next free
+// turn. A message leaves the queue only when it is really dispatched, so the
+// remainder cannot be stranded: the turn that runs next picks it up.
+func (r *Router) dispatchQueued(key responseKey) {
+	for {
+		qmsg, ok := r.responses.popNext(key)
+		if !ok {
 			return
 		}
+		outcome := r.passthroughQueued(qmsg)
+		if outcome == queuedBusy {
+			r.responses.pushFront(key, qmsg)
+			return
+		}
+		if outcome == queuedDropped {
+			continue
+		}
+		return
 	}
 }
 
-func (r *Router) passthroughQueued(qmsg queuedMessage) bool {
+func (r *Router) passthroughQueued(qmsg queuedMessage) queuedDispatch {
 	// Shutdown race guard: a queued message whose context is already canceled
 	// (process shutting down) must not be dispatched — the store/agent work
 	// would only fail with "context canceled" and emit misleading WARNs.
 	if err := qmsg.ctx.Err(); err != nil {
-		return false
+		return queuedDropped
 	}
 	threadID, userID := conversationKey(qmsg.msg)
 	key := responseKey{platform: qmsg.msg.Platform, channelID: qmsg.msg.ChannelID, threadID: threadID, userID: userID}
 	taskCtx, cancel := context.WithCancel(qmsg.ctx)
 	if !r.responses.acquire(key, cancel) {
 		cancel()
-		return false
+		return queuedBusy
 	}
 	if err := r.executePassthrough(taskCtx, cancel, key, qmsg.msg); err != nil {
 		if errors.Is(err, errPassthroughCanceled) {
@@ -475,11 +498,11 @@ func (r *Router) passthroughQueued(qmsg queuedMessage) bool {
 			// dispatched. Report it as not dispatched so the caller can
 			// continue with the remaining FIFO entries instead of treating the
 			// nil return as a successful dispatch.
-			return false
+			return queuedDropped
 		}
 		slog.Error("queued message dispatch failed", "platform", key.platform, "channel_id", key.channelID, "user_id", key.userID, "error", err)
 	}
-	return true
+	return queuedDispatched
 }
 
 func (r *Router) executePassthrough(taskCtx context.Context, cancel context.CancelFunc, key responseKey, msg channel.IncomingMessage) error {
@@ -497,7 +520,7 @@ func (r *Router) executePassthrough(taskCtx context.Context, cancel context.Canc
 	if err := ctx.Err(); err != nil {
 		cancel()
 		r.responses.release(key)
-		r.dispatchDrained(key, r.responses.drain(key))
+		r.dispatchQueued(key)
 		return errPassthroughCanceled
 	}
 
@@ -532,7 +555,7 @@ func (r *Router) executePassthrough(taskCtx context.Context, cancel context.Canc
 			r.reply(msg, "⚠️ Agent unreachable")
 		}
 		r.responses.release(key)
-		r.dispatchDrained(key, r.responses.drain(key))
+		r.dispatchQueued(key)
 		return nil
 	}
 
@@ -545,7 +568,7 @@ func (r *Router) executePassthrough(taskCtx context.Context, cancel context.Canc
 		r.recordHealthError("agent unreachable")
 		r.responses.release(key)
 		r.reply(msg, "⚠️ Agent unreachable")
-		r.dispatchDrained(key, r.responses.drain(key))
+		r.dispatchQueued(key)
 		return nil
 	}
 	sessionID := resolution.SessionID
@@ -580,7 +603,7 @@ func (r *Router) executePassthrough(taskCtx context.Context, cancel context.Canc
 			r.responses.release(key)
 			slog.Error("failed to resolve message model; message not sent", "platform", msg.Platform, "channel_id", msg.ChannelID, "user_id", msg.UserID, "error", err)
 			r.reply(msg, "⚠️ Unable to resolve model configuration. Message not sent.")
-			r.dispatchDrained(key, r.responses.drain(key))
+			r.dispatchQueued(key)
 			return nil
 		}
 		attachments = make([]relay.Attachment, len(msg.Attachments))
@@ -601,7 +624,7 @@ func (r *Router) executePassthrough(taskCtx context.Context, cancel context.Canc
 		r.recordHealthError("agent unreachable")
 		r.responses.release(key)
 		r.reply(msg, "⚠️ Agent unreachable")
-		r.dispatchDrained(key, r.responses.drain(key))
+		r.dispatchQueued(key)
 		return nil
 	}
 

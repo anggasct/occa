@@ -1193,8 +1193,8 @@ func TestPassthroughQueuedDropsCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	qmsg := queuedMessage{ctx: ctx, msg: msg("hello queued", &fakeReplyCtx{})}
-	if r.passthroughQueued(qmsg) {
-		t.Fatal("passthroughQueued with canceled ctx must return false")
+	if r.passthroughQueued(qmsg) != queuedDropped {
+		t.Fatal("passthroughQueued with canceled ctx must report a dropped message")
 	}
 	if client.lastMsg != "" {
 		t.Fatalf("expected no dispatch, got %q", client.lastMsg)
@@ -1327,7 +1327,7 @@ var closedDone = func() <-chan struct{} {
 func TestPassthroughQueuedCanceledAfterAcquireNotReportedAsDispatched(t *testing.T) {
 	r, client, _ := newTestRouter()
 	qmsg := queuedMessage{ctx: &raceCancelCtx{Context: context.Background()}, msg: msg("hello queued", &fakeReplyCtx{})}
-	if r.passthroughQueued(qmsg) {
+	if r.passthroughQueued(qmsg) != queuedDropped {
 		t.Fatal("passthroughQueued must report canceled drop as not dispatched")
 	}
 	// The guard releases the slot even though acquire had succeeded.
@@ -1340,16 +1340,16 @@ func TestPassthroughQueuedCanceledAfterAcquireNotReportedAsDispatched(t *testing
 	}
 }
 
-func TestDispatchDrainedContinuesAfterCanceledDrop(t *testing.T) {
+func TestDispatchQueuedContinuesAfterCanceledDrop(t *testing.T) {
 	r, client, _ := newTestRouter()
 	key := responseKey{platform: "telegram", channelID: "chat1", threadID: "", userID: "user1"}
 	canceledReply := &fakeReplyCtx{}
 	queuedReply := &fakeReplyCtx{}
-	drained := []queuedMessage{
-		{ctx: &raceCancelCtx{Context: context.Background()}, msg: msg("canceled first", canceledReply)},
-		{ctx: context.Background(), msg: msg("survives second", queuedReply)},
-	}
-	r.dispatchDrained(key, drained)
+	r.responses.acquire(key, func() {})
+	r.responses.enqueue(key, &raceCancelCtx{Context: context.Background()}, msg("canceled first", canceledReply))
+	r.responses.enqueue(key, context.Background(), msg("survives second", queuedReply))
+	r.responses.release(key)
+	r.dispatchQueued(key)
 
 	if depth := r.responses.queueDepth(key); depth != 0 {
 		t.Fatalf("queue depth = %d, want 0 (no stranded FIFO suffix)", depth)
@@ -1361,6 +1361,22 @@ func TestDispatchDrainedContinuesAfterCanceledDrop(t *testing.T) {
 	waitForResponse(t, r)
 	if client.lastMsg != "survives second" {
 		t.Fatalf("remaining FIFO entry was not dispatched, lastMsg = %q", client.lastMsg)
+	}
+}
+
+func TestDispatchQueuedKeepsMessageQueuedWhileSlotIsBusy(t *testing.T) {
+	r, client, _ := newTestRouter()
+	key := responseKey{platform: "telegram", channelID: "chat1", threadID: "", userID: "user1"}
+	r.responses.acquire(key, func() {})
+	r.responses.enqueue(key, context.Background(), msg("waits for the slot", &fakeReplyCtx{}))
+
+	r.dispatchQueued(key)
+
+	if depth := r.responses.queueDepth(key); depth != 1 {
+		t.Fatalf("queue depth = %d, want 1 (message must stay queued)", depth)
+	}
+	if client.lastMsg != "" {
+		t.Fatalf("expected no dispatch while the slot is busy, got %q", client.lastMsg)
 	}
 }
 

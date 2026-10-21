@@ -108,6 +108,7 @@ type responseClient struct {
 	started      chan struct{}
 	startOnce    sync.Once
 	dispatch     func(context.Context, chan<- relay.Event) error
+	eventsHook   func(call int) (<-chan relay.Event, error)
 }
 
 func newResponseClient(dispatch func(context.Context, chan<- relay.Event) error) *responseClient {
@@ -196,8 +197,23 @@ func (c *responseClient) Events(_ context.Context, _ string) (<-chan relay.Event
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.eventsCall++
+	if c.eventsHook != nil {
+		events, err := c.eventsHook(c.eventsCall)
+		if err != nil {
+			return nil, err
+		}
+		if events != nil {
+			return events, nil
+		}
+	}
 	c.events = make(chan relay.Event, 8)
 	return c.events, nil
+}
+
+func (c *responseClient) sentTexts() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.sendTexts...)
 }
 
 func (c *responseClient) eventCalls() int {
@@ -295,7 +311,12 @@ func TestResponseCoordinatorUsesSamePathForCommands(t *testing.T) {
 
 func waitForAllResponses(t *testing.T, r *Router) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
+	waitForAllResponsesWithin(t, r, 30*time.Second)
+}
+
+func waitForAllResponsesWithin(t *testing.T, r *Router, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		r.responses.mu.Lock()
 		active := len(r.responses.active)
@@ -1013,6 +1034,107 @@ func TestRouterStatusIncludesQueueLine(t *testing.T) {
 
 	close(release)
 	waitForAllResponses(t, r)
+}
+
+func TestRouterQueuedRemainderStaysVisibleToNextTurn(t *testing.T) {
+	release := make(chan struct{})
+	var r *Router
+	var mu sync.Mutex
+	var depths []int
+
+	client := newResponseClient(func(ctx context.Context, events chan<- relay.Event) error {
+		events <- relay.Event{Type: "delta", Delta: "active"}
+		select {
+		case <-release:
+			events <- relay.Event{Type: "done"}
+			close(events)
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	client.eventsHook = func(int) (<-chan relay.Event, error) {
+		key := responseKey{platform: "telegram", channelID: "chat1", userID: "user1"}
+		mu.Lock()
+		depths = append(depths, r.responses.queueDepth(key))
+		mu.Unlock()
+		return nil, nil
+	}
+	r, _ = newResponseRouter(client)
+
+	firstReply := newResponseReply()
+	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "first", firstReply)); err != nil {
+		t.Fatalf("Route first: %v", err)
+	}
+	waitForReply(t, firstReply, "active")
+
+	q1Reply := newResponseReply()
+	_ = r.Route(context.Background(), responseMessage("user1", "chat1", "q1", q1Reply))
+	q2Reply := newResponseReply()
+	_ = r.Route(context.Background(), responseMessage("user1", "chat1", "q2", q2Reply))
+
+	statusReply := newResponseReply()
+	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "/status", statusReply)); err != nil {
+		t.Fatalf("Route status: %v", err)
+	}
+	if !statusReply.contains("Queue: 2 message(s)") {
+		t.Fatalf("status reply missing queue info: %v", statusReply.texts())
+	}
+
+	close(release)
+	waitForAllResponses(t, r)
+
+	mu.Lock()
+	got := append([]int(nil), depths...)
+	mu.Unlock()
+	if len(got) != 3 {
+		t.Fatalf("turns started = %d, want 3: %v", len(got), got)
+	}
+	// The turn that runs the first queued message must still see the
+	// second one waiting in the queue: the remainder stays queued until the
+	// turn that runs it picks it up.
+	if got[1] != 1 {
+		t.Fatalf("queued messages left while the next turn starts = %d, want 1: %v", got[1], got)
+	}
+}
+
+func TestRouterQueuedMessageRunsAfterPreviousQueuedTurnFails(t *testing.T) {
+	release := make(chan struct{})
+	client := newResponseClient(func(ctx context.Context, events chan<- relay.Event) error {
+		events <- relay.Event{Type: "delta", Delta: "active"}
+		select {
+		case <-release:
+			events <- relay.Event{Type: "done"}
+			close(events)
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	client.eventsHook = func(call int) (<-chan relay.Event, error) {
+		if call == 2 {
+			return nil, errors.New("agent events unavailable")
+		}
+		return nil, nil
+	}
+	r, _ := newResponseRouter(client)
+
+	firstReply := newResponseReply()
+	if err := r.Route(context.Background(), responseMessage("user1", "chat1", "first", firstReply)); err != nil {
+		t.Fatalf("Route first: %v", err)
+	}
+	waitForReply(t, firstReply, "active")
+
+	_ = r.Route(context.Background(), responseMessage("user1", "chat1", "q1", newResponseReply()))
+	_ = r.Route(context.Background(), responseMessage("user1", "chat1", "q2", newResponseReply()))
+
+	close(release)
+	waitForAllResponsesWithin(t, r, 5*time.Second)
+
+	sent := client.sentTexts()
+	if len(sent) != 2 || sent[0] != "first" || sent[1] != "q2" {
+		t.Fatalf("agent messages = %v, want [first q2]", sent)
+	}
 }
 
 func TestResponseTimeoutGenericCopy(t *testing.T) {
