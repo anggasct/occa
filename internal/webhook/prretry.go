@@ -96,15 +96,21 @@ func (s *Server) dispatcherFor(prKey string) *dispatcher {
 	return s.dispatchers["pr:"+strings.TrimSpace(prKey)]
 }
 
-func (s *Server) prQueueBlocked(prKey string) (bool, error) {
+// blockedQueueRow returns the queue row of a PR whose queue is blocked. The
+// row carries the block reason and the kind that failed, so a surface can
+// name the PR and the reason instead of a generic phrase.
+func (s *Server) blockedQueueRow(ctx context.Context, prKey string) (*store.PRRun, error) {
 	if s.prQueues == nil || strings.TrimSpace(prKey) == "" {
-		return false, nil
+		return nil, nil
 	}
-	row, err := s.prQueues.Get(context.Background(), prKey)
+	row, err := s.prQueues.Get(ctx, prKey)
 	if err != nil || row == nil {
-		return false, err
+		return nil, err
 	}
-	return row.Status == store.PRStatusBlocked, nil
+	if row.Status != store.PRStatusBlocked {
+		return nil, nil
+	}
+	return row, nil
 }
 
 type retryWake int
@@ -283,7 +289,7 @@ func (s *Server) escalateBlockedReason(ep config.EndpointConfig, prKey string, r
 	if threadID != "" {
 		s.ensureThreadStatus(ctx, ep.Platform, ep.ChannelID, threadID, repo, "", prKey, ThreadStatusUpdate{
 			Phase:  PhaseBlocked,
-			Action: mergeActionAsk,
+			Action: blockedQueueText(prKey, reason, blockedQueueCommand),
 		})
 		threadLine := FormatEscalationCopy(repo, prNumber, PhaseBlocked, what, why, s.statusIcons)
 		target := threadTargetFor(ep.Platform, ep.ChannelID, threadID)

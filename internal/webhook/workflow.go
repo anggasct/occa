@@ -390,14 +390,17 @@ func (s *Server) emitPRAudit(ctx context.Context, ep config.EndpointConfig, enve
 	envelope = withGateVerdict(envelope, s.gateVerdict(prKey))
 	taskRepo, branch := TaskRepoBranch(WebhookExecutionKey{}, envelope)
 	s.postPhaseBannerIfChanged(ctx, ep.Platform, ep.ChannelID, threadID, taskRepo, branch, ep.Workflow, reason)
-	waiting := s.queueWaiting(ctx, prKey, phase)
-	if gateReason := waitingReasonForGate(envelope); gateReason != "" {
-		waiting = gateReason
+	waiting, action := s.queueState(ctx, prKey, phase)
+	if action == "" {
+		if gateReason := waitingReasonForGate(envelope); gateReason != "" {
+			waiting = gateReason
+		}
 	}
 	s.ensureThreadStatus(ctx, ep.Platform, ep.ChannelID, threadID, taskRepo, branch, prKey, ThreadStatusUpdate{
 		Phase:   phase,
 		Waiting: waiting,
 		Next:    NextStepForPhase(phase),
+		Action:  action,
 	})
 	outcome := redactAuditSummary(FormatRunOutcome(envelope, ep.Workflow, status, reason, NextStepForPhase(phase)), ep.Secret)
 	if strings.TrimSpace(outcome) == "" {

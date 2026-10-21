@@ -16,7 +16,7 @@ const threadStatusPrefix = "📌 Status — "
 
 const escalationActionLine = "Action: /retry · /skip · /cancel"
 
-const mergeActionAsk = "retry exhausted — run /retry, /skip or /cancel"
+const blockedQueueCommand = "run /retry, /skip or /cancel"
 
 type ThreadStatusUpdate struct {
 	Phase   Phase
@@ -81,6 +81,29 @@ func FormatEscalationCopy(repo, prNumber string, phase Phase, what, why string, 
 	}
 	lines = append(lines, escalationActionLine)
 	return strings.Join(lines, "\n")
+}
+
+// blockedQueueText renders the blocked-queue text of a PR: the PR key, the
+// block reason stored on the queue row and the operator ask.
+func blockedQueueText(prKey, reason, ask string) string {
+	head := "queue blocked"
+	if key := strings.TrimSpace(prKey); key != "" {
+		head = key + " — " + head
+	}
+	if trimmed := strings.TrimSpace(reason); trimmed != "" {
+		head += ": " + trimmed
+	}
+	return head + " — " + ask
+}
+
+// blockedQueueSkipReason renders the reason a delivery of a blocked PR queue
+// is skipped with: the PR key, the block reason and the kind /retry re-runs.
+func blockedQueueSkipReason(prKey, reason, kind string) string {
+	ask := "/retry re-runs the failed run"
+	if trimmed := strings.TrimSpace(kind); trimmed != "" {
+		ask = "/retry re-runs " + trimmed
+	}
+	return blockedQueueText(prKey, reason, ask)
 }
 
 func FormatPRThreadOpener(envelope WebhookEnvelope) string {
@@ -766,19 +789,26 @@ func (s *Server) reopenPRSurface(prKey string) {
 	s.tasks.ReopenSurface(prKey)
 }
 
-func (s *Server) queueWaiting(ctx context.Context, prKey string, phase Phase) string {
+// queueState renders the queue-driven parts of the thread state line: the
+// reason the PR waits on another run, and the operator ask of a blocked
+// queue. A blocked queue waits on nothing — its run is over — so it carries
+// the block reason and the ask instead of a waiting reason.
+func (s *Server) queueState(ctx context.Context, prKey string, phase Phase) (string, string) {
 	if s.prQueues == nil || strings.TrimSpace(prKey) == "" {
-		return ""
+		return "", ""
 	}
 	row, err := s.prQueues.Get(ctx, prKey)
 	if err != nil || row == nil {
-		return ""
+		return "", ""
+	}
+	if row.Status == store.PRStatusBlocked {
+		return "", blockedQueueText(prKey, row.BlockedReason, blockedQueueCommand)
 	}
 	kind := strings.TrimSpace(strings.ToLower(row.ActiveKind))
 	if kind == "" || kind == string(phase) {
-		return ""
+		return "", ""
 	}
-	return kind + " run active"
+	return kind + " run active", ""
 }
 
 func waitingReasonForGate(envelope WebhookEnvelope) string {

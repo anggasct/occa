@@ -1144,8 +1144,8 @@ func (d *dispatcher) handle(item dispatchItem) {
 		}
 	}
 	if item.prKey != "" {
-		if blocked, _ := s.prQueueBlocked(item.prKey); blocked {
-			s.markSkipped(receipt.ID, item.ep, normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", item.ep.CommentTrigger), "queue blocked — /retry, /skip or /cancel")
+		if row, _ := s.blockedQueueRow(context.Background(), item.prKey); row != nil {
+			s.markSkipped(receipt.ID, item.ep, normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", item.ep.CommentTrigger), blockedQueueSkipReason(item.prKey, row.BlockedReason, row.ActiveKind))
 			return
 		}
 		if err := s.deliveries.SetPRKey(context.Background(), receipt.ID, item.prKey); err != nil {
