@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -234,6 +236,7 @@ type mockDiscordChannel struct {
 	mu             sync.Mutex
 	sentMessages   []mockMessage
 	editedMessages []mockEdit
+	pinnedMessages []mockEdit
 	threadStarts   []mockThread
 	startThreadErr error
 	nextMsgID      string
@@ -315,6 +318,13 @@ func (m *mockDiscordChannel) StartThread(channelID, messageID, name string) (str
 		return m.nextThreadID, nil
 	}
 	return "thread-999", nil
+}
+
+func (m *mockDiscordChannel) PinNotification(channelID, messageID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pinnedMessages = append(m.pinnedMessages, mockEdit{channelID, messageID, ""})
+	return nil
 }
 
 type mockTelegramChannel struct {
@@ -942,5 +952,119 @@ func TestWebhookExecutorDiscordRoutingThreadID(t *testing.T) {
 	}
 	if len(discordCh.threadStarts) != 0 {
 		t.Errorf("threadStarts = %d, want 0 (reuse routing-identity thread)", len(discordCh.threadStarts))
+	}
+}
+
+// TestRefreshThreadBannerRecordsStateLineForThread asserts the dispatch
+// writer records the state line under the thread and pins it, so the
+// PR-queue writer edits the same message instead of posting a second one.
+func TestRefreshThreadBannerRecordsStateLineForThread(t *testing.T) {
+	discordCh := &mockDiscordChannel{name: "discord"}
+	reg := webhook.NewTaskThreadRegistry()
+	taskOpts := webhook.TaskOptions{Registry: reg}
+	workCtx := &webhook.WebhookWorkContext{
+		Workflow: "review",
+		PRKey:    "acme/widget#181",
+		Envelope: webhook.WebhookEnvelope{"repository": "acme/widget", "head_branch": "feat/x"},
+	}
+
+	refreshThreadBannerAndStatus(discordCh, taskOpts, "discord", "chan-1", "thread-9", "acme/widget", "feat/x", workCtx, "run started")
+
+	statusID := statusLineMessageID(t, discordCh)
+	if id := reg.StatusMessageIDForThread("thread-9"); id != statusID {
+		t.Fatalf("state line id for the thread = %q, want %q", id, statusID)
+	}
+	if len(discordCh.pinnedMessages) != 1 {
+		t.Fatalf("pins = %d, want the state line pinned once: %+v", len(discordCh.pinnedMessages), discordCh.pinnedMessages)
+	}
+	if discordCh.pinnedMessages[0].messageID != statusID {
+		t.Fatalf("pinned message = %q, want the state line %q", discordCh.pinnedMessages[0].messageID, statusID)
+	}
+
+	refreshThreadBannerAndStatus(discordCh, taskOpts, "discord", "chan-1", "thread-9", "acme/widget", "feat/x", workCtx, "run started")
+
+	if got := statusLineMessageID(t, discordCh); got != statusID {
+		t.Fatalf("state line id = %q after the second write, want the same line %q", got, statusID)
+	}
+	if len(discordCh.editedMessages) == 0 {
+		t.Fatal("the second write did not edit the state line in place")
+	}
+	if len(discordCh.pinnedMessages) != 1 {
+		t.Fatalf("pins = %d, want the state line pinned once: %+v", len(discordCh.pinnedMessages), discordCh.pinnedMessages)
+	}
+}
+
+// statusLineMessageID returns the message id of the one state line the
+// channel carries.
+func statusLineMessageID(t *testing.T, ch *mockDiscordChannel) string {
+	t.Helper()
+	index := -1
+	for i, msg := range ch.sentMessages {
+		if !strings.Contains(msg.text, "📌 Status — ") {
+			continue
+		}
+		if index >= 0 {
+			t.Fatalf("the thread carries more than one state line: %+v", ch.sentMessages)
+		}
+		index = i
+	}
+	if index < 0 {
+		t.Fatalf("the thread carries no state line: %+v", ch.sentMessages)
+	}
+	return fmt.Sprintf("msg-%d", index+1)
+}
+
+// logBuffer collects log output from the writer under test.
+type logBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *logBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *logBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestRefreshThreadBannerRefusesTerminalPR asserts a terminal PR keeps its
+// state line: the dispatch writer does not rewrite it and the refusal is
+// logged.
+func TestRefreshThreadBannerRefusesTerminalPR(t *testing.T) {
+	discordCh := &mockDiscordChannel{name: "discord"}
+	reg := webhook.NewTaskThreadRegistry()
+	reg.SetSurface("acme/widget#181", webhook.SurfaceUpdate{
+		ThreadID: "thread-9",
+		Phase:    string(webhook.PhaseMerged),
+	})
+	taskOpts := webhook.TaskOptions{Registry: reg}
+	workCtx := &webhook.WebhookWorkContext{
+		Workflow: "review",
+		PRKey:    "acme/widget#181",
+		Envelope: webhook.WebhookEnvelope{"repository": "acme/widget", "head_branch": "feat/x"},
+	}
+
+	logs := &logBuffer{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	refreshThreadBannerAndStatus(discordCh, taskOpts, "discord", "chan-1", "thread-9", "acme/widget", "feat/x", workCtx, "run started")
+
+	for _, msg := range discordCh.sentMessages {
+		if strings.Contains(msg.text, "📌 Status — ") {
+			t.Fatalf("the terminal PR state line was written again: %q", msg.text)
+		}
+	}
+	if len(discordCh.editedMessages) != 0 {
+		t.Fatalf("the terminal PR state line was edited: %+v", discordCh.editedMessages)
+	}
+	if !strings.Contains(logs.String(), "write refused, PR terminal") {
+		t.Fatalf("the refused write was not logged: %s", logs.String())
 	}
 }

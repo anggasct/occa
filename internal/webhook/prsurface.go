@@ -485,14 +485,6 @@ func (s *Server) ensureThreadStatus(ctx context.Context, platform, channelID, th
 	if s == nil || s.tasks == nil || strings.TrimSpace(threadID) == "" {
 		return ""
 	}
-	if s.prSurfaceFrozen(prKey, update.Phase) {
-		slog.Info("webhook: write refused, PR terminal",
-			"pr_key", prKey,
-			"surface", "thread status",
-			"run", string(update.Phase),
-		)
-		return ""
-	}
 	queued := strings.TrimSpace(update.Queued)
 	if queued == "" && strings.TrimSpace(prKey) != "" {
 		queued = s.queueSnapshot(ctx, prKey)
@@ -502,20 +494,27 @@ func (s *Server) ensureThreadStatus(ctx context.Context, platform, channelID, th
 	if strings.TrimSpace(target) == "" {
 		return ""
 	}
-	existing := s.tasks.StatusMessageIDForThread(threadID)
-	if existing != "" {
-		if err := s.editThread(ctx, platform, target, existing, text); err == nil {
-			return existing
-		}
+	writer := s.threadStatusWriter(ctx, platform, target, update.Phase)
+	return writer.Write(target, threadID, repo, branch, prKey, text)
+}
+
+// threadStatusWriter builds the writer of a thread's state line. The
+// dispatch writer in the executor uses the same writer, so both edit one
+// message.
+func (s *Server) threadStatusWriter(ctx context.Context, platform, target string, phase Phase) *ThreadStatusWriter {
+	return &ThreadStatusWriter{
+		Registry: s.tasks,
+		Phase:    phase,
+		Send: func(target, text string) (string, error) {
+			return s.sendThread(ctx, platform, target, text)
+		},
+		Edit: func(target, messageID, text string) error {
+			return s.editThread(ctx, platform, target, messageID, text)
+		},
+		Pin: func(target, messageID string) {
+			s.pinThreadStatus(ctx, platform, target, messageID)
+		},
 	}
-	msgID, err := s.sendThread(ctx, platform, target, text)
-	if err != nil || strings.TrimSpace(msgID) == "" {
-		return strings.TrimSpace(msgID)
-	}
-	s.tasks.SetStatusMessageForThread(threadID, msgID)
-	s.tasks.SetStatusMessageKeyed(repo, branch, prKey, msgID)
-	s.pinThreadStatus(ctx, platform, target, msgID)
-	return msgID
 }
 
 // pinThreadStatus pins the thread state line so the operator finds the
@@ -533,20 +532,22 @@ func (s *Server) pinThreadStatus(ctx context.Context, platform, target, msgID st
 	}
 }
 
-// prSurfaceFrozen reports whether a write to the PR surface must be refused:
-// the PR reached a terminal phase and the run asks for a different one.
-func (s *Server) prSurfaceFrozen(prKey string, phase Phase) bool {
-	if s == nil || s.tasks == nil || strings.TrimSpace(prKey) == "" {
+// SurfaceFrozen reports whether a write to the PR surface must be refused:
+// the PR reached a terminal phase and the write asks for a different one.
+// Every writer of a PR surface asks through here, so a terminal PR keeps its
+// state line.
+func SurfaceFrozen(tasks *TaskThreadRegistry, prKey string, phase Phase) bool {
+	if tasks == nil || strings.TrimSpace(prKey) == "" {
 		return false
 	}
-	_, current, _, known := s.prSurfaceState(prKey)
+	_, current, _, known := tasks.SurfaceState(prKey)
 	if !known || current == "" || current == phase {
 		return false
 	}
 	if !IsTerminalPhase(current) {
 		return false
 	}
-	if current == PhaseBlocked && s.tasks.SurfaceReopened(prKey) {
+	if current == PhaseBlocked && tasks.SurfaceReopened(prKey) {
 		return false
 	}
 	return true

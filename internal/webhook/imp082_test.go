@@ -255,64 +255,83 @@ func TestInternalReviewBodyCarriesTheTrigger(t *testing.T) {
 // verdict of its own still reports the blocking one the gate holds, and the
 // merge button agrees with it.
 func TestMergeGateVerdictRendersIdenticallyInEveryLane(t *testing.T) {
-	srv, _, rec := newSurfaceServer(t)
-	ep := srv.endpoints["/merge"]
-	prKey := "acme/widget#181"
-	ctx := context.Background()
+	for _, lane := range []struct {
+		path     string
+		workflow string
+	}{
+		{path: "/review", workflow: "review"},
+		{path: "/fix", workflow: "fix"},
+		{path: "/merge", workflow: "merge"},
+	} {
+		t.Run(lane.workflow, func(t *testing.T) {
+			srv, _, rec := newSurfaceServer(t)
+			ep := srv.endpoints[lane.path]
+			prKey := "acme/widget#181"
+			ctx := context.Background()
 
-	if verdict := srv.recordMergeGate(prKey, WebhookEnvelope{
-		"repository":     "acme/widget",
-		"pr_number":      "181",
-		"review_state":   "commented",
-		"review_verdict": "request_changes",
-		"review_commit":  "c0ffee",
-	}); verdict != "changes_requested" {
-		t.Fatalf("gate verdict = %q, want changes_requested", verdict)
-	}
-
-	// A merge-lane delivery that carries no review verdict of its own.
-	envelope := WebhookEnvelope{
-		"repository":  "acme/widget",
-		"pr_number":   "181",
-		"head_branch": "feat/x",
-		"pr_state":    "open",
-	}
-	srv.emitPRAudit(ctx, ep, envelope, "COMPLETED", "", prKey, "thread-9")
-
-	outcome := ""
-	for _, msg := range rec.notified {
-		if strings.Contains(msg.text, "verdict:") {
-			outcome = msg.text
-		}
-	}
-	if outcome == "" {
-		t.Fatalf("the merge lane posted no verdict: %+v", rec.notified)
-	}
-	if !strings.Contains(outcome, "REQUEST_CHANGES") {
-		t.Fatalf("merge outcome = %q, want the blocking verdict the gate holds", outcome)
-	}
-	if strings.Contains(outcome, "merge ready") {
-		t.Fatalf("merge outcome = %q, must not report merge ready while the gate blocks", outcome)
-	}
-
-	lines := rec.threadSends()
-	if len(lines) == 0 {
-		t.Fatal("the merge lane posted no thread state line")
-	}
-	if !strings.Contains(lines[len(lines)-1].text, "waiting: approval") {
-		t.Fatalf("thread state line = %q, want the blocking verdict as the waiting reason", lines[len(lines)-1].text)
-	}
-
-	mergeDisabled := false
-	for _, msg := range append(append([]surfaceMessage(nil), rec.sent...), rec.edited...) {
-		for _, button := range msg.buttons {
-			if button.Label == "Merge" {
-				mergeDisabled = button.Disabled
+			if verdict := srv.recordMergeGate(prKey, WebhookEnvelope{
+				"repository":     "acme/widget",
+				"pr_number":      "181",
+				"review_state":   "commented",
+				"review_verdict": "request_changes",
+				"review_commit":  "c0ffee",
+			}); verdict != "changes_requested" {
+				t.Fatalf("gate verdict = %q, want changes_requested", verdict)
 			}
-		}
-	}
-	if !mergeDisabled {
-		t.Fatal("the merge button must stay disabled while the gate blocks")
+
+			// A lane delivery that carries no review verdict of its own.
+			envelope := WebhookEnvelope{
+				"repository":  "acme/widget",
+				"pr_number":   "181",
+				"head_branch": "feat/x",
+				"pr_state":    "open",
+			}
+			srv.emitPRAudit(ctx, ep, envelope, "COMPLETED", "", prKey, "thread-9")
+
+			outcome := ""
+			for _, msg := range rec.notified {
+				if strings.Contains(msg.text, "verdict:") {
+					outcome = msg.text
+				}
+			}
+			if outcome == "" {
+				t.Fatalf("the %s lane posted no verdict: %+v", lane.workflow, rec.notified)
+			}
+			if !strings.Contains(outcome, "REQUEST_CHANGES") {
+				t.Fatalf("%s outcome = %q, want the blocking verdict the gate holds", lane.workflow, outcome)
+			}
+
+			// The gate outcome that lane renders names the blocking gate.
+			// The merge lane reports a merge as ready only when the gate
+			// allows it, so this fails when the lane loses the verdict.
+			gateOutcome := FormatGateOutcome(withGateVerdict(envelope, srv.gateVerdict(prKey)), lane.workflow, "COMPLETED")
+			if gateOutcome != "gate checked, review changes requested, fix running" {
+				t.Fatalf("%s gate outcome = %q, want the blocking gate outcome", lane.workflow, gateOutcome)
+			}
+			if strings.Contains(gateOutcome, "merge ready") {
+				t.Fatalf("%s gate outcome = %q, must not report merge ready while the gate blocks", lane.workflow, gateOutcome)
+			}
+
+			lines := rec.threadSends()
+			if len(lines) == 0 {
+				t.Fatalf("the %s lane posted no thread state line", lane.workflow)
+			}
+			if !strings.Contains(lines[len(lines)-1].text, "waiting: approval") {
+				t.Fatalf("%s thread state line = %q, want the blocking verdict as the waiting reason", lane.workflow, lines[len(lines)-1].text)
+			}
+
+			mergeDisabled := false
+			for _, msg := range append(append([]surfaceMessage(nil), rec.sent...), rec.edited...) {
+				for _, button := range msg.buttons {
+					if button.Label == "Merge" {
+						mergeDisabled = button.Disabled
+					}
+				}
+			}
+			if !mergeDisabled {
+				t.Fatalf("the merge button must stay disabled while the gate blocks (%s lane)", lane.workflow)
+			}
+		})
 	}
 }
 

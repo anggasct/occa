@@ -836,13 +836,33 @@ func refreshThreadBannerAndStatus(ch channel.Channel, taskOpts webhook.TaskOptio
 		"",
 		taskOpts.Icons,
 	)
-	if msgID := reg.StatusMessageIDKeyed(repo, branch, prKey); msgID != "" {
-		if err := notifyEdit(ch, target, msgID, text); err == nil {
-			return
-		}
+	writer := &webhook.ThreadStatusWriter{
+		Registry: reg,
+		Phase:    surfacePhase,
+		Send: func(target, text string) (string, error) {
+			return notifySend(ch, target, text)
+		},
+		Edit: func(target, messageID, text string) error {
+			return notifyEdit(ch, target, messageID, text)
+		},
+		Pin: func(target, messageID string) {
+			pinThreadStatus(ch, target, messageID)
+		},
 	}
-	if msgID, err := notifySend(ch, target, text); err == nil && strings.TrimSpace(msgID) != "" {
-		reg.SetStatusMessageKeyed(repo, branch, prKey, msgID)
+	writer.Write(target, threadID, repo, branch, prKey, text)
+}
+
+// pinThreadStatus pins the state line of a thread so the operator finds the
+// current phase without hunting through the thread.
+func pinThreadStatus(ch channel.Channel, target, messageID string) {
+	pinner, ok := ch.(interface {
+		PinNotification(channelID, messageID string) error
+	})
+	if !ok {
+		return
+	}
+	if err := pinner.PinNotification(target, messageID); err != nil {
+		slog.Warn("webhook: thread status pin failed", "platform", ch.Name(), "message_id", messageID, "error", err)
 	}
 }
 

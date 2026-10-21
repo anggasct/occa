@@ -639,6 +639,14 @@ func (t *TaskThreadRegistry) StatusMessageIDForThread(threadID string) string {
 	return strings.TrimSpace(t.statusByThread[strings.TrimSpace(threadID)])
 }
 
+// RecordStatusMessage records the id of a thread's state line in the thread
+// map and in the (repo, branch, PR) map, so every writer of that line finds
+// the same message.
+func (t *TaskThreadRegistry) RecordStatusMessage(threadID, repo, branch, prKey, msgID string) {
+	t.SetStatusMessageForThread(threadID, msgID)
+	t.SetStatusMessageKeyed(repo, branch, prKey, msgID)
+}
+
 // SetStatusMessageKeyed records the id of the thread state line. PR surfaces
 // are tracked per PR, the legacy task path per repo and branch.
 func (t *TaskThreadRegistry) SetStatusMessageKeyed(repo, branch, prKey, msgID string) {
@@ -647,33 +655,6 @@ func (t *TaskThreadRegistry) SetStatusMessageKeyed(repo, branch, prKey, msgID st
 		return
 	}
 	t.SetStatusMessage(repo, branch, msgID)
-}
-
-// StatusMessageIDKeyed returns the id of the thread state line.
-func (t *TaskThreadRegistry) StatusMessageIDKeyed(repo, branch, prKey string) string {
-	if strings.TrimSpace(prKey) != "" {
-		if id := t.SurfaceStatusMessageID(prKey); id != "" {
-			return id
-		}
-	}
-	if rec, ok := t.Lookup(repo, branch); ok {
-		return strings.TrimSpace(rec.StatusMessageID)
-	}
-	return ""
-}
-
-// SurfaceStatusMessageID returns the id of the thread state line of a PR.
-func (t *TaskThreadRegistry) SurfaceStatusMessageID(prKey string) string {
-	if t == nil || strings.TrimSpace(prKey) == "" {
-		return ""
-	}
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	surface, ok := t.surfaces[strings.TrimSpace(prKey)]
-	if !ok {
-		return ""
-	}
-	return strings.TrimSpace(surface.StatusMessageID)
 }
 
 // SurfaceRootOwner returns the PR whose channel parent is a given message.
