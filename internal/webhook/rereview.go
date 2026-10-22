@@ -53,7 +53,7 @@ func (s *Server) enqueueInternalReview(prKey, headSHA string) {
 		payloadHash: payloadHashOf(body),
 	}
 	key := WebhookExecutionKey{Repository: repo, Branch: s.branchForPR(prKey)}
-	if _, ok := s.enqueue(ep, key, item); !ok {
+	if _, ok, _ := s.enqueue(ep, key, item); !ok {
 		slog.Warn("webhook: re-review not queued, queue full", "pr_key", prKey, "endpoint", ep.Name)
 		return
 	}

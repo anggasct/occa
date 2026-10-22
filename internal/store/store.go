@@ -88,6 +88,7 @@ const (
 	WebhookStatusProcessing WebhookStatus = "processing"
 	WebhookStatusCompleted  WebhookStatus = "completed"
 	WebhookStatusSkipped    WebhookStatus = "skipped"
+	WebhookStatusRejected   WebhookStatus = "rejected"
 	WebhookStatusFailed     WebhookStatus = "failed"
 )
 
@@ -265,5 +266,6 @@ type Store interface {
 	WebhookDeliveryRepo() WebhookDeliveryRepo
 	RecoveryEventRepo() RecoveryEventRepo
 	PRQueueRepo() PRQueueRepo
+	WebhookReplayRepo() WebhookReplayRepo
 	Close() error
 }

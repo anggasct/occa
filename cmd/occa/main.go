@@ -452,6 +452,7 @@ func main() {
 		webhookSrv.SetTaskRegistry(taskRegistry)
 		webhookSrv.SetChannelStore(db.ChannelRepo())
 		webhookSrv.SetPRQueueRepo(db.PRQueueRepo())
+		webhookSrv.SetWebhookReplayRepo(db.WebhookReplayRepo())
 		webhookSrv.SetStallFreshness(cfg.Runtime.Relay.StallFreshness)
 		webhookSrv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
 			for _, ch := range channels {

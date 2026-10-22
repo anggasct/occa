@@ -200,13 +200,30 @@ type SurfaceGate struct {
 	// Commit is the commit the verdict was observed on. A verdict on
 	// another commit does not clear a blocking one unless it is the head.
 	Commit string
+	// Head is the newest commit observed for the PR, from any delivery that
+	// carried one. A blocking verdict on an older commit is stale once Head
+	// has moved past it.
+	Head string
+	// ReviewID and ReviewAt order two verdicts on the same commit. GitHub
+	// review ids increase with submission time; the timestamp is the
+	// fallback when an id is unavailable.
+	ReviewID int64
+	ReviewAt int64
 }
 
 // Allows reports whether the approval and CI half of the merge gate passes.
 // An unknown state is not a failure: the binary only knows what it has seen.
 func (g SurfaceGate) Allows() bool {
 	if approval := strings.TrimSpace(g.Approval); approval != "" && approval != "approved" {
-		return false
+		stale := false
+		if commit := strings.TrimSpace(g.Commit); commit != "" {
+			if head := strings.TrimSpace(g.Head); head != "" && head != commit {
+				stale = true
+			}
+		}
+		if !stale {
+			return false
+		}
 	}
 	switch strings.TrimSpace(g.CI) {
 	case "success":
@@ -366,18 +383,7 @@ func (t *TaskThreadRegistry) SetGate(prKey string, gate SurfaceGate) {
 	if t.gates == nil {
 		t.gates = make(map[string]SurfaceGate)
 	}
-	key := strings.TrimSpace(prKey)
-	current := t.gates[key]
-	if approval := strings.TrimSpace(gate.Approval); approval != "" {
-		current.Approval = approval
-		if commit := strings.TrimSpace(gate.Commit); commit != "" {
-			current.Commit = commit
-		}
-	}
-	if ci := strings.TrimSpace(gate.CI); ci != "" {
-		current.CI = ci
-	}
-	t.gates[key] = current
+	t.gates[strings.TrimSpace(prKey)] = gate
 }
 
 // Gate returns the approval and CI state known for a PR.

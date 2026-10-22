@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	schemaVersion    = 20
+	schemaVersion    = 21
 	SchemaVersion    = schemaVersion
 	busyTimeoutMilli = 5000
 )
@@ -37,6 +37,33 @@ var migrations = []func(s *SQLiteStore, tx *sql.Tx) error{
 	addSessionParked,
 	addPRQueue,
 	addPRQueueRetryAt,
+	addWebhookReplay,
+}
+
+func addWebhookReplay(_ *SQLiteStore, tx *sql.Tx) error {
+	ddl := `
+CREATE TABLE IF NOT EXISTS webhook_replay (
+	id               INTEGER PRIMARY KEY AUTOINCREMENT,
+	endpoint         TEXT NOT NULL,
+	delivery_id      TEXT NOT NULL,
+	event_type       TEXT NOT NULL,
+	pr_key           TEXT NOT NULL DEFAULT '',
+	body             BLOB NOT NULL,
+	reason           TEXT NOT NULL,
+	attempts         INTEGER NOT NULL DEFAULT 0,
+	next_attempt_at  INTEGER NOT NULL,
+	expires_at       INTEGER NOT NULL,
+	status           TEXT NOT NULL DEFAULT 'pending',
+	created_at       INTEGER NOT NULL,
+	updated_at       INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_webhook_replay_key ON webhook_replay (endpoint, delivery_id);
+CREATE INDEX IF NOT EXISTS idx_webhook_replay_due ON webhook_replay (status, next_attempt_at);
+`
+	if _, err := tx.Exec(ddl); err != nil {
+		return fmt.Errorf("store: migrate webhook replay: %w", err)
+	}
+	return nil
 }
 
 func addPRQueueRetryAt(_ *SQLiteStore, tx *sql.Tx) error {
@@ -448,6 +475,7 @@ type SQLiteStore struct {
 	webhookDeliveries *sqliteWebhookDeliveryRepo
 	recoveryEvents    *sqliteRecoveryEventRepo
 	prQueues          *sqlitePRQueueRepo
+	webhookReplays    *sqliteWebhookReplayRepo
 	defaultWorkdir    string
 }
 
@@ -500,6 +528,14 @@ func OpenWithRetention(path, defaultWorkdir string, usage UsageRetention, recove
 	s.webhookDeliveries = &sqliteWebhookDeliveryRepo{db: db}
 	s.recoveryEvents = &sqliteRecoveryEventRepo{db: db, retention: recoveryRetention}
 	s.prQueues = &sqlitePRQueueRepo{db: db}
+	s.webhookReplays = &sqliteWebhookReplayRepo{db: db}
+	if repaired, err := s.prQueues.RepairInvariants(context.Background()); err != nil {
+		slog.Warn("store: pr queue invariant check failed", "error", err)
+	} else {
+		for _, key := range repaired {
+			slog.Warn("store: pr queue invariant repaired", "pr_key", key, "status", "drained")
+		}
+	}
 	return s, nil
 }
 
@@ -539,6 +575,7 @@ func (s *SQLiteStore) UsageRepo() UsageRepo                     { return s.usage
 func (s *SQLiteStore) WebhookDeliveryRepo() WebhookDeliveryRepo { return s.webhookDeliveries }
 func (s *SQLiteStore) RecoveryEventRepo() RecoveryEventRepo     { return s.recoveryEvents }
 func (s *SQLiteStore) PRQueueRepo() PRQueueRepo                 { return s.prQueues }
+func (s *SQLiteStore) WebhookReplayRepo() WebhookReplayRepo     { return s.webhookReplays }
 
 func (s *SQLiteStore) Close() error {
 	return s.db.Close()

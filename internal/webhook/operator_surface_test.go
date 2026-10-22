@@ -139,6 +139,7 @@ func TestMergeGateBlocksOnRequestChanges(t *testing.T) {
 		"review_user":    "reviewbot",
 		"pr_author":      "reviewbot",
 		"review_commit":  "c0ffee",
+		"review_id":      "10",
 	}
 	verdict := srv.recordMergeGate(prKey, envelope)
 	if verdict != "changes_requested" {
@@ -159,6 +160,7 @@ func TestMergeGateBlocksOnRequestChanges(t *testing.T) {
 		"review_state":   "approved",
 		"review_verdict": "approved",
 		"review_commit":  "c0ffee",
+		"review_id":      "11",
 	}
 	if verdict := srv.recordMergeGate(prKey, approval); verdict != "approved" {
 		t.Fatalf("gate verdict = %q, want approved", verdict)
@@ -180,6 +182,8 @@ func TestMergeLaneSkipsWhenVerdictBlocks(t *testing.T) {
 		"review_state":   "commented",
 		"review_verdict": "request_changes",
 		"review_commit":  "c0ffee",
+		"review_id":      "10",
+		"head_sha":       "c0ffee",
 	})
 	ep := srv.endpoints["/merge"]
 	receipt, err := st.WebhookDeliveryRepo().Create(context.Background(), store.WebhookDelivery{
@@ -194,7 +198,7 @@ func TestMergeLaneSkipsWhenVerdictBlocks(t *testing.T) {
 	}
 	item := dispatchItem{
 		ep:          ep,
-		body:        []byte(prReviewBody(181, "feat/x", "owner", "commented", "c0ffee")),
+		body:        []byte(strings.Replace(prReviewBody(181, "feat/x", "owner", "commented", "c0ffee"), "abc1234def5678", "c0ffee", 1)),
 		deliveryID:  "del-merge-blocked",
 		eventType:   "pull_request_review",
 		payloadHash: "hash-merge-blocked",

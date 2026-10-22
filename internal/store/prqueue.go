@@ -58,6 +58,7 @@ type PRQueueRepo interface {
 	ListUnresolved(ctx context.Context) ([]PRRun, error)
 	ClearQueue(ctx context.Context, prKey string) (int, error)
 	DeleteItem(ctx context.Context, id int64) error
+	RepairInvariants(ctx context.Context) ([]string, error)
 }
 
 type sqlitePRQueueRepo struct {
@@ -437,3 +438,47 @@ func (r *sqlitePRQueueRepo) ClearQueue(ctx context.Context, prKey string) (int, 
 }
 
 var _ PRQueueRepo = (*sqlitePRQueueRepo)(nil)
+
+// RepairInvariants fixes rows that claim an active run without carrying one.
+// An active row is legitimate only while a run is stamped (kind and start
+// time) or queued items are waiting; a row with neither is a phantom that
+// /retry cannot reach.
+func (r *sqlitePRQueueRepo) RepairInvariants(ctx context.Context) ([]string, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT pr_key FROM pr_queue q
+		 WHERE status = ?
+		   AND (active_kind = '' OR active_since = 0)
+		   AND NOT EXISTS (SELECT 1 FROM pr_queue_items i WHERE i.pr_key = q.pr_key)`,
+		string(PRStatusActive),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: pr queue invariant scan: %w", err)
+	}
+	var keys []string
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("store: pr queue invariant scan: %w", err)
+		}
+		keys = append(keys, key)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("store: pr queue invariant scan: %w", err)
+	}
+	_ = rows.Close()
+	now := time.Now().Unix()
+	for _, key := range keys {
+		if _, err := r.db.ExecContext(ctx,
+			`UPDATE pr_queue
+			 SET status = ?, active_kind = '', active_session = '', active_delivery = 0,
+			     active_since = 0, blocked_reason = '', updated_at = ?
+			 WHERE pr_key = ?`,
+			string(PRStatusDrained), now, key,
+		); err != nil {
+			return nil, fmt.Errorf("store: pr queue invariant repair: %w", err)
+		}
+	}
+	return keys, nil
+}
