@@ -292,3 +292,80 @@ func TestUnknownRuntimeKeyFails(t *testing.T) {
 		t.Fatalf("Load error = %v, want bogus_runtime_key failure", err)
 	}
 }
+
+func TestReplayRuntimeKeysDefaultWhenUnset(t *testing.T) {
+	var rt WebhookRuntime
+	if got := rt.EffectiveStateLaneShare(); got != defaultStateLaneMaxShare {
+		t.Fatalf("state share = %v, want %v", got, defaultStateLaneMaxShare)
+	}
+	if got := rt.EffectivePriorityOverflow(); got != defaultPriorityOverflow {
+		t.Fatalf("priority overflow = %d, want %d", got, defaultPriorityOverflow)
+	}
+	if got := rt.EffectiveReplayStoreMax(); got != defaultReplayStoreMax {
+		t.Fatalf("replay store max = %d, want %d", got, defaultReplayStoreMax)
+	}
+	if got := rt.EffectiveReplayMaxAttempts(); got != defaultReplayMaxAttempts {
+		t.Fatalf("replay max attempts = %d, want %d", got, defaultReplayMaxAttempts)
+	}
+	if got := rt.EffectiveReplayTTL(); got != defaultReplayTTL {
+		t.Fatalf("replay ttl = %s, want %s", got, defaultReplayTTL)
+	}
+	if got := rt.EffectiveReplayInterval(); got != defaultReplayInterval {
+		t.Fatalf("replay interval = %s, want %s", got, defaultReplayInterval)
+	}
+	if got := len(rt.EffectiveReplayBackoff()); got != len(defaultReplayBackoff) {
+		t.Fatalf("replay backoff steps = %d, want %d", got, len(defaultReplayBackoff))
+	}
+}
+
+func TestReplayRuntimeExplicitZeroOverflowIsHonoured(t *testing.T) {
+	zero := 0
+	rt := WebhookRuntime{PriorityOverflow: &zero}
+	if got := rt.EffectivePriorityOverflow(); got != 0 {
+		t.Fatalf("explicit zero overflow = %d, want 0", got)
+	}
+}
+
+func TestWebhookRuntimeRejectsInvalidReplayValues(t *testing.T) {
+	negative := -1
+	share := 0.0
+	base := validRuntimeForAdmissionTest()
+	base.PriorityOverflow = &negative
+	if _, err := validateWebhookRuntime(base); err == nil {
+		t.Fatal("negative priority_overflow accepted")
+	}
+	base = validRuntimeForAdmissionTest()
+	base.StateLaneMaxShare = &share
+	if _, err := validateWebhookRuntime(base); err == nil {
+		t.Fatal("zero state_lane_max_share accepted")
+	}
+	base = validRuntimeForAdmissionTest()
+	base.ReplayBackoff = []time.Duration{0}
+	if _, err := validateWebhookRuntime(base); err == nil {
+		t.Fatal("zero replay backoff accepted")
+	}
+}
+
+func validRuntimeForAdmissionTest() WebhookRuntime {
+	return WebhookRuntime{
+		MaxBodySize:           ByteSize(10 * 1024 * 1024),
+		MaxConcurrentEvents:   16,
+		MaxQueuedPerKey:       8,
+		ProcessingTimeout:     30 * time.Minute,
+		ClaimGrace:            32 * time.Minute,
+		RetryAfter:            30 * time.Second,
+		WorkspaceRetryBackoff: []time.Duration{30 * time.Second},
+		Retention:             720 * time.Hour,
+		RetentionKeep:         500,
+		PruneInterval:         10 * time.Minute,
+		DispatcherIdleTTL:     time.Hour,
+		DispatcherStuckAfter:  5 * time.Minute,
+		WatchdogInterval:      time.Minute,
+		HTTPReadHeaderTimeout: 10 * time.Second,
+		HTTPReadTimeout:       30 * time.Second,
+		HTTPWriteTimeout:      30 * time.Second,
+		HTTPIdleTimeout:       2 * time.Minute,
+		ReviewDedupeWindow:    time.Hour,
+		IsolatedWorkspaceTTL:  24 * time.Hour,
+	}
+}

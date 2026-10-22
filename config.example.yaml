@@ -30,7 +30,15 @@ webhooks:
   runtime:
     max_body_size: 10MB # reject larger webhook payloads with 413
     max_concurrent_events: 16 # global executing-delivery semaphore size
-    max_queued_per_key: 8 # per-identity queue depth; overflows answer 429
+    max_queued_per_key: 8 # per-identity queue budget; lanes share it, overflows answer 429
+    state_lane_max_share: 0.5 # max share of the budget state events may occupy (0 < share <= 1)
+    priority_overflow: 8 # extra slots a verdict/fix may borrow when the budget is full (>= 0)
+    replay_store_max: 200 # rejected deliveries retained for automatic replay
+    replay_store_max_bytes: 64MB # total body bytes retained by the replay store
+    replay_interval: 30s # how often pending rejected deliveries are reconsidered
+    replay_backoff: [30s, 2m, 10m] # delays between replay attempts
+    replay_max_attempts: 3 # replay attempts before a delivery is declared lost
+    replay_ttl: 30m # how long a rejected delivery stays replayable
     processing_timeout: 30m # per-delivery executor deadline
     claim_grace: 32m # stale-claim reclaim and restart-recovery window
     retry_after: 30s # Retry-After seconds sent with queue-full 429s

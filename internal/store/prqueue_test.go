@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestPRQueueSchemaVersion(t *testing.T) {
@@ -12,8 +13,8 @@ func TestPRQueueSchemaVersion(t *testing.T) {
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatalf("read schema version: %v", err)
 	}
-	if version != 20 {
-		t.Fatalf("schema version = %d, want 20", version)
+	if version != 21 {
+		t.Fatalf("schema version = %d, want 21", version)
 	}
 }
 
@@ -246,5 +247,59 @@ func TestPRQueueConcurrentEnqueue(t *testing.T) {
 	items, err := repo.ListItems(ctx, key)
 	if err != nil || len(items) != workers {
 		t.Fatalf("ListItems: %v (n=%d, want %d)", err, len(items), workers)
+	}
+}
+
+func TestRepairInvariantsDrainsPhantomActiveRow(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+	now := time.Now().Unix()
+	if _, err := s.db.Exec(
+		`INSERT INTO pr_queue (pr_key, thread_id, root_msg_id, status, active_kind, active_session, active_delivery, active_since, retry_count, next_retry_at, blocked_reason, created_at, updated_at)
+		 VALUES (?, '', '', ?, '', '', 0, 0, 0, 0, '', ?, ?)`,
+		"acme/widget#9", string(PRStatusActive), now, now,
+	); err != nil {
+		t.Fatalf("seed phantom row: %v", err)
+	}
+
+	repaired, err := s.PRQueueRepo().RepairInvariants(ctx)
+	if err != nil {
+		t.Fatalf("repair invariants: %v", err)
+	}
+	if len(repaired) != 1 || repaired[0] != "acme/widget#9" {
+		t.Fatalf("repaired rows = %v, want the phantom row", repaired)
+	}
+	row, err := s.PRQueueRepo().Get(ctx, "acme/widget#9")
+	if err != nil || row == nil {
+		t.Fatalf("get repaired row: %v", err)
+	}
+	if row.Status != PRStatusDrained || row.ActiveKind != "" || row.ActiveSince != 0 {
+		t.Fatalf("phantom row not repaired: %+v", row)
+	}
+}
+
+func TestRepairInvariantsKeepsActiveQueueAndRun(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+	repo := s.PRQueueRepo()
+	if _, err := repo.EnsurePR(ctx, "acme/widget#10", "thread-10", "root-10"); err != nil {
+		t.Fatalf("ensure queued row: %v", err)
+	}
+	if _, err := repo.Enqueue(ctx, "acme/widget#10", "github-widget-fix", "pull_request_review", 0, 3); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if _, err := repo.EnsurePR(ctx, "acme/widget#11", "thread-11", "root-11"); err != nil {
+		t.Fatalf("ensure running row: %v", err)
+	}
+	if err := repo.SetActive(ctx, "acme/widget#11", "fix", "sess-11", 1); err != nil {
+		t.Fatalf("set active: %v", err)
+	}
+
+	repaired, err := repo.RepairInvariants(ctx)
+	if err != nil {
+		t.Fatalf("repair invariants: %v", err)
+	}
+	if len(repaired) != 0 {
+		t.Fatalf("legitimate rows repaired: %v", repaired)
 	}
 }

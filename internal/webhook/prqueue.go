@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/anggasct/occa/internal/config"
@@ -106,10 +107,61 @@ func splitPRKey(prKey string) (string, string, bool) {
 	return parts[0], parts[1], true
 }
 
-func makePRLanes(capacity int) [numPRLanes]chan dispatchItem {
-	var lanes [numPRLanes]chan dispatchItem
+type prLane struct {
+	mu    sync.Mutex
+	items []dispatchItem
+}
+
+func (l *prLane) push(item dispatchItem) {
+	l.mu.Lock()
+	l.items = append(l.items, item)
+	l.mu.Unlock()
+}
+
+func (l *prLane) pop() (dispatchItem, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.items) == 0 {
+		return dispatchItem{}, false
+	}
+	item := l.items[0]
+	l.items = l.items[1:]
+	return item, true
+}
+
+func (l *prLane) len() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.items)
+}
+
+func (l *prLane) removeMatching(match func(dispatchItem) bool) (dispatchItem, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for i, item := range l.items {
+		if match(item) {
+			l.items = append(l.items[:i], l.items[i+1:]...)
+			return item, true
+		}
+	}
+	return dispatchItem{}, false
+}
+
+func (l *prLane) removeOldest() (dispatchItem, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.items) == 0 {
+		return dispatchItem{}, false
+	}
+	item := l.items[0]
+	l.items = l.items[1:]
+	return item, true
+}
+
+func makePRLanes(int) [numPRLanes]*prLane {
+	var lanes [numPRLanes]*prLane
 	for i := range lanes {
-		lanes[i] = make(chan dispatchItem, capacity)
+		lanes[i] = &prLane{}
 	}
 	return lanes
 }
@@ -124,46 +176,109 @@ func newDispatcher(server *Server, key string) *dispatcher {
 	}
 }
 
-func (d *dispatcher) queueLen() int {
-	n := 0
-	for i := range d.lanes {
-		n += len(d.lanes[i])
-	}
-	return n
-}
-
-func (d *dispatcher) queueCap() int {
-	n := 0
-	for i := range d.lanes {
-		n += cap(d.lanes[i])
-	}
-	return n
-}
-
-func (d *dispatcher) push(item dispatchItem) bool {
+func (d *dispatcher) laneFor(item dispatchItem) int {
 	lane := item.lane
 	if lane < 0 || lane >= numPRLanes {
 		lane = numPRLanes - 1
 	}
-	select {
-	case d.lanes[lane] <- item:
-		d.touch()
-		select {
-		case d.notify <- struct{}{}:
-		default:
-		}
-		return true
-	default:
-		return false
+	return lane
+}
+
+func (d *dispatcher) queueLen() int {
+	n := 0
+	for i := range d.lanes {
+		n += d.lanes[i].len()
 	}
+	return n
+}
+
+func (d *dispatcher) laneLen(lane int) int {
+	if lane < 0 || lane >= numPRLanes {
+		return 0
+	}
+	return d.lanes[lane].len()
+}
+
+// queueCap reports the per-PR budget, not the sum of the lane slices: the
+// budget is the admission ceiling and the lanes share it.
+func (d *dispatcher) queueCap() int {
+	return d.server.maxQueuedPerKey
+}
+
+func (d *dispatcher) signal() {
+	select {
+	case d.notify <- struct{}{}:
+	default:
+	}
+}
+
+func (d *dispatcher) push(item dispatchItem) bool {
+	d.lanes[d.laneFor(item)].push(item)
+	d.touch()
+	d.signal()
+	return true
+}
+
+type admissionDecision struct {
+	admitted bool
+	replaced *dispatchItem
+	evicted  *dispatchItem
+}
+
+// admit reserves a queue slot for an item without inserting it. The caller
+// mirrors the reservation into the store and then pushes the item; both
+// happen under dispatchMu, so no other admission can overbook the budget in
+// between. State events are latest-wins: a matching queued item is removed and
+// returned so the caller can mark it superseded.
+func (d *dispatcher) admit(item dispatchItem, budget, stateShare, overflow int) admissionDecision {
+	lane := d.laneFor(item)
+	item.lane = lane
+	for i := range d.lanes {
+		if replaced, ok := d.lanes[i].removeMatching(func(queued dispatchItem) bool {
+			return queued.ep.Name == item.ep.Name && queued.deliveryID == item.deliveryID
+		}); ok {
+			return admissionDecision{admitted: true, replaced: &replaced}
+		}
+	}
+	if lane == numPRLanes-1 {
+		if item.actionClass != "" {
+			replaced, ok := d.lanes[lane].removeMatching(func(queued dispatchItem) bool {
+				if queued.ep.Name != item.ep.Name ||
+					queued.eventType != item.eventType ||
+					queued.prKey != item.prKey ||
+					queued.actionClass != item.actionClass {
+					return false
+				}
+				// Without a PR identity, only the same delivery is provably
+				// the same state; distinct deliveries may target different
+				// resources.
+				return item.prKey != "" || queued.deliveryID == item.deliveryID
+			})
+			if ok {
+				return admissionDecision{admitted: true, replaced: &replaced}
+			}
+		}
+		if budget <= 0 || d.laneLen(lane) >= stateShare || d.queueLen() >= budget {
+			return admissionDecision{}
+		}
+		return admissionDecision{admitted: true}
+	}
+	total := d.queueLen()
+	if total >= budget {
+		if evicted, ok := d.lanes[numPRLanes-1].removeOldest(); ok {
+			return admissionDecision{admitted: true, evicted: &evicted}
+		}
+		if total >= budget+overflow {
+			return admissionDecision{}
+		}
+	}
+	return admissionDecision{admitted: true}
 }
 
 func (d *dispatcher) pop() (dispatchItem, bool) {
 	for i := range d.lanes {
-		select {
-		case item := <-d.lanes[i]:
+		if item, ok := d.lanes[i].pop(); ok {
 			return item, true
-		default:
 		}
 	}
 	return dispatchItem{}, false
@@ -171,7 +286,7 @@ func (d *dispatcher) pop() (dispatchItem, bool) {
 
 func (d *dispatcher) hasQueuedHigher() bool {
 	for i := 0; i < numPRLanes-1; i++ {
-		if len(d.lanes[i]) > 0 {
+		if d.lanes[i].len() > 0 {
 			return true
 		}
 	}

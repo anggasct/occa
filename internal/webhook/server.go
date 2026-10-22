@@ -138,6 +138,16 @@ type Server struct {
 	shutdownCancel        context.CancelFunc
 	maxBodySize           int64
 	maxQueuedPerKey       int
+	stateShare            float64
+	overflowSlots         int
+	replays               store.WebhookReplayRepo
+	replayInterval        time.Duration
+	replayBackoff         []time.Duration
+	replayMaxAttempts     int
+	replayTTL             time.Duration
+	replayStoreMax        int
+	replayStoreMaxBytes   int64
+	replayChecker         ReplayChecker
 	retryAfter            time.Duration
 	retentionAge          time.Duration
 	retentionKeep         int
@@ -213,6 +223,14 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 		shutdownCancel:        shutdownCancel,
 		maxBodySize:           int64(rt.MaxBodySize),
 		maxQueuedPerKey:       rt.MaxQueuedPerKey,
+		stateShare:            rt.EffectiveStateLaneShare(),
+		overflowSlots:         rt.EffectivePriorityOverflow(),
+		replayInterval:        rt.EffectiveReplayInterval(),
+		replayBackoff:         rt.EffectiveReplayBackoff(),
+		replayMaxAttempts:     rt.EffectiveReplayMaxAttempts(),
+		replayTTL:             rt.EffectiveReplayTTL(),
+		replayStoreMax:        rt.EffectiveReplayStoreMax(),
+		replayStoreMaxBytes:   int64(rt.EffectiveReplayStoreMaxBytes()),
 		retryAfter:            rt.RetryAfter,
 		retentionAge:          rt.Retention,
 		retentionKeep:         rt.RetentionKeep,
@@ -266,6 +284,24 @@ func (s *Server) maxConcurrentEvents() int { return cap(s.eventSlots) }
 
 func (s *Server) queueCap() int {
 	return s.maxQueuedPerKey
+}
+
+func (s *Server) stateLaneShare() int {
+	share := int(float64(s.maxQueuedPerKey) * s.stateShare)
+	if share < 0 {
+		return 0
+	}
+	if share > s.maxQueuedPerKey {
+		return s.maxQueuedPerKey
+	}
+	return share
+}
+
+func (s *Server) priorityOverflow() int {
+	if s.overflowSlots < 0 {
+		return 0
+	}
+	return s.overflowSlots
 }
 
 func (s *Server) SetWorkspaceResolver(r WorkspaceResolver) {
@@ -354,6 +390,14 @@ func (s *Server) SetChannelStore(c ChannelStore) {
 
 func (s *Server) SetPRQueueRepo(r store.PRQueueRepo) {
 	s.prQueues = r
+}
+
+func (s *Server) SetWebhookReplayRepo(r store.WebhookReplayRepo) {
+	s.replays = r
+}
+
+func (s *Server) SetReplayChecker(c ReplayChecker) {
+	s.replayChecker = c
 }
 
 func (s *Server) SetSessionAborter(fn func(ctx context.Context, sessionID, workdir string) error) {
@@ -577,6 +621,15 @@ func (s *Server) pruneIfDue() {
 func (s *Server) Start(ctx context.Context) error {
 	s.recoverStale(ctx)
 	slog.Info("webhook: " + s.RecoverPRQueue())
+	if s.prQueues != nil {
+		repaired, err := s.prQueues.RepairInvariants(ctx)
+		if err != nil {
+			slog.Warn("webhook: pr queue invariant check failed", "error", err)
+		}
+		for _, key := range repaired {
+			slog.Warn("webhook: pr queue invariant repaired", "pr_key", key, "status", "drained")
+		}
+	}
 
 	mux := http.NewServeMux()
 	if s.dispatchEnabled {
@@ -618,6 +671,8 @@ func (s *Server) Start(ctx context.Context) error {
 	}()
 
 	go s.watchdogLoop()
+	s.dispatchWG.Add(1)
+	go s.replayLoop(s.shutdownCtx)
 
 	slog.Info("webhook server started", "bind", s.bind, "endpoints", len(s.endpoints))
 	for _, ep := range s.endpoints {
@@ -745,6 +800,7 @@ func (s *Server) enqueue(ep config.EndpointConfig, key WebhookExecutionKey, item
 		item.prKey = prKey
 	}
 	item.lane = lane
+	item.actionClass = stateActionClass(item.eventType, webhookAction(item.body))
 	s.dispatchMu.Lock()
 	defer s.dispatchMu.Unlock()
 	d, ok := s.dispatchers[lockKey]
@@ -754,19 +810,74 @@ func (s *Server) enqueue(ep config.EndpointConfig, key WebhookExecutionKey, item
 		s.dispatchWG.Add(1)
 		go d.run(s.shutdownCtx)
 	}
-	if d.queueLen() >= s.maxQueuedPerKey {
+	decision := d.admit(item, s.maxQueuedPerKey, s.stateLaneShare(), s.priorityOverflow())
+	if !decision.admitted {
+		reason := "queue ceiling reached"
+		if item.lane == numPRLanes-1 {
+			if d.laneLen(item.lane) >= s.stateLaneShare() {
+				reason = "state lane at capacity"
+			} else {
+				reason = "queue budget exhausted"
+			}
+		}
+		slog.Warn("webhook: admission rejected",
+			"endpoint", ep.Name,
+			"delivery_id", item.deliveryID,
+			"event_type", item.eventType,
+			"lane", item.lane,
+			"queue_len", d.queueLen(),
+			"reason", reason,
+		)
+		s.recordRejection(ep, item, reason)
 		return nil, false
+	}
+	if decision.replaced != nil {
+		slog.Info("webhook: evicted", "endpoint", ep.Name, "delivery_id", item.deliveryID, "replaced_delivery_id", decision.replaced.deliveryID, "pr_key", item.prKey, "lane", item.lane)
+		s.mirrorDelete(decision.replaced.queueID)
+		if decision.replaced.deliveryID != item.deliveryID {
+			s.recordSuperseded(*decision.replaced, "coalesced by a newer state event")
+		}
+	}
+	if decision.evicted != nil {
+		slog.Info("webhook: evicted", "endpoint", ep.Name, "delivery_id", item.deliveryID, "evicted_delivery_id", decision.evicted.deliveryID, "pr_key", item.prKey, "lane", item.lane)
+		s.mirrorDelete(decision.evicted.queueID)
+		s.recordSuperseded(*decision.evicted, "evicted for a higher-priority delivery")
 	}
 	if item.prKey != "" {
 		item.queueID = s.mirrorEnqueue(item.prKey, ep.Name, item.eventType, 0, lanePriority(item.lane))
 	}
-	if !d.push(item) {
-		if item.queueID != 0 {
-			s.mirrorDelete(item.queueID)
-		}
-		return nil, false
-	}
+	d.push(item)
 	return d, true
+}
+
+// stateActionClass names the coalescing shape of a state event. Only state
+// events coalesce: a review or a comment is a distinct user action, never a
+// newer version of an earlier one.
+func stateActionClass(eventType, action string) string {
+	switch strings.ToLower(strings.TrimSpace(eventType)) {
+	case "pull_request":
+		switch strings.ToLower(strings.TrimSpace(action)) {
+		case "opened", "edited", "synchronize":
+			return "state"
+		default:
+			return strings.ToLower(strings.TrimSpace(action))
+		}
+	case "check_suite":
+		return "checks"
+	case "pull_request_review", "issue_comment":
+		return ""
+	}
+	return ""
+}
+
+func webhookAction(body []byte) string {
+	var payload struct {
+		Action string `json:"action"`
+	}
+	if json.Unmarshal(body, &payload) != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.Action)
 }
 
 func lanePriority(lane int) int {
@@ -905,6 +1016,7 @@ type dispatchItem struct {
 	eventType   string
 	payloadHash string
 	prKey       string
+	actionClass string
 	lane        int
 	queueID     int64
 	requeues    int
@@ -913,7 +1025,7 @@ type dispatchItem struct {
 type dispatcher struct {
 	server          *Server
 	key             string
-	lanes           [numPRLanes]chan dispatchItem
+	lanes           [numPRLanes]*prLane
 	notify          chan struct{}
 	exiting         bool
 	mu              sync.Mutex
@@ -1131,15 +1243,22 @@ func (d *dispatcher) handle(item dispatchItem) {
 		return
 	}
 	if item.prKey != "" && strings.EqualFold(strings.TrimSpace(item.ep.Workflow), "merge") {
+		envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", item.ep.CommentTrigger)
+		s.recordMergeGate(item.prKey, envelope)
 		if verdict, blocked := s.mergeGateBlocked(item.prKey); blocked {
-			envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", item.ep.CommentTrigger)
+			commit := s.mergeGateCommit(item.prKey)
 			slog.Info("webhook: merge refused, review verdict blocks the gate",
 				"endpoint", item.ep.Name,
 				"delivery_id", item.deliveryID,
 				"pr_key", item.prKey,
 				"review_verdict", verdict,
+				"review_commit", commit,
 			)
-			s.markSkipped(receipt.ID, item.ep, envelope, "merge blocked: "+verdict+" on the current head")
+			reason := "merge blocked: " + verdict
+			if commit != "" {
+				reason += " recorded for " + commit
+			}
+			s.markSkipped(receipt.ID, item.ep, envelope, reason)
 			return
 		}
 	}
@@ -1833,10 +1952,6 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		}
 	}()
 
-	if allowed, reason := admitDelivery(ep, s.policy, envelope); !allowed {
-		s.markSkipped(id, ep, envelope, reason)
-		return nil
-	}
 	if workCtx.PRKey != "" {
 		verdict := s.recordMergeGate(workCtx.PRKey, envelope)
 		if verdict != "" && strings.EqualFold(strings.TrimSpace(ep.Workflow), "merge") &&
@@ -1845,6 +1960,10 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 			// one this delivery happened to carry.
 			envelope["review_verdict"] = verdict
 		}
+	}
+	if allowed, reason := admitDelivery(ep, s.policy, envelope); !allowed {
+		s.markSkipped(id, ep, envelope, reason)
+		return nil
 	}
 
 	if reviewKey := reviewDedupeKey(envelope); reviewKey != "" && id != 0 {

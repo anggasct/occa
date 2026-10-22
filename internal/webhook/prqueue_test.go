@@ -397,13 +397,15 @@ func TestMergeDrainRequeueThenBlocked(t *testing.T) {
 	mergeItem := dispatchItem{ep: mergeEp, body: mergeBody, deliveryID: "del-drain-merge", eventType: "pull_request_review", payloadHash: "h", prKey: "acme/widget#7", lane: 3}
 	popLane3 := func() dispatchItem {
 		t.Helper()
-		select {
-		case next := <-d.lanes[3]:
-			return next
-		default:
+		d.lanes[3].mu.Lock()
+		defer d.lanes[3].mu.Unlock()
+		if len(d.lanes[3].items) == 0 {
 			t.Fatal("merge item not requeued at back of lane 3")
 			return dispatchItem{}
 		}
+		next := d.lanes[3].items[0]
+		d.lanes[3].items = d.lanes[3].items[1:]
+		return next
 	}
 	backdateReceipt := func() {
 		t.Helper()

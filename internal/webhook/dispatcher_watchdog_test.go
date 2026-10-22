@@ -239,7 +239,7 @@ func TestDispatcherQueueOnlyAlarmPreservesFIFO(t *testing.T) {
 	}
 	d := &dispatcher{server: srv, key: "key:fifo-alarm-test", lanes: makePRLanes(8), lastActivity: time.Now().Add(-10 * time.Minute)}
 	for _, id := range []string{"fifo-1", "fifo-2", "fifo-3"} {
-		d.lanes[3] <- mkItem(id)
+		d.push(mkItem(id))
 	}
 	snap := d.snapshot()
 	if snap.queueLen != 3 || snap.hasActive {
@@ -247,20 +247,14 @@ func TestDispatcherQueueOnlyAlarmPreservesFIFO(t *testing.T) {
 	}
 	srv.alarmStuckDispatcher(d, snap, time.Now(), time.Minute, livenessUnknown)
 	var got []string
-	for i := 0; i < 3; i++ {
-		select {
-		case it := <-d.lanes[3]:
-			got = append(got, it.deliveryID)
-		default:
-			t.Fatalf("alarm consumed a queued item, got %v", got)
-		}
+	d.lanes[3].mu.Lock()
+	for _, it := range d.lanes[3].items {
+		got = append(got, it.deliveryID)
 	}
+	d.lanes[3].mu.Unlock()
 	want := []string{"fifo-1", "fifo-2", "fifo-3"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("queue order after alarm = %v, want %v", got, want)
-	}
-	for _, id := range want {
-		d.lanes[3] <- mkItem(id)
 	}
 	srv.dispatchMu.Lock()
 	srv.dispatchers[d.key] = d
@@ -308,7 +302,7 @@ func TestDispatcherRunPanicFailsActiveWithoutRequeue(t *testing.T) {
 	active := dispatchItem{ep: ep, body: []byte(stuckPayload()), deliveryID: "delivery-active", eventType: "pull_request", payloadHash: "hash-active"}
 	queued := dispatchItem{ep: ep, body: []byte(stuckPayload()), deliveryID: "delivery-queued", eventType: "pull_request", payloadHash: "hash-queued"}
 	d := &dispatcher{server: srv, key: "key:panic-active-test", lanes: makePRLanes(8), lastActivity: time.Now()}
-	d.lanes[3] <- queued
+	d.push(queued)
 	srv.dispatchMu.Lock()
 	srv.dispatchers[d.key] = d
 	srv.dispatchMu.Unlock()

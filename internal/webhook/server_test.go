@@ -996,7 +996,7 @@ func TestWebhookConcurrentDuplicateSuppression(t *testing.T) {
 			t.Fatalf("concurrent duplicate returned %d, want 200", code)
 		}
 	}
-	waitForAttempt(t, st, "github", "same-delivery", workers)
+	waitForReceipt(t, st, store.WebhookStatusCompleted)
 	if exec.callCount() != 1 {
 		t.Fatalf("concurrent duplicates started %d sessions, want exactly 1", exec.callCount())
 	}
@@ -1054,7 +1054,7 @@ func TestWebhookConcurrentStaleRecoveryClaimsOnce(t *testing.T) {
 		}
 	}
 	waitForReceipt(t, st, store.WebhookStatusCompleted)
-	recovered := waitForAttempt(t, st, "github", "stale", 3)
+	recovered := waitForReceipt(t, st, store.WebhookStatusCompleted)
 	if exec.callCount() != 1 {
 		t.Fatalf("stale recovery started %d sessions, want exactly 1", exec.callCount())
 	}
@@ -2760,7 +2760,7 @@ func TestWebhookQueuedDeliveryHasNoRow(t *testing.T) {
 	waitForCompletedCount(t, st, 2)
 }
 
-func TestWebhookQueueFullReturns429WithoutRow(t *testing.T) {
+func TestWebhookQueueFullRecordsRejection(t *testing.T) {
 	release := make(chan struct{})
 	blocked := make(chan struct{}, 32)
 	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
@@ -2798,7 +2798,7 @@ func TestWebhookQueueFullReturns429WithoutRow(t *testing.T) {
 	}
 	waitForRowCount(t, st, 1)
 
-	for i := 0; i < srv.queueCap(); i++ {
+	for i := 0; i < srv.stateLaneShare(); i++ {
 		resp := post(t, url, fmt.Sprintf("delivery-q%d", i), "pull_request", `{}`)
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("queued delivery %d expected 200, got %d", i, resp.StatusCode)
@@ -2813,12 +2813,15 @@ func TestWebhookQueueFullReturns429WithoutRow(t *testing.T) {
 		t.Fatal("429 response missing Retry-After header")
 	}
 	rows := mustList(t, st)
-	if len(rows) != 1 {
-		t.Fatalf("overflow delivery wrote a receipt row: %+v", rows)
+	if len(rows) != 2 {
+		t.Fatalf("overflow delivery must be recorded once, rows: %+v", rows)
+	}
+	if rows[0].DeliveryID != "delivery-overflow" || rows[0].Status != store.WebhookStatusRejected {
+		t.Fatalf("overflow delivery not recorded as rejected: %+v", rows[0])
 	}
 
 	close(release)
-	waitForCompletedCount(t, st, srv.queueCap()+1)
+	waitForCompletedCount(t, st, srv.stateLaneShare()+1)
 }
 
 func TestWebhookSlotCapBoundedAcrossKeys(t *testing.T) {

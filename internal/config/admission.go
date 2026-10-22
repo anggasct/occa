@@ -44,6 +44,14 @@ type WebhookRuntime struct {
 	MaxBodySize           byteSize        `yaml:"max_body_size"`
 	MaxConcurrentEvents   int             `yaml:"max_concurrent_events"`
 	MaxQueuedPerKey       int             `yaml:"max_queued_per_key"`
+	StateLaneMaxShare     *float64        `yaml:"state_lane_max_share"`
+	PriorityOverflow      *int            `yaml:"priority_overflow"`
+	ReplayStoreMax        int             `yaml:"replay_store_max"`
+	ReplayStoreMaxBytes   byteSize        `yaml:"replay_store_max_bytes"`
+	ReplayInterval        time.Duration   `yaml:"replay_interval"`
+	ReplayBackoff         []time.Duration `yaml:"replay_backoff"`
+	ReplayMaxAttempts     int             `yaml:"replay_max_attempts"`
+	ReplayTTL             time.Duration   `yaml:"replay_ttl"`
 	ProcessingTimeout     time.Duration   `yaml:"processing_timeout"`
 	ClaimGrace            time.Duration   `yaml:"claim_grace"`
 	RetryAfter            time.Duration   `yaml:"retry_after"`
@@ -60,6 +68,74 @@ type WebhookRuntime struct {
 	HTTPIdleTimeout       time.Duration   `yaml:"http_idle_timeout"`
 	ReviewDedupeWindow    time.Duration   `yaml:"review_dedupe_window"`
 	IsolatedWorkspaceTTL  time.Duration   `yaml:"isolated_workspace_ttl"`
+}
+
+const (
+	defaultStateLaneMaxShare   = 0.5
+	defaultPriorityOverflow    = 8
+	defaultReplayStoreMax      = 200
+	defaultReplayStoreMaxBytes = byteSize(64 << 20)
+	defaultReplayInterval      = 30 * time.Second
+	defaultReplayMaxAttempts   = 3
+	defaultReplayTTL           = 30 * time.Minute
+)
+
+var defaultReplayBackoff = []time.Duration{30 * time.Second, 2 * time.Minute, 10 * time.Minute}
+
+func (r WebhookRuntime) EffectiveStateLaneShare() float64 {
+	if r.StateLaneMaxShare == nil {
+		return defaultStateLaneMaxShare
+	}
+	return *r.StateLaneMaxShare
+}
+
+func (r WebhookRuntime) EffectivePriorityOverflow() int {
+	if r.PriorityOverflow == nil {
+		return defaultPriorityOverflow
+	}
+	return *r.PriorityOverflow
+}
+
+func (r WebhookRuntime) EffectiveReplayStoreMax() int {
+	if r.ReplayStoreMax <= 0 {
+		return defaultReplayStoreMax
+	}
+	return r.ReplayStoreMax
+}
+
+func (r WebhookRuntime) EffectiveReplayStoreMaxBytes() int64 {
+	if r.ReplayStoreMaxBytes <= 0 {
+		return int64(defaultReplayStoreMaxBytes)
+	}
+	return int64(r.ReplayStoreMaxBytes)
+}
+
+func (r WebhookRuntime) EffectiveReplayInterval() time.Duration {
+	if r.ReplayInterval <= 0 {
+		return defaultReplayInterval
+	}
+	return r.ReplayInterval
+}
+
+func (r WebhookRuntime) EffectiveReplayBackoff() []time.Duration {
+	if len(r.ReplayBackoff) == 0 {
+		return append([]time.Duration(nil), defaultReplayBackoff...)
+	}
+	return append([]time.Duration(nil), r.ReplayBackoff...)
+}
+
+func (r WebhookRuntime) EffectiveReplayMaxAttempts() int {
+	if r.ReplayMaxAttempts <= 0 {
+		return defaultReplayMaxAttempts
+	}
+	return r.ReplayMaxAttempts
+}
+
+func (r WebhookRuntime) EffectiveReplayTTL() time.Duration {
+	if r.ReplayTTL <= 0 {
+		return defaultReplayTTL
+	}
+	return r.ReplayTTL
 }
 
 var knownRequireFlags = map[string]bool{
@@ -201,6 +277,32 @@ func validateWebhookRuntime(runtime WebhookRuntime) (WebhookRuntime, error) {
 	}
 	if runtime.MaxQueuedPerKey <= 0 {
 		return WebhookRuntime{}, missing("max_queued_per_key")
+	}
+	if runtime.StateLaneMaxShare != nil && (*runtime.StateLaneMaxShare <= 0 || *runtime.StateLaneMaxShare > 1) {
+		return WebhookRuntime{}, fmt.Errorf("config: webhooks.runtime.state_lane_max_share must be > 0 and <= 1")
+	}
+	if runtime.PriorityOverflow != nil && *runtime.PriorityOverflow < 0 {
+		return WebhookRuntime{}, fmt.Errorf("config: webhooks.runtime.priority_overflow must be >= 0")
+	}
+	if runtime.ReplayStoreMax < 0 {
+		return WebhookRuntime{}, fmt.Errorf("config: webhooks.runtime.replay_store_max must be >= 0")
+	}
+	if runtime.ReplayStoreMaxBytes < 0 {
+		return WebhookRuntime{}, fmt.Errorf("config: webhooks.runtime.replay_store_max_bytes must be >= 0")
+	}
+	if runtime.ReplayInterval < 0 {
+		return WebhookRuntime{}, fmt.Errorf("config: webhooks.runtime.replay_interval must be >= 0")
+	}
+	for i, backoff := range runtime.ReplayBackoff {
+		if backoff <= 0 {
+			return WebhookRuntime{}, fmt.Errorf("config: webhooks.runtime.replay_backoff[%d] must be > 0", i)
+		}
+	}
+	if runtime.ReplayMaxAttempts < 0 {
+		return WebhookRuntime{}, fmt.Errorf("config: webhooks.runtime.replay_max_attempts must be >= 0")
+	}
+	if runtime.ReplayTTL < 0 {
+		return WebhookRuntime{}, fmt.Errorf("config: webhooks.runtime.replay_ttl must be >= 0")
 	}
 	if runtime.ProcessingTimeout <= 0 {
 		return WebhookRuntime{}, missing("processing_timeout")

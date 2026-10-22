@@ -668,8 +668,10 @@ func (s *Server) recordMergeGate(prKey string, envelope WebhookEnvelope) string 
 		Approval: approvalState(envelope),
 		CI:       ciState(envelope),
 		Commit:   strings.TrimSpace(stringValue(envelope["review_commit"])),
+		Head:     strings.TrimSpace(stringValue(envelope["head_sha"])),
 	}
 	if gate.Approval == "" && gate.CI == "" {
+		s.tasks.SetGate(prKey, gate)
 		return s.mergeGateVerdict(prKey)
 	}
 	current, known := s.tasks.Gate(prKey)
@@ -693,6 +695,9 @@ func (s *Server) approvalSupersedesBlock(prKey string, current, approval Surface
 	if blockedCommit == "" || approvedCommit == "" || blockedCommit == approvedCommit {
 		return true
 	}
+	if head := strings.TrimSpace(approval.Head); head != "" {
+		return head == approvedCommit
+	}
 	head := s.livePRHeadSHA(context.Background(), prKey)
 	return head != "" && head == approvedCommit
 }
@@ -711,14 +716,38 @@ func (s *Server) mergeGateVerdict(prKey string) string {
 }
 
 // mergeGateBlocked reports whether the recorded review verdict blocks the
-// merge. A REQUEST_CHANGES verdict blocks it, also when the review is a
-// self-review by the PR author.
+// merge. The verdict is head-scoped: a blocking review recorded for an older
+// head is stale once a newer head has been observed, and a REQUEST_CHANGES
+// verdict blocks also when the review is a self-review by the PR author.
 func (s *Server) mergeGateBlocked(prKey string) (string, bool) {
-	verdict := s.mergeGateVerdict(prKey)
+	if s == nil || s.tasks == nil || strings.TrimSpace(prKey) == "" {
+		return "", false
+	}
+	gate, ok := s.tasks.Gate(prKey)
+	if !ok {
+		return "", false
+	}
+	verdict := strings.TrimSpace(gate.Approval)
 	if verdict == "" || verdict == "approved" {
 		return verdict, false
 	}
+	if commit := strings.TrimSpace(gate.Commit); commit != "" {
+		if head := strings.TrimSpace(gate.Head); head != "" && head != commit {
+			return verdict, false
+		}
+	}
 	return verdict, true
+}
+
+func (s *Server) mergeGateCommit(prKey string) string {
+	if s == nil || s.tasks == nil {
+		return ""
+	}
+	gate, ok := s.tasks.Gate(prKey)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(gate.Commit)
 }
 
 // approvalState reads the review verdict a delivery carries.

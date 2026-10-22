@@ -152,6 +152,9 @@ func fillPullRequest(envelope WebhookEnvelope, pullRequest map[string]any) {
 	envelope["pr_author"] = userName(pullRequest["user"])
 	envelope["merged"] = boolValue(pullRequest["merged"])
 	envelope["merge_commit"] = stringValue(pullRequest["merge_commit_sha"])
+	if envelope["head_sha"] == "" {
+		envelope["head_sha"] = stringValue(mapValue(pullRequest, "head")["sha"])
+	}
 	envelope["pr_state"] = stringValue(pullRequest["state"])
 	if boolValue(pullRequest["merged"]) {
 		envelope["pr_state"] = "merged"

@@ -180,6 +180,7 @@ func TestMergeLaneSkipsWhenVerdictBlocks(t *testing.T) {
 		"review_state":   "commented",
 		"review_verdict": "request_changes",
 		"review_commit":  "c0ffee",
+		"head_sha":       "abc1234def5678",
 	})
 	ep := srv.endpoints["/merge"]
 	receipt, err := st.WebhookDeliveryRepo().Create(context.Background(), store.WebhookDelivery{
@@ -194,7 +195,7 @@ func TestMergeLaneSkipsWhenVerdictBlocks(t *testing.T) {
 	}
 	item := dispatchItem{
 		ep:          ep,
-		body:        []byte(prReviewBody(181, "feat/x", "owner", "commented", "c0ffee")),
+		body:        []byte(strings.Replace(prReviewBody(181, "feat/x", "owner", "commented", "c0ffee"), "abc1234def5678", "c0ffee", 1)),
 		deliveryID:  "del-merge-blocked",
 		eventType:   "pull_request_review",
 		payloadHash: "hash-merge-blocked",
