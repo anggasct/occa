@@ -99,10 +99,19 @@ type QueueStats struct {
 	ReplayExpired   int
 }
 
-func (s *Server) QueueStats(ctx context.Context) QueueStats {
+// QueueStats reports queue depth against the per-PR budget. A non-empty prKey
+// scopes the length to that PR's dispatcher; an empty one sums every dispatcher.
+func (s *Server) QueueStats(ctx context.Context, prKey string) QueueStats {
 	stats := QueueStats{QueueBudget: s.maxQueuedPerKey}
+	want := ""
+	if key := strings.TrimSpace(prKey); key != "" {
+		want = "pr:" + key
+	}
 	s.dispatchMu.Lock()
-	for _, d := range s.dispatchers {
+	for key, d := range s.dispatchers {
+		if want != "" && key != want {
+			continue
+		}
 		stats.QueueLen += d.queueLen()
 	}
 	s.dispatchMu.Unlock()
@@ -184,7 +193,7 @@ func (s *Server) operatorStatus(ctx context.Context, prKey string) string {
 	if row.ThreadID != "" {
 		fmt.Fprintf(&b, "\nthread: %s", row.ThreadID)
 	}
-	stats := s.QueueStats(ctx)
+	stats := s.QueueStats(ctx, prKey)
 	fmt.Fprintf(&b, "\nqueue: %d/%d · rejected pending: %d · replay expired: %d", stats.QueueLen, stats.QueueBudget, stats.RejectedPending, stats.ReplayExpired)
 	return b.String()
 }

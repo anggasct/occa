@@ -49,6 +49,8 @@ func normalizeWebhook(body []byte, eventType, deliveryID string, verdicts map[st
 		"review_user":                "",
 		"review_verdict":             "",
 		"review_commit":              "",
+		"review_id":                  "",
+		"review_submitted_at":        "",
 		"review_url":                 "",
 		"has_findings":               false,
 		"comment_body":               "",
@@ -86,6 +88,8 @@ func normalizeWebhook(body []byte, eventType, deliveryID string, verdicts map[st
 				envelope["comment_body"] = stringValue(review["body"])
 				envelope["review_verdict"] = resolveVerdict(stringValue(review["body"]), verdicts)
 				envelope["review_commit"] = stringValue(review["commit_id"])
+				envelope["review_id"] = numberValue(review["id"])
+				envelope["review_submitted_at"] = stringValue(review["submitted_at"])
 				envelope["review_url"] = stringValue(review["html_url"])
 				envelope["has_findings"] = hasActionableFindings(stringValue(review["body"]))
 			}

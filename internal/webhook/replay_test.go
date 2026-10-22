@@ -139,7 +139,7 @@ func assertReplayDelay(t *testing.T, next, before int64, want time.Duration) {
 	}
 }
 
-func TestDefaultReplayCheckerRelevance(t *testing.T) {
+func TestReplayRelevanceDefaultChecker(t *testing.T) {
 	prev := replayGHRun
 	t.Cleanup(func() { replayGHRun = prev })
 
@@ -148,12 +148,20 @@ func TestDefaultReplayCheckerRelevance(t *testing.T) {
 		out   string
 		err   error
 	}
+	manyReviewsPage1 := func() string {
+		reviews := []string{`{"id":10,"state":"CHANGES_REQUESTED"}`}
+		for i := 0; i < 99; i++ {
+			reviews = append(reviews, fmt.Sprintf(`{"id":%d,"state":"COMMENTED"}`, 100+i))
+		}
+		return "[" + strings.Join(reviews, ",") + "]"
+	}()
 	tests := []struct {
 		name      string
 		eventType string
 		body      string
 		responses []ghResponse
 		want      replayDecision
+		wantErr   bool
 	}{
 		{
 			name:      "open PR on current head",
@@ -163,11 +171,45 @@ func TestDefaultReplayCheckerRelevance(t *testing.T) {
 			want:      replayGo,
 		},
 		{
+			name:      "open PR on newer descendant head",
+			eventType: "pull_request",
+			body:      `{"pull_request":{"head":{"sha":"aaaaaaa"}}}`,
+			responses: []ghResponse{
+				{match: "pr view", out: `{"state":"OPEN","headRefOid":"bbbbbbb"}`},
+				{match: "compare/aaaaaaa...bbbbbbb", out: `{"status":"ahead"}`},
+			},
+			want: replayGo,
+		},
+		{
 			name:      "open PR on stale head",
 			eventType: "pull_request",
 			body:      `{"pull_request":{"head":{"sha":"bbbbbbb"}}}`,
-			responses: []ghResponse{{match: "pr view", out: `{"state":"OPEN","headRefOid":"aaaaaaa"}`}},
-			want:      replaySuperseded,
+			responses: []ghResponse{
+				{match: "pr view", out: `{"state":"OPEN","headRefOid":"aaaaaaa"}`},
+				{match: "compare/bbbbbbb...aaaaaaa", out: `{"status":"behind"}`},
+			},
+			want: replaySuperseded,
+		},
+		{
+			name:      "open PR on diverged head",
+			eventType: "pull_request",
+			body:      `{"pull_request":{"head":{"sha":"bbbbbbb"}}}`,
+			responses: []ghResponse{
+				{match: "pr view", out: `{"state":"OPEN","headRefOid":"aaaaaaa"}`},
+				{match: "compare/bbbbbbb...aaaaaaa", out: `{"status":"diverged"}`},
+			},
+			want: replaySuperseded,
+		},
+		{
+			name:      "ancestry undecidable fails closed",
+			eventType: "pull_request",
+			body:      `{"pull_request":{"head":{"sha":"aaaaaaa"}}}`,
+			responses: []ghResponse{
+				{match: "pr view", out: `{"state":"OPEN","headRefOid":"bbbbbbb"}`},
+				{match: "compare/aaaaaaa...bbbbbbb", err: fmt.Errorf("gh api: HTTP 500")},
+			},
+			want:    replayUndecidable,
+			wantErr: true,
 		},
 		{
 			name:      "missing stored head fails closed",
@@ -180,8 +222,11 @@ func TestDefaultReplayCheckerRelevance(t *testing.T) {
 			name:      "check suite on stale head",
 			eventType: "check_suite",
 			body:      `{"check_suite":{"head_sha":"bbbbbbb"}}`,
-			responses: []ghResponse{{match: "pr view", out: `{"state":"OPEN","headRefOid":"aaaaaaa"}`}},
-			want:      replaySuperseded,
+			responses: []ghResponse{
+				{match: "pr view", out: `{"state":"OPEN","headRefOid":"aaaaaaa"}`},
+				{match: "compare/bbbbbbb...aaaaaaa", out: `{"status":"behind"}`},
+			},
+			want: replaySuperseded,
 		},
 		{
 			name:      "latest blocking review",
@@ -205,11 +250,35 @@ func TestDefaultReplayCheckerRelevance(t *testing.T) {
 			want:      replaySuperseded,
 		},
 		{
-			name:      "review superseded by later review",
+			name:      "later comment review does not supersede verdict",
 			eventType: "pull_request_review",
 			body:      `{"review":{"id":10}}`,
 			responses: []ghResponse{{match: "pulls/7/reviews", out: `[{"id":10,"state":"APPROVED"},{"id":11,"state":"COMMENTED"}]`}},
+			want:      replayGo,
+		},
+		{
+			name:      "another reviewer comment does not supersede verdict",
+			eventType: "pull_request_review",
+			body:      `{"review":{"id":10}}`,
+			responses: []ghResponse{{match: "pulls/7/reviews", out: `[{"id":10,"state":"CHANGES_REQUESTED"},{"id":11,"state":"COMMENTED","user":{"login":"other"}}]`}},
+			want:      replayGo,
+		},
+		{
+			name:      "later actionable review supersedes verdict",
+			eventType: "pull_request_review",
+			body:      `{"review":{"id":10}}`,
+			responses: []ghResponse{{match: "pulls/7/reviews", out: `[{"id":10,"state":"CHANGES_REQUESTED"},{"id":11,"state":"APPROVED"}]`}},
 			want:      replaySuperseded,
+		},
+		{
+			name:      "reviews past the first page",
+			eventType: "pull_request_review",
+			body:      `{"review":{"id":10}}`,
+			responses: []ghResponse{
+				{match: "page=1", out: manyReviewsPage1},
+				{match: "page=2", out: `[{"id":200,"state":"COMMENTED"}]`},
+			},
+			want: replayGo,
 		},
 		{
 			name:      "existing issue comment",
@@ -248,8 +317,11 @@ func TestDefaultReplayCheckerRelevance(t *testing.T) {
 				EventType: tt.eventType,
 				Body:      []byte(tt.body),
 			})
-			if err != nil {
+			if err != nil && !tt.wantErr {
 				t.Fatalf("checker error: %v", err)
+			}
+			if err == nil && tt.wantErr {
+				t.Fatal("checker returned no error, want an undecidable result")
 			}
 			if got != tt.want {
 				t.Fatalf("decision = %v, want %v", got, tt.want)

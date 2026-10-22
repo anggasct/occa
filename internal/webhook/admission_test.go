@@ -337,7 +337,7 @@ func TestQueueStatsReportsReplayState(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create expired: %v", err)
 	}
-	stats := srv.QueueStats(context.Background())
+	stats := srv.QueueStats(context.Background(), "")
 	if stats.QueueBudget != 12 || stats.RejectedPending != 1 || stats.ReplayExpired != 1 {
 		t.Fatalf("queue stats = %+v", stats)
 	}
@@ -345,10 +345,12 @@ func TestQueueStatsReportsReplayState(t *testing.T) {
 
 func TestMergeGateIsHeadScoped(t *testing.T) {
 	srv, _, _ := newTestServerFull(t, nil)
+	srv.SetPRHeadResolver(&fakePRHeadResolver{head: PRHead{SHA: "2017dbb4"}})
 	prKey := "acme/widget#7"
 	srv.recordMergeGate(prKey, WebhookEnvelope{
 		"review_verdict": "request_changes",
 		"review_commit":  "d41c600",
+		"review_id":      "10",
 		"head_sha":       "d41c600",
 	})
 	if _, blocked := srv.mergeGateBlocked(prKey); !blocked {
@@ -363,11 +365,13 @@ func TestMergeGateIsHeadScoped(t *testing.T) {
 	srv.recordMergeGate(prKey, WebhookEnvelope{
 		"review_verdict": "request_changes",
 		"review_commit":  "2017dbb4",
+		"review_id":      "10",
 		"head_sha":       "2017dbb4",
 	})
 	srv.recordMergeGate(prKey, WebhookEnvelope{
 		"review_verdict": "approved",
 		"review_commit":  "2017dbb4",
+		"review_id":      "11",
 		"head_sha":       "2017dbb4",
 	})
 	if verdict, blocked := srv.mergeGateBlocked(prKey); blocked {
@@ -445,6 +449,67 @@ func TestMergeGateApprovalOnCurrentHeadClearsOlderBlock(t *testing.T) {
 	})
 	if verdict, blocked := srv.mergeGateBlocked(prKey); blocked {
 		t.Fatalf("approval on the current head did not clear the block: %q", verdict)
+	}
+}
+
+func TestMergeGateOlderSameCommitApprovalDoesNotClearNewerBlock(t *testing.T) {
+	srv, _, _ := newTestServerFull(t, nil)
+	srv.SetPRHeadResolver(&fakePRHeadResolver{head: PRHead{SHA: "bbbbbbb"}})
+	prKey := "acme/widget#7"
+	srv.recordMergeGate(prKey, WebhookEnvelope{
+		"review_verdict": "changes_requested",
+		"review_commit":  "bbbbbbb",
+		"review_id":      "20",
+		"head_sha":       "bbbbbbb",
+	})
+	srv.recordMergeGate(prKey, WebhookEnvelope{
+		"review_verdict": "approved",
+		"review_commit":  "bbbbbbb",
+		"review_id":      "19",
+		"head_sha":       "bbbbbbb",
+	})
+	if verdict, blocked := srv.mergeGateBlocked(prKey); !blocked {
+		t.Fatalf("older same-commit approval cleared newer block: verdict=%q blocked=%v", verdict, blocked)
+	}
+}
+
+func TestMergeGateStaleHeadDeliveryDoesNotRegressBlock(t *testing.T) {
+	srv, _, _ := newTestServerFull(t, nil)
+	srv.SetPRHeadResolver(&fakePRHeadResolver{head: PRHead{SHA: "bbbbbbb"}})
+	prKey := "acme/widget#7"
+	srv.recordMergeGate(prKey, WebhookEnvelope{
+		"review_verdict": "changes_requested",
+		"review_commit":  "bbbbbbb",
+		"review_id":      "10",
+		"head_sha":       "bbbbbbb",
+	})
+	srv.recordMergeGate(prKey, WebhookEnvelope{"head_sha": "aaaaaaa"})
+	if verdict, blocked := srv.mergeGateBlocked(prKey); !blocked {
+		t.Fatalf("stale head delivery unblocked a newer block: verdict=%q blocked=%v", verdict, blocked)
+	}
+}
+
+func TestMergeGateStaleBlockDoesNotOverrideApproval(t *testing.T) {
+	srv, _, _ := newTestServerFull(t, nil)
+	srv.SetPRHeadResolver(&fakePRHeadResolver{head: PRHead{SHA: "bbbbbbb"}})
+	prKey := "acme/widget#7"
+	srv.recordMergeGate(prKey, WebhookEnvelope{
+		"review_verdict": "approved",
+		"review_commit":  "bbbbbbb",
+		"review_id":      "11",
+		"head_sha":       "bbbbbbb",
+	})
+	srv.recordMergeGate(prKey, WebhookEnvelope{
+		"review_verdict": "changes_requested",
+		"review_commit":  "aaaaaaa",
+		"review_id":      "10",
+		"head_sha":       "aaaaaaa",
+	})
+	if verdict, blocked := srv.mergeGateBlocked(prKey); blocked {
+		t.Fatalf("stale block re-blocked an approved head: verdict=%q", verdict)
+	}
+	if verdict := srv.mergeGateVerdict(prKey); verdict == "changes_requested" {
+		t.Fatalf("stale blocking verdict rendered: %q", verdict)
 	}
 }
 

@@ -314,10 +314,20 @@ func defaultReplayChecker(ctx context.Context, row store.WebhookReplay) (replayD
 		if storedHead == "" || liveHead == "" {
 			return replayUndecidable, nil
 		}
-		if storedHead != liveHead {
+		if storedHead == liveHead {
+			return replayGo, nil
+		}
+		relation, err := ghHeadRelation(ctx, repo, storedHead, liveHead)
+		if err != nil {
+			return replayUndecidable, err
+		}
+		switch relation {
+		case "ahead", "identical":
+			return replayGo, nil
+		case "behind", "diverged":
 			return replaySuperseded, nil
 		}
-		return replayGo, nil
+		return replayUndecidable, nil
 	case "pull_request_review":
 		var payload struct {
 			Review struct {
@@ -415,21 +425,81 @@ func ghPRFacts(ctx context.Context, repo string, number int) (ghPRSnapshot, erro
 }
 
 func ghReviewState(ctx context.Context, repo string, number int, reviewID int64) (string, bool, error) {
-	out, err := replayGHRun(ctx, "api", fmt.Sprintf("repos/%s/pulls/%d/reviews?per_page=100", repo, number))
+	reviews, err := ghReviews(ctx, repo, number)
 	if err != nil {
 		return "", false, err
 	}
-	var reviews []struct {
-		ID    int64  `json:"id"`
-		State string `json:"state"`
+	replayState := ""
+	found := false
+	latestActionableID := int64(0)
+	latestActionableState := ""
+	for _, review := range reviews {
+		state := strings.ToUpper(strings.TrimSpace(review.State))
+		if review.ID == reviewID {
+			replayState = state
+			found = true
+		}
+		switch state {
+		case "APPROVED", "CHANGES_REQUESTED":
+			latestActionableID = review.ID
+			latestActionableState = state
+		}
 	}
-	if err := json.Unmarshal(out, &reviews); err != nil {
-		return "", false, fmt.Errorf("gh review list: %w", err)
-	}
-	if len(reviews) == 0 || reviews[len(reviews)-1].ID != reviewID {
+	if !found {
 		return "", false, nil
 	}
-	return strings.ToUpper(strings.TrimSpace(reviews[len(reviews)-1].State)), true, nil
+	switch replayState {
+	case "APPROVED", "CHANGES_REQUESTED":
+		if latestActionableID != reviewID {
+			return latestActionableState, false, nil
+		}
+		return replayState, true, nil
+	}
+	return replayState, true, nil
+}
+
+type ghReview struct {
+	ID    int64  `json:"id"`
+	State string `json:"state"`
+}
+
+// ghReviews returns every review of a PR. Only COMMENTED and DISMISSED reviews
+// do not clear a block; the caller picks the latest actionable one.
+func ghReviews(ctx context.Context, repo string, number int) ([]ghReview, error) {
+	const perPage = 100
+	var all []ghReview
+	for page := 1; page <= 50; page++ {
+		out, err := replayGHRun(ctx, "api", fmt.Sprintf("repos/%s/pulls/%d/reviews?per_page=%d&page=%d", repo, number, perPage, page))
+		if err != nil {
+			return nil, err
+		}
+		var reviews []ghReview
+		if err := json.Unmarshal(out, &reviews); err != nil {
+			return nil, fmt.Errorf("gh review list: %w", err)
+		}
+		all = append(all, reviews...)
+		if len(reviews) < perPage {
+			break
+		}
+	}
+	return all, nil
+}
+
+// ghHeadRelation reports how the live head relates to the stored head, using
+// the compare status of stored...live: "ahead" means the stored head is an
+// ancestor of the live head.
+func ghHeadRelation(ctx context.Context, repo, storedHead, liveHead string) (string, error) {
+	out, err := replayGHRun(ctx, "api", fmt.Sprintf("repos/%s/compare/%s...%s", repo, storedHead, liveHead))
+	if err != nil {
+		return "", err
+	}
+	var relation struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(out, &relation); err != nil {
+		return "", fmt.Errorf("gh compare: %w", err)
+	}
+	return strings.ToLower(strings.TrimSpace(relation.Status)), nil
 }
 
 func ghCommentExists(ctx context.Context, repo string, commentID int64) (bool, error) {

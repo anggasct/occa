@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/config"
@@ -659,46 +661,88 @@ func (s *Server) clearEscalated(prKey string) {
 // recordMergeGate remembers the approval and CI state a delivery reported so
 // the merge button is disabled while the merge gate would fail. The gate is
 // the single place the verdict is computed: a REQUEST_CHANGES verdict blocks
-// the merge until a later approval supersedes it.
+// the merge until a strictly later approval supersedes it.
 func (s *Server) recordMergeGate(prKey string, envelope WebhookEnvelope) string {
 	if s == nil || s.tasks == nil || strings.TrimSpace(prKey) == "" {
 		return ""
 	}
-	gate := SurfaceGate{
+	incoming := SurfaceGate{
 		Approval: approvalState(envelope),
 		CI:       ciState(envelope),
 		Commit:   strings.TrimSpace(stringValue(envelope["review_commit"])),
 		Head:     strings.TrimSpace(stringValue(envelope["head_sha"])),
+		ReviewID: reviewIDValue(envelope),
+		ReviewAt: reviewSubmittedAt(envelope),
 	}
-	if gate.Approval == "" && gate.CI == "" {
-		s.tasks.SetGate(prKey, gate)
-		return s.mergeGateVerdict(prKey)
+	current, _ := s.tasks.Gate(prKey)
+	head := s.gateHead(context.Background(), prKey, current, incoming)
+	current.Head = head
+
+	if incoming.CI != "" {
+		current.CI = incoming.CI
 	}
-	current, known := s.tasks.Gate(prKey)
-	if gate.Approval == "approved" && known && strings.TrimSpace(current.Approval) == "changes_requested" &&
-		!s.approvalSupersedesBlock(prKey, current, gate) {
-		// The approval is not on the head that carries the blocking
-		// review: the block stands, and the stale approval head must not
-		// move the gate past the blocking commit.
-		gate.Approval = ""
-		gate.Commit = ""
-		gate.Head = current.Head
+	if incoming.Approval != "" && gateVerdictApplies(head, incoming) {
+		if incoming.Approval != "approved" ||
+			strings.TrimSpace(current.Approval) != "changes_requested" ||
+			s.approvalSupersedesBlock(prKey, current, incoming) {
+			current.Approval = incoming.Approval
+			current.Commit = incoming.Commit
+			current.ReviewID = incoming.ReviewID
+			current.ReviewAt = incoming.ReviewAt
+		}
 	}
-	s.tasks.SetGate(prKey, gate)
+	s.tasks.SetGate(prKey, current)
 	return s.mergeGateVerdict(prKey)
 }
 
+// gateHead returns the head a record may move the gate to. A delivery never
+// moves the known head backwards: when two deliveries disagree, the live PR
+// head decides, and without it the first observed head stands.
+func (s *Server) gateHead(ctx context.Context, prKey string, current, incoming SurfaceGate) string {
+	currentHead := strings.TrimSpace(current.Head)
+	incomingHead := strings.TrimSpace(incoming.Head)
+	if incomingHead == "" {
+		return currentHead
+	}
+	if currentHead == "" || currentHead == incomingHead {
+		return incomingHead
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	if live := s.livePRHeadSHA(lookupCtx, prKey); live != "" {
+		return live
+	}
+	return currentHead
+}
+
+// gateVerdictApplies reports whether a verdict was observed on the head the
+// gate now holds. A verdict with no head recorded is not judged stale.
+func gateVerdictApplies(head string, verdict SurfaceGate) bool {
+	commit := strings.TrimSpace(verdict.Commit)
+	if commit == "" || head == "" {
+		return true
+	}
+	return commit == head
+}
+
 // approvalSupersedesBlock reports whether an approval clears a recorded
-// REQUEST_CHANGES verdict. A later review on the same commit wins, and an
-// approval on another commit wins only when it is the current head.
+// REQUEST_CHANGES verdict. A same-commit approval must be strictly later than
+// the blocking review; an approval on another commit wins only when it is the
+// current head.
 func (s *Server) approvalSupersedesBlock(prKey string, current, approval SurfaceGate) bool {
 	blockedCommit := strings.TrimSpace(current.Commit)
 	approvedCommit := strings.TrimSpace(approval.Commit)
 	if approvedCommit == "" {
 		return blockedCommit == ""
 	}
-	if blockedCommit == "" || blockedCommit == approvedCommit {
+	if blockedCommit == "" {
 		return true
+	}
+	if blockedCommit == approvedCommit {
+		if later, known := reviewOrdering(current, approval); known {
+			return later
+		}
+		return strings.EqualFold(s.livePRReviewDecision(context.Background(), prKey), "APPROVED")
 	}
 	if head := strings.TrimSpace(current.Head); head != "" && head == approvedCommit {
 		return true
@@ -707,8 +751,68 @@ func (s *Server) approvalSupersedesBlock(prKey string, current, approval Surface
 	return head != "" && head == approvedCommit
 }
 
+// reviewOrdering reports whether approval came after blocked on the same
+// commit. known is false when neither review ids nor timestamps can order them.
+func reviewOrdering(blocked, approval SurfaceGate) (later, known bool) {
+	if blocked.ReviewID > 0 && approval.ReviewID > 0 {
+		return approval.ReviewID > blocked.ReviewID, true
+	}
+	if blocked.ReviewAt > 0 && approval.ReviewAt > 0 && blocked.ReviewAt != approval.ReviewAt {
+		return approval.ReviewAt > blocked.ReviewAt, true
+	}
+	return false, false
+}
+
+func reviewIDValue(envelope WebhookEnvelope) int64 {
+	id, err := strconv.ParseInt(strings.TrimSpace(stringValue(envelope["review_id"])), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return id
+}
+
+func reviewSubmittedAt(envelope WebhookEnvelope) int64 {
+	submitted := strings.TrimSpace(stringValue(envelope["review_submitted_at"]))
+	if submitted == "" {
+		return 0
+	}
+	at, err := time.Parse(time.RFC3339, submitted)
+	if err != nil {
+		return 0
+	}
+	return at.Unix()
+}
+
+// livePRReviewDecision returns the latest actionable review verdict on the live
+// PR, so an unordered approval never clears a block on its own.
+func (s *Server) livePRReviewDecision(ctx context.Context, prKey string) string {
+	repo, number, ok := splitPRKey(prKey)
+	if !ok {
+		return ""
+	}
+	prNumber, err := strconv.Atoi(strings.TrimSpace(number))
+	if err != nil || prNumber <= 0 {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	reviews, err := ghReviews(ctx, repo, prNumber)
+	if err != nil {
+		return ""
+	}
+	state := ""
+	for _, review := range reviews {
+		switch reviewed := strings.ToUpper(strings.TrimSpace(review.State)); reviewed {
+		case "APPROVED", "CHANGES_REQUESTED":
+			state = reviewed
+		}
+	}
+	return state
+}
+
 // mergeGateVerdict returns the review verdict the merge gate holds for a PR
-// and whether it blocks the merge.
+// and whether it blocks the merge. A verdict recorded for another head is not
+// the current decision, so it renders as unknown.
 func (s *Server) mergeGateVerdict(prKey string) string {
 	if s == nil || s.tasks == nil {
 		return ""
@@ -717,7 +821,16 @@ func (s *Server) mergeGateVerdict(prKey string) string {
 	if !ok {
 		return ""
 	}
+	if gateVerdictStale(gate) {
+		return ""
+	}
 	return strings.TrimSpace(gate.Approval)
+}
+
+func gateVerdictStale(gate SurfaceGate) bool {
+	commit := strings.TrimSpace(gate.Commit)
+	head := strings.TrimSpace(gate.Head)
+	return commit != "" && head != "" && commit != head
 }
 
 // mergeGateBlocked reports whether the recorded review verdict blocks the
@@ -736,10 +849,8 @@ func (s *Server) mergeGateBlocked(prKey string) (string, bool) {
 	if verdict == "" || verdict == "approved" {
 		return verdict, false
 	}
-	if commit := strings.TrimSpace(gate.Commit); commit != "" {
-		if head := strings.TrimSpace(gate.Head); head != "" && head != commit {
-			return verdict, false
-		}
+	if gateVerdictStale(gate) {
+		return verdict, false
 	}
 	return verdict, true
 }

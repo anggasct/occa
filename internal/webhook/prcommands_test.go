@@ -162,6 +162,30 @@ func TestOperatorQueueAndStatus(t *testing.T) {
 	}
 }
 
+func TestOperatorStatusScopesQueueToPR(t *testing.T) {
+	srv, st, _ := operatorTestServer(t, func(platform, userID string) bool { return true })
+	ctx := context.Background()
+	for _, key := range []string{"acme/widget#7", "acme/widget#8"} {
+		if _, err := st.PRQueueRepo().EnsurePR(ctx, key, "", ""); err != nil {
+			t.Fatal(err)
+		}
+		d := newDispatcher(srv, "pr:"+key)
+		if !d.push(dispatchItem{ep: config.EndpointConfig{Name: "github-widget-merge"}, prKey: key}) {
+			t.Fatal("push failed")
+		}
+		srv.dispatchMu.Lock()
+		srv.dispatchers[d.key] = d
+		srv.dispatchMu.Unlock()
+	}
+	reply := srv.operatorStatus(ctx, "acme/widget#7")
+	if !strings.Contains(reply, "queue: 1/8") {
+		t.Fatalf("status must report the PR queue against its budget: %q", reply)
+	}
+	if strings.Contains(reply, "queue: 2/8") {
+		t.Fatalf("status reported the process-wide queue: %q", reply)
+	}
+}
+
 func TestOperatorRetryUnblocksAndRequeues(t *testing.T) {
 	allow := func(platform, userID string) bool { return true }
 	srv, st, _ := operatorTestServer(t, allow)

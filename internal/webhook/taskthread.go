@@ -204,6 +204,11 @@ type SurfaceGate struct {
 	// carried one. A blocking verdict on an older commit is stale once Head
 	// has moved past it.
 	Head string
+	// ReviewID and ReviewAt order two verdicts on the same commit. GitHub
+	// review ids increase with submission time; the timestamp is the
+	// fallback when an id is unavailable.
+	ReviewID int64
+	ReviewAt int64
 }
 
 // Allows reports whether the approval and CI half of the merge gate passes.
@@ -378,21 +383,7 @@ func (t *TaskThreadRegistry) SetGate(prKey string, gate SurfaceGate) {
 	if t.gates == nil {
 		t.gates = make(map[string]SurfaceGate)
 	}
-	key := strings.TrimSpace(prKey)
-	current := t.gates[key]
-	if approval := strings.TrimSpace(gate.Approval); approval != "" {
-		current.Approval = approval
-		if commit := strings.TrimSpace(gate.Commit); commit != "" {
-			current.Commit = commit
-		}
-	}
-	if ci := strings.TrimSpace(gate.CI); ci != "" {
-		current.CI = ci
-	}
-	if head := strings.TrimSpace(gate.Head); head != "" {
-		current.Head = head
-	}
-	t.gates[key] = current
+	t.gates[strings.TrimSpace(prKey)] = gate
 }
 
 // Gate returns the approval and CI state known for a PR.
