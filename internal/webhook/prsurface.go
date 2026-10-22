@@ -678,9 +678,11 @@ func (s *Server) recordMergeGate(prKey string, envelope WebhookEnvelope) string 
 	if gate.Approval == "approved" && known && strings.TrimSpace(current.Approval) == "changes_requested" &&
 		!s.approvalSupersedesBlock(prKey, current, gate) {
 		// The approval is not on the head that carries the blocking
-		// review: the block stands.
+		// review: the block stands, and the stale approval head must not
+		// move the gate past the blocking commit.
 		gate.Approval = ""
 		gate.Commit = ""
+		gate.Head = current.Head
 	}
 	s.tasks.SetGate(prKey, gate)
 	return s.mergeGateVerdict(prKey)
@@ -692,11 +694,14 @@ func (s *Server) recordMergeGate(prKey string, envelope WebhookEnvelope) string 
 func (s *Server) approvalSupersedesBlock(prKey string, current, approval SurfaceGate) bool {
 	blockedCommit := strings.TrimSpace(current.Commit)
 	approvedCommit := strings.TrimSpace(approval.Commit)
-	if blockedCommit == "" || approvedCommit == "" || blockedCommit == approvedCommit {
+	if approvedCommit == "" {
+		return blockedCommit == ""
+	}
+	if blockedCommit == "" || blockedCommit == approvedCommit {
 		return true
 	}
-	if head := strings.TrimSpace(approval.Head); head != "" {
-		return head == approvedCommit
+	if head := strings.TrimSpace(current.Head); head != "" && head == approvedCommit {
+		return true
 	}
 	head := s.livePRHeadSHA(context.Background(), prKey)
 	return head != "" && head == approvedCommit

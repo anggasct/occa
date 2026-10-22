@@ -770,13 +770,22 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		eventType:   eventType,
 		payloadHash: payloadHash,
 	}
-	d, ok := s.enqueue(ep, ExtractExecutionKey(body), item)
+	d, ok, reason := s.enqueue(ep, ExtractExecutionKey(body), item)
 	if !ok {
-		slog.Warn("webhook: queue full",
-			"endpoint", ep.Name,
-			"delivery_id", deliveryID,
-			"event_type", eventType,
-		)
+		if reason == "queue ceiling reached" {
+			slog.Warn("webhook: queue full",
+				"endpoint", ep.Name,
+				"delivery_id", deliveryID,
+				"event_type", eventType,
+			)
+		} else {
+			slog.Warn("webhook: delivery rejected",
+				"endpoint", ep.Name,
+				"delivery_id", deliveryID,
+				"event_type", eventType,
+				"reason", reason,
+			)
+		}
 		w.Header().Set("Retry-After", strconv.Itoa(int(s.retryAfter/time.Second)))
 		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
 		return
@@ -792,7 +801,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 // that lock before any drain — so an accepted send is always ordered before
 // retirement completes and can never land in a channel nobody will read. A
 // rejected send (queue full) leaves the dispatcher untouched.
-func (s *Server) enqueue(ep config.EndpointConfig, key WebhookExecutionKey, item dispatchItem) (*dispatcher, bool) {
+func (s *Server) enqueue(ep config.EndpointConfig, key WebhookExecutionKey, item dispatchItem) (*dispatcher, bool, string) {
 	lockKey := dispatchLockKey(ep, key, item)
 	lane := laneOfWorkflow(ep.Workflow)
 	if prKey, ok := s.prKeyForItem(ep, key, item); ok {
@@ -802,7 +811,6 @@ func (s *Server) enqueue(ep config.EndpointConfig, key WebhookExecutionKey, item
 	item.lane = lane
 	item.actionClass = stateActionClass(item.eventType, webhookAction(item.body))
 	s.dispatchMu.Lock()
-	defer s.dispatchMu.Unlock()
 	d, ok := s.dispatchers[lockKey]
 	if !ok || d.exiting {
 		d = newDispatcher(s, lockKey)
@@ -820,16 +828,18 @@ func (s *Server) enqueue(ep config.EndpointConfig, key WebhookExecutionKey, item
 				reason = "queue budget exhausted"
 			}
 		}
+		queueLen := d.queueLen()
+		s.dispatchMu.Unlock()
 		slog.Warn("webhook: admission rejected",
 			"endpoint", ep.Name,
 			"delivery_id", item.deliveryID,
 			"event_type", item.eventType,
 			"lane", item.lane,
-			"queue_len", d.queueLen(),
+			"queue_len", queueLen,
 			"reason", reason,
 		)
 		s.recordRejection(ep, item, reason)
-		return nil, false
+		return nil, false, reason
 	}
 	if decision.replaced != nil {
 		slog.Info("webhook: evicted", "endpoint", ep.Name, "delivery_id", item.deliveryID, "replaced_delivery_id", decision.replaced.deliveryID, "pr_key", item.prKey, "lane", item.lane)
@@ -847,7 +857,8 @@ func (s *Server) enqueue(ep config.EndpointConfig, key WebhookExecutionKey, item
 		item.queueID = s.mirrorEnqueue(item.prKey, ep.Name, item.eventType, 0, lanePriority(item.lane))
 	}
 	d.push(item)
-	return d, true
+	s.dispatchMu.Unlock()
+	return d, true, ""
 }
 
 // stateActionClass names the coalescing shape of a state event. Only state
@@ -1019,6 +1030,7 @@ type dispatchItem struct {
 	actionClass string
 	lane        int
 	queueID     int64
+	replayID    int64
 	requeues    int
 }
 
@@ -1720,25 +1732,39 @@ func (s *Server) beginExecution(item dispatchItem) *store.WebhookDelivery {
 
 	staleClaimed := false
 	if !created {
-		switch {
-		case isTerminal(receipt.Status):
-			s.logDuplicate(item, receipt.Status)
-			return nil
-		case receipt.Status == store.WebhookStatusReceived:
-		case time.Now().Unix()-receipt.UpdatedAt < s.claimGraceSeconds:
-			s.logDuplicate(item, receipt.Status)
-			return nil
-		default:
-			ok, tErr := s.deliveries.ClaimStale(ctx, receipt.ID, time.Now().Add(-s.claimGrace).Unix())
+		if item.replayID != 0 && receipt.Status == store.WebhookStatusRejected {
+			ok, tErr := s.deliveries.Transition(ctx, receipt.ID, []store.WebhookStatus{store.WebhookStatusRejected}, store.WebhookStatusReceived, "")
 			if tErr != nil {
-				slog.Error("webhook: stale claim failed", "endpoint", ep.Name, "delivery_id", item.deliveryID, "error", tErr)
+				slog.Error("webhook: replay claim failed", "endpoint", ep.Name, "delivery_id", item.deliveryID, "error", tErr)
 				return nil
 			}
 			if !ok {
 				s.logDuplicate(item, receipt.Status)
 				return nil
 			}
-			staleClaimed = true
+			receipt.Status = store.WebhookStatusReceived
+		} else {
+			switch {
+			case isTerminal(receipt.Status):
+				s.logDuplicate(item, receipt.Status)
+				s.settleReplay(ctx, item.replayID, store.WebhookReplaySuperseded)
+				return nil
+			case receipt.Status == store.WebhookStatusReceived:
+			case time.Now().Unix()-receipt.UpdatedAt < s.claimGraceSeconds:
+				s.logDuplicate(item, receipt.Status)
+				return nil
+			default:
+				ok, tErr := s.deliveries.ClaimStale(ctx, receipt.ID, time.Now().Add(-s.claimGrace).Unix())
+				if tErr != nil {
+					slog.Error("webhook: stale claim failed", "endpoint", ep.Name, "delivery_id", item.deliveryID, "error", tErr)
+					return nil
+				}
+				if !ok {
+					s.logDuplicate(item, receipt.Status)
+					return nil
+				}
+				staleClaimed = true
+			}
 		}
 	}
 
@@ -1757,6 +1783,7 @@ func (s *Server) beginExecution(item dispatchItem) *store.WebhookDelivery {
 		}
 		slog.Info("webhook: delivery skipped", "endpoint", ep.Name, "delivery_id", item.deliveryID, "event_type", item.eventType)
 		s.emitAudit(ctx, ep, envelope, "SKIP", reason, "")
+		s.settleReplay(ctx, item.replayID, store.WebhookReplayReplayed)
 		return nil
 	}
 
@@ -1772,8 +1799,18 @@ func (s *Server) beginExecution(item dispatchItem) *store.WebhookDelivery {
 		}
 	}
 
+	s.settleReplay(ctx, item.replayID, store.WebhookReplayReplayed)
 	slog.Info("webhook: delivery accepted", "endpoint", ep.Name, "delivery_id", item.deliveryID, "event_type", item.eventType, "status", store.WebhookStatusProcessing)
 	return receipt
+}
+
+func (s *Server) settleReplay(ctx context.Context, id int64, status store.WebhookReplayStatus) {
+	if s.replays == nil || id == 0 {
+		return
+	}
+	if err := s.replays.Mark(ctx, id, status, 0); err != nil {
+		slog.Warn("webhook: replay mark failed", "replay_id", id, "status", status, "error", err)
+	}
 }
 
 func (s *Server) logDuplicate(item dispatchItem, observed store.WebhookStatus) {

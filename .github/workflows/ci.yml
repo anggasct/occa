@@ -47,7 +47,12 @@ jobs:
           out=$(grep -rnE '[0-9]+ \* time\.(Milli)?[Ss]econd|[0-9]+ \* time\.Minute|[0-9]+ \* time\.Hour' --include='*.go' internal/ cmd/ | grep -v _test.go || true)
           echo "$out"
           count=$(printf '%s\n' "$out" | grep -c . || true)
-          test "$count" -eq 22 || (echo "expected 22 mechanism lines, got $count"; exit 1)
+          test "$count" -eq 27 || (echo "expected 27 mechanism lines, got $count"; exit 1)
+          printf '%s\n' "$out" | grep -q 'internal/config/admission.go:.*defaultReplayInterval' || (echo "missing admission replay interval default"; exit 1)
+          printf '%s\n' "$out" | grep -q 'internal/config/admission.go:.*defaultReplayTTL' || (echo "missing admission replay TTL default"; exit 1)
+          printf '%s\n' "$out" | grep -q 'internal/config/admission.go:.*defaultReplayBackoff' || (echo "missing admission replay backoff default"; exit 1)
+          printf '%s\n' "$out" | grep -q 'internal/webhook/replay.go:.*return 30 \* time.Second' || (echo "missing replay fallback backoff"; exit 1)
+          printf '%s\n' "$out" | grep -q 'internal/webhook/replay.go:.*timeout := 20 \* time.Second' || (echo "missing replay checker timeout"; exit 1)
           printf '%s\n' "$out" | grep -q "internal/relay/client.go" && (echo "policy literal in relay/client.go"; exit 1) || true
           printf '%s\n' "$out" | grep -q "internal/relay/discovery.go" && (echo "policy literal in relay/discovery.go"; exit 1) || true
           printf '%s\n' "$out" | grep -q "internal/relay/webhook.go" && (echo "policy literal in relay/webhook.go"; exit 1) || true

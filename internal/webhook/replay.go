@@ -1,6 +1,7 @@
 package webhook
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -110,9 +111,18 @@ func (s *Server) notifyRejection(ep config.EndpointConfig, item dispatchItem, re
 	}
 	backoff := s.replayBackoffFor(0)
 	text := fmt.Sprintf("⚠️ WEBHOOK REJECTED — %s · %s · replay in ~%s", target, reason, formatReplayDelay(backoff))
-	if err := s.notifier(context.Background(), ep.Platform, ep.ChannelID, text); err != nil {
+	ctx, cancel := s.notificationContext()
+	defer cancel()
+	if err := s.notifier(ctx, ep.Platform, ep.ChannelID, text); err != nil {
 		slog.Warn("webhook: rejection notice failed", "endpoint", ep.Name, "delivery_id", item.deliveryID, "error", err)
 	}
+}
+
+func (s *Server) notificationContext() (context.Context, context.CancelFunc) {
+	if s.processingTimeout > 0 {
+		return context.WithTimeout(context.Background(), s.processingTimeout)
+	}
+	return context.WithCancel(context.Background())
 }
 
 func formatReplayDelay(d time.Duration) string {
@@ -217,24 +227,23 @@ func (s *Server) replayOne(ctx context.Context, row store.WebhookReplay) {
 		eventType:   row.EventType,
 		payloadHash: sha256Hex(row.Body),
 		prKey:       row.PRKey,
+		replayID:    row.ID,
 	}
-	if _, admitted := s.enqueue(ep, ExtractExecutionKey(row.Body), item); !admitted {
+	if _, admitted, _ := s.enqueue(ep, ExtractExecutionKey(row.Body), item); !admitted {
 		slog.Info("webhook: replay result", "endpoint", row.Endpoint, "delivery_id", row.DeliveryID, "result", "deferred")
 		s.rescheduleReplay(ctx, row)
 		return
 	}
-	if err := s.replays.Mark(ctx, row.ID, store.WebhookReplayReplayed, 0); err != nil {
-		slog.Warn("webhook: replay mark failed", "delivery_id", row.DeliveryID, "error", err)
-	}
-	slog.Info("webhook: replay result", "endpoint", row.Endpoint, "delivery_id", row.DeliveryID, "result", "replayed")
+	slog.Info("webhook: replay result", "endpoint", row.Endpoint, "delivery_id", row.DeliveryID, "result", "queued")
 }
 
 func (s *Server) rescheduleReplay(ctx context.Context, row store.WebhookReplay) {
-	if row.Attempts+1 >= s.replayMaxAttempts {
+	nextAttempt := row.Attempts + 1
+	if nextAttempt >= s.replayMaxAttempts {
 		s.expireReplay(ctx, row, "replay attempts exhausted")
 		return
 	}
-	next := time.Now().Add(s.replayBackoffFor(row.Attempts)).Unix()
+	next := time.Now().Add(s.replayBackoffFor(nextAttempt)).Unix()
 	if row.ExpiresAt > 0 && next >= row.ExpiresAt {
 		s.expireReplay(ctx, row, "replay TTL reached")
 		return
@@ -271,7 +280,9 @@ func (s *Server) expireReplay(ctx context.Context, row store.WebhookReplay, reas
 		target = row.EventType
 	}
 	text := fmt.Sprintf("❌ WEBHOOK LOST — %s · replay exhausted · manual redelivery required", target)
-	if err := s.notifier(context.Background(), ep.Platform, ep.ChannelID, text); err != nil {
+	noticeCtx, cancel := s.notificationContext()
+	defer cancel()
+	if err := s.notifier(noticeCtx, ep.Platform, ep.ChannelID, text); err != nil {
 		slog.Warn("webhook: lost notice failed", "endpoint", row.Endpoint, "delivery_id", row.DeliveryID, "error", err)
 	}
 }
@@ -288,40 +299,67 @@ func defaultReplayChecker(ctx context.Context, row store.WebhookReplay) (replayD
 	timeout := 20 * time.Second
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	switch strings.ToLower(strings.TrimSpace(row.EventType)) {
+	eventType := strings.ToLower(strings.TrimSpace(row.EventType))
+	switch eventType {
 	case "pull_request", "check_suite":
-		state, err := ghPRState(ctx, repo, prNumber)
+		facts, err := ghPRFacts(ctx, repo, prNumber)
 		if err != nil {
 			return replayUndecidable, err
 		}
-		if !strings.EqualFold(state, "OPEN") {
+		if !strings.EqualFold(facts.State, "OPEN") {
+			return replaySuperseded, nil
+		}
+		storedHead := replayEventHead(eventType, row.Body)
+		liveHead := normalizeRevision(facts.HeadRefOid)
+		if storedHead == "" || liveHead == "" {
+			return replayUndecidable, nil
+		}
+		if storedHead != liveHead {
 			return replaySuperseded, nil
 		}
 		return replayGo, nil
 	case "pull_request_review":
 		var payload struct {
 			Review struct {
-				ID    int64  `json:"id"`
-				State string `json:"state"`
+				ID int64 `json:"id"`
 			} `json:"review"`
 		}
 		if err := json.Unmarshal(row.Body, &payload); err != nil || payload.Review.ID == 0 {
 			return replayUndecidable, nil
 		}
-		latest, err := ghLatestReviewID(ctx, repo, prNumber)
+		state, found, err := ghReviewState(ctx, repo, prNumber, payload.Review.ID)
 		if err != nil {
 			return replayUndecidable, err
 		}
-		if latest != payload.Review.ID {
+		if !found {
 			return replaySuperseded, nil
 		}
-		return replayGo, nil
+		switch state {
+		case "APPROVED", "CHANGES_REQUESTED":
+			return replayGo, nil
+		}
+		return replaySuperseded, nil
 	case "issue_comment":
-		state, err := ghPRState(ctx, repo, prNumber)
+		var payload struct {
+			Comment struct {
+				ID int64 `json:"id"`
+			} `json:"comment"`
+		}
+		if err := json.Unmarshal(row.Body, &payload); err != nil || payload.Comment.ID == 0 {
+			return replayUndecidable, nil
+		}
+		facts, err := ghPRFacts(ctx, repo, prNumber)
 		if err != nil {
 			return replayUndecidable, err
 		}
-		if !strings.EqualFold(state, "OPEN") {
+		if !strings.EqualFold(facts.State, "OPEN") {
+			return replaySuperseded, nil
+		}
+		exists, err := ghCommentExists(ctx, repo, payload.Comment.ID)
+		if err != nil {
+			return replayUndecidable, err
+		}
+		if !exists {
 			return replaySuperseded, nil
 		}
 		return replayGo, nil
@@ -329,24 +367,100 @@ func defaultReplayChecker(ctx context.Context, row store.WebhookReplay) (replayD
 	return replayUndecidable, nil
 }
 
-func ghPRState(ctx context.Context, repo string, number int) (string, error) {
-	cmd := exec.CommandContext(ctx, "gh", "pr", "view", strconv.Itoa(number), "--repo", repo, "--json", "state", "-q", ".state")
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("gh pr view: %w", err)
+func replayEventHead(eventType string, body []byte) string {
+	var payload struct {
+		PullRequest struct {
+			Head struct {
+				SHA string `json:"sha"`
+			} `json:"head"`
+		} `json:"pull_request"`
+		CheckSuite struct {
+			HeadSHA string `json:"head_sha"`
+		} `json:"check_suite"`
+		HeadSHA string `json:"head_sha"`
 	}
-	return strings.TrimSpace(string(out)), nil
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return ""
+	}
+	switch eventType {
+	case "pull_request":
+		return normalizeRevision(payload.PullRequest.Head.SHA)
+	case "check_suite":
+		if head := normalizeRevision(payload.CheckSuite.HeadSHA); head != "" {
+			return head
+		}
+		return normalizeRevision(payload.HeadSHA)
+	}
+	return ""
 }
 
-func ghLatestReviewID(ctx context.Context, repo string, number int) (int64, error) {
-	cmd := exec.CommandContext(ctx, "gh", "pr", "view", strconv.Itoa(number), "--repo", repo, "--json", "reviews", "-q", ".reviews[-1].id")
-	out, err := cmd.Output()
+type ghPRSnapshot struct {
+	State      string `json:"state"`
+	HeadRefOid string `json:"headRefOid"`
+}
+
+func ghPRFacts(ctx context.Context, repo string, number int) (ghPRSnapshot, error) {
+	out, err := replayGHRun(ctx, "pr", "view", strconv.Itoa(number), "--repo", repo, "--json", "state,headRefOid")
 	if err != nil {
-		return 0, fmt.Errorf("gh pr view reviews: %w", err)
+		return ghPRSnapshot{}, err
 	}
-	id, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	var facts ghPRSnapshot
+	if err := json.Unmarshal(out, &facts); err != nil {
+		return ghPRSnapshot{}, fmt.Errorf("gh pr view: %w", err)
+	}
+	if strings.TrimSpace(facts.State) == "" {
+		return ghPRSnapshot{}, fmt.Errorf("gh pr view: empty state")
+	}
+	return facts, nil
+}
+
+func ghReviewState(ctx context.Context, repo string, number int, reviewID int64) (string, bool, error) {
+	out, err := replayGHRun(ctx, "api", fmt.Sprintf("repos/%s/pulls/%d/reviews?per_page=100", repo, number))
 	if err != nil {
-		return 0, fmt.Errorf("gh pr view reviews: %w", err)
+		return "", false, err
 	}
-	return id, nil
+	var reviews []struct {
+		ID    int64  `json:"id"`
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(out, &reviews); err != nil {
+		return "", false, fmt.Errorf("gh review list: %w", err)
+	}
+	if len(reviews) == 0 || reviews[len(reviews)-1].ID != reviewID {
+		return "", false, nil
+	}
+	return strings.ToUpper(strings.TrimSpace(reviews[len(reviews)-1].State)), true, nil
+}
+
+func ghCommentExists(ctx context.Context, repo string, commentID int64) (bool, error) {
+	if _, err := replayGHRun(ctx, "api", fmt.Sprintf("repos/%s/issues/comments/%d", repo, commentID)); err != nil {
+		if isGHNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func isGHNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "404") || strings.Contains(text, "not found")
+}
+
+var replayGHRun = func(ctx context.Context, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "gh", args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if detail == "" {
+			detail = err.Error()
+		}
+		return nil, fmt.Errorf("gh %s: %s", strings.Join(args, " "), detail)
+	}
+	return stdout.Bytes(), nil
 }

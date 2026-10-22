@@ -3,6 +3,7 @@ package webhook
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -157,7 +158,7 @@ func TestRejectedDeliveryIsRecordedAndReplayable(t *testing.T) {
 
 	rejected := laneItem("custom", "delivery-rejected", 3, "pull_request", "edited", "")
 	rejected.ep = ep
-	if _, ok := srv.enqueue(ep, WebhookExecutionKey{}, rejected); ok {
+	if _, ok, _ := srv.enqueue(ep, WebhookExecutionKey{}, rejected); ok {
 		t.Fatal("delivery admitted past the state share")
 	}
 
@@ -214,19 +215,19 @@ func TestReplayReenqueuesThroughAdmission(t *testing.T) {
 
 	srv.replayPending(context.Background())
 
-	rows, err := st.WebhookReplayRepo().ListDue(context.Background(), now+1, 10)
-	if err != nil {
-		t.Fatalf("list due: %v", err)
-	}
-	if len(rows) != 0 {
-		t.Fatalf("replay row still pending: %+v", rows)
-	}
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) && exec.callCount() == 0 {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if exec.callCount() != 1 {
 		t.Fatalf("replayed delivery executions = %d, want 1", exec.callCount())
+	}
+	rows, err := st.WebhookReplayRepo().ListDue(context.Background(), time.Now().Add(24*time.Hour).Unix(), 10)
+	if err != nil {
+		t.Fatalf("list due: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("replay row still pending: %+v", rows)
 	}
 }
 
@@ -384,6 +385,7 @@ func TestMergeGateApprovalRecordedBeforeAdmission(t *testing.T) {
 	srv, _, st := newTestServerFull(t, []config.EndpointConfig{ep})
 	srv.SetPRQueueRepo(st.PRQueueRepo())
 	srv.SetWebhookReplayRepo(st.WebhookReplayRepo())
+	srv.SetPRHeadResolver(&fakePRHeadResolver{head: PRHead{SHA: "2017dbb4"}})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleRequest)
 	ts := httptest.NewServer(mux)
@@ -405,6 +407,76 @@ func TestMergeGateApprovalRecordedBeforeAdmission(t *testing.T) {
 	waitForReceipt(t, st, store.WebhookStatusSkipped)
 	if verdict := srv.mergeGateVerdict("acme/widget#7"); verdict != "approved" {
 		t.Fatalf("approval not recorded before admission: verdict = %q", verdict)
+	}
+}
+
+func TestMergeGateOlderApprovalDoesNotClearNewerBlock(t *testing.T) {
+	srv, _, _ := newTestServerFull(t, nil)
+	srv.SetPRHeadResolver(&fakePRHeadResolver{head: PRHead{SHA: "bbbbbbb"}})
+	prKey := "acme/widget#7"
+	srv.recordMergeGate(prKey, WebhookEnvelope{
+		"review_verdict": "request_changes",
+		"review_commit":  "bbbbbbb",
+		"head_sha":       "bbbbbbb",
+	})
+	srv.recordMergeGate(prKey, WebhookEnvelope{
+		"review_verdict": "approved",
+		"review_commit":  "aaaaaaa",
+		"head_sha":       "aaaaaaa",
+	})
+	if verdict, blocked := srv.mergeGateBlocked(prKey); !blocked {
+		t.Fatalf("older approval cleared newer block: verdict=%q blocked=%v", verdict, blocked)
+	}
+}
+
+func TestMergeGateApprovalOnCurrentHeadClearsOlderBlock(t *testing.T) {
+	srv, _, _ := newTestServerFull(t, nil)
+	srv.SetPRHeadResolver(&fakePRHeadResolver{head: PRHead{SHA: "bbbbbbb"}})
+	prKey := "acme/widget#7"
+	srv.recordMergeGate(prKey, WebhookEnvelope{
+		"review_verdict": "request_changes",
+		"review_commit":  "aaaaaaa",
+		"head_sha":       "aaaaaaa",
+	})
+	srv.recordMergeGate(prKey, WebhookEnvelope{
+		"review_verdict": "approved",
+		"review_commit":  "bbbbbbb",
+		"head_sha":       "bbbbbbb",
+	})
+	if verdict, blocked := srv.mergeGateBlocked(prKey); blocked {
+		t.Fatalf("approval on the current head did not clear the block: %q", verdict)
+	}
+}
+
+func TestStateLaneRejectionDoesNotLogQueueFull(t *testing.T) {
+	srv, _, _ := newTestServerFull(t, []config.EndpointConfig{
+		{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+	})
+	srv.maxQueuedPerKey = 1
+
+	var logs lockedBuffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	resp := post(t, ts.URL+"/github?secret=s3cret", "del-state-reject", "pull_request", `{"action":"opened","pull_request":{"number":7}}`)
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("state-lane rejection returned %d, want 429", resp.StatusCode)
+	}
+	if resp.Header.Get("Retry-After") == "" {
+		t.Fatal("state-lane rejection omitted Retry-After")
+	}
+	text := logs.String()
+	if strings.Contains(text, "webhook: queue full") {
+		t.Fatalf("state-lane rejection logged queue full:\n%s", text)
+	}
+	if !strings.Contains(text, "webhook: delivery rejected") {
+		t.Fatalf("state-lane rejection omitted the reason-aware log:\n%s", text)
 	}
 }
 
