@@ -264,10 +264,24 @@ func TestReplayRelevanceDefaultChecker(t *testing.T) {
 			want:      replayGo,
 		},
 		{
-			name:      "later actionable review supersedes verdict",
+			name:      "same reviewer later approval supersedes verdict",
 			eventType: "pull_request_review",
 			body:      `{"review":{"id":10}}`,
-			responses: []ghResponse{{match: "pulls/7/reviews", out: `[{"id":10,"state":"CHANGES_REQUESTED"},{"id":11,"state":"APPROVED"}]`}},
+			responses: []ghResponse{{match: "pulls/7/reviews", out: `[{"id":10,"state":"CHANGES_REQUESTED","user":{"login":"alice"}},{"id":11,"state":"APPROVED","user":{"login":"alice"}}]`}},
+			want:      replaySuperseded,
+		},
+		{
+			name:      "another reviewer approval does not supersede block",
+			eventType: "pull_request_review",
+			body:      `{"review":{"id":10}}`,
+			responses: []ghResponse{{match: "pulls/7/reviews", out: `[{"id":10,"state":"CHANGES_REQUESTED","user":{"login":"alice"}},{"id":11,"state":"APPROVED","user":{"login":"bob"}}]`}},
+			want:      replayGo,
+		},
+		{
+			name:      "replayed approval does not override newer block",
+			eventType: "pull_request_review",
+			body:      `{"review":{"id":10}}`,
+			responses: []ghResponse{{match: "pulls/7/reviews", out: `[{"id":10,"state":"APPROVED","user":{"login":"bob"}},{"id":11,"state":"CHANGES_REQUESTED","user":{"login":"alice"}}]`}},
 			want:      replaySuperseded,
 		},
 		{

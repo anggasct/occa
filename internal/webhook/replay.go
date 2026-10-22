@@ -430,28 +430,20 @@ func ghReviewState(ctx context.Context, repo string, number int, reviewID int64)
 		return "", false, err
 	}
 	replayState := ""
-	found := false
-	latestActionableID := int64(0)
-	latestActionableState := ""
 	for _, review := range reviews {
-		state := strings.ToUpper(strings.TrimSpace(review.State))
 		if review.ID == reviewID {
-			replayState = state
-			found = true
-		}
-		switch state {
-		case "APPROVED", "CHANGES_REQUESTED":
-			latestActionableID = review.ID
-			latestActionableState = state
+			replayState = strings.ToUpper(strings.TrimSpace(review.State))
+			break
 		}
 	}
-	if !found {
+	if replayState == "" {
 		return "", false, nil
 	}
 	switch replayState {
 	case "APPROVED", "CHANGES_REQUESTED":
-		if latestActionableID != reviewID {
-			return latestActionableState, false, nil
+		decision := ghReviewDecision(reviews)
+		if !strings.EqualFold(decision, replayState) {
+			return decision, false, nil
 		}
 		return replayState, true, nil
 	}
@@ -461,10 +453,46 @@ func ghReviewState(ctx context.Context, repo string, number int, reviewID int64)
 type ghReview struct {
 	ID    int64  `json:"id"`
 	State string `json:"state"`
+	User  struct {
+		Login string `json:"login"`
+	} `json:"user"`
 }
 
-// ghReviews returns every review of a PR. Only COMMENTED and DISMISSED reviews
-// do not clear a block; the caller picks the latest actionable one.
+// ghReviewDecision derives the live PR review decision the way GitHub does:
+// each reviewer's latest verdict replaces their earlier one, a dismissal clears
+// it, and any outstanding change request blocks even when another reviewer
+// approved later.
+func ghReviewDecision(reviews []ghReview) string {
+	latest := make(map[string]ghReview)
+	for _, review := range reviews {
+		state := strings.ToUpper(strings.TrimSpace(review.State))
+		switch state {
+		case "APPROVED", "CHANGES_REQUESTED", "DISMISSED":
+		default:
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(review.User.Login))
+		if key == "" {
+			key = fmt.Sprintf("review:%d", review.ID)
+		}
+		if prev, ok := latest[key]; ok && prev.ID > review.ID {
+			continue
+		}
+		latest[key] = ghReview{ID: review.ID, State: state}
+	}
+	decision := ""
+	for _, review := range latest {
+		switch review.State {
+		case "CHANGES_REQUESTED":
+			return "CHANGES_REQUESTED"
+		case "APPROVED":
+			decision = "APPROVED"
+		}
+	}
+	return decision
+}
+
+// ghReviews returns every review of a PR in submission order.
 func ghReviews(ctx context.Context, repo string, number int) ([]ghReview, error) {
 	const perPage = 100
 	var all []ghReview

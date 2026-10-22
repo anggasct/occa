@@ -800,14 +800,7 @@ func (s *Server) livePRReviewDecision(ctx context.Context, prKey string) string 
 	if err != nil {
 		return ""
 	}
-	state := ""
-	for _, review := range reviews {
-		switch reviewed := strings.ToUpper(strings.TrimSpace(review.State)); reviewed {
-		case "APPROVED", "CHANGES_REQUESTED":
-			state = reviewed
-		}
-	}
-	return state
+	return ghReviewDecision(reviews)
 }
 
 // mergeGateVerdict returns the review verdict the merge gate holds for a PR

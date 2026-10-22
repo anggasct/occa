@@ -318,6 +318,43 @@ func TestReplayStoreIsBounded(t *testing.T) {
 	if total != 3 {
 		t.Fatalf("rows after prune = %d, want 3", total)
 	}
+
+	_, _, byteSt := newTestServerFull(t, nil)
+	ctx := context.Background()
+	const bodySize = 10
+	for i := 0; i < 5; i++ {
+		body := fmt.Sprintf("body-%05d", i)
+		if len(body) != bodySize {
+			t.Fatalf("seed body %q is %d bytes, want %d", body, len(body), bodySize)
+		}
+		if _, _, err := byteSt.WebhookReplayRepo().Create(ctx, store.WebhookReplay{
+			Endpoint: "github", DeliveryID: fmt.Sprintf("del-%d", i), EventType: "pull_request",
+			Body: []byte(body), Reason: "rejected", NextAttemptAt: now, ExpiresAt: now + 600,
+		}); err != nil {
+			t.Fatalf("create byte replay %d: %v", i, err)
+		}
+	}
+	const byteCap = 25
+	if _, err := byteSt.WebhookReplayRepo().Prune(ctx, 100, byteCap); err != nil {
+		t.Fatalf("byte prune: %v", err)
+	}
+	rows, err := byteSt.WebhookReplayRepo().ListDue(ctx, now+1, 100)
+	if err != nil {
+		t.Fatalf("list byte replays: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows after byte prune = %d, want 2", len(rows))
+	}
+	if rows[0].DeliveryID != "del-3" || rows[1].DeliveryID != "del-4" {
+		t.Fatalf("retained rows = %q, %q; want del-3, del-4", rows[0].DeliveryID, rows[1].DeliveryID)
+	}
+	retainedBytes := 0
+	for _, row := range rows {
+		retainedBytes += len(row.Body)
+	}
+	if retainedBytes > byteCap {
+		t.Fatalf("retained body bytes = %d, want <= %d", retainedBytes, byteCap)
+	}
 }
 
 func TestQueueStatsReportsReplayState(t *testing.T) {
@@ -486,6 +523,24 @@ func TestMergeGateStaleHeadDeliveryDoesNotRegressBlock(t *testing.T) {
 	srv.recordMergeGate(prKey, WebhookEnvelope{"head_sha": "aaaaaaa"})
 	if verdict, blocked := srv.mergeGateBlocked(prKey); !blocked {
 		t.Fatalf("stale head delivery unblocked a newer block: verdict=%q blocked=%v", verdict, blocked)
+	}
+}
+
+func TestMergeGateUnorderedApprovalKeepsAnotherReviewersBlock(t *testing.T) {
+	srv, _, _ := newTestServerFull(t, nil)
+	prev := replayGHRun
+	t.Cleanup(func() { replayGHRun = prev })
+	replayGHRun = func(_ context.Context, args ...string) ([]byte, error) {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "pulls/7/reviews") {
+			return []byte(`[{"id":10,"state":"CHANGES_REQUESTED","user":{"login":"alice"}},{"id":11,"state":"APPROVED","user":{"login":"bob"}}]`), nil
+		}
+		return nil, fmt.Errorf("unexpected gh invocation: %s", joined)
+	}
+	current := SurfaceGate{Approval: "changes_requested", Commit: "abc1234", Head: "abc1234"}
+	approval := SurfaceGate{Approval: "approved", Commit: "abc1234", Head: "abc1234"}
+	if srv.approvalSupersedesBlock("acme/widget#7", current, approval) {
+		t.Fatal("another reviewer's approval cleared an active request-changes")
 	}
 }
 
