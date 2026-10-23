@@ -44,10 +44,12 @@ func newTestServer(t *testing.T, endpoints []config.EndpointConfig) (*Server, *f
 }
 
 type fakeExecutor struct {
-	mu    sync.Mutex
-	calls []execCall
-	err   error
-	block chan struct{}
+	mu          sync.Mutex
+	calls       []execCall
+	err         error
+	block       chan struct{}
+	started     chan struct{}
+	startedOnce sync.Once
 	// progress, when set, is copied into workCtx.Progress before the executor
 	// returns, simulating turn progress observed by the relay layer.
 	progress func() relay.TurnProgress
@@ -65,6 +67,9 @@ type execCall struct {
 }
 
 func (f *fakeExecutor) exec(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+	if f.started != nil {
+		f.startedOnce.Do(func() { close(f.started) })
+	}
 	if f.block != nil {
 		select {
 		case <-f.block:
@@ -638,7 +643,7 @@ func waitForCompletedCount(t *testing.T, st *store.SQLiteStore, want int) {
 		}
 		completed := 0
 		for _, d := range deliveries {
-			if isTerminal(d.Status) {
+			if d.Status == store.WebhookStatusCompleted || d.Status == store.WebhookStatusFailed {
 				completed++
 			}
 		}
@@ -3144,7 +3149,7 @@ func TestWebhookEnqueueRacingShutdownNeverLosesDelivery(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Get %s: %v", id, err)
 		}
-		if receipt == nil || !isTerminal(receipt.Status) {
+		if receipt == nil || (receipt.Status != store.WebhookStatusCompleted && receipt.Status != store.WebhookStatusFailed && receipt.Status != store.WebhookStatusSkipped && receipt.Status != store.WebhookStatusRejected) {
 			t.Fatalf("accepted delivery %s was neither executed nor recorded on shutdown: %+v", id, receipt)
 		}
 	}

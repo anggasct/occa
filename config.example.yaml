@@ -105,7 +105,7 @@ webhooks:
       secret: <your-webhook-secret> # one secret shared by the 4 hooks
       checkout: /home/operator/projects/widget # required checkout root for fix runs (isolated worktree)
       # model: openai/gpt-4o # optional per-repo model override
-      # comment_trigger: # optional per-workflow trigger override (review and fix only)
+      # comment_trigger: # optional per-workflow phrases merged with the defaults (review and fix only)
       #   review: ['please re-review']
       # automation: # optional per-author policy (absent = review-only for everyone)
       #   default: review-only # full | review-only

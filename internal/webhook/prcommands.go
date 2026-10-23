@@ -224,8 +224,8 @@ func (s *Server) operatorRetry(ctx context.Context, msg channel.IncomingMessage,
 	if err != nil || row == nil {
 		return "Nothing to retry for " + prKey + " — no queue state.", true, nil
 	}
-	kind := strings.TrimSpace(row.ActiveKind)
-	if kind == "" || kind == "dispatch" {
+	kind := s.inferRetryKind(ctx, row)
+	if kind == "" || kind == "dispatch" || kind == "merged" {
 		return "Nothing to retry for " + prKey + ".", true, nil
 	}
 	if err := s.prQueues.SetRetryState(ctx, prKey, 0, 0); err != nil {
@@ -252,6 +252,65 @@ func (s *Server) operatorRetry(ctx context.Context, msg channel.IncomingMessage,
 		return "Retry reset, but re-run failed: " + err.Error(), true, nil
 	}
 	return "Re-running " + kind + " for " + prKey + ".", true, nil
+}
+
+func (s *Server) inferRetryKind(ctx context.Context, row *store.PRRun) string {
+	if row == nil {
+		return ""
+	}
+	kind := strings.TrimSpace(strings.ToLower(row.ActiveKind))
+	if kind != "" {
+		return kind
+	}
+	if s.deliveries == nil {
+		return ""
+	}
+	var rec *store.WebhookDelivery
+	if row.ActiveDelivery != 0 {
+		if got, err := s.deliveries.GetByID(ctx, row.ActiveDelivery); err == nil {
+			rec = got
+		}
+	}
+	if rec == nil {
+		if got, err := s.deliveries.LatestForPR(ctx, row.PRKey); err == nil {
+			rec = got
+		}
+	}
+	return s.retryKindForDelivery(rec)
+}
+
+func (s *Server) retryKindForDelivery(rec *store.WebhookDelivery) string {
+	if rec == nil {
+		return ""
+	}
+	if ep, ok := s.endpointsByName[strings.TrimSpace(rec.Endpoint)]; ok {
+		switch kind := strings.TrimSpace(strings.ToLower(ep.Workflow)); kind {
+		case "review", "reviewer":
+			return "review"
+		case "fix", "pr-fix":
+			return "fix"
+		case "merge", "merged":
+			return kind
+		}
+	}
+	summary := strings.ToUpper(rec.ErrorSummary)
+	switch strings.ToLower(strings.TrimSpace(rec.EventType)) {
+	case "pull_request_review":
+		if strings.Contains(summary, "APPROVED") {
+			return "merge"
+		}
+		return "fix"
+	case "issue_comment":
+		return "fix"
+	case "check_suite":
+		return "merge"
+	case "pull_request":
+		if strings.Contains(summary, "MERGED") {
+			return "merged"
+		}
+		return "review"
+	}
+	return ""
 }
 
 func (s *Server) operatorSkip(ctx context.Context, msg channel.IncomingMessage, prKey string) (string, bool, error) {
@@ -321,7 +380,7 @@ func (s *Server) enqueueSyntheticRetry(ctx context.Context, repo, number, kind, 
 	if !found {
 		return fmt.Errorf("no %s endpoint for repo %s", kind, repo)
 	}
-	deliveryID := fmt.Sprintf("op-retry-%d", time.Now().UnixNano())
+	deliveryID := fmt.Sprintf("%s%d", operatorRetryDeliveryPrefix, time.Now().UnixNano())
 	item := dispatchItem{
 		ep:         ep,
 		body:       body,

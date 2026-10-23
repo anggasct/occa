@@ -453,8 +453,8 @@ func (s *Server) skipDeliveryQuiet(ep config.EndpointConfig, id int64, reason st
 // RecoverPRQueue reconciles persisted PR-queue state after a restart without
 // re-executing anything: queued-but-unexecuted items cannot run because the
 // delivery bodies live only in memory, so they are dropped with a count.
-// Active rows are marked failed and escalated to blocked — nothing is silently
-// lost, and the operator re-drives via /retry or a fresh trigger.
+// Active rows become drained with a resume marker so /retry can rebuild them
+// from live PR state instead of dead-ending on an empty active kind.
 func (s *Server) RecoverPRQueue() string {
 	if s.prQueues == nil {
 		return "pr queue recovery skipped (no store)"
@@ -465,7 +465,7 @@ func (s *Server) RecoverPRQueue() string {
 		slog.Error("webhook: pr queue recovery list failed", "error", err)
 		return "pr queue recovery failed: " + err.Error()
 	}
-	var active, failed, dropped, blocked int
+	var active, failed, dropped, blocked, resumed int
 	for i := range runs {
 		run := &runs[i]
 		if run.Status == store.PRStatusBlocked {
@@ -473,25 +473,34 @@ func (s *Server) RecoverPRQueue() string {
 			continue
 		}
 		active++
+		droppedHere := 0
 		if n, err := s.prQueues.ClearQueue(ctx, run.PRKey); err != nil {
 			slog.Warn("webhook: pr queue recovery clear failed", "pr_key", run.PRKey, "error", err)
 		} else {
+			droppedHere = n
 			dropped += n
 		}
+		kind := s.inferRetryKind(ctx, run)
 		if run.ActiveDelivery != 0 {
 			if rec, rerr := s.deliveries.GetByID(ctx, run.ActiveDelivery); rerr == nil && rec != nil && rec.Status == store.WebhookStatusProcessing {
-				_, _ = s.deliveries.Transition(ctx, rec.ID, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusFailed, "interrupted by restart")
+				if _, terr := s.deliveries.Transition(ctx, rec.ID, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusFailed, "interrupted by restart"); terr == nil {
+					failed++
+				}
 			}
 		}
-		reason := "interrupted by restart — re-run via /retry or re-trigger"
-		if serr := s.prQueues.SetBlocked(ctx, run.PRKey, reason); serr != nil {
-			slog.Warn("webhook: pr queue recovery block failed", "pr_key", run.PRKey, "error", serr)
+		if serr := s.prQueues.SetResumePending(ctx, run.PRKey, kind, run.ActiveDelivery); serr != nil {
+			slog.Warn("webhook: pr queue recovery resume mark failed", "pr_key", run.PRKey, "error", serr)
 			continue
 		}
-		failed++
-		blocked++
+		resumed++
+		slog.Info("webhook: pr recovery resume pending",
+			"pr_key", run.PRKey,
+			"kind", kind,
+			"delivery_id", run.ActiveDelivery,
+			"dropped", droppedHere,
+		)
 	}
-	result := fmt.Sprintf("recovered %d active (resumed 0, failed %d), dropped %d queued, blocked %d", active, failed, dropped, blocked)
+	result := fmt.Sprintf("recovered %d active (resumed %d, failed %d), dropped %d queued, blocked %d", active, resumed, failed, dropped, blocked)
 	slog.Warn("webhook: pr queue recovery", "result", result)
 	return result
 }

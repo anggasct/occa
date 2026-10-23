@@ -24,7 +24,7 @@ func newRecoveryHarness(t *testing.T) (*Server, *store.SQLiteStore) {
 		Bind:      "127.0.0.1:0",
 		Policy:    testPolicy(),
 		Runtime:   testRuntime(),
-		Endpoints: withAdmitDefaults(nil),
+		Endpoints: withAdmitDefaults([]config.EndpointConfig{prTestEndpoint("merge", "/merge", config.AutomationFull)}),
 	}
 	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
 	if err != nil {
@@ -70,7 +70,7 @@ func TestRecoverPRQueueInterruptsAndBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	msg := srv.RecoverPRQueue()
-	want := "recovered 1 active (resumed 0, failed 1), dropped 1 queued, blocked 1"
+	want := "recovered 1 active (resumed 1, failed 1), dropped 1 queued, blocked 0"
 	if msg != want {
 		t.Fatalf("recover log = %q, want %q", msg, want)
 	}
@@ -79,12 +79,52 @@ func TestRecoverPRQueueInterruptsAndBlocks(t *testing.T) {
 		t.Fatalf("active receipt = %+v, %v; want failed", rec, err)
 	}
 	run, err := st.PRQueueRepo().Get(ctx, "acme/widget#7")
-	if err != nil || run == nil || run.Status != store.PRStatusBlocked {
-		t.Fatalf("pr row = %+v, %v; want blocked", run, err)
+	if err != nil || run == nil || run.Status != store.PRStatusDrained {
+		t.Fatalf("pr row = %+v, %v; want drained", run, err)
+	}
+	if run.BlockedReason != "resume_pending" || run.ActiveKind != "fix" || run.ActiveDelivery != int64(receipt.ID) {
+		t.Fatalf("resume marker = %+v", run)
 	}
 	items, err := st.PRQueueRepo().ListItems(ctx, "acme/widget#7")
 	if err != nil || len(items) != 0 {
 		t.Fatalf("queued items not dropped: %+v %v", items, err)
+	}
+}
+
+func TestRecoverPRQueueInfersMergeForInterruptedApprovedReview(t *testing.T) {
+	srv, st := newRecoveryHarness(t)
+	ctx := context.Background()
+	if _, err := st.PRQueueRepo().EnsurePR(ctx, "acme/widget#9", "thread-9", "root-9"); err != nil {
+		t.Fatal(err)
+	}
+	created, err := st.WebhookDeliveryRepo().Create(ctx, store.WebhookDelivery{
+		Endpoint:     "github-widget-merge",
+		DeliveryID:   "del-approved",
+		EventType:    "pull_request_review",
+		PayloadHash:  "h",
+		ErrorSummary: "APPROVED",
+	})
+	if err != nil || !created {
+		t.Fatalf("create receipt: %v %v", created, err)
+	}
+	receipt, err := st.WebhookDeliveryRepo().Get(ctx, "github-widget-merge", "del-approved")
+	if err != nil || receipt == nil {
+		t.Fatalf("get receipt: %v", err)
+	}
+	ok, err := st.WebhookDeliveryRepo().Transition(ctx, receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived}, store.WebhookStatusProcessing, "")
+	if err != nil || !ok {
+		t.Fatalf("transition to processing: %v %v", ok, err)
+	}
+	if err := st.PRQueueRepo().SetActive(ctx, "acme/widget#9", "", "", int64(receipt.ID)); err != nil {
+		t.Fatal(err)
+	}
+	srv.RecoverPRQueue()
+	run, err := st.PRQueueRepo().Get(ctx, "acme/widget#9")
+	if err != nil || run == nil {
+		t.Fatalf("pr row = %+v, %v", run, err)
+	}
+	if run.ActiveKind != "merge" {
+		t.Fatalf("resume kind = %q, want merge", run.ActiveKind)
 	}
 }
 

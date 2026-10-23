@@ -153,8 +153,8 @@ func TestReposDefaultsAndOverrides(t *testing.T) {
 	if triggers := byWorkflow["review"].CommentTrigger; len(triggers) != 1 || triggers[0] != "tolong review" {
 		t.Fatalf("review triggers should come from defaults: %v", triggers)
 	}
-	if triggers := byWorkflow["fix"].CommentTrigger; len(triggers) != 1 || triggers[0] != "fix it" {
-		t.Fatalf("fix triggers should come from repo override: %v", triggers)
+	if triggers := byWorkflow["fix"].CommentTrigger; len(triggers) != 3 || triggers[0] != "please fix review" || triggers[1] != "please fix ci" || triggers[2] != "fix it" {
+		t.Fatalf("fix triggers should merge the repo override with the defaults: %v", triggers)
 	}
 	if limits := byWorkflow["merge"].Limits; limits.MaxRunsPerPR != 5 || limits.Window != 30*time.Minute {
 		t.Fatalf("limits should come from defaults: %+v", limits)

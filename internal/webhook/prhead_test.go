@@ -226,11 +226,12 @@ func TestEnrichedCommentRateCapIntact(t *testing.T) {
 	srv.SetWorkspaceResolver(&fakeWorkspaceResolver{path: "/tmp/wt"})
 
 	body := commentFixBody(7, "please fix review")
-	enriched, err := srv.enrichCommentBody(dispatchItem{ep: ep, body: body, deliveryID: "seed", eventType: "issue_comment"})
-	if err != nil {
-		t.Fatalf("enrich seed: %v", err)
-	}
 	for i := 1; i <= 3; i++ {
+		headSHA := fmt.Sprintf("%040x", i)
+		enriched, err := seedEnrichedBody(body, PRHead{Branch: "feat/fix-7", SHA: headSHA, HeadRepo: "o/r", BaseBranch: "main"}, "o/r")
+		if err != nil {
+			t.Fatalf("enrich delivery %d: %v", i, err)
+		}
 		delID := fmt.Sprintf("cap-%d", i)
 		id := seedReviewDelivery(t, st.WebhookDeliveryRepo(), ep.Name, delID)
 		if err := srv.executeDelivery(ep, enriched, id, delID, "issue_comment", 1, nil, nil, nil); err != nil {
@@ -239,6 +240,10 @@ func TestEnrichedCommentRateCapIntact(t *testing.T) {
 	}
 	if exec.callCount() != 3 {
 		t.Fatalf("calls = %d, want 3", exec.callCount())
+	}
+	enriched, err := seedEnrichedBody(body, PRHead{Branch: "feat/fix-7", SHA: fmt.Sprintf("%040x", 4), HeadRepo: "o/r", BaseBranch: "main"}, "o/r")
+	if err != nil {
+		t.Fatalf("enrich capped delivery: %v", err)
 	}
 	id4 := seedReviewDelivery(t, st.WebhookDeliveryRepo(), ep.Name, "cap-4")
 	if err := srv.executeDelivery(ep, enriched, id4, "cap-4", "issue_comment", 1, nil, nil, nil); err != nil {

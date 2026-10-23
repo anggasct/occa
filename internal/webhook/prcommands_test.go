@@ -239,6 +239,192 @@ func TestOperatorRetryUnblocksAndRequeues(t *testing.T) {
 	}
 }
 
+func TestOperatorRetryInfersKindFromLastDelivery(t *testing.T) {
+	allow := func(platform, userID string) bool { return true }
+	srv, st, _ := operatorTestServer(t, allow)
+	ctx := context.Background()
+	linkPRThread(t, srv, "acme/widget#7", "thread-pr")
+	if _, err := st.PRQueueRepo().EnsurePR(ctx, "acme/widget#7", "thread-pr", "root-1"); err != nil {
+		t.Fatal(err)
+	}
+	created, err := st.WebhookDeliveryRepo().Create(ctx, store.WebhookDelivery{
+		Endpoint:     "github-widget-pr-fix",
+		DeliveryID:   "del-interrupted",
+		EventType:    "pull_request_review",
+		ErrorSummary: "Review verdict: REQUEST_CHANGES",
+		Status:       store.WebhookStatusFailed,
+	})
+	if err != nil || !created {
+		t.Fatalf("create delivery: %v %v", created, err)
+	}
+	rec, err := st.WebhookDeliveryRepo().Get(ctx, "github-widget-pr-fix", "del-interrupted")
+	if err != nil || rec == nil {
+		t.Fatalf("get delivery: %v", err)
+	}
+	if err := st.WebhookDeliveryRepo().SetPRKey(ctx, rec.ID, "acme/widget#7"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PRQueueRepo().SetBlocked(ctx, "acme/widget#7", "interrupted by restart — re-run via /retry or re-trigger"); err != nil {
+		t.Fatal(err)
+	}
+	srv.retryBodyBuilder = func(ctx context.Context, repo, number, kind string) ([]byte, string, error) {
+		if repo != "acme/widget" || number != "7" || kind != "fix" {
+			t.Fatalf("retry builder got %q %q %q", repo, number, kind)
+		}
+		return []byte(`{"action":"created","synthetic":"retry"}`), "issue_comment", nil
+	}
+	reply, handled, err := srv.HandleOperatorCommand(ctx, operatorMsg("thread-pr", "/retry"), "retry", "")
+	if err != nil || !handled {
+		t.Fatalf("retry = %q %v %v", reply, handled, err)
+	}
+	if !strings.Contains(reply, "fix") || strings.Contains(reply, "Nothing to retry") {
+		t.Fatalf("retry reply = %q", reply)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		all, lerr := st.WebhookDeliveryRepo().List(ctx, 20)
+		if lerr != nil {
+			t.Fatalf("list: %v", lerr)
+		}
+		for _, d := range all {
+			if strings.HasPrefix(d.DeliveryID, "op-retry-") && d.Status == store.WebhookStatusCompleted {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("synthetic retry never completed: %+v", all)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestOperatorRetryInfersReviewFromDeliveryEndpoint(t *testing.T) {
+	allow := func(platform, userID string) bool { return true }
+	srv, st, _ := operatorTestServer(t, allow)
+	ctx := context.Background()
+	linkPRThread(t, srv, "acme/widget#7", "thread-pr")
+	if _, err := st.PRQueueRepo().EnsurePR(ctx, "acme/widget#7", "thread-pr", "root-1"); err != nil {
+		t.Fatal(err)
+	}
+	created, err := st.WebhookDeliveryRepo().Create(ctx, store.WebhookDelivery{
+		Endpoint:     "github-widget-review",
+		DeliveryID:   "del-review-comment",
+		EventType:    "issue_comment",
+		ErrorSummary: "skipped: comment trigger",
+		Status:       store.WebhookStatusFailed,
+	})
+	if err != nil || !created {
+		t.Fatalf("create delivery: %v %v", created, err)
+	}
+	rec, err := st.WebhookDeliveryRepo().Get(ctx, "github-widget-review", "del-review-comment")
+	if err != nil || rec == nil {
+		t.Fatalf("get delivery: %v", err)
+	}
+	if err := st.WebhookDeliveryRepo().SetPRKey(ctx, rec.ID, "acme/widget#7"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PRQueueRepo().SetBlocked(ctx, "acme/widget#7", "resume_pending"); err != nil {
+		t.Fatal(err)
+	}
+	srv.retryBodyBuilder = func(ctx context.Context, repo, number, kind string) ([]byte, string, error) {
+		if repo != "acme/widget" || number != "7" || kind != "review" {
+			t.Fatalf("retry builder got %q %q %q", repo, number, kind)
+		}
+		return []byte(`{"action":"created","synthetic":"retry"}`), "issue_comment", nil
+	}
+	reply, handled, err := srv.HandleOperatorCommand(ctx, operatorMsg("thread-pr", "/retry"), "retry", "")
+	if err != nil || !handled {
+		t.Fatalf("retry = %q %v %v", reply, handled, err)
+	}
+	if !strings.Contains(reply, "review") || strings.Contains(reply, "Nothing to retry") {
+		t.Fatalf("retry reply = %q", reply)
+	}
+}
+
+func TestOperatorRetryBypassesSameHeadReviewDedupe(t *testing.T) {
+	allow := func(platform, userID string) bool { return true }
+	reviewEp := prTestEndpoint("review", "/review", config.AutomationFull)
+	reviewEp.CommentTrigger = []string{"please re-review"}
+	reviewEp.Limits = &config.EndpointLimits{MaxRunsPerPR: 10, Window: time.Hour}
+	srv, st, _ := operatorTestServer(t, allow, reviewEp)
+	ctx := context.Background()
+	linkPRThread(t, srv, "acme/widget#7", "thread-pr")
+	if _, err := st.PRQueueRepo().EnsurePR(ctx, "acme/widget#7", "thread-pr", "root-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	const head = "5932515abc123"
+	created, err := st.WebhookDeliveryRepo().Create(ctx, store.WebhookDelivery{
+		Endpoint:    "github-widget-review",
+		DeliveryID:  "del-prior-review",
+		EventType:   "issue_comment",
+		PayloadHash: "prior-review",
+	})
+	if err != nil || !created {
+		t.Fatalf("create prior delivery: created=%v err=%v", created, err)
+	}
+	prior, err := st.WebhookDeliveryRepo().Get(ctx, "github-widget-review", "del-prior-review")
+	if err != nil || prior == nil {
+		t.Fatalf("get prior delivery: %v %v", prior, err)
+	}
+	if err := st.WebhookDeliveryRepo().SetReviewKey(ctx, prior.ID, "acme/widget#7@"+head); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.WebhookDeliveryRepo().Transition(ctx, prior.ID, []store.WebhookStatus{store.WebhookStatusReceived}, store.WebhookStatusCompleted, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.PRQueueRepo().SetActive(ctx, "acme/widget#7", "review", "sess-9", 11); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PRQueueRepo().SetBlocked(ctx, "acme/widget#7", "interrupted by restart — re-run via /retry or re-trigger"); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls int64
+	srv.executor = func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+		atomic.AddInt64(&calls, 1)
+		return nil
+	}
+	srv.retryBodyBuilder = func(ctx context.Context, repo, number, kind string) ([]byte, string, error) {
+		if repo != "acme/widget" || number != "7" || kind != "review" {
+			t.Fatalf("retry builder got %q %q %q", repo, number, kind)
+		}
+		return internalReviewCommentBody("acme/widget", "7", "please re-review", "https://github.com/acme/widget/pull/7", "feat/x", head), "issue_comment", nil
+	}
+
+	reply, handled, err := srv.HandleOperatorCommand(ctx, operatorMsg("thread-pr", "/retry"), "retry", "")
+	if err != nil || !handled || !strings.Contains(reply, "Re-running review") {
+		t.Fatalf("retry = %q %v %v", reply, handled, err)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		all, lerr := st.WebhookDeliveryRepo().List(ctx, 50)
+		if lerr != nil {
+			t.Fatalf("list: %v", lerr)
+		}
+		for _, d := range all {
+			if !strings.HasPrefix(d.DeliveryID, "op-retry-") {
+				continue
+			}
+			if d.Status == store.WebhookStatusSkipped {
+				t.Fatalf("operator retry was deduped: %+v", d)
+			}
+			if d.Status == store.WebhookStatusCompleted {
+				if got := atomic.LoadInt64(&calls); got != 1 {
+					t.Fatalf("executor calls = %d, want 1", got)
+				}
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("synthetic retry never completed: %+v", all)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func TestOperatorSkipNoActive(t *testing.T) {
 	allow := func(platform, userID string) bool { return true }
 	srv, _, _ := operatorTestServer(t, allow)

@@ -43,7 +43,7 @@ func (s *Server) enqueueInternalReview(prKey, headSHA string) {
 	if !ok {
 		return
 	}
-	body := internalReviewCommentBody(repo, number, trigger, s.prURLForPR(prKey))
+	body := internalReviewCommentBody(repo, number, trigger, s.prURLForPR(prKey), s.branchForPR(prKey), headSHA)
 	deliveryID := internalReviewDeliveryID(prKey, headSHA)
 	item := dispatchItem{
 		ep:          ep,
@@ -96,13 +96,17 @@ func (s *Server) reviewTrigger(ep config.EndpointConfig) string {
 }
 
 // internalReviewCommentBody renders the comment delivery of an internal
-// re-review.
-func internalReviewCommentBody(repo, number, trigger, prURL string) []byte {
+// re-review. The head is carried in the body so the delivery is deduped
+// against a webhook echo for the same head before the echo can start a
+// second review.
+func internalReviewCommentBody(repo, number, trigger, prURL, branch, headSHA string) []byte {
 	payload := map[string]any{
 		"action": "created",
 		"repository": map[string]any{
 			"full_name": repo,
 		},
+		"branch":        branch,
+		"head_revision": headSHA,
 		"issue": map[string]any{
 			"number": number,
 			"state":  "open",

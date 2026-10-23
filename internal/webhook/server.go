@@ -47,8 +47,10 @@ type DeliveryStore interface {
 	FailStale(ctx context.Context, cutoff int64, summary string) (int, error)
 	SetReviewKey(ctx context.Context, id int64, reviewKey string) error
 	SetPRKey(ctx context.Context, id int64, prKey string) error
-	FindReviewDuplicate(ctx context.Context, endpoint, reviewKey string, cutoff int64) (*store.WebhookDelivery, error)
-	CountReviewDeliveries(ctx context.Context, endpoint, reviewKey string, cutoff int64) (int, error)
+	Reopen(ctx context.Context, id int64, from []store.WebhookStatus) (bool, error)
+	LatestForPR(ctx context.Context, prKey string) (*store.WebhookDelivery, error)
+	FindReviewDuplicate(ctx context.Context, endpoint, reviewKey string, excludeID, cutoff int64) (*store.WebhookDelivery, error)
+	CountReviewDeliveries(ctx context.Context, endpoint, reviewKeyPrefix string, cutoff int64) (int, error)
 }
 
 type ChannelStore interface {
@@ -56,6 +58,7 @@ type ChannelStore interface {
 }
 
 type TakeoverStore interface {
+	SetActive(ctx context.Context, platform, channelID, threadID, userID, sessionID string, agentPID int) error
 	MarkTakeoverEligible(ctx context.Context, platform, channelID, threadID, sessionID string, agentPID int, seed string) error
 	ClearTakeoverEligible(ctx context.Context, platform, channelID, threadID string) error
 	LinkThreadRoot(ctx context.Context, platform, channelID, threadID, messageID, channel, card string) error
@@ -1732,10 +1735,11 @@ func (s *Server) beginExecution(item dispatchItem) *store.WebhookDelivery {
 
 	staleClaimed := false
 	if !created {
-		if item.replayID != 0 && receipt.Status == store.WebhookStatusRejected {
-			ok, tErr := s.deliveries.Transition(ctx, receipt.ID, []store.WebhookStatus{store.WebhookStatusRejected}, store.WebhookStatusReceived, "")
+		switch {
+		case isReopenable(receipt.Status):
+			ok, tErr := s.deliveries.Reopen(ctx, receipt.ID, []store.WebhookStatus{receipt.Status})
 			if tErr != nil {
-				slog.Error("webhook: replay claim failed", "endpoint", ep.Name, "delivery_id", item.deliveryID, "error", tErr)
+				slog.Error("webhook: reopen claim failed", "endpoint", ep.Name, "delivery_id", item.deliveryID, "error", tErr)
 				return nil
 			}
 			if !ok {
@@ -1743,28 +1747,25 @@ func (s *Server) beginExecution(item dispatchItem) *store.WebhookDelivery {
 				return nil
 			}
 			receipt.Status = store.WebhookStatusReceived
-		} else {
-			switch {
-			case isTerminal(receipt.Status):
-				s.logDuplicate(item, receipt.Status)
-				s.settleReplay(ctx, item.replayID, store.WebhookReplaySuperseded)
+		case isTerminal(receipt.Status):
+			s.logDuplicate(item, receipt.Status)
+			s.settleReplay(ctx, item.replayID, store.WebhookReplaySuperseded)
+			return nil
+		case receipt.Status == store.WebhookStatusReceived:
+		case time.Now().Unix()-receipt.UpdatedAt < s.claimGraceSeconds:
+			s.logDuplicate(item, receipt.Status)
+			return nil
+		default:
+			ok, tErr := s.deliveries.ClaimStale(ctx, receipt.ID, time.Now().Add(-s.claimGrace).Unix())
+			if tErr != nil {
+				slog.Error("webhook: stale claim failed", "endpoint", ep.Name, "delivery_id", item.deliveryID, "error", tErr)
 				return nil
-			case receipt.Status == store.WebhookStatusReceived:
-			case time.Now().Unix()-receipt.UpdatedAt < s.claimGraceSeconds:
-				s.logDuplicate(item, receipt.Status)
-				return nil
-			default:
-				ok, tErr := s.deliveries.ClaimStale(ctx, receipt.ID, time.Now().Add(-s.claimGrace).Unix())
-				if tErr != nil {
-					slog.Error("webhook: stale claim failed", "endpoint", ep.Name, "delivery_id", item.deliveryID, "error", tErr)
-					return nil
-				}
-				if !ok {
-					s.logDuplicate(item, receipt.Status)
-					return nil
-				}
-				staleClaimed = true
 			}
+			if !ok {
+				s.logDuplicate(item, receipt.Status)
+				return nil
+			}
+			staleClaimed = true
 		}
 	}
 
@@ -1873,6 +1874,41 @@ func (s *Server) failAbandonedReceipt(receipt *store.WebhookDelivery, reason str
 // report observable progress; the dispatcher stamps last activity from it.
 // The returned error is the executor's error, after the receipt's terminal
 // transition (or retry grant) is recorded.
+// ensureReviewDedupeHead resolves the PR head for comment-triggered review
+// deliveries on non-git endpoints, whose payload carries no head SHA. Without
+// it the synthetic internal re-review and its GitHub comment echo would key
+// differently and both start a review on the same head.
+func (s *Server) ensureReviewDedupeHead(envelope WebhookEnvelope) {
+	if stringValue(envelope["event_type"]) != "issue_comment" {
+		return
+	}
+	if strings.TrimSpace(stringValue(envelope["comment_trigger"])) == "" {
+		return
+	}
+	if normalizeRevision(stringValue(envelope["head_sha"])) != "" {
+		return
+	}
+	repo := strings.TrimSpace(stringValue(envelope["repository"]))
+	number, err := strconv.Atoi(strings.TrimSpace(stringValue(envelope["pr_number"])))
+	if repo == "" || err != nil || number <= 0 {
+		return
+	}
+	resolver := s.prHeadResolver
+	if resolver == nil {
+		resolver = &ghPRHeadResolver{timeout: s.processingTimeout}
+	}
+	head, err := resolver.ResolvePRHead(context.Background(), repo, number)
+	if err != nil {
+		slog.Warn("webhook: review dedupe head lookup failed", "repo", repo, "pr_number", number, "error", err)
+		return
+	}
+	sha := normalizeRevision(head.SHA)
+	if sha == "" {
+		return
+	}
+	envelope["head_sha"] = sha
+}
+
 func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64, deliveryID, eventType string, attempt int, lease *WorkspaceLease, allowRetryIncomplete func() bool, heartbeat func()) error {
 	key := ExtractExecutionKey(body)
 	envelope := normalizeWebhook(body, eventType, deliveryID, s.verdicts, false, "", ep.CommentTrigger)
@@ -1904,8 +1940,15 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 	workdir := ""
 	if lease != nil {
 		workdir = lease.Path
+		workCtx.Worktree = lease.Path
+		defer func() {
+			if rErr := lease.Release(context.Background()); rErr != nil {
+				slog.Warn("webhook: workspace cleanup failed", "endpoint", ep.Name, "delivery_id", deliveryID, "workspace", lease.Path, "error", rErr)
+			}
+		}()
 	}
 	run := s.beginActiveRun(workCtx.PRKey, ep.Name, deliveryID, workdir)
+	defer s.endActiveRun(run)
 	if heartbeat != nil {
 		progress := heartbeat
 		workCtx.Heartbeat = func() {
@@ -1955,17 +1998,31 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 			}
 		}
 	}
-	if lease != nil {
-		workCtx.Worktree = lease.Path
-		defer func() {
-			if rErr := lease.Release(context.Background()); rErr != nil {
-				slog.Warn("webhook: workspace cleanup failed", "endpoint", ep.Name, "delivery_id", deliveryID, "workspace", lease.Path, "error", rErr)
-			}
-		}()
+	if hasPRKey && strings.TrimSpace(workCtx.ThreadID) == "" && s.prQueues != nil {
+		if row, rowErr := s.prQueues.Get(context.Background(), prKey); rowErr == nil && row != nil {
+			workCtx.ThreadID = strings.TrimSpace(row.ThreadID)
+			workCtx.RootMessageID = strings.TrimSpace(row.RootMsgID)
+		}
+	}
+	if hasPRKey && strings.TrimSpace(workCtx.ThreadID) == "" && s.threadStarter != nil {
+		summary := "run refused: PR thread binding unresolved (re-run /retry or re-trigger)"
+		slog.Error("webhook: run refused, PR thread binding unresolved",
+			"endpoint", ep.Name,
+			"delivery_id", deliveryID,
+			"event_type", eventType,
+			"pr_key", prKey,
+		)
+		s.failUnboundRun(ep, id, envelope, prKey, summary)
+		return nil
 	}
 	workCtx.ReportSession = func(sessionID string) {
 		workCtx.SessionID = strings.TrimSpace(sessionID)
 		run.setSession(workCtx.SessionID)
+		if s.sessions != nil && workCtx.SessionID != "" && strings.TrimSpace(workCtx.ThreadID) != "" {
+			if err := s.sessions.SetActive(context.Background(), ep.Platform, ep.ChannelID, workCtx.ThreadID, "", workCtx.SessionID, workCtx.AgentPID); err != nil {
+				slog.Warn("webhook: session binding persist failed", "endpoint", ep.Name, "pr_key", workCtx.PRKey, "thread_id", workCtx.ThreadID, "error", err)
+			}
+		}
 		if workCtx.PRKey != "" && s.prQueues != nil {
 			if err := s.prQueues.UpdateSession(context.Background(), workCtx.PRKey, workCtx.SessionID); err != nil {
 				slog.Warn("webhook: pr session stamp failed", "pr_key", workCtx.PRKey, "error", err)
@@ -2003,40 +2060,52 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		return nil
 	}
 
-	if reviewKey := reviewDedupeKey(envelope); reviewKey != "" && id != 0 {
-		prior, err := s.deliveries.FindReviewDuplicate(context.Background(), ep.Name, reviewKey, s.reviewDedupeCutoff())
+	reviewKey := ""
+	if isReviewWorkflow(ep.Workflow) && !isOperatorRetryDelivery(deliveryID) {
+		s.ensureReviewDedupeHead(envelope)
+		reviewKey = reviewDedupeKey(envelope)
+	}
+	triggerPrefix := ""
+	if stringValue(envelope["event_type"]) == "issue_comment" && stringValue(envelope["comment_trigger"]) != "" {
+		triggerPrefix = reviewDedupePrefix(envelope)
+	}
+	if reviewKey != "" && id != 0 {
+		prior, err := s.deliveries.FindReviewDuplicate(context.Background(), ep.Name, reviewKey, id, s.reviewDedupeCutoff())
 		if err != nil {
 			slog.Warn("webhook: review duplicate lookup failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
 		} else if prior != nil {
 			slog.Info("webhook: duplicate review event skipped", "endpoint", ep.Name, "delivery_id", deliveryID, "review_key", reviewKey, "handled_by", prior.DeliveryID)
-			s.markSkipped(id, ep, envelope, "duplicate review event (same commit, verdict and body; already handled by delivery "+prior.DeliveryID+")")
+			s.markSkipped(id, ep, envelope, "duplicate review event (same head, already handled by delivery "+prior.DeliveryID+")")
 			return nil
-		}
-		if err := s.deliveries.SetReviewKey(context.Background(), id, reviewKey); err != nil {
-			slog.Warn("webhook: review key persist failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
 		}
 	}
 
-	if stringValue(envelope["event_type"]) == "issue_comment" && stringValue(envelope["comment_trigger"]) != "" && id != 0 {
-		triggerKey := commentTriggerKey(envelope)
-		if triggerKey != "" {
-			limit, ok := s.triggerLimits[ep.Name]
-			if !ok {
-				slog.Error("webhook: comment trigger without configured limits", "endpoint", ep.Name, "delivery_id", deliveryID)
-				s.markSkipped(id, ep, envelope, "trigger rate cap")
-				return nil
-			}
-			windowCutoff := time.Now().Add(-limit.Window).Unix()
-			count, err := s.deliveries.CountReviewDeliveries(context.Background(), ep.Name, triggerKey, windowCutoff)
-			if err != nil {
-				slog.Warn("webhook: review trigger count lookup failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
-			} else if count >= limit.MaxRunsPerPR {
-				slog.Info("webhook: review delivery trigger rate cap reached", "endpoint", ep.Name, "delivery_id", deliveryID, "trigger_key", triggerKey, "count", count)
-				s.markSkipped(id, ep, envelope, "trigger rate cap")
-				return nil
-			}
-			if err := s.deliveries.SetReviewKey(context.Background(), id, triggerKey); err != nil {
-				slog.Warn("webhook: review trigger key persist failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
+	if triggerPrefix != "" && id != 0 {
+		limit, ok := s.triggerLimits[ep.Name]
+		if !ok {
+			slog.Error("webhook: comment trigger without configured limits", "endpoint", ep.Name, "delivery_id", deliveryID)
+			s.markSkipped(id, ep, envelope, "trigger rate cap")
+			return nil
+		}
+		windowCutoff := time.Now().Add(-limit.Window).Unix()
+		count, err := s.deliveries.CountReviewDeliveries(context.Background(), ep.Name, triggerPrefix, windowCutoff)
+		if err != nil {
+			slog.Warn("webhook: review trigger count lookup failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
+		} else if count >= limit.MaxRunsPerPR {
+			slog.Info("webhook: review delivery trigger rate cap reached", "endpoint", ep.Name, "delivery_id", deliveryID, "trigger_prefix", triggerPrefix, "count", count)
+			s.markSkipped(id, ep, envelope, "trigger rate cap")
+			return nil
+		}
+	}
+
+	if id != 0 {
+		storedKey := reviewKey
+		if storedKey == "" {
+			storedKey = triggerPrefix
+		}
+		if storedKey != "" {
+			if err := s.deliveries.SetReviewKey(context.Background(), id, storedKey); err != nil {
+				slog.Warn("webhook: review key persist failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
 			}
 		}
 	}
@@ -2249,6 +2318,31 @@ func (s *Server) linkRootCard(ep config.EndpointConfig, workCtx *WebhookWorkCont
 	}
 }
 
+func (s *Server) failUnboundRun(ep config.EndpointConfig, id int64, envelope WebhookEnvelope, prKey, summary string) {
+	ok, err := s.deliveries.Transition(context.Background(), id, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusFailed, summary)
+	if err != nil {
+		slog.Error("webhook: unbound run transition failed", "endpoint", ep.Name, "error", err)
+	}
+	if !ok {
+		return
+	}
+	repo, number, found := splitPRKey(prKey)
+	if !found {
+		repo = strings.TrimSpace(stringValue(envelope["repository"]))
+		number = strings.TrimSpace(stringValue(envelope["pr_number"]))
+	}
+	label := strings.TrimSpace(repo)
+	if number != "" {
+		label += "#" + number
+	}
+	text := "⚠️ RUN REFUSED — " + label + " · PR thread binding unresolved. Re-run via /retry or re-trigger."
+	if s.notifier != nil {
+		if nErr := s.notifier(context.Background(), ep.Platform, ep.ChannelID, text); nErr != nil {
+			slog.Warn("webhook: unbound run notice failed", "endpoint", ep.Name, "pr_key", prKey, "error", nErr)
+		}
+	}
+}
+
 func (s *Server) failDelivery(ep config.EndpointConfig, id int64, deliveryID, eventType string, envelope WebhookEnvelope, summary string, workCtx *WebhookWorkContext) {
 	card := s.terminalCard(ep, envelope, "FAILED", summary, workCtx)
 	s.recordTaskThread(ep, envelope, workCtx, TaskFailed)
@@ -2299,8 +2393,12 @@ func (s *Server) shouldSkip(ep config.EndpointConfig, eventType string) bool {
 }
 
 func isTerminal(status store.WebhookStatus) bool {
+	return status == store.WebhookStatusCompleted
+}
+
+func isReopenable(status store.WebhookStatus) bool {
 	switch status {
-	case store.WebhookStatusCompleted, store.WebhookStatusSkipped, store.WebhookStatusFailed:
+	case store.WebhookStatusSkipped, store.WebhookStatusRejected, store.WebhookStatusFailed:
 		return true
 	}
 	return false

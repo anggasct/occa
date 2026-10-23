@@ -54,6 +54,7 @@ type PRQueueRepo interface {
 	UpdateThread(ctx context.Context, prKey, threadID, rootMsgID string) error
 	UpdateSession(ctx context.Context, prKey, sessionID string) error
 	SetRetryState(ctx context.Context, prKey string, retryCount int, nextRetryAt int64) error
+	SetResumePending(ctx context.Context, prKey, kind string, deliveryID int64) error
 	Unblock(ctx context.Context, prKey string) error
 	ListUnresolved(ctx context.Context) ([]PRRun, error)
 	ClearQueue(ctx context.Context, prKey string) (int, error)
@@ -382,6 +383,25 @@ func (r *sqlitePRQueueRepo) SetRetryState(ctx context.Context, prKey string, ret
 	return nil
 }
 
+func (r *sqlitePRQueueRepo) SetResumePending(ctx context.Context, prKey, kind string, deliveryID int64) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE pr_queue
+		 SET status = ?, active_kind = ?, active_session = '', active_delivery = ?,
+		     active_since = 0, retry_count = 0, next_retry_at = 0, blocked_reason = ?, updated_at = ?
+		 WHERE pr_key = ?`,
+		string(PRStatusDrained), kind, deliveryID, "resume_pending", time.Now().Unix(), prKey,
+	)
+	if err != nil {
+		return fmt.Errorf("store: pr queue set resume pending: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("store: pr queue set resume pending rows: %w", err)
+	} else if n == 0 {
+		return fmt.Errorf("store: pr queue set resume pending: unknown pr_key %q", prKey)
+	}
+	return nil
+}
+
 func (r *sqlitePRQueueRepo) Unblock(ctx context.Context, prKey string) error {
 	res, err := r.db.ExecContext(ctx,
 		`UPDATE pr_queue SET status = ?, retry_count = 0, next_retry_at = 0, blocked_reason = '', updated_at = ? WHERE pr_key = ? AND status = ?`,
@@ -472,10 +492,10 @@ func (r *sqlitePRQueueRepo) RepairInvariants(ctx context.Context) ([]string, err
 	for _, key := range keys {
 		if _, err := r.db.ExecContext(ctx,
 			`UPDATE pr_queue
-			 SET status = ?, active_kind = '', active_session = '', active_delivery = 0,
-			     active_since = 0, blocked_reason = '', updated_at = ?
+			 SET status = ?, active_session = '', active_since = 0,
+			     retry_count = 0, next_retry_at = 0, blocked_reason = ?, updated_at = ?
 			 WHERE pr_key = ?`,
-			string(PRStatusDrained), now, key,
+			string(PRStatusDrained), "resume_pending", now, key,
 		); err != nil {
 			return nil, fmt.Errorf("store: pr queue invariant repair: %w", err)
 		}

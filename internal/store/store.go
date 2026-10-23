@@ -239,10 +239,17 @@ type WebhookDeliveryRepo interface {
 	// SetReviewKey stamps the semantic review identity on a delivery so later
 	// duplicates can find it.
 	SetReviewKey(ctx context.Context, id int64, reviewKey string) error
-	// FindReviewDuplicate returns the terminal delivery (completed or skipped)
-	// with the same review key updated at/after cutoff, or nil when none.
-	FindReviewDuplicate(ctx context.Context, endpoint, reviewKey string, cutoff int64) (*WebhookDelivery, error)
-	CountReviewDeliveries(ctx context.Context, endpoint, reviewKey string, cutoff int64) (int, error)
+	// Reopen resets a non-terminal receipt back to received so a redelivery
+	// re-enters admission instead of dead-ending on an old skip or rejection.
+	Reopen(ctx context.Context, id int64, from []WebhookStatus) (bool, error)
+	// LatestForPR returns the newest delivery stamped with prKey, or nil.
+	LatestForPR(ctx context.Context, prKey string) (*WebhookDelivery, error)
+	// FindReviewDuplicate returns a completed or in-flight delivery, other than
+	// excludeID, with the same review key updated at/after cutoff, or nil.
+	FindReviewDuplicate(ctx context.Context, endpoint, reviewKey string, excludeID, cutoff int64) (*WebhookDelivery, error)
+	// CountReviewDeliveries counts deliveries whose review key starts with the
+	// given PR prefix and were updated at/after cutoff.
+	CountReviewDeliveries(ctx context.Context, endpoint, reviewKeyPrefix string, cutoff int64) (int, error)
 	// SetPRKey stamps the owning PR identity on a delivery.
 	SetPRKey(ctx context.Context, id int64, prKey string) error
 }
