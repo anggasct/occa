@@ -30,6 +30,9 @@ type ReplayChecker func(ctx context.Context, replay store.WebhookReplay) (replay
 // lost body is reported at ERROR.
 func (s *Server) recordRejection(ep config.EndpointConfig, item dispatchItem, reason string) {
 	ctx := context.Background()
+	if strings.TrimSpace(item.prKey) != "" {
+		defer s.repairPRQueueInvariants(ctx, item.prKey)
+	}
 	if s.deliveries != nil {
 		if _, err := s.deliveries.Create(ctx, store.WebhookDelivery{
 			Endpoint:     ep.Name,
