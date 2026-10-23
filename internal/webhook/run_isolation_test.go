@@ -384,8 +384,8 @@ func TestRetryRefusedWhenLivePRMerged(t *testing.T) {
 	if got := atomic.LoadInt64(&calls); got != 1 {
 		t.Fatalf("a merged PR must not run again, executor calls = %d", got)
 	}
-	if queued, _ := st.WebhookDeliveryRepo().Get(context.Background(), "github-widget-fix", "del-queued-retry"); queued != nil {
-		t.Fatalf("the queue must be drained, queued receipt = %+v", queued)
+	if queued, qerr := st.WebhookDeliveryRepo().Get(context.Background(), "github-widget-fix", "del-queued-retry"); qerr != nil || queued == nil || queued.Status != store.WebhookStatusSkipped || !strings.Contains(queued.ErrorSummary, "queue drained") {
+		t.Fatalf("the drained queue item must settle as skipped, queued receipt = %+v %v", queued, qerr)
 	}
 	run, err := st.PRQueueRepo().Get(context.Background(), "acme/widget#7")
 	if err != nil || run == nil {
@@ -525,6 +525,7 @@ func TestMergedDeliveryRunsWithoutAgentTurn(t *testing.T) {
 		return nil
 	}
 	srv, st, _, url := newIsolationServer(t, exec)
+	setPRState(srv, PRStateMerged, nil)
 
 	if resp := post(t, url+"/merged?secret=s3cret", "del-merged-lane", "pull_request", mergedBody(7)); resp.StatusCode != http.StatusOK {
 		t.Fatalf("post: status %d", resp.StatusCode)
@@ -558,6 +559,13 @@ func TestMergedDeliveryRunsWithoutAgentTurn(t *testing.T) {
 	if len(logs.all("webhook: merged delivery closed without agent turn")) != 1 {
 		t.Fatal("the merged delivery must be recorded as closed without an agent turn")
 	}
+	fallbacks := logs.all("webhook: merged lane falls back to channel root")
+	if len(fallbacks) != 1 {
+		t.Fatalf("channel-root fallback lines = %d, want one", len(fallbacks))
+	}
+	if reason := attrValue(fallbacks[0], "reason"); reason != "no PR thread binding" {
+		t.Fatalf("fallback reason = %q, want no PR thread binding", reason)
+	}
 }
 
 func TestMergedDeliveryAbortsActiveSession(t *testing.T) {
@@ -566,6 +574,7 @@ func TestMergedDeliveryAbortsActiveSession(t *testing.T) {
 		return nil
 	}
 	srv, st, _, url := newIsolationServer(t, exec)
+	setPRState(srv, PRStateMerged, nil)
 	ctx := context.Background()
 	if _, err := st.PRQueueRepo().EnsurePR(ctx, "acme/widget#7", "", ""); err != nil {
 		t.Fatalf("ensure pr: %v", err)
@@ -606,6 +615,7 @@ func TestMergedDocsUpdateWritesNoSurface(t *testing.T) {
 		return nil
 	}
 	srv, _, rec, _ := newIsolationServer(t, exec)
+	setPRState(srv, PRStateMerged, nil)
 	ep := srv.endpoints["/merged"]
 	ctx := context.Background()
 	prKey := "acme/widget#7"

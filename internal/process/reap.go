@@ -206,6 +206,11 @@ func killPIDWithGrace(pid int, stopGrace time.Duration) error {
 	return nil
 }
 
+// Alive reports whether pid exists and is not a zombie.
+func Alive(pid int) bool {
+	return processAlive(pid)
+}
+
 // processAlive reports whether pid exists and is not a zombie. Zombies hold no
 // port and cannot be signalled, so they count as dead for reaping purposes.
 func processAlive(pid int) bool {

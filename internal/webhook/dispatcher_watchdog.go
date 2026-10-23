@@ -204,6 +204,9 @@ func (s *Server) alarmStuckDispatcher(d *dispatcher, snap dispatcherSnapshot, no
 	if rec, ok := s.tasks.ResolveTaskThread(repo, branch, "watchdog"); ok {
 		threadID = strings.TrimSpace(rec.ThreadID)
 	}
+	if threadID != "" {
+		s.deactivateSession(item.ep.Platform, item.ep.ChannelID, threadID)
+	}
 	if threadID == "" || s.notifier == nil {
 		return
 	}

@@ -34,7 +34,7 @@ func (s *Server) recordRejection(ep config.EndpointConfig, item dispatchItem, re
 		defer s.repairPRQueueInvariants(ctx, item.prKey)
 	}
 	if s.deliveries != nil {
-		if _, err := s.deliveries.Create(ctx, store.WebhookDelivery{
+		created, err := s.deliveries.Create(ctx, store.WebhookDelivery{
 			Endpoint:     ep.Name,
 			DeliveryID:   item.deliveryID,
 			EventType:    item.eventType,
@@ -42,8 +42,15 @@ func (s *Server) recordRejection(ep config.EndpointConfig, item dispatchItem, re
 			PRKey:        item.prKey,
 			Status:       store.WebhookStatusRejected,
 			ErrorSummary: reason,
-		}); err != nil {
+		})
+		if err != nil {
 			slog.Error("webhook: reject record failed", "endpoint", ep.Name, "delivery_id", item.deliveryID, "error", err)
+		} else if !created {
+			if receipt, getErr := s.deliveries.Get(ctx, ep.Name, item.deliveryID); getErr == nil && receipt != nil {
+				if _, tErr := s.deliveries.Transition(ctx, receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived, store.WebhookStatusAccepted}, store.WebhookStatusRejected, reason); tErr != nil {
+					slog.Warn("webhook: reject transition failed", "endpoint", ep.Name, "delivery_id", item.deliveryID, "error", tErr)
+				}
+			}
 		}
 	}
 	if s.replays == nil {

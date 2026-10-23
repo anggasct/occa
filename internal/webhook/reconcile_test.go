@@ -1,0 +1,233 @@
+package webhook
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/anggasct/occa/internal/config"
+	"github.com/anggasct/occa/internal/store"
+)
+
+func TestGHReviewVerdictScopesCurrentHead(t *testing.T) {
+	review := func(login, state, commit, submitted string) ghReconcileReview {
+		var r ghReconcileReview
+		r.Author.Login = login
+		r.State = state
+		r.Commit.OID = commit
+		r.SubmittedAt = submitted
+		return r
+	}
+	cases := []struct {
+		name    string
+		head    string
+		reviews []ghReconcileReview
+		want    string
+	}{
+		{
+			name:    "approval on previous head does not approve new head",
+			head:    "bbbbbbb",
+			reviews: []ghReconcileReview{review("alice", "APPROVED", "aaaaaaa", "2026-10-23T10:00:00Z")},
+			want:    "",
+		},
+		{
+			name: "approval on current head wins",
+			head: "bbbbbbb",
+			reviews: []ghReconcileReview{
+				review("alice", "APPROVED", "aaaaaaa", "2026-10-23T10:00:00Z"),
+				review("alice", "APPROVED", "bbbbbbb", "2026-10-23T11:00:00Z"),
+			},
+			want: "approved",
+		},
+		{
+			name:    "change request on previous head does not block new head review",
+			head:    "bbbbbbb",
+			reviews: []ghReconcileReview{review("alice", "CHANGES_REQUESTED", "aaaaaaa", "2026-10-23T10:00:00Z")},
+			want:    "",
+		},
+		{
+			name:    "change request on current head blocks",
+			head:    "bbbbbbb",
+			reviews: []ghReconcileReview{review("alice", "CHANGES_REQUESTED", "bbbbbbb", "2026-10-23T10:00:00Z")},
+			want:    "changes_requested",
+		},
+		{
+			name: "dismissed review on current head clears approval",
+			head: "bbbbbbb",
+			reviews: []ghReconcileReview{
+				review("alice", "APPROVED", "bbbbbbb", "2026-10-23T10:00:00Z"),
+				review("alice", "DISMISSED", "bbbbbbb", "2026-10-23T11:00:00Z"),
+			},
+			want: "",
+		},
+		{
+			name:    "unknown head never approves",
+			head:    "",
+			reviews: []ghReconcileReview{review("alice", "APPROVED", "aaaaaaa", "2026-10-23T10:00:00Z")},
+			want:    "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ghReviewVerdictForHead(tc.reviews, tc.head); got != tc.want {
+				t.Fatalf("verdict = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReconcilePRRoutesReviewLaneOncePerHead(t *testing.T) {
+	srv, st, _ := newSurfaceServer(t)
+	ctx := context.Background()
+	reviewEP := srv.endpoints["/review"]
+	reviewEP.CommentTrigger = []string{"please re-review"}
+	srv.endpoints["/review"] = reviewEP
+	prKey := "acme/widget#181"
+	if _, err := st.PRQueueRepo().EnsurePR(ctx, prKey, "thread-181", "root-181"); err != nil {
+		t.Fatalf("ensure pr binding: %v", err)
+	}
+	facts := ReconcileFacts{
+		State:         "OPEN",
+		HeadSHA:       "c0ffee81",
+		HeadRef:       "feat/x",
+		BaseRef:       "main",
+		Title:         "T",
+		URL:           "https://github.com/acme/widget/pull/181",
+		Author:        "owner",
+		HeadRepo:      "acme/widget",
+		CIGreen:       true,
+		ReviewVerdict: "",
+	}
+	srv.SetReconcileFacts(func(context.Context, string, string) (ReconcileFacts, error) {
+		return facts, nil
+	})
+	row := store.PRRun{PRKey: prKey, ThreadID: "thread-181"}
+	srv.reconcilePR(ctx, row)
+	prefix := "reconcile-review-" + normalizeRevision(facts.HeadSHA) + "-"
+	waitForReconcileDelivery(t, st, "github-widget-review", prefix, 1)
+	srv.reconcilePR(ctx, row)
+	time.Sleep(50 * time.Millisecond)
+	if got := countReconcileDeliveries(t, st, "github-widget-review", prefix); got != 1 {
+		t.Fatalf("review reconcile deliveries = %d, want 1 after a second tick", got)
+	}
+}
+
+func TestReconcilePRSkipsClosedAndMergedPRs(t *testing.T) {
+	srv, st, _ := newSurfaceServer(t)
+	ctx := context.Background()
+	for i, state := range []string{"CLOSED", "MERGED"} {
+		number := 190 + i
+		prKey := fmt.Sprintf("acme/widget#%d", number)
+		if _, err := st.PRQueueRepo().EnsurePR(ctx, prKey, fmt.Sprintf("thread-%d", number), ""); err != nil {
+			t.Fatalf("ensure pr binding: %v", err)
+		}
+		facts := ReconcileFacts{
+			State:         state,
+			HeadSHA:       fmt.Sprintf("c0ffee%02d", i),
+			HeadRef:       "feat/x",
+			BaseRef:       "main",
+			Title:         "T",
+			URL:           fmt.Sprintf("https://github.com/acme/widget/pull/%d", number),
+			CIGreen:       true,
+			ReviewVerdict: "approved",
+		}
+		srv.SetReconcileFacts(func(context.Context, string, string) (ReconcileFacts, error) {
+			return facts, nil
+		})
+		srv.reconcilePR(ctx, store.PRRun{PRKey: prKey, ThreadID: fmt.Sprintf("thread-%d", number)})
+	}
+	time.Sleep(50 * time.Millisecond)
+	for i := range []string{"CLOSED", "MERGED"} {
+		prefix := fmt.Sprintf("reconcile-merge-c0ffee%02d-", i)
+		if got := countReconcileDeliveries(t, st, "github-widget-merge", prefix); got != 0 {
+			t.Fatalf("%s reconcile deliveries = %d, want 0", prefix, got)
+		}
+	}
+}
+
+func TestReconcileFloorSurvivesRestart(t *testing.T) {
+	srv, st, _ := newSurfaceServer(t)
+	ctx := context.Background()
+	floor := 3 * time.Second
+	srv.reconcileFloor = floor
+	prKey := "acme/widget#205"
+	if _, err := st.PRQueueRepo().EnsurePR(ctx, prKey, "thread-205", "root-205"); err != nil {
+		t.Fatalf("ensure pr binding: %v", err)
+	}
+	facts := ReconcileFacts{
+		State:         "OPEN",
+		HeadSHA:       "c0ffee205",
+		HeadRef:       "feat/x",
+		BaseRef:       "main",
+		Title:         "T",
+		URL:           "https://github.com/acme/widget/pull/205",
+		CIGreen:       true,
+		ReviewVerdict: "approved",
+	}
+	waitForBucketMidpoint(t, floor)
+	startBucket := time.Now().UnixNano() / int64(floor)
+	srv.reconcileEnqueue(ctx, store.PRRun{PRKey: prKey, ThreadID: "thread-205"}, "merge", facts, "test")
+	prefix := "reconcile-merge-" + normalizeRevision(facts.HeadSHA) + "-"
+	waitForReconcileDelivery(t, st, "github-widget-merge", prefix, 1)
+
+	cfg := config.WebhookConfig{
+		Bind:      "127.0.0.1:0",
+		Policy:    testPolicy(),
+		Runtime:   testRuntime(),
+		Endpoints: []config.EndpointConfig{surfaceEndpoint("merge", "github-widget-merge", "/merge")},
+	}
+	restarted := New(cfg, func(context.Context, string, string, string, *WebhookWorkContext) error { return nil }, st.WebhookDeliveryRepo())
+	restarted.SetPRQueueRepo(st.PRQueueRepo())
+	restarted.reconcileFloor = floor
+	for time.Now().UnixNano()/int64(floor) == startBucket {
+		time.Sleep(10 * time.Millisecond)
+	}
+	restarted.reconcileEnqueue(ctx, store.PRRun{PRKey: prKey, ThreadID: "thread-205"}, "merge", facts, "test")
+	time.Sleep(50 * time.Millisecond)
+	if got := countReconcileDeliveries(t, st, "github-widget-merge", prefix); got != 1 {
+		t.Fatalf("merge reconcile deliveries = %d, want 1 across restart", got)
+	}
+}
+
+func countReconcileDeliveries(t *testing.T, st *store.SQLiteStore, endpoint, prefix string) int {
+	t.Helper()
+	rows, err := st.WebhookDeliveryRepo().List(context.Background(), 500)
+	if err != nil {
+		t.Fatalf("list deliveries: %v", err)
+	}
+	count := 0
+	for _, row := range rows {
+		if row.Endpoint == endpoint && strings.HasPrefix(row.DeliveryID, prefix) {
+			count++
+		}
+	}
+	return count
+}
+
+func waitForReconcileDelivery(t *testing.T, st *store.SQLiteStore, endpoint, prefix string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if countReconcileDeliveries(t, st, endpoint, prefix) >= want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("reconcile deliveries for %s never reached %d", prefix, want)
+}
+
+func waitForBucketMidpoint(t *testing.T, floor time.Duration) {
+	t.Helper()
+	target := floor / 2
+	deadline := time.Now().Add(floor + time.Second)
+	for time.Now().Before(deadline) {
+		remainder := time.Duration(time.Now().UnixNano() % int64(floor))
+		if remainder >= target && remainder < target+100*time.Millisecond {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("never reached the midpoint of a reconcile bucket")
+}

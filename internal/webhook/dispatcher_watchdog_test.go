@@ -101,8 +101,8 @@ func TestDispatcherStuckFlagReleasesKey(t *testing.T) {
 	if resp := post(t, url, "delivery-next", "pull_request", stuckPayload()); resp.StatusCode != http.StatusOK {
 		t.Fatalf("next expected 200, got %d", resp.StatusCode)
 	}
-	if rec, _ := st.WebhookDeliveryRepo().Get(context.Background(), "github", "delivery-next"); rec != nil {
-		t.Fatalf("queued delivery created a row while waiting: %+v", rec)
+	if rec, err := st.WebhookDeliveryRepo().Get(context.Background(), "github", "delivery-next"); err != nil || rec == nil || rec.Status != store.WebhookStatusReceived {
+		t.Fatalf("queued delivery must have a received receipt while waiting: %+v %v", rec, err)
 	}
 	time.Sleep(200 * time.Millisecond)
 	if n := srv.sweepStuckDispatchers(time.Now()); n != 1 {
@@ -177,7 +177,7 @@ func (f workspaceResolverFunc) ResolveWorkspace(ctx context.Context, req Workspa
 	return f(ctx, req)
 }
 
-func TestDispatcherQueuedDeliveryHasNoRow(t *testing.T) {
+func TestDispatcherQueuedDeliveryHasReceivedRow(t *testing.T) {
 	release := make(chan struct{})
 	started := make(chan string, 8)
 	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
@@ -210,8 +210,8 @@ func TestDispatcherQueuedDeliveryHasNoRow(t *testing.T) {
 		t.Fatalf("queued expected 200, got %d", resp.StatusCode)
 	}
 	time.Sleep(150 * time.Millisecond)
-	if rec, _ := st.WebhookDeliveryRepo().Get(context.Background(), "github", "delivery-queued"); rec != nil {
-		t.Fatalf("queued delivery created a row while waiting: %+v", rec)
+	if rec, err := st.WebhookDeliveryRepo().Get(context.Background(), "github", "delivery-queued"); err != nil || rec == nil || rec.Status != store.WebhookStatusReceived {
+		t.Fatalf("queued delivery must have a received receipt while waiting: %+v %v", rec, err)
 	}
 	select {
 	case id := <-started:

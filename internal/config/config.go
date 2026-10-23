@@ -543,6 +543,11 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 		if err != nil {
 			return Config{}, err
 		}
+		spoolDir, err := expandHome(runtime.SpoolDir)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: webhooks.runtime.spool_dir: %w", err)
+		}
+		runtime.SpoolDir = strings.TrimSpace(spoolDir)
 		fc.Webhooks.Runtime = runtime
 		policy, err := validateWebhookPolicy(fc.Webhooks.Policy)
 		if err != nil {

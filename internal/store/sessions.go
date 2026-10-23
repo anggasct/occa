@@ -78,6 +78,42 @@ func (r *sqliteSessionRepo) Deactivate(ctx context.Context, platform, channelID,
 	return nil
 }
 
+func (r *sqliteSessionRepo) SweepActive(ctx context.Context, alive func(pid int) bool) (int, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT id, agent_pid FROM session WHERE active = 1`)
+	if err != nil {
+		return 0, fmt.Errorf("store: session sweep list: %w", err)
+	}
+	var stale []int64
+	for rows.Next() {
+		var id int64
+		var pid int
+		if err := rows.Scan(&id, &pid); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("store: session sweep scan: %w", err)
+		}
+		if pid <= 0 || alive == nil || !alive(pid) {
+			stale = append(stale, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, fmt.Errorf("store: session sweep rows: %w", err)
+	}
+	_ = rows.Close()
+	if len(stale) == 0 {
+		return 0, nil
+	}
+	now := time.Now().Unix()
+	for _, id := range stale {
+		if _, err := r.db.ExecContext(ctx,
+			`UPDATE session SET active = 0, updated_at = ? WHERE id = ? AND active = 1`, now, id,
+		); err != nil {
+			return 0, fmt.Errorf("store: session sweep deactivate: %w", err)
+		}
+	}
+	return len(stale), nil
+}
+
 func (r *sqliteSessionRepo) MarkParked(ctx context.Context, platform, channelID, threadID, userID, reason string) error {
 	now := time.Now().Unix()
 	res, err := r.db.ExecContext(ctx,
@@ -239,25 +275,38 @@ func (r *sqliteSessionRepo) MarkTakeoverEligible(ctx context.Context, platform, 
 
 	var id int64
 	var continuable int
+	var activeSession string
 	err = tx.QueryRowContext(ctx,
-		`SELECT id, continuable FROM session WHERE platform = ? AND channel_id = ? AND thread_id = ? AND user_id = '' AND active = 1`,
+		`SELECT id, continuable, agent_session_id FROM session WHERE platform = ? AND channel_id = ? AND thread_id = ? AND user_id = '' AND active = 1`,
 		platform, channelID, threadID,
-	).Scan(&id, &continuable)
+	).Scan(&id, &continuable, &activeSession)
 	switch {
-	case err == sql.ErrNoRows:
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO session (channel_id, platform, agent_session_id, thread_id, user_id, agent_pid, continuable, takeover_seed, active, created_at, updated_at) VALUES (?, ?, ?, ?, '', ?, 1, ?, 1, ?, ?)`,
-			channelID, platform, sessionID, threadID, agentPID, seed, now, now,
-		); err != nil {
-			return fmt.Errorf("store: session mark takeover: insert: %w", err)
-		}
-	case err != nil:
-		return fmt.Errorf("store: session mark takeover: lookup: %w", err)
-	case continuable == 0:
+	case err == nil && continuable == 0 && activeSession != sessionID:
 		return nil
-	default:
+	case err == nil:
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE session SET agent_session_id = ?, agent_pid = ?, takeover_seed = ?, updated_at = ? WHERE id = ?`,
+			`UPDATE session SET agent_session_id = ?, agent_pid = ?, takeover_seed = ?, continuable = 1, active = 0, updated_at = ? WHERE id = ?`,
+			sessionID, agentPID, seed, now, id,
+		); err != nil {
+			return fmt.Errorf("store: session mark takeover: replace: %w", err)
+		}
+	case err != sql.ErrNoRows:
+		return fmt.Errorf("store: session mark takeover: lookup: %w", err)
+	default:
+		if err := tx.QueryRowContext(ctx,
+			`SELECT id FROM session WHERE platform = ? AND channel_id = ? AND thread_id = ? AND user_id = '' AND continuable = 1 ORDER BY updated_at DESC, id DESC LIMIT 1`,
+			platform, channelID, threadID,
+		).Scan(&id); err == sql.ErrNoRows {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO session (channel_id, platform, agent_session_id, thread_id, user_id, agent_pid, continuable, takeover_seed, active, created_at, updated_at) VALUES (?, ?, ?, ?, '', ?, 1, ?, 1, ?, ?)`,
+				channelID, platform, sessionID, threadID, agentPID, seed, now, now,
+			); err != nil {
+				return fmt.Errorf("store: session mark takeover: insert: %w", err)
+			}
+		} else if err != nil {
+			return fmt.Errorf("store: session mark takeover: lookup: %w", err)
+		} else if _, err := tx.ExecContext(ctx,
+			`UPDATE session SET agent_session_id = ?, agent_pid = ?, takeover_seed = ?, continuable = 1, updated_at = ? WHERE id = ?`,
 			sessionID, agentPID, seed, now, id,
 		); err != nil {
 			return fmt.Errorf("store: session mark takeover: replace: %w", err)
@@ -281,7 +330,7 @@ func (r *sqliteSessionRepo) ClearTakeoverEligible(ctx context.Context, platform,
 func (r *sqliteSessionRepo) TakeoverCandidate(ctx context.Context, platform, channelID, threadID string) (*TakeoverCandidate, error) {
 	var c TakeoverCandidate
 	err := r.db.QueryRowContext(ctx,
-		`SELECT agent_session_id, agent_pid, takeover_seed FROM session WHERE platform = ? AND channel_id = ? AND thread_id = ? AND user_id = '' AND active = 1 AND continuable = 1`,
+		`SELECT agent_session_id, agent_pid, takeover_seed FROM session WHERE platform = ? AND channel_id = ? AND thread_id = ? AND user_id = '' AND continuable = 1 ORDER BY updated_at DESC, id DESC LIMIT 1`,
 		platform, channelID, threadID,
 	).Scan(&c.SessionID, &c.AgentPID, &c.Seed)
 	if err == sql.ErrNoRows {

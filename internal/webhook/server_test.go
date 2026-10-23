@@ -2703,7 +2703,7 @@ func TestWebhookFIFOOrderSameKey(t *testing.T) {
 	}
 }
 
-func TestWebhookQueuedDeliveryHasNoRow(t *testing.T) {
+func TestWebhookQueuedDeliveryHasReceivedRow(t *testing.T) {
 	var startedOnce sync.Once
 	started := make(chan struct{})
 	released := make(chan struct{})
@@ -2757,8 +2757,12 @@ func TestWebhookQueuedDeliveryHasNoRow(t *testing.T) {
 	}
 	time.Sleep(100 * time.Millisecond)
 	rows = mustList(t, st)
-	if len(rows) != 1 {
-		t.Fatalf("queued delivery created a row while waiting: %+v", rows)
+	if len(rows) != 2 {
+		t.Fatalf("queued delivery must have a received receipt: %+v", rows)
+	}
+	queued := rows[0]
+	if queued.DeliveryID != "delivery-2" || queued.Status != store.WebhookStatusReceived {
+		t.Fatalf("queued receipt = %+v, want delivery-2 received", queued)
 	}
 
 	close(released)
@@ -2818,8 +2822,8 @@ func TestWebhookQueueFullRecordsRejection(t *testing.T) {
 		t.Fatal("429 response missing Retry-After header")
 	}
 	rows := mustList(t, st)
-	if len(rows) != 2 {
-		t.Fatalf("overflow delivery must be recorded once, rows: %+v", rows)
+	if len(rows) != 2+srv.stateLaneShare() {
+		t.Fatalf("durable ACK must record every delivery once, rows: %+v", rows)
 	}
 	if rows[0].DeliveryID != "delivery-overflow" || rows[0].Status != store.WebhookStatusRejected {
 		t.Fatalf("overflow delivery not recorded as rejected: %+v", rows[0])

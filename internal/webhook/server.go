@@ -38,6 +38,7 @@ const (
 // repo lives in internal/store; the server only needs the transitions below.
 type DeliveryStore interface {
 	Create(ctx context.Context, d store.WebhookDelivery) (bool, error)
+	Ensure(ctx context.Context, d store.WebhookDelivery) (bool, error)
 	Get(ctx context.Context, endpoint, deliveryID string) (*store.WebhookDelivery, error)
 	GetByID(ctx context.Context, id int64) (*store.WebhookDelivery, error)
 	Transition(ctx context.Context, id int64, from []store.WebhookStatus, to store.WebhookStatus, summary string) (bool, error)
@@ -49,6 +50,7 @@ type DeliveryStore interface {
 	SetPRKey(ctx context.Context, id int64, prKey string) error
 	Reopen(ctx context.Context, id int64, from []store.WebhookStatus) (bool, error)
 	LatestForPR(ctx context.Context, prKey string) (*store.WebhookDelivery, error)
+	LatestByDeliveryPrefix(ctx context.Context, endpoint, prefix string) (*store.WebhookDelivery, error)
 	FindReviewDuplicate(ctx context.Context, endpoint, reviewKey string, excludeID, cutoff int64) (*store.WebhookDelivery, error)
 	CountReviewDeliveries(ctx context.Context, endpoint, reviewKeyPrefix string, cutoff int64) (int, error)
 }
@@ -59,6 +61,7 @@ type ChannelStore interface {
 
 type TakeoverStore interface {
 	SetActive(ctx context.Context, platform, channelID, threadID, userID, sessionID string, agentPID int) error
+	Deactivate(ctx context.Context, platform, channelID, threadID, userID string) error
 	MarkTakeoverEligible(ctx context.Context, platform, channelID, threadID, sessionID string, agentPID int, seed string) error
 	ClearTakeoverEligible(ctx context.Context, platform, channelID, threadID string) error
 	LinkThreadRoot(ctx context.Context, platform, channelID, threadID, messageID, channel, card string) error
@@ -151,6 +154,15 @@ type Server struct {
 	replayStoreMax        int
 	replayStoreMaxBytes   int64
 	replayChecker         ReplayChecker
+	ackBudget             time.Duration
+	spoolDir              string
+	reconcileInterval     time.Duration
+	reconcileFloor        time.Duration
+	reconcileMaxPRs       int
+	reconcileFacts        ReconcileFactsResolver
+	reconcileMu           sync.Mutex
+	reconcileLast         map[string]time.Time
+	reconcileRunning      atomic.Bool
 	retryAfter            time.Duration
 	retentionAge          time.Duration
 	retentionKeep         int
@@ -234,6 +246,12 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 		replayTTL:             rt.EffectiveReplayTTL(),
 		replayStoreMax:        rt.EffectiveReplayStoreMax(),
 		replayStoreMaxBytes:   int64(rt.EffectiveReplayStoreMaxBytes()),
+		ackBudget:             rt.EffectiveAckBudget(),
+		spoolDir:              strings.TrimSpace(rt.SpoolDir),
+		reconcileInterval:     rt.EffectiveReconcileInterval(),
+		reconcileFloor:        rt.EffectiveReconcileFloor(),
+		reconcileMaxPRs:       rt.EffectiveReconcileMaxPRs(),
+		reconcileLast:         make(map[string]time.Time),
 		retryAfter:            rt.RetryAfter,
 		retentionAge:          rt.Retention,
 		retentionKeep:         rt.RetentionKeep,
@@ -397,6 +415,14 @@ func (s *Server) SetPRQueueRepo(r store.PRQueueRepo) {
 
 func (s *Server) SetWebhookReplayRepo(r store.WebhookReplayRepo) {
 	s.replays = r
+}
+
+func (s *Server) SetSpoolDir(dir string) {
+	s.spoolDir = strings.TrimSpace(dir)
+}
+
+func (s *Server) SetReconcileFactsResolver(fn ReconcileFactsResolver) {
+	s.reconcileFacts = fn
 }
 
 func (s *Server) SetReplayChecker(c ReplayChecker) {
@@ -685,6 +711,8 @@ func (s *Server) Start(ctx context.Context) error {
 	go s.watchdogLoop()
 	s.dispatchWG.Add(1)
 	go s.replayLoop(s.shutdownCtx)
+	s.dispatchWG.Add(1)
+	go s.reconcileLoop(s.shutdownCtx)
 
 	slog.Info("webhook server started", "bind", s.bind, "endpoints", len(s.endpoints))
 	for _, ep := range s.endpoints {
@@ -782,6 +810,11 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		eventType:   eventType,
 		payloadHash: payloadHash,
 	}
+	spooled, persisted := s.recordDelivery(item)
+	if !persisted {
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
 	d, ok, reason := s.enqueue(ep, ExtractExecutionKey(body), item)
 	if !ok {
 		if reason == "queue ceiling reached" {
@@ -804,7 +837,51 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("webhook: delivery enqueued", "endpoint", ep.Name, "delivery_id", deliveryID, "event_type", eventType, "lock", d.key)
+	if spooled {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
+}
+
+// recordDelivery writes the receipt before the event enters the in-memory
+// queue, so a delivery that never executes still leaves a row behind. When the
+// write cannot finish inside the ACK budget the raw body goes to the spool and
+// the caller acknowledges with 202; the spool drain inserts the row later.
+func (s *Server) recordDelivery(item dispatchItem) (spooled bool, persisted bool) {
+	if s.deliveries == nil {
+		return false, true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), s.ackBudget)
+	defer cancel()
+	_, err := s.deliveries.Create(ctx, store.WebhookDelivery{
+		Endpoint:    item.ep.Name,
+		DeliveryID:  item.deliveryID,
+		EventType:   item.eventType,
+		PayloadHash: item.payloadHash,
+		Status:      store.WebhookStatusReceived,
+	})
+	if err == nil {
+		return false, true
+	}
+	path, spoolErr := s.writeSpool(item)
+	if spoolErr != nil {
+		slog.Error("webhook: delivery persistence failed and spool unavailable",
+			"endpoint", item.ep.Name,
+			"delivery_id", item.deliveryID,
+			"error", err,
+			"spool_error", spoolErr,
+		)
+		return false, false
+	}
+	slog.Warn("webhook: delivery spooled",
+		"endpoint", item.ep.Name,
+		"delivery_id", item.deliveryID,
+		"event_type", item.eventType,
+		"path", path,
+		"error", err,
+	)
+	return true, true
 }
 
 // enqueue atomically resolves the live dispatcher for a lock identity and
@@ -1044,6 +1121,7 @@ type dispatchItem struct {
 	queueID     int64
 	replayID    int64
 	requeues    int
+	mergedRetry int
 }
 
 type dispatcher struct {
@@ -1723,22 +1801,29 @@ func (s *Server) beginExecution(item dispatchItem) *store.WebhookDelivery {
 	ctx := context.Background()
 	ep := item.ep
 
-	created, err := s.deliveries.Create(ctx, store.WebhookDelivery{
-		Endpoint:    ep.Name,
-		DeliveryID:  item.deliveryID,
-		EventType:   item.eventType,
-		PayloadHash: item.payloadHash,
-		Attempt:     1,
-	})
-	if err != nil {
-		slog.Error("webhook: receipt claim failed", "endpoint", ep.Name, "delivery_id", item.deliveryID, "error", err)
-		return nil
-	}
-
 	receipt, err := s.deliveries.Get(ctx, ep.Name, item.deliveryID)
 	if err != nil {
 		slog.Error("webhook: receipt load failed", "endpoint", ep.Name, "delivery_id", item.deliveryID, "error", err)
 		return nil
+	}
+	created := false
+	if receipt == nil {
+		created, err = s.deliveries.Create(ctx, store.WebhookDelivery{
+			Endpoint:    ep.Name,
+			DeliveryID:  item.deliveryID,
+			EventType:   item.eventType,
+			PayloadHash: item.payloadHash,
+			Attempt:     1,
+		})
+		if err != nil {
+			slog.Error("webhook: receipt claim failed", "endpoint", ep.Name, "delivery_id", item.deliveryID, "error", err)
+			return nil
+		}
+		receipt, err = s.deliveries.Get(ctx, ep.Name, item.deliveryID)
+		if err != nil {
+			slog.Error("webhook: receipt load failed", "endpoint", ep.Name, "delivery_id", item.deliveryID, "error", err)
+			return nil
+		}
 	}
 	if receipt == nil {
 		slog.Error("webhook: receipt missing after claim", "endpoint", ep.Name, "delivery_id", item.deliveryID)
@@ -1844,7 +1929,7 @@ func (s *Server) abandon(item dispatchItem, reason string) {
 		defer s.repairPRQueueInvariants(ctx, item.prKey)
 	}
 	s.mirrorDelete(item.queueID)
-	created, err := s.deliveries.Create(ctx, store.WebhookDelivery{
+	_, err := s.deliveries.Create(ctx, store.WebhookDelivery{
 		Endpoint:    item.ep.Name,
 		DeliveryID:  item.deliveryID,
 		EventType:   item.eventType,
@@ -1854,9 +1939,6 @@ func (s *Server) abandon(item dispatchItem, reason string) {
 	})
 	if err != nil {
 		slog.Error("webhook: abandoned delivery receipt failed", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "error", err)
-		return
-	}
-	if !created {
 		return
 	}
 	receipt, err := s.deliveries.Get(ctx, item.ep.Name, item.deliveryID)
@@ -2028,6 +2110,11 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		}
 	}
 	defer s.endActiveRun(run)
+	defer func() {
+		if workCtx.SessionID != "" {
+			s.deactivateSession(ep.Platform, ep.ChannelID, workCtx.ThreadID)
+		}
+	}()
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -2209,6 +2296,20 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 			s.planRetry(ep, itemPRKey, id, err, workCtx, false, true)
 		}
 		return err
+	}
+
+	if err == nil && strings.EqualFold(strings.TrimSpace(ep.Workflow), "merge") && strings.TrimSpace(workCtx.PRKey) != "" {
+		if state, lookupErr := s.resolveLivePRState(ctx, workCtx.PRKey); lookupErr != nil || state != PRStateMerged {
+			slog.Warn("webhook: merge not confirmed",
+				"endpoint", ep.Name,
+				"delivery_id", deliveryID,
+				"pr_key", workCtx.PRKey,
+				"state", state,
+				"error", lookupErr,
+			)
+		} else {
+			s.markMergeConfirmed(ctx, ep, envelope, workCtx)
+		}
 	}
 
 	if itemPRKey := strings.TrimSpace(workCtx.PRKey); err != nil && itemPRKey != "" && !errors.Is(err, relay.ErrWebhookResponseIncomplete) {

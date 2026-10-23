@@ -61,6 +61,35 @@ func (r *sqliteWebhookDeliveryRepo) Create(ctx context.Context, d WebhookDeliver
 	return true, nil
 }
 
+func (r *sqliteWebhookDeliveryRepo) Ensure(ctx context.Context, d WebhookDelivery) (bool, error) {
+	if d.CreatedAt == 0 {
+		d.CreatedAt = time.Now().Unix()
+	}
+	if d.UpdatedAt == 0 {
+		d.UpdatedAt = d.CreatedAt
+	}
+	if d.Status == "" {
+		d.Status = WebhookStatusReceived
+	}
+	if d.Attempt < 1 {
+		d.Attempt = 1
+	}
+	err := r.db.QueryRowContext(ctx,
+		`INSERT INTO webhook_delivery (endpoint, delivery_id, event_type, payload_hash, pr_key, status, attempt, error_summary, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(endpoint, delivery_id) DO NOTHING
+		 RETURNING id`,
+		d.Endpoint, d.DeliveryID, d.EventType, d.PayloadHash, d.PRKey, string(d.Status), d.Attempt, d.ErrorSummary, d.CreatedAt, d.UpdatedAt,
+	).Scan(&d.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: webhook delivery ensure: %w", err)
+	}
+	return true, nil
+}
+
 func (r *sqliteWebhookDeliveryRepo) Get(ctx context.Context, endpoint, deliveryID string) (*WebhookDelivery, error) {
 	row := r.db.QueryRowContext(ctx,
 		`SELECT `+deliveryColumns+` FROM webhook_delivery WHERE endpoint = ? AND delivery_id = ?`,
@@ -247,6 +276,21 @@ func (r *sqliteWebhookDeliveryRepo) LatestForPR(ctx context.Context, prKey strin
 	}
 	if err != nil {
 		return nil, fmt.Errorf("store: webhook delivery latest for pr: %w", err)
+	}
+	return d, nil
+}
+
+func (r *sqliteWebhookDeliveryRepo) LatestByDeliveryPrefix(ctx context.Context, endpoint, prefix string) (*WebhookDelivery, error) {
+	row := r.db.QueryRowContext(ctx,
+		`SELECT `+deliveryColumns+` FROM webhook_delivery WHERE endpoint = ? AND delivery_id LIKE ? ORDER BY id DESC LIMIT 1`,
+		endpoint, prefix+"%",
+	)
+	d, err := scanWebhookDelivery(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: webhook delivery latest by prefix: %w", err)
 	}
 	return d, nil
 }
