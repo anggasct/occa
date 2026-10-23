@@ -241,7 +241,7 @@ func TestInternalReviewDeliveryIDIsStablePerHead(t *testing.T) {
 // TestInternalReviewBodyCarriesTheTrigger asserts the internal review is a
 // comment delivery the review endpoint admits.
 func TestInternalReviewBodyCarriesTheTrigger(t *testing.T) {
-	body := internalReviewCommentBody("acme/widget", "181", "please re-review", "https://github.com/acme/widget/pull/181")
+	body := internalReviewCommentBody("acme/widget", "181", "please re-review", "https://github.com/acme/widget/pull/181", "feat/x", "aaaaaaa")
 	envelope := normalizeWebhook(body, "issue_comment", "d1", nil, false, "", []string{"please re-review"})
 	if stringValue(envelope["comment_trigger"]) != "please re-review" {
 		t.Fatalf("comment trigger = %q", stringValue(envelope["comment_trigger"]))
@@ -251,6 +251,9 @@ func TestInternalReviewBodyCarriesTheTrigger(t *testing.T) {
 	}
 	if prState(envelope) != "open" {
 		t.Fatalf("pr state = %q, want open", prState(envelope))
+	}
+	if got := stringValue(envelope["head_sha"]); got != "aaaaaaa" {
+		t.Fatalf("head sha = %q, want aaaaaaa", got)
 	}
 }
 

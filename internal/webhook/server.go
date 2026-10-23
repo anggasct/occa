@@ -50,7 +50,7 @@ type DeliveryStore interface {
 	Reopen(ctx context.Context, id int64, from []store.WebhookStatus) (bool, error)
 	LatestForPR(ctx context.Context, prKey string) (*store.WebhookDelivery, error)
 	FindReviewDuplicate(ctx context.Context, endpoint, reviewKey string, cutoff int64) (*store.WebhookDelivery, error)
-	CountReviewDeliveries(ctx context.Context, endpoint, reviewKey string, cutoff int64) (int, error)
+	CountReviewDeliveries(ctx context.Context, endpoint, reviewKeyPrefix string, cutoff int64) (int, error)
 }
 
 type ChannelStore interface {
@@ -2025,40 +2025,48 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		return nil
 	}
 
-	if reviewKey := reviewDedupeKey(envelope); reviewKey != "" && id != 0 {
+	reviewKey := reviewDedupeKey(envelope)
+	triggerPrefix := ""
+	if stringValue(envelope["event_type"]) == "issue_comment" && stringValue(envelope["comment_trigger"]) != "" {
+		triggerPrefix = reviewDedupePrefix(envelope)
+	}
+	if reviewKey != "" && id != 0 {
 		prior, err := s.deliveries.FindReviewDuplicate(context.Background(), ep.Name, reviewKey, s.reviewDedupeCutoff())
 		if err != nil {
 			slog.Warn("webhook: review duplicate lookup failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
 		} else if prior != nil {
 			slog.Info("webhook: duplicate review event skipped", "endpoint", ep.Name, "delivery_id", deliveryID, "review_key", reviewKey, "handled_by", prior.DeliveryID)
-			s.markSkipped(id, ep, envelope, "duplicate review event (same commit, verdict and body; already handled by delivery "+prior.DeliveryID+")")
+			s.markSkipped(id, ep, envelope, "duplicate review event (same head, already handled by delivery "+prior.DeliveryID+")")
 			return nil
-		}
-		if err := s.deliveries.SetReviewKey(context.Background(), id, reviewKey); err != nil {
-			slog.Warn("webhook: review key persist failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
 		}
 	}
 
-	if stringValue(envelope["event_type"]) == "issue_comment" && stringValue(envelope["comment_trigger"]) != "" && id != 0 {
-		triggerKey := commentTriggerKey(envelope)
-		if triggerKey != "" {
-			limit, ok := s.triggerLimits[ep.Name]
-			if !ok {
-				slog.Error("webhook: comment trigger without configured limits", "endpoint", ep.Name, "delivery_id", deliveryID)
-				s.markSkipped(id, ep, envelope, "trigger rate cap")
-				return nil
-			}
-			windowCutoff := time.Now().Add(-limit.Window).Unix()
-			count, err := s.deliveries.CountReviewDeliveries(context.Background(), ep.Name, triggerKey, windowCutoff)
-			if err != nil {
-				slog.Warn("webhook: review trigger count lookup failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
-			} else if count >= limit.MaxRunsPerPR {
-				slog.Info("webhook: review delivery trigger rate cap reached", "endpoint", ep.Name, "delivery_id", deliveryID, "trigger_key", triggerKey, "count", count)
-				s.markSkipped(id, ep, envelope, "trigger rate cap")
-				return nil
-			}
-			if err := s.deliveries.SetReviewKey(context.Background(), id, triggerKey); err != nil {
-				slog.Warn("webhook: review trigger key persist failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
+	if triggerPrefix != "" && id != 0 {
+		limit, ok := s.triggerLimits[ep.Name]
+		if !ok {
+			slog.Error("webhook: comment trigger without configured limits", "endpoint", ep.Name, "delivery_id", deliveryID)
+			s.markSkipped(id, ep, envelope, "trigger rate cap")
+			return nil
+		}
+		windowCutoff := time.Now().Add(-limit.Window).Unix()
+		count, err := s.deliveries.CountReviewDeliveries(context.Background(), ep.Name, triggerPrefix, windowCutoff)
+		if err != nil {
+			slog.Warn("webhook: review trigger count lookup failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
+		} else if count >= limit.MaxRunsPerPR {
+			slog.Info("webhook: review delivery trigger rate cap reached", "endpoint", ep.Name, "delivery_id", deliveryID, "trigger_prefix", triggerPrefix, "count", count)
+			s.markSkipped(id, ep, envelope, "trigger rate cap")
+			return nil
+		}
+	}
+
+	if id != 0 {
+		storedKey := reviewKey
+		if storedKey == "" {
+			storedKey = triggerPrefix
+		}
+		if storedKey != "" {
+			if err := s.deliveries.SetReviewKey(context.Background(), id, storedKey); err != nil {
+				slog.Warn("webhook: review key persist failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
 			}
 		}
 	}

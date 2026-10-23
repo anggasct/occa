@@ -247,7 +247,9 @@ type WebhookDeliveryRepo interface {
 	// FindReviewDuplicate returns the completed delivery with the same review
 	// key updated at/after cutoff, or nil when none.
 	FindReviewDuplicate(ctx context.Context, endpoint, reviewKey string, cutoff int64) (*WebhookDelivery, error)
-	CountReviewDeliveries(ctx context.Context, endpoint, reviewKey string, cutoff int64) (int, error)
+	// CountReviewDeliveries counts deliveries whose review key starts with the
+	// given PR prefix and were updated at/after cutoff.
+	CountReviewDeliveries(ctx context.Context, endpoint, reviewKeyPrefix string, cutoff int64) (int, error)
 	// SetPRKey stamps the owning PR identity on a delivery.
 	SetPRKey(ctx context.Context, id int64, prKey string) error
 }

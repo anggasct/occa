@@ -1,8 +1,6 @@
 package webhook
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -371,36 +369,41 @@ func commentTrigger(body string, triggers []string) string {
 	return ""
 }
 
-func commentTriggerKey(envelope WebhookEnvelope) string {
+func reviewDedupePrefix(envelope WebhookEnvelope) string {
 	repo := strings.TrimSpace(stringValue(envelope["repository"]))
 	pr := strings.TrimSpace(stringValue(envelope["pr_number"]))
-	if pr == "" {
+	if repo == "" || pr == "" {
 		return ""
 	}
-	if repo == "" {
-		return "comment_trigger:" + pr
-	}
-	return "comment_trigger:" + repo + "#" + pr
+	return repo + "#" + pr + "@"
 }
 
-func normalizedReviewBody(body string) string {
-	return strings.Join(strings.Fields(body), " ")
-}
-
+// reviewDedupeKey names the head a review-start delivery would review. One
+// review per PR head is admitted inside the dedupe window, whichever path
+// started it: a review event, an internal re-review delivery, or a
+// comment-triggered review.
 func reviewDedupeKey(envelope WebhookEnvelope) string {
-	if stringValue(envelope["event_type"]) != "pull_request_review" {
+	prefix := reviewDedupePrefix(envelope)
+	if prefix == "" {
 		return ""
 	}
-	repo := strings.TrimSpace(stringValue(envelope["repository"]))
-	pr := strings.TrimSpace(stringValue(envelope["pr_number"]))
-	commit := strings.TrimSpace(stringValue(envelope["review_commit"]))
-	state := strings.ToLower(strings.TrimSpace(stringValue(envelope["review_state"])))
-	if repo == "" || pr == "" || state == "" {
+	var head string
+	switch stringValue(envelope["event_type"]) {
+	case "pull_request_review":
+		head = normalizeRevision(stringValue(envelope["review_commit"]))
+		if head == "" {
+			head = normalizeRevision(stringValue(envelope["head_sha"]))
+		}
+	case "issue_comment":
+		if strings.TrimSpace(stringValue(envelope["comment_trigger"])) == "" {
+			return ""
+		}
+		head = normalizeRevision(stringValue(envelope["head_sha"]))
+	}
+	if head == "" {
 		return ""
 	}
-	body := normalizedReviewBody(stringValue(envelope["comment_body"]))
-	sum := sha256.Sum256([]byte(repo + "\n" + pr + "\n" + commit + "\n" + state + "\n" + body))
-	return hex.EncodeToString(sum[:])
+	return prefix + head
 }
 
 func hasActionableFindings(body string) bool {
