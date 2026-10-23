@@ -239,6 +239,65 @@ func TestOperatorRetryUnblocksAndRequeues(t *testing.T) {
 	}
 }
 
+func TestOperatorRetryInfersKindFromLastDelivery(t *testing.T) {
+	allow := func(platform, userID string) bool { return true }
+	srv, st, _ := operatorTestServer(t, allow)
+	ctx := context.Background()
+	linkPRThread(t, srv, "acme/widget#7", "thread-pr")
+	if _, err := st.PRQueueRepo().EnsurePR(ctx, "acme/widget#7", "thread-pr", "root-1"); err != nil {
+		t.Fatal(err)
+	}
+	created, err := st.WebhookDeliveryRepo().Create(ctx, store.WebhookDelivery{
+		Endpoint:     "github-widget-pr-fix",
+		DeliveryID:   "del-interrupted",
+		EventType:    "pull_request_review",
+		ErrorSummary: "Review verdict: REQUEST_CHANGES",
+		Status:       store.WebhookStatusFailed,
+	})
+	if err != nil || !created {
+		t.Fatalf("create delivery: %v %v", created, err)
+	}
+	rec, err := st.WebhookDeliveryRepo().Get(ctx, "github-widget-pr-fix", "del-interrupted")
+	if err != nil || rec == nil {
+		t.Fatalf("get delivery: %v", err)
+	}
+	if err := st.WebhookDeliveryRepo().SetPRKey(ctx, rec.ID, "acme/widget#7"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PRQueueRepo().SetBlocked(ctx, "acme/widget#7", "interrupted by restart — re-run via /retry or re-trigger"); err != nil {
+		t.Fatal(err)
+	}
+	srv.retryBodyBuilder = func(ctx context.Context, repo, number, kind string) ([]byte, string, error) {
+		if repo != "acme/widget" || number != "7" || kind != "fix" {
+			t.Fatalf("retry builder got %q %q %q", repo, number, kind)
+		}
+		return []byte(`{"action":"created","synthetic":"retry"}`), "issue_comment", nil
+	}
+	reply, handled, err := srv.HandleOperatorCommand(ctx, operatorMsg("thread-pr", "/retry"), "retry", "")
+	if err != nil || !handled {
+		t.Fatalf("retry = %q %v %v", reply, handled, err)
+	}
+	if !strings.Contains(reply, "fix") || strings.Contains(reply, "Nothing to retry") {
+		t.Fatalf("retry reply = %q", reply)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		all, lerr := st.WebhookDeliveryRepo().List(ctx, 20)
+		if lerr != nil {
+			t.Fatalf("list: %v", lerr)
+		}
+		for _, d := range all {
+			if strings.HasPrefix(d.DeliveryID, "op-retry-") && d.Status == store.WebhookStatusCompleted {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("synthetic retry never completed: %+v", all)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func TestOperatorSkipNoActive(t *testing.T) {
 	allow := func(platform, userID string) bool { return true }
 	srv, _, _ := operatorTestServer(t, allow)

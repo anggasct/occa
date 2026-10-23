@@ -70,7 +70,7 @@ func TestRecoverPRQueueInterruptsAndBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	msg := srv.RecoverPRQueue()
-	want := "recovered 1 active (resumed 0, failed 1), dropped 1 queued, blocked 1"
+	want := "recovered 1 active (resumed 1, failed 1), dropped 1 queued, blocked 0"
 	if msg != want {
 		t.Fatalf("recover log = %q, want %q", msg, want)
 	}
@@ -79,8 +79,11 @@ func TestRecoverPRQueueInterruptsAndBlocks(t *testing.T) {
 		t.Fatalf("active receipt = %+v, %v; want failed", rec, err)
 	}
 	run, err := st.PRQueueRepo().Get(ctx, "acme/widget#7")
-	if err != nil || run == nil || run.Status != store.PRStatusBlocked {
-		t.Fatalf("pr row = %+v, %v; want blocked", run, err)
+	if err != nil || run == nil || run.Status != store.PRStatusDrained {
+		t.Fatalf("pr row = %+v, %v; want drained", run, err)
+	}
+	if run.BlockedReason != "resume_pending" || run.ActiveKind != "fix" || run.ActiveDelivery != int64(receipt.ID) {
+		t.Fatalf("resume marker = %+v", run)
 	}
 	items, err := st.PRQueueRepo().ListItems(ctx, "acme/widget#7")
 	if err != nil || len(items) != 0 {

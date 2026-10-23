@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -109,23 +110,47 @@ func resolveRepoPrompt(prompts map[string]RepoPromptRef, workflow string) (promp
 }
 
 func resolveTriggers(defaults WebhookDefaults, repo RepoConfig, workflow string) []string {
-	if repo.CommentTrigger != nil {
-		if triggers, ok := repo.CommentTrigger[workflow]; ok {
-			return triggers
-		}
-	}
+	var base []string
 	if defaults.CommentTrigger != nil {
 		if triggers, ok := defaults.CommentTrigger[workflow]; ok {
-			return triggers
+			base = append([]string(nil), triggers...)
 		}
 	}
-	switch workflow {
-	case "review":
-		return append([]string(nil), defaultReviewTriggers...)
-	case "fix":
-		return append([]string(nil), defaultFixTriggers...)
+	if base == nil {
+		switch workflow {
+		case "review":
+			base = append([]string(nil), defaultReviewTriggers...)
+		case "fix":
+			base = append([]string(nil), defaultFixTriggers...)
+		}
 	}
-	return nil
+	if repo.CommentTrigger != nil {
+		if triggers, ok := repo.CommentTrigger[workflow]; ok {
+			base = mergeTriggers(base, triggers)
+		}
+	}
+	return base
+}
+
+func mergeTriggers(base, additions []string) []string {
+	out := append([]string(nil), base...)
+	seen := make(map[string]bool, len(out)+len(additions))
+	for _, trigger := range out {
+		seen[strings.ToLower(strings.TrimSpace(trigger))] = true
+	}
+	for _, trigger := range additions {
+		trigger = strings.TrimSpace(trigger)
+		if trigger == "" {
+			continue
+		}
+		key := strings.ToLower(trigger)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, trigger)
+	}
+	return out
 }
 
 func resolveRepoLimits(defaults WebhookDefaults, repo RepoConfig) *EndpointLimits {
@@ -263,6 +288,9 @@ func expandRepos(repos []RepoConfig, defaults WebhookDefaults) ([]EndpointConfig
 				Limits:         resolveRepoLimits(defaults, *repo),
 				Automation:     &automationCopy,
 				VerifyEndpoint: "",
+			}
+			if len(ep.CommentTrigger) > 0 {
+				slog.Info("config: effective comment triggers", "endpoint", ep.Name, "workflow", workflow, "triggers", strings.Join(ep.CommentTrigger, ", "))
 			}
 			if workflow == "merged" {
 				ep.OnMerged = append([]MergedAction(nil), repo.OnMerged...)

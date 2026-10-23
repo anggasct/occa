@@ -214,6 +214,43 @@ func (r *sqliteWebhookDeliveryRepo) FailStale(ctx context.Context, cutoff int64,
 	return int(n), nil
 }
 
+func (r *sqliteWebhookDeliveryRepo) Reopen(ctx context.Context, id int64, from []WebhookStatus) (bool, error) {
+	if len(from) == 0 {
+		return false, fmt.Errorf("store: webhook delivery reopen: empty from set")
+	}
+	query := `UPDATE webhook_delivery
+		SET status = ?, error_summary = '', completed_at = 0, updated_at = ?
+		WHERE id = ? AND status IN (` + strings.TrimSuffix(strings.Repeat("?,", len(from)), ",") + `)`
+	args := []any{string(WebhookStatusReceived), time.Now().Unix(), id}
+	for _, s := range from {
+		args = append(args, string(s))
+	}
+	res, err := r.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return false, fmt.Errorf("store: webhook delivery reopen: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: webhook delivery reopen rows: %w", err)
+	}
+	return n > 0, nil
+}
+
+func (r *sqliteWebhookDeliveryRepo) LatestForPR(ctx context.Context, prKey string) (*WebhookDelivery, error) {
+	row := r.db.QueryRowContext(ctx,
+		`SELECT `+deliveryColumns+` FROM webhook_delivery WHERE pr_key = ? ORDER BY id DESC LIMIT 1`,
+		prKey,
+	)
+	d, err := scanWebhookDelivery(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: webhook delivery latest for pr: %w", err)
+	}
+	return d, nil
+}
+
 func (r *sqliteWebhookDeliveryRepo) SetPRKey(ctx context.Context, id int64, prKey string) error {
 	_, err := r.db.ExecContext(ctx,
 		`UPDATE webhook_delivery SET pr_key = ?, updated_at = ? WHERE id = ?`,
@@ -239,9 +276,9 @@ func (r *sqliteWebhookDeliveryRepo) SetReviewKey(ctx context.Context, id int64, 
 func (r *sqliteWebhookDeliveryRepo) FindReviewDuplicate(ctx context.Context, endpoint, reviewKey string, cutoff int64) (*WebhookDelivery, error) {
 	row := r.db.QueryRowContext(ctx,
 		`SELECT `+deliveryColumns+` FROM webhook_delivery
-		 WHERE endpoint = ? AND review_key = ? AND status IN (?, ?) AND updated_at >= ?
+		 WHERE endpoint = ? AND review_key = ? AND status = ? AND updated_at >= ?
 		 ORDER BY id DESC LIMIT 1`,
-		endpoint, reviewKey, string(WebhookStatusCompleted), string(WebhookStatusSkipped), cutoff,
+		endpoint, reviewKey, string(WebhookStatusCompleted), cutoff,
 	)
 	d, err := scanWebhookDelivery(row)
 	if err == sql.ErrNoRows {
