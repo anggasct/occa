@@ -440,7 +440,7 @@ func TestMergeDrainRequeueThenBlocked(t *testing.T) {
 
 func TestMergedEventDrainsQueue(t *testing.T) {
 	rec := newPRRecorder("thread-pr", make(chan struct{}))
-	_, st, url := newPRTestServer(t, rec, []config.EndpointConfig{
+	srv, st, url := newPRTestServer(t, rec, []config.EndpointConfig{
 		prTestEndpoint("fix", "/fix", config.AutomationFull),
 		prTestEndpoint("merged", "/merged", config.AutomationFull),
 	})
@@ -448,6 +448,7 @@ func TestMergedEventDrainsQueue(t *testing.T) {
 		t.Fatalf("post fix: status %d", resp.StatusCode)
 	}
 	waitForCalls(t, rec, 1)
+	setPRState(srv, PRStateMerged, nil)
 	if resp := post(t, url+"/merged?secret=s3cret", "del-mq-merged", "pull_request", prClosedBody(7, true)); resp.StatusCode != http.StatusOK {
 		t.Fatalf("post merged: status %d", resp.StatusCode)
 	}

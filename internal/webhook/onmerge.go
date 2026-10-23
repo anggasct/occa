@@ -115,7 +115,7 @@ func (s *Server) handleMergedDelivery(item dispatchItem, receipt *store.WebhookD
 			"dropped", dropped,
 		)
 	}
-	s.scheduleMergedDocsUpdate(item, envelope)
+	s.scheduleMergedDocsUpdate(item, envelope, prKey)
 }
 
 // markMergedTerminal moves the PR surface to its terminal phase: the parent
@@ -206,11 +206,22 @@ func (s *Server) abortPRSession(ctx context.Context, prKey, repo string) (string
 }
 
 // scheduleMergedDocsUpdate runs the post-merge work outside the PR queue
-// lane: it holds no PR execution key and outlives the queue item.
-func (s *Server) scheduleMergedDocsUpdate(item dispatchItem, envelope WebhookEnvelope) {
+// lane: it holds no PR execution key and outlives the queue item. The merged
+// lane posts its summary into the bound PR thread, falling back to the channel
+// root only when no binding exists.
+func (s *Server) scheduleMergedDocsUpdate(item dispatchItem, envelope WebhookEnvelope, prKey string) {
 	ep := item.ep
 	if strings.TrimSpace(ep.Prompt) == "" && len(ep.OnMerged) == 0 {
 		return
+	}
+	threadID, rootID, reason := s.mergedLaneTarget(prKey, item.eventType, envelope)
+	if threadID == "" {
+		slog.Info("webhook: merged lane falls back to channel root",
+			"endpoint", ep.Name,
+			"delivery_id", item.deliveryID,
+			"pr_key", prKey,
+			"reason", reason,
+		)
 	}
 	go func() {
 		if !s.acquireEvent(s.shutdownCtx) {
@@ -219,13 +230,30 @@ func (s *Server) scheduleMergedDocsUpdate(item dispatchItem, envelope WebhookEnv
 		defer s.releaseEvent()
 		ctx, cancel := context.WithTimeout(context.Background(), s.processingTimeout)
 		defer cancel()
-		s.runMergedDocsUpdate(ctx, ep, item, envelope)
+		s.runMergedDocsUpdate(ctx, ep, item, envelope, threadID, rootID)
 	}()
+}
+
+// mergedLaneTarget resolves the destination for the merged lane from the
+// persisted PR binding, then the task-thread registry. An empty thread means
+// the channel root is the only remaining destination.
+func (s *Server) mergedLaneTarget(prKey, eventType string, envelope WebhookEnvelope) (string, string, string) {
+	if strings.TrimSpace(prKey) == "" {
+		return "", "", "no PR key"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), prBindingLookupTimeout)
+	defer cancel()
+	res := s.resolvePRBinding(ctx, prKey, eventType, envelope)
+	threadID := strings.TrimSpace(res.ThreadID)
+	if threadID == "" {
+		return "", "", "no PR thread binding"
+	}
+	return threadID, strings.TrimSpace(res.RootMessageID), ""
 }
 
 // runMergedDocsUpdate performs the post-merge work with a context that cannot
 // reach the PR parent or the thread state line.
-func (s *Server) runMergedDocsUpdate(ctx context.Context, ep config.EndpointConfig, item dispatchItem, envelope WebhookEnvelope) {
+func (s *Server) runMergedDocsUpdate(ctx context.Context, ep config.EndpointConfig, item dispatchItem, envelope WebhookEnvelope, threadID, rootID string) {
 	payload := map[string]any{}
 	if err := json.Unmarshal(item.body, &payload); err != nil {
 		payload = map[string]any{}
@@ -238,11 +266,13 @@ func (s *Server) runMergedDocsUpdate(ctx context.Context, ep config.EndpointConf
 		"webhook":       envelope,
 	}
 	workCtx := &WebhookWorkContext{
-		DeliveryID: item.deliveryID,
-		Attempt:    1,
-		Workflow:   ep.Workflow,
-		Envelope:   mergedDocsEnvelope(envelope),
-		StartTime:  time.Now(),
+		DeliveryID:    item.deliveryID,
+		Attempt:       1,
+		Workflow:      ep.Workflow,
+		Envelope:      mergedDocsEnvelope(envelope),
+		StartTime:     time.Now(),
+		ThreadID:      threadID,
+		RootMessageID: rootID,
 	}
 	if prompt := strings.TrimSpace(ep.Prompt); prompt != "" {
 		rendered, err := renderTemplate(prompt, tmplData)

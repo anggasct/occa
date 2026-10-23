@@ -325,13 +325,13 @@ func ghReconcileFacts(ctx context.Context, repo, number string) (ReconcileFacts,
 		return ReconcileFacts{}, fmt.Errorf("gh pr view: %s", detail)
 	}
 	var raw struct {
-		State             string `json:"state"`
-		HeadRefOid        string `json:"headRefOid"`
-		HeadRefName       string `json:"headRefName"`
-		BaseRefName       string `json:"baseRefName"`
-		Title             string `json:"title"`
-		URL               string `json:"url"`
-		ReviewDecision    string `json:"reviewDecision"`
+		State             string           `json:"state"`
+		HeadRefOid        string           `json:"headRefOid"`
+		HeadRefName       string           `json:"headRefName"`
+		BaseRefName       string           `json:"baseRefName"`
+		Title             string           `json:"title"`
+		URL               string           `json:"url"`
+		ReviewDecision    string           `json:"reviewDecision"`
 		StatusCheckRollup []ghCheckContext `json:"statusCheckRollup"`
 		Author            struct {
 			Login string `json:"login"`

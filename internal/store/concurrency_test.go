@@ -63,8 +63,8 @@ func TestPoolExplicitlyConfigured(t *testing.T) {
 	s := tempStore(t)
 
 	stats := s.db.Stats()
-	if stats.MaxOpenConnections != 1 {
-		t.Fatalf("max open conns = %d, want 1", stats.MaxOpenConnections)
+	if stats.MaxOpenConnections < 4 {
+		t.Fatalf("max open conns = %d, want at least 4", stats.MaxOpenConnections)
 	}
 }
 

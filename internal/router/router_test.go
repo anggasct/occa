@@ -865,6 +865,28 @@ func (f *fakeSessionRepo) SetActive(_ context.Context, platform, channelID, thre
 	return nil
 }
 
+func (f *fakeSessionRepo) SweepActive(_ context.Context, alive func(pid int) bool) (int, error) {
+	stale := make(map[string]bool)
+	for key, pid := range f.activePIDs {
+		if pid <= 0 || alive == nil || !alive(pid) {
+			stale[f.activeBy[key]] = true
+			delete(f.activeBy, key)
+			delete(f.activePIDs, key)
+		}
+	}
+	if f.activePIDs == nil && f.activeID != "" && (f.activePID <= 0 || alive == nil || !alive(f.activePID)) {
+		stale[f.activeID] = true
+		f.activeID = ""
+		f.activePID = 0
+	}
+	for i := range f.sessions {
+		if f.sessions[i].Active && stale[f.sessions[i].AgentSessionID] {
+			f.sessions[i].Active = false
+		}
+	}
+	return len(stale), nil
+}
+
 func (f *fakeSessionRepo) Deactivate(_ context.Context, platform, channelID, threadID, userID string) error {
 	f.activeID = ""
 	if f.activeBy != nil {

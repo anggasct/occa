@@ -38,6 +38,7 @@ const (
 // repo lives in internal/store; the server only needs the transitions below.
 type DeliveryStore interface {
 	Create(ctx context.Context, d store.WebhookDelivery) (bool, error)
+	Ensure(ctx context.Context, d store.WebhookDelivery) (bool, error)
 	Get(ctx context.Context, endpoint, deliveryID string) (*store.WebhookDelivery, error)
 	GetByID(ctx context.Context, id int64) (*store.WebhookDelivery, error)
 	Transition(ctx context.Context, id int64, from []store.WebhookStatus, to store.WebhookStatus, summary string) (bool, error)
@@ -1926,7 +1927,7 @@ func (s *Server) abandon(item dispatchItem, reason string) {
 		defer s.repairPRQueueInvariants(ctx, item.prKey)
 	}
 	s.mirrorDelete(item.queueID)
-	created, err := s.deliveries.Create(ctx, store.WebhookDelivery{
+	_, err := s.deliveries.Create(ctx, store.WebhookDelivery{
 		Endpoint:    item.ep.Name,
 		DeliveryID:  item.deliveryID,
 		EventType:   item.eventType,
@@ -1936,9 +1937,6 @@ func (s *Server) abandon(item dispatchItem, reason string) {
 	})
 	if err != nil {
 		slog.Error("webhook: abandoned delivery receipt failed", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "error", err)
-		return
-	}
-	if !created {
 		return
 	}
 	receipt, err := s.deliveries.Get(ctx, item.ep.Name, item.deliveryID)

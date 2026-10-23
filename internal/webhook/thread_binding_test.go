@@ -238,11 +238,18 @@ func TestRestartRetryResumesWithSameThread(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatalf("resumed run did not execute")
 	}
-	session, _, err := stB.SessionRepo().Active(ctx, "telegram", "chat1", "thread-pr", "")
-	if err != nil {
-		t.Fatalf("read session binding: %v", err)
-	}
-	if session != "sess-b" {
-		t.Fatalf("session binding = %q, want sess-b on thread-pr", session)
+	clearBy := time.Now().Add(2 * time.Second)
+	for {
+		session, _, err := stB.SessionRepo().Active(ctx, "telegram", "chat1", "thread-pr", "")
+		if err != nil {
+			t.Fatalf("read session binding: %v", err)
+		}
+		if session == "" {
+			break
+		}
+		if time.Now().After(clearBy) {
+			t.Fatalf("run exit must clear session.active, got %q", session)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

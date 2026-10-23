@@ -92,6 +92,20 @@ func (m *mockSessionRepo) ThreadRoot(_ context.Context, _, _, _ string) (*store.
 	return nil, nil
 }
 
+func (m *mockSessionRepo) SweepActive(_ context.Context, alive func(pid int) bool) (int, error) {
+	if m.ownerPID > 0 && alive != nil && alive(m.ownerPID) {
+		return 0, nil
+	}
+	n := len(m.byKey)
+	if m.activeID != "" {
+		n++
+	}
+	m.activeID = ""
+	m.ownerPID = 0
+	m.byKey = nil
+	return n, nil
+}
+
 type mockClient struct {
 	sessionID     string
 	sessionExists bool
