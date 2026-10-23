@@ -1874,6 +1874,41 @@ func (s *Server) failAbandonedReceipt(receipt *store.WebhookDelivery, reason str
 // report observable progress; the dispatcher stamps last activity from it.
 // The returned error is the executor's error, after the receipt's terminal
 // transition (or retry grant) is recorded.
+// ensureReviewDedupeHead resolves the PR head for comment-triggered review
+// deliveries on non-git endpoints, whose payload carries no head SHA. Without
+// it the synthetic internal re-review and its GitHub comment echo would key
+// differently and both start a review on the same head.
+func (s *Server) ensureReviewDedupeHead(envelope WebhookEnvelope) {
+	if stringValue(envelope["event_type"]) != "issue_comment" {
+		return
+	}
+	if strings.TrimSpace(stringValue(envelope["comment_trigger"])) == "" {
+		return
+	}
+	if normalizeRevision(stringValue(envelope["head_sha"])) != "" {
+		return
+	}
+	repo := strings.TrimSpace(stringValue(envelope["repository"]))
+	number, err := strconv.Atoi(strings.TrimSpace(stringValue(envelope["pr_number"])))
+	if repo == "" || err != nil || number <= 0 {
+		return
+	}
+	resolver := s.prHeadResolver
+	if resolver == nil {
+		resolver = &ghPRHeadResolver{timeout: s.processingTimeout}
+	}
+	head, err := resolver.ResolvePRHead(context.Background(), repo, number)
+	if err != nil {
+		slog.Warn("webhook: review dedupe head lookup failed", "repo", repo, "pr_number", number, "error", err)
+		return
+	}
+	sha := normalizeRevision(head.SHA)
+	if sha == "" {
+		return
+	}
+	envelope["head_sha"] = sha
+}
+
 func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64, deliveryID, eventType string, attempt int, lease *WorkspaceLease, allowRetryIncomplete func() bool, heartbeat func()) error {
 	key := ExtractExecutionKey(body)
 	envelope := normalizeWebhook(body, eventType, deliveryID, s.verdicts, false, "", ep.CommentTrigger)
@@ -2027,6 +2062,7 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 
 	reviewKey := ""
 	if isReviewWorkflow(ep.Workflow) && !isOperatorRetryDelivery(deliveryID) {
+		s.ensureReviewDedupeHead(envelope)
 		reviewKey = reviewDedupeKey(envelope)
 	}
 	triggerPrefix := ""

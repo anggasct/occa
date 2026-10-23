@@ -427,6 +427,54 @@ func TestDuplicateReviewSuppressedAcrossSyntheticAndCommentPaths(t *testing.T) {
 	}
 }
 
+func TestDuplicateReviewSuppressedForCommentEchoWithoutHead(t *testing.T) {
+	const head = "5932515abc"
+	ep := reviewGuardEndpoint()
+	ep.Name = "review-echo-no-head"
+	ep.Workflow = "review"
+	ep.CommentTrigger = []string{"please re-review"}
+	ep.Limits = &config.EndpointLimits{MaxRunsPerPR: 10, Window: time.Hour}
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{ep})
+	resolver := &fakePRHeadResolver{head: PRHead{SHA: head, Branch: "feat/x", HeadRepo: "o/r"}}
+	srv.SetPRHeadResolver(resolver)
+
+	syntheticID := internalReviewDeliveryID("o/r#7", head)
+	syntheticBody := internalReviewCommentBody("o/r", "7", "please re-review", "https://github.com/o/r/pull/7", "feat/x", head)
+	syntheticReceipt := seedDeliveryForEvent(t, st.WebhookDeliveryRepo(), ep.Name, syntheticID, "issue_comment")
+	if err := srv.executeDelivery(ep, syntheticBody, syntheticReceipt, syntheticID, "issue_comment", 1, nil, nil, nil); err != nil {
+		t.Fatalf("synthetic executeDelivery: %v", err)
+	}
+	if count := exec.callCount(); count != 1 {
+		t.Fatalf("synthetic review spawned %d turns, want 1", count)
+	}
+	if resolver.calls != 0 {
+		t.Fatalf("synthetic review resolved head %d times, want 0", resolver.calls)
+	}
+
+	commentID := "comment-webhook-echo-no-head"
+	commentBody := issueCommentEventBody(t, 7, "please re-review")
+	commentReceipt := seedDeliveryForEvent(t, st.WebhookDeliveryRepo(), ep.Name, commentID, "issue_comment")
+	if err := srv.executeDelivery(ep, commentBody, commentReceipt, commentID, "issue_comment", 1, nil, nil, nil); err != nil {
+		t.Fatalf("comment executeDelivery: %v", err)
+	}
+	if count := exec.callCount(); count != 1 {
+		t.Fatalf("same-head comment echo spawned %d turns, want 1", count)
+	}
+	if resolver.calls == 0 || resolver.lastRepo != "o/r" || resolver.lastNumber != 7 {
+		t.Fatalf("resolver calls = %d repo=%q number=%d, want a lookup for o/r#7", resolver.calls, resolver.lastRepo, resolver.lastNumber)
+	}
+	second, err := st.WebhookDeliveryRepo().Get(context.Background(), ep.Name, commentID)
+	if err != nil || second == nil {
+		t.Fatalf("get comment echo receipt: %v %v", second, err)
+	}
+	if second.Status != store.WebhookStatusSkipped {
+		t.Fatalf("comment echo status = %s, want skipped", second.Status)
+	}
+	if !strings.Contains(second.ErrorSummary, "same head") || !strings.Contains(second.ErrorSummary, syntheticID) {
+		t.Fatalf("comment echo skip reason = %q, want same head handled by %s", second.ErrorSummary, syntheticID)
+	}
+}
+
 func TestFixTriggerNotSuppressedByReviewDedupe(t *testing.T) {
 	const head = "5932515abc"
 	ep := reviewGuardEndpoint()
