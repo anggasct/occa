@@ -529,7 +529,7 @@ func OpenWithRetention(path, defaultWorkdir string, usage UsageRetention, recove
 	s.recoveryEvents = &sqliteRecoveryEventRepo{db: db, retention: recoveryRetention}
 	s.prQueues = &sqlitePRQueueRepo{db: db}
 	s.webhookReplays = &sqliteWebhookReplayRepo{db: db}
-	if repaired, err := s.prQueues.RepairInvariants(context.Background()); err != nil {
+	if repaired, err := s.prQueues.RepairInvariants(context.Background(), ""); err != nil {
 		slog.Warn("store: pr queue invariant check failed", "error", err)
 	} else {
 		for _, key := range repaired {

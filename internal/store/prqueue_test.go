@@ -262,7 +262,7 @@ func TestRepairInvariantsDrainsPhantomActiveRow(t *testing.T) {
 		t.Fatalf("seed phantom row: %v", err)
 	}
 
-	repaired, err := s.PRQueueRepo().RepairInvariants(ctx)
+	repaired, err := s.PRQueueRepo().RepairInvariants(ctx, "")
 	if err != nil {
 		t.Fatalf("repair invariants: %v", err)
 	}
@@ -295,11 +295,59 @@ func TestRepairInvariantsKeepsActiveQueueAndRun(t *testing.T) {
 		t.Fatalf("set active: %v", err)
 	}
 
-	repaired, err := repo.RepairInvariants(ctx)
+	repaired, err := repo.RepairInvariants(ctx, "")
 	if err != nil {
 		t.Fatalf("repair invariants: %v", err)
 	}
 	if len(repaired) != 0 {
 		t.Fatalf("legitimate rows repaired: %v", repaired)
+	}
+}
+
+func TestRepairInvariantsScopedToPRKey(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+	now := time.Now().Unix()
+	seed := func(key, kind string, delivery, since int64) {
+		t.Helper()
+		if _, err := s.db.Exec(
+			`INSERT INTO pr_queue (pr_key, thread_id, root_msg_id, status, active_kind, active_session, active_delivery, active_since, retry_count, next_retry_at, blocked_reason, created_at, updated_at)
+			 VALUES (?, '', '', ?, ?, '', ?, ?, 0, 0, '', ?, ?)`,
+			key, string(PRStatusActive), kind, delivery, since, now, now,
+		); err != nil {
+			t.Fatalf("seed %s: %v", key, err)
+		}
+	}
+	seed("acme/widget#1", "", 0, 0)
+	seed("acme/widget#2", "fix", 0, now)
+
+	repaired, err := s.PRQueueRepo().RepairInvariants(ctx, "acme/widget#1")
+	if err != nil {
+		t.Fatalf("repair invariants: %v", err)
+	}
+	if len(repaired) != 1 || repaired[0] != "acme/widget#1" {
+		t.Fatalf("repaired rows = %v, want only acme/widget#1", repaired)
+	}
+	other, err := s.PRQueueRepo().Get(ctx, "acme/widget#2")
+	if err != nil || other == nil {
+		t.Fatalf("get untouched row: %v", err)
+	}
+	if other.Status != PRStatusActive {
+		t.Fatalf("scoped repair touched another PR: %+v", other)
+	}
+
+	repaired, err = s.PRQueueRepo().RepairInvariants(ctx, "")
+	if err != nil {
+		t.Fatalf("global repair invariants: %v", err)
+	}
+	if len(repaired) != 1 || repaired[0] != "acme/widget#2" {
+		t.Fatalf("repaired rows = %v, want the missing-delivery phantom", repaired)
+	}
+	missing, err := s.PRQueueRepo().Get(ctx, "acme/widget#2")
+	if err != nil || missing == nil {
+		t.Fatalf("get missing-delivery row: %v", err)
+	}
+	if missing.Status != PRStatusDrained {
+		t.Fatalf("missing-delivery phantom not repaired: %+v", missing)
 	}
 }

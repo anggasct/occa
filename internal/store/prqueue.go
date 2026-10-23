@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -59,7 +60,7 @@ type PRQueueRepo interface {
 	ListUnresolved(ctx context.Context) ([]PRRun, error)
 	ClearQueue(ctx context.Context, prKey string) (int, error)
 	DeleteItem(ctx context.Context, id int64) error
-	RepairInvariants(ctx context.Context) ([]string, error)
+	RepairInvariants(ctx context.Context, prKey string) ([]string, error)
 }
 
 type sqlitePRQueueRepo struct {
@@ -460,17 +461,21 @@ func (r *sqlitePRQueueRepo) ClearQueue(ctx context.Context, prKey string) (int, 
 var _ PRQueueRepo = (*sqlitePRQueueRepo)(nil)
 
 // RepairInvariants fixes rows that claim an active run without carrying one.
-// An active row is legitimate only while a run is stamped (kind and start
-// time) or queued items are waiting; a row with neither is a phantom that
-// /retry cannot reach.
-func (r *sqlitePRQueueRepo) RepairInvariants(ctx context.Context) ([]string, error) {
-	rows, err := r.db.QueryContext(ctx,
-		`SELECT pr_key FROM pr_queue q
+// An active row is legitimate only while a run is stamped (kind, delivery,
+// and start time) or queued items are waiting; a row with neither is a
+// phantom that /retry cannot reach. An empty prKey sweeps every row; a
+// non-empty prKey restricts the sweep to that PR.
+func (r *sqlitePRQueueRepo) RepairInvariants(ctx context.Context, prKey string) ([]string, error) {
+	query := `SELECT pr_key FROM pr_queue q
 		 WHERE status = ?
-		   AND (active_kind = '' OR active_since = 0)
-		   AND NOT EXISTS (SELECT 1 FROM pr_queue_items i WHERE i.pr_key = q.pr_key)`,
-		string(PRStatusActive),
-	)
+		   AND (active_kind = '' OR active_delivery = 0 OR active_since = 0)
+		   AND NOT EXISTS (SELECT 1 FROM pr_queue_items i WHERE i.pr_key = q.pr_key)`
+	args := []any{string(PRStatusActive)}
+	if strings.TrimSpace(prKey) != "" {
+		query += ` AND q.pr_key = ?`
+		args = append(args, strings.TrimSpace(prKey))
+	}
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: pr queue invariant scan: %w", err)
 	}
