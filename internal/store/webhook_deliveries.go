@@ -273,12 +273,12 @@ func (r *sqliteWebhookDeliveryRepo) SetReviewKey(ctx context.Context, id int64, 
 	return nil
 }
 
-func (r *sqliteWebhookDeliveryRepo) FindReviewDuplicate(ctx context.Context, endpoint, reviewKey string, cutoff int64) (*WebhookDelivery, error) {
+func (r *sqliteWebhookDeliveryRepo) FindReviewDuplicate(ctx context.Context, endpoint, reviewKey string, excludeID, cutoff int64) (*WebhookDelivery, error) {
 	row := r.db.QueryRowContext(ctx,
 		`SELECT `+deliveryColumns+` FROM webhook_delivery
-		 WHERE endpoint = ? AND review_key = ? AND status = ? AND updated_at >= ?
+		 WHERE endpoint = ? AND review_key = ? AND id <> ? AND status IN (?, ?) AND updated_at >= ?
 		 ORDER BY id DESC LIMIT 1`,
-		endpoint, reviewKey, string(WebhookStatusCompleted), cutoff,
+		endpoint, reviewKey, excludeID, string(WebhookStatusCompleted), string(WebhookStatusProcessing), cutoff,
 	)
 	d, err := scanWebhookDelivery(row)
 	if err == sql.ErrNoRows {

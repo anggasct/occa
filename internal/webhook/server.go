@@ -49,7 +49,7 @@ type DeliveryStore interface {
 	SetPRKey(ctx context.Context, id int64, prKey string) error
 	Reopen(ctx context.Context, id int64, from []store.WebhookStatus) (bool, error)
 	LatestForPR(ctx context.Context, prKey string) (*store.WebhookDelivery, error)
-	FindReviewDuplicate(ctx context.Context, endpoint, reviewKey string, cutoff int64) (*store.WebhookDelivery, error)
+	FindReviewDuplicate(ctx context.Context, endpoint, reviewKey string, excludeID, cutoff int64) (*store.WebhookDelivery, error)
 	CountReviewDeliveries(ctx context.Context, endpoint, reviewKeyPrefix string, cutoff int64) (int, error)
 }
 
@@ -2070,7 +2070,7 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		triggerPrefix = reviewDedupePrefix(envelope)
 	}
 	if reviewKey != "" && id != 0 {
-		prior, err := s.deliveries.FindReviewDuplicate(context.Background(), ep.Name, reviewKey, s.reviewDedupeCutoff())
+		prior, err := s.deliveries.FindReviewDuplicate(context.Background(), ep.Name, reviewKey, id, s.reviewDedupeCutoff())
 		if err != nil {
 			slog.Warn("webhook: review duplicate lookup failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
 		} else if prior != nil {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -319,20 +321,20 @@ func TestReviewDuplicateLookupSurvivesRestart(t *testing.T) {
 	defer func() { _ = st2.Close() }()
 
 	cutoff := time.Now().Add(-time.Hour).Unix()
-	prior, err := st2.WebhookDeliveryRepo().FindReviewDuplicate(ctx, "ep", "key-1", cutoff)
+	prior, err := st2.WebhookDeliveryRepo().FindReviewDuplicate(ctx, "ep", "key-1", 0, cutoff)
 	if err != nil {
 		t.Fatalf("lookup after restart: %v", err)
 	}
 	if prior == nil || prior.DeliveryID != "d1" {
 		t.Fatalf("prior = %+v, want d1 after restart", prior)
 	}
-	if prior2, _ := st2.WebhookDeliveryRepo().FindReviewDuplicate(ctx, "ep", "key-1", time.Now().Add(2*time.Second).Unix()); prior2 != nil {
+	if prior2, _ := st2.WebhookDeliveryRepo().FindReviewDuplicate(ctx, "ep", "key-1", 0, time.Now().Add(2*time.Second).Unix()); prior2 != nil {
 		t.Fatalf("stale cutoff resurrected a duplicate: %+v", prior2)
 	}
-	if miss, _ := st2.WebhookDeliveryRepo().FindReviewDuplicate(ctx, "ep", "key-2", cutoff); miss != nil {
+	if miss, _ := st2.WebhookDeliveryRepo().FindReviewDuplicate(ctx, "ep", "key-2", 0, cutoff); miss != nil {
 		t.Fatalf("unknown key matched: %+v", miss)
 	}
-	if miss, _ := st2.WebhookDeliveryRepo().FindReviewDuplicate(ctx, "other", "key-1", cutoff); miss != nil {
+	if miss, _ := st2.WebhookDeliveryRepo().FindReviewDuplicate(ctx, "other", "key-1", 0, cutoff); miss != nil {
 		t.Fatalf("foreign endpoint matched: %+v", miss)
 	}
 }
@@ -472,6 +474,100 @@ func TestDuplicateReviewSuppressedForCommentEchoWithoutHead(t *testing.T) {
 	}
 	if !strings.Contains(second.ErrorSummary, "same head") || !strings.Contains(second.ErrorSummary, syntheticID) {
 		t.Fatalf("comment echo skip reason = %q, want same head handled by %s", second.ErrorSummary, syntheticID)
+	}
+}
+
+func TestDuplicateReviewSuppressedForCommentEchoWithoutHeadHTTP(t *testing.T) {
+	const head = "5932515abc"
+	ep := reviewGuardEndpoint()
+	ep.Name = "review-echo-no-head-http"
+	ep.Path = "/review"
+	ep.Secret = "s3cret"
+	ep.Repository = "o/r"
+	ep.Workflow = "review"
+	ep.CommentTrigger = []string{"please re-review"}
+	ep.Limits = &config.EndpointLimits{MaxRunsPerPR: 10, Window: time.Hour}
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{ep})
+	resolver := &fakePRHeadResolver{head: PRHead{SHA: head, Branch: "feat/x", HeadRepo: "o/r"}}
+	srv.SetPRHeadResolver(resolver)
+
+	syntheticID := internalReviewDeliveryID("o/r#7", head)
+	syntheticBody := internalReviewCommentBody("o/r", "7", "please re-review", "https://github.com/o/r/pull/7", "feat/x", head)
+	syntheticReceipt := seedDeliveryForEvent(t, st.WebhookDeliveryRepo(), ep.Name, syntheticID, "issue_comment")
+	if err := srv.executeDelivery(ep, syntheticBody, syntheticReceipt, syntheticID, "issue_comment", 1, nil, nil, nil); err != nil {
+		t.Fatalf("synthetic executeDelivery: %v", err)
+	}
+	if count := exec.callCount(); count != 1 {
+		t.Fatalf("synthetic review spawned %d turns, want 1", count)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	commentID := "comment-webhook-echo-no-head-http"
+	commentBody := issueCommentEventBody(t, 7, "please re-review")
+	if resp := post(t, ts.URL+"/review?secret=s3cret", commentID, "issue_comment", string(commentBody)); resp.StatusCode != http.StatusOK {
+		t.Fatalf("comment echo post status = %d, want 200", resp.StatusCode)
+	}
+	second := waitForReceiptDeliveryID(t, st, commentID, store.WebhookStatusSkipped)
+	if count := exec.callCount(); count != 1 {
+		t.Fatalf("same-head comment echo spawned %d turns, want 1", count)
+	}
+	if resolver.calls == 0 || resolver.lastRepo != "o/r" || resolver.lastNumber != 7 {
+		t.Fatalf("resolver calls = %d repo=%q number=%d, want a lookup for o/r#7", resolver.calls, resolver.lastRepo, resolver.lastNumber)
+	}
+	if !strings.Contains(second.ErrorSummary, "same head") || !strings.Contains(second.ErrorSummary, syntheticID) {
+		t.Fatalf("comment echo skip reason = %q, want same head handled by %s", second.ErrorSummary, syntheticID)
+	}
+}
+
+func TestInFlightReviewDedupeSkipsSameHead(t *testing.T) {
+	const head = "5932515abc"
+	ep := reviewGuardEndpoint()
+	ep.Name = "review-inflight-dedupe"
+	ep.Workflow = "review"
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{ep})
+	exec.block = make(chan struct{})
+	exec.started = make(chan struct{})
+
+	body := reviewEventBody(t, "changes_requested", "**Verdict:** REQUEST_CHANGES", head)
+	firstID := "del-inflight-1"
+	firstReceipt := seedDeliveryForEvent(t, st.WebhookDeliveryRepo(), ep.Name, firstID, "pull_request_review")
+	firstErr := make(chan error, 1)
+	go func() {
+		firstErr <- srv.executeDelivery(ep, body, firstReceipt, firstID, "pull_request_review", 1, nil, nil, nil)
+	}()
+
+	select {
+	case <-exec.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first review never reached the executor")
+	}
+
+	secondID := "del-inflight-2"
+	secondReceipt := seedDeliveryForEvent(t, st.WebhookDeliveryRepo(), ep.Name, secondID, "pull_request_review")
+	if err := srv.executeDelivery(ep, body, secondReceipt, secondID, "pull_request_review", 1, nil, nil, nil); err != nil {
+		t.Fatalf("second executeDelivery: %v", err)
+	}
+	second, err := st.WebhookDeliveryRepo().Get(context.Background(), ep.Name, secondID)
+	if err != nil || second == nil {
+		t.Fatalf("get second receipt: %v %v", second, err)
+	}
+	if second.Status != store.WebhookStatusSkipped {
+		t.Fatalf("second receipt status = %s, want skipped", second.Status)
+	}
+	if !strings.Contains(second.ErrorSummary, "same head") || !strings.Contains(second.ErrorSummary, firstID) {
+		t.Fatalf("second skip reason = %q, want same head handled by %s", second.ErrorSummary, firstID)
+	}
+
+	close(exec.block)
+	if err := <-firstErr; err != nil {
+		t.Fatalf("first executeDelivery: %v", err)
+	}
+	if count := exec.callCount(); count != 1 {
+		t.Fatalf("same-head in-flight duplicate spawned %d turns, want 1", count)
 	}
 }
 

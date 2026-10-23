@@ -44,10 +44,12 @@ func newTestServer(t *testing.T, endpoints []config.EndpointConfig) (*Server, *f
 }
 
 type fakeExecutor struct {
-	mu    sync.Mutex
-	calls []execCall
-	err   error
-	block chan struct{}
+	mu          sync.Mutex
+	calls       []execCall
+	err         error
+	block       chan struct{}
+	started     chan struct{}
+	startedOnce sync.Once
 	// progress, when set, is copied into workCtx.Progress before the executor
 	// returns, simulating turn progress observed by the relay layer.
 	progress func() relay.TurnProgress
@@ -65,6 +67,9 @@ type execCall struct {
 }
 
 func (f *fakeExecutor) exec(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+	if f.started != nil {
+		f.startedOnce.Do(func() { close(f.started) })
+	}
 	if f.block != nil {
 		select {
 		case <-f.block:
