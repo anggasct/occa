@@ -1941,13 +1941,6 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		StartTime:    time.Now(),
 		Heartbeat:    heartbeat,
 	}
-	caller := ep.Workflow
-	if caller == "" {
-		caller = "delivery"
-	}
-	if eventType == "issue_comment" && caller == "fix" {
-		caller = "pr-fix"
-	}
 	prKey, hasPRKey := prKeyForEndpoint(ep, key, envelope)
 	if hasPRKey {
 		workCtx.PRKey = prKey
@@ -1974,58 +1967,48 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 	workCtx.ReportWorkdir = func(workdir string) {
 		run.setWorkdir(workdir)
 	}
-	resolvedPR := false
+	boundThreadID := strings.TrimSpace(workCtx.ThreadID)
+	binding := prBindingResolution{ThreadID: boundThreadID}
 	if hasPRKey {
-		if rec, ok := s.tasks.ResolvePRThread(prKey); ok {
-			resolvedPR = true
-			if rec.ThreadID != "" {
-				workCtx.ThreadID = rec.ThreadID
-			}
-			if rec.RootMessageID != "" {
-				workCtx.RootMessageID = rec.RootMessageID
-			}
+		binding = s.resolvePRBinding(context.Background(), prKey, eventType, envelope)
+		if binding.ThreadID == "" {
+			binding.ThreadID = boundThreadID
+		}
+		if binding.ThreadID != "" {
+			workCtx.ThreadID = binding.ThreadID
+		}
+		if binding.RootMessageID != "" {
+			workCtx.RootMessageID = binding.RootMessageID
 		}
 	}
-	if !resolvedPR {
-		if repo, branch := TaskRepoBranch(key, envelope); repo != "" && branch != "" {
-			if _, _, rec, ok := s.tasks.ResolveForDelivery(key, envelope, caller); ok {
-				if rec.ThreadID != "" {
-					workCtx.ThreadID = rec.ThreadID
-				}
-				if rec.RootMessageID != "" {
-					workCtx.RootMessageID = rec.RootMessageID
-				}
-			}
-		} else if eventType == "issue_comment" {
+	if !hasPRKey && strings.TrimSpace(workCtx.ThreadID) == "" {
+		repo, branch := TaskRepoBranch(key, envelope)
+		if repo == "" {
+			repo = normalizeRepoKey(stringValue(envelope["repository"]))
+		}
+		if branch == "" && eventType == "issue_comment" {
 			if routingRepo, routingBranch, ok := s.commentRoutingIdentity(body, eventType, ep, envelope); ok {
-				if rec, ok := s.tasks.ResolveTaskThread(routingRepo, routingBranch, caller); ok {
-					if rec.ThreadID != "" {
-						workCtx.ThreadID = rec.ThreadID
-					}
-					if rec.RootMessageID != "" {
-						workCtx.RootMessageID = rec.RootMessageID
-					}
-				}
-			} else if repo != "" || branch != "" {
-				s.tasks.ResolveTaskThread(repo, branch, caller)
-			} else if parsedRepo, _, ok := parseIssueCommentPR(body); ok {
-				s.tasks.ResolveTaskThread(parsedRepo, "", caller)
+				repo, branch = routingRepo, routingBranch
+			}
+		}
+		if repo != "" && branch != "" {
+			if rec, ok := s.tasks.ResolveTaskThread(repo, branch, ep.Workflow); ok {
+				workCtx.ThreadID = strings.TrimSpace(rec.ThreadID)
+				workCtx.RootMessageID = strings.TrimSpace(rec.RootMessageID)
 			}
 		}
 	}
-	if hasPRKey && strings.TrimSpace(workCtx.ThreadID) == "" && s.prQueues != nil {
-		if row, rowErr := s.prQueues.Get(context.Background(), prKey); rowErr == nil && row != nil {
-			workCtx.ThreadID = strings.TrimSpace(row.ThreadID)
-			workCtx.RootMessageID = strings.TrimSpace(row.RootMsgID)
-		}
-	}
-	if hasPRKey && strings.TrimSpace(workCtx.ThreadID) == "" && s.threadStarter != nil {
-		summary := "run refused: PR thread binding unresolved (re-run /retry or re-trigger)"
+	if hasPRKey && strings.TrimSpace(workCtx.ThreadID) == "" && s.threadStarter != nil &&
+		isBindingRequiredWorkflow(ep.Workflow) {
+		summary := prBindingRefusalSummary(prKey, binding)
 		slog.Error("webhook: run refused, PR thread binding unresolved",
 			"endpoint", ep.Name,
 			"delivery_id", deliveryID,
 			"event_type", eventType,
 			"pr_key", prKey,
+			"repo", binding.Repo,
+			"branch", binding.Branch,
+			"branch_source", binding.BranchSource,
 		)
 		s.failUnboundRun(ep, id, envelope, prKey, summary)
 		return nil
@@ -2350,7 +2333,7 @@ func (s *Server) failUnboundRun(ep config.EndpointConfig, id int64, envelope Web
 	if number != "" {
 		label += "#" + number
 	}
-	text := "⚠️ RUN REFUSED — " + label + " · PR thread binding unresolved. Re-run via /retry or re-trigger."
+	text := "⚠️ RUN REFUSED — " + label + " · " + strings.TrimPrefix(summary, "run refused: ")
 	if s.notifier != nil {
 		if nErr := s.notifier(context.Background(), ep.Platform, ep.ChannelID, text); nErr != nil {
 			slog.Warn("webhook: unbound run notice failed", "endpoint", ep.Name, "pr_key", prKey, "error", nErr)

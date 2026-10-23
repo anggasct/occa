@@ -92,8 +92,10 @@ func TestRunWithoutResolvableThreadFailsLoudly(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 	receipt := waitForReceiptDeliveryID(t, st, "del-unbound", store.WebhookStatusFailed)
-	if receipt.ErrorSummary != "run refused: PR thread binding unresolved (re-run /retry or re-trigger)" {
-		t.Fatalf("unexpected failure summary: %q", receipt.ErrorSummary)
+	for _, want := range []string{"PR thread binding unresolved", "pr_key=acme/widget#7", "acme/widget#feat/x", "branch from payload"} {
+		if !strings.Contains(receipt.ErrorSummary, want) {
+			t.Fatalf("failure summary %q missing %q", receipt.ErrorSummary, want)
+		}
 	}
 	if atomic.LoadInt64(&calls) != 0 {
 		t.Fatalf("unbound run executed %d times", calls)
