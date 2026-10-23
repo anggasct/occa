@@ -406,6 +406,20 @@ func reviewDedupeKey(envelope WebhookEnvelope) string {
 	return prefix + head
 }
 
+const operatorRetryDeliveryPrefix = "op-retry-"
+
+func isOperatorRetryDelivery(deliveryID string) bool {
+	return strings.HasPrefix(strings.TrimSpace(deliveryID), operatorRetryDeliveryPrefix)
+}
+
+func isReviewWorkflow(workflow string) bool {
+	switch strings.TrimSpace(strings.ToLower(workflow)) {
+	case "review", "reviewer":
+		return true
+	}
+	return false
+}
+
 func hasActionableFindings(body string) bool {
 	lower := strings.ToLower(body)
 	if declaresNoFindings(lower) {

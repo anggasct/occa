@@ -121,6 +121,7 @@ func TestSkipOptOutCoversAllFamilies(t *testing.T) {
 
 	t.Run("review duplicate", func(t *testing.T) {
 		ep := silentEndpoint()
+		ep.Workflow = "review"
 		ep.Admit = defaultCatchAllAdmit()
 		srv, exec, st := newTestServerFull(t, []config.EndpointConfig{ep})
 		var mu sync.Mutex

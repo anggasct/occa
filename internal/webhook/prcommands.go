@@ -380,7 +380,7 @@ func (s *Server) enqueueSyntheticRetry(ctx context.Context, repo, number, kind, 
 	if !found {
 		return fmt.Errorf("no %s endpoint for repo %s", kind, repo)
 	}
-	deliveryID := fmt.Sprintf("op-retry-%d", time.Now().UnixNano())
+	deliveryID := fmt.Sprintf("%s%d", operatorRetryDeliveryPrefix, time.Now().UnixNano())
 	item := dispatchItem{
 		ep:         ep,
 		body:       body,

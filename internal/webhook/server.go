@@ -2025,7 +2025,10 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		return nil
 	}
 
-	reviewKey := reviewDedupeKey(envelope)
+	reviewKey := ""
+	if isReviewWorkflow(ep.Workflow) && !isOperatorRetryDelivery(deliveryID) {
+		reviewKey = reviewDedupeKey(envelope)
+	}
 	triggerPrefix := ""
 	if stringValue(envelope["event_type"]) == "issue_comment" && stringValue(envelope["comment_trigger"]) != "" {
 		triggerPrefix = reviewDedupePrefix(envelope)

@@ -84,7 +84,7 @@ func seedDeliveryForEvent(t *testing.T, deliveries store.WebhookDeliveryRepo, en
 
 func reviewGuardEndpoint() config.EndpointConfig {
 	ep := takeoverTestEndpoint()
-	ep.Workflow = ""
+	ep.Workflow = "review"
 	return ep
 }
 
@@ -424,6 +424,38 @@ func TestDuplicateReviewSuppressedAcrossSyntheticAndCommentPaths(t *testing.T) {
 	third, err := st.WebhookDeliveryRepo().Get(context.Background(), ep.Name, otherHeadID)
 	if err != nil || third == nil || third.Status != store.WebhookStatusCompleted {
 		t.Fatalf("different-head receipt = %+v, %v; want completed", third, err)
+	}
+}
+
+func TestFixTriggerNotSuppressedByReviewDedupe(t *testing.T) {
+	const head = "5932515abc"
+	ep := reviewGuardEndpoint()
+	ep.Name = "fix-dedupe-test"
+	ep.Workflow = "fix"
+	ep.CommentTrigger = []string{"please fix review"}
+	ep.Limits = &config.EndpointLimits{MaxRunsPerPR: 10, Window: time.Hour}
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{ep})
+
+	reviewID := "del-review-fix"
+	reviewReceipt := seedDeliveryForEvent(t, st.WebhookDeliveryRepo(), ep.Name, reviewID, "pull_request_review")
+	if err := srv.executeDelivery(ep, reviewEventBody(t, "changes_requested", "**Verdict:** REQUEST_CHANGES", head), reviewReceipt, reviewID, "pull_request_review", 1, nil, nil, nil); err != nil {
+		t.Fatalf("review executeDelivery: %v", err)
+	}
+	if count := exec.callCount(); count != 1 {
+		t.Fatalf("review delivery spawned %d turns, want 1", count)
+	}
+
+	commentID := "del-fix-comment"
+	commentReceipt := seedDeliveryForEvent(t, st.WebhookDeliveryRepo(), ep.Name, commentID, "issue_comment")
+	if err := srv.executeDelivery(ep, issueCommentEventBodyWithHead(t, 7, "please fix review", head), commentReceipt, commentID, "issue_comment", 1, nil, nil, nil); err != nil {
+		t.Fatalf("fix comment executeDelivery: %v", err)
+	}
+	if count := exec.callCount(); count != 2 {
+		t.Fatalf("fix retrigger spawned %d turns, want 2", count)
+	}
+	second, err := st.WebhookDeliveryRepo().Get(context.Background(), ep.Name, commentID)
+	if err != nil || second == nil || second.Status != store.WebhookStatusCompleted {
+		t.Fatalf("fix comment receipt = %+v, %v; want completed", second, err)
 	}
 }
 
