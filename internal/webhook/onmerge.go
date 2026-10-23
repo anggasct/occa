@@ -63,6 +63,43 @@ func (s *Server) markMergeConfirmed(ctx context.Context, ep config.EndpointConfi
 	s.ensureThreadStatus(ctx, ep.Platform, ep.ChannelID, workCtx.ThreadID, repo, branch, workCtx.PRKey, ThreadStatusUpdate{Phase: PhaseMerged})
 }
 
+func (s *Server) scheduleMergedRetry(item dispatchItem, receipt *store.WebhookDelivery) {
+	ctx := context.Background()
+	attempt := item.mergedRetry + 1
+	maxAttempts := s.replayMaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = 3
+	}
+	if attempt > maxAttempts {
+		s.failAbandonedReceipt(receipt, "merge confirmation lookup failed")
+		return
+	}
+	ok, err := s.deliveries.Transition(ctx, receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived, store.WebhookStatusAccepted, store.WebhookStatusProcessing}, store.WebhookStatusReceived, "merge confirmation lookup pending")
+	if err != nil {
+		slog.Warn("webhook: merge retry transition failed", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "error", err)
+	} else if !ok {
+		slog.Warn("webhook: merge retry transition lost race", "endpoint", item.ep.Name, "delivery_id", item.deliveryID)
+	}
+	item.mergedRetry = attempt
+	delay := s.replayBackoffFor(attempt - 1)
+	go func() {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-s.shutdownCtx.Done():
+			return
+		}
+		if _, admitted, why := s.enqueue(item.ep, ExtractExecutionKey(item.body), item); !admitted {
+			slog.Warn("webhook: merge retry deferred",
+				"endpoint", item.ep.Name,
+				"delivery_id", item.deliveryID,
+				"reason", why,
+			)
+		}
+	}()
+}
+
 // handleMergedDelivery closes a merged PR without an agent turn: the queue is
 // drained, the task becomes terminal, a session left over from an earlier run
 // is aborted, and the post-merge work runs outside the queue lane.
@@ -80,13 +117,23 @@ func (s *Server) handleMergedDelivery(item dispatchItem, receipt *store.WebhookD
 		if err := s.deliveries.SetPRKey(ctx, receipt.ID, prKey); err != nil {
 			slog.Warn("webhook: pr key stamp failed", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "error", err)
 		}
-		if state, lookupErr := s.resolveLivePRState(ctx, prKey); lookupErr != nil || state != PRStateMerged {
+		state, lookupErr := s.resolveLivePRState(ctx, prKey)
+		if lookupErr != nil {
+			slog.Warn("webhook: merge confirmation lookup failed",
+				"endpoint", item.ep.Name,
+				"delivery_id", item.deliveryID,
+				"pr_key", prKey,
+				"error", lookupErr,
+			)
+			s.scheduleMergedRetry(item, receipt)
+			return
+		}
+		if state != PRStateMerged {
 			slog.Warn("webhook: merge not confirmed",
 				"endpoint", item.ep.Name,
 				"delivery_id", item.deliveryID,
 				"pr_key", prKey,
 				"state", state,
-				"error", lookupErr,
 			)
 			ok, tErr := s.deliveries.Transition(ctx, receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived, store.WebhookStatusAccepted, store.WebhookStatusProcessing}, store.WebhookStatusSkipped, "merge not confirmed: PR is "+state)
 			if tErr != nil {

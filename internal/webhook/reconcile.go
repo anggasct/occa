@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -160,6 +161,24 @@ func (s *Server) reconcileFloorKey(prKey, lane, head string) string {
 	return strings.TrimSpace(prKey) + "|" + lane + "|" + normalizeRevision(head)
 }
 
+func (s *Server) persistedReconcileAt(ctx context.Context, endpoint, lane, head string) (time.Time, bool) {
+	if s.deliveries == nil {
+		return time.Time{}, false
+	}
+	prefix := fmt.Sprintf("reconcile-%s-%s-", lane, normalizeRevision(head))
+	receipt, err := s.deliveries.LatestByDeliveryPrefix(ctx, endpoint, prefix)
+	if err != nil || receipt == nil {
+		return time.Time{}, false
+	}
+	if nanos, parseErr := strconv.ParseInt(strings.TrimPrefix(receipt.DeliveryID, prefix), 10, 64); parseErr == nil && nanos > 0 {
+		return time.Unix(0, nanos), true
+	}
+	if receipt.CreatedAt <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(receipt.CreatedAt, 0), true
+}
+
 func (s *Server) reconcileEnqueue(ctx context.Context, row store.PRRun, lane string, facts ReconcileFacts, reason string) {
 	repo, _, _ := splitPRKey(row.PRKey)
 	ep, ok := s.endpointForWorkflow(repo, lane)
@@ -176,19 +195,19 @@ func (s *Server) reconcileEnqueue(ctx context.Context, row store.PRRun, lane str
 	}
 	s.reconcileMu.Unlock()
 
+	if last, seen := s.persistedReconcileAt(ctx, ep.Name, lane, facts.HeadSHA); seen && now.Sub(last) < s.reconcileFloor {
+		s.reconcileMu.Lock()
+		s.reconcileLast[key] = last
+		s.reconcileMu.Unlock()
+		return
+	}
+
 	body, eventType, err := reconcileBody(ep, lane, repo, facts)
 	if err != nil {
 		slog.Warn("webhook: reconcile body failed", "pr_key", row.PRKey, "lane", lane, "error", err)
 		return
 	}
-	bucket := now.Unix() / int64(s.reconcileFloor/time.Second)
-	deliveryID := fmt.Sprintf("reconcile-%s-%s-%d", lane, normalizeRevision(facts.HeadSHA), bucket)
-	if receipt, getErr := s.deliveries.Get(ctx, ep.Name, deliveryID); getErr == nil && receipt != nil {
-		s.reconcileMu.Lock()
-		s.reconcileLast[key] = now
-		s.reconcileMu.Unlock()
-		return
-	}
+	deliveryID := fmt.Sprintf("reconcile-%s-%s-%d", lane, normalizeRevision(facts.HeadSHA), now.UnixNano())
 	item := dispatchItem{
 		ep:          ep,
 		body:        body,
@@ -309,11 +328,22 @@ type ghCheckContext struct {
 	State      string `json:"state"`
 }
 
+type ghReconcileReview struct {
+	State       string `json:"state"`
+	SubmittedAt string `json:"submittedAt"`
+	Commit      struct {
+		OID string `json:"oid"`
+	} `json:"commit"`
+	Author struct {
+		Login string `json:"login"`
+	} `json:"author"`
+}
+
 func ghReconcileFacts(ctx context.Context, repo, number string) (ReconcileFacts, error) {
 	lookupCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(lookupCtx, "gh", "pr", "view", strings.TrimSpace(number), "--repo", strings.TrimSpace(repo),
-		"--json", "state,headRefOid,headRefName,baseRefName,title,url,author,headRepository,reviewDecision,statusCheckRollup")
+		"--json", "state,headRefOid,headRefName,baseRefName,title,url,author,headRepository,reviews,statusCheckRollup")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -325,14 +355,14 @@ func ghReconcileFacts(ctx context.Context, repo, number string) (ReconcileFacts,
 		return ReconcileFacts{}, fmt.Errorf("gh pr view: %s", detail)
 	}
 	var raw struct {
-		State             string           `json:"state"`
-		HeadRefOid        string           `json:"headRefOid"`
-		HeadRefName       string           `json:"headRefName"`
-		BaseRefName       string           `json:"baseRefName"`
-		Title             string           `json:"title"`
-		URL               string           `json:"url"`
-		ReviewDecision    string           `json:"reviewDecision"`
-		StatusCheckRollup []ghCheckContext `json:"statusCheckRollup"`
+		State             string              `json:"state"`
+		HeadRefOid        string              `json:"headRefOid"`
+		HeadRefName       string              `json:"headRefName"`
+		BaseRefName       string              `json:"baseRefName"`
+		Title             string              `json:"title"`
+		URL               string              `json:"url"`
+		Reviews           []ghReconcileReview `json:"reviews"`
+		StatusCheckRollup []ghCheckContext    `json:"statusCheckRollup"`
 		Author            struct {
 			Login string `json:"login"`
 		} `json:"author"`
@@ -344,23 +374,55 @@ func ghReconcileFacts(ctx context.Context, repo, number string) (ReconcileFacts,
 		return ReconcileFacts{}, fmt.Errorf("gh pr view decode: %w", err)
 	}
 	facts := ReconcileFacts{
-		State:    strings.TrimSpace(raw.State),
-		HeadSHA:  normalizeRevision(raw.HeadRefOid),
-		HeadRef:  strings.TrimSpace(raw.HeadRefName),
-		BaseRef:  strings.TrimSpace(raw.BaseRefName),
-		Title:    strings.TrimSpace(raw.Title),
-		URL:      strings.TrimSpace(raw.URL),
-		Author:   strings.TrimSpace(raw.Author.Login),
-		HeadRepo: strings.TrimSpace(raw.HeadRepository.NameWithOwner),
-		CIGreen:  checksGreen(raw.StatusCheckRollup),
-	}
-	switch strings.ToUpper(strings.TrimSpace(raw.ReviewDecision)) {
-	case "APPROVED":
-		facts.ReviewVerdict = "approved"
-	case "CHANGES_REQUESTED":
-		facts.ReviewVerdict = "changes_requested"
+		State:         strings.TrimSpace(raw.State),
+		HeadSHA:       normalizeRevision(raw.HeadRefOid),
+		HeadRef:       strings.TrimSpace(raw.HeadRefName),
+		BaseRef:       strings.TrimSpace(raw.BaseRefName),
+		Title:         strings.TrimSpace(raw.Title),
+		URL:           strings.TrimSpace(raw.URL),
+		Author:        strings.TrimSpace(raw.Author.Login),
+		HeadRepo:      strings.TrimSpace(raw.HeadRepository.NameWithOwner),
+		CIGreen:       checksGreen(raw.StatusCheckRollup),
+		ReviewVerdict: ghReviewVerdictForHead(raw.Reviews, raw.HeadRefOid),
 	}
 	return facts, nil
+}
+
+func ghReviewVerdictForHead(reviews []ghReconcileReview, head string) string {
+	head = normalizeRevision(head)
+	if head == "" {
+		return ""
+	}
+	latest := make(map[string]ghReconcileReview)
+	for index, review := range reviews {
+		state := strings.ToUpper(strings.TrimSpace(review.State))
+		switch state {
+		case "APPROVED", "CHANGES_REQUESTED", "DISMISSED":
+		default:
+			continue
+		}
+		if normalizeRevision(review.Commit.OID) != head {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(review.Author.Login))
+		if key == "" {
+			key = fmt.Sprintf("review:%d", index)
+		}
+		if previous, ok := latest[key]; ok && previous.SubmittedAt > review.SubmittedAt {
+			continue
+		}
+		latest[key] = review
+	}
+	verdict := ""
+	for _, review := range latest {
+		switch strings.ToUpper(strings.TrimSpace(review.State)) {
+		case "CHANGES_REQUESTED":
+			return "changes_requested"
+		case "APPROVED":
+			verdict = "approved"
+		}
+	}
+	return verdict
 }
 
 func checksGreen(checks []ghCheckContext) bool {

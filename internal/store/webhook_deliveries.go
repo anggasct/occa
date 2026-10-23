@@ -280,6 +280,21 @@ func (r *sqliteWebhookDeliveryRepo) LatestForPR(ctx context.Context, prKey strin
 	return d, nil
 }
 
+func (r *sqliteWebhookDeliveryRepo) LatestByDeliveryPrefix(ctx context.Context, endpoint, prefix string) (*WebhookDelivery, error) {
+	row := r.db.QueryRowContext(ctx,
+		`SELECT `+deliveryColumns+` FROM webhook_delivery WHERE endpoint = ? AND delivery_id LIKE ? ORDER BY id DESC LIMIT 1`,
+		endpoint, prefix+"%",
+	)
+	d, err := scanWebhookDelivery(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: webhook delivery latest by prefix: %w", err)
+	}
+	return d, nil
+}
+
 func (r *sqliteWebhookDeliveryRepo) SetPRKey(ctx context.Context, id int64, prKey string) error {
 	_, err := r.db.ExecContext(ctx,
 		`UPDATE webhook_delivery SET pr_key = ?, updated_at = ? WHERE id = ?`,

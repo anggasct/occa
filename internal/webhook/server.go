@@ -50,6 +50,7 @@ type DeliveryStore interface {
 	SetPRKey(ctx context.Context, id int64, prKey string) error
 	Reopen(ctx context.Context, id int64, from []store.WebhookStatus) (bool, error)
 	LatestForPR(ctx context.Context, prKey string) (*store.WebhookDelivery, error)
+	LatestByDeliveryPrefix(ctx context.Context, endpoint, prefix string) (*store.WebhookDelivery, error)
 	FindReviewDuplicate(ctx context.Context, endpoint, reviewKey string, excludeID, cutoff int64) (*store.WebhookDelivery, error)
 	CountReviewDeliveries(ctx context.Context, endpoint, reviewKeyPrefix string, cutoff int64) (int, error)
 }
@@ -1120,6 +1121,7 @@ type dispatchItem struct {
 	queueID     int64
 	replayID    int64
 	requeues    int
+	mergedRetry int
 }
 
 type dispatcher struct {

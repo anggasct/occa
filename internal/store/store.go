@@ -251,6 +251,9 @@ type WebhookDeliveryRepo interface {
 	Reopen(ctx context.Context, id int64, from []WebhookStatus) (bool, error)
 	// LatestForPR returns the newest delivery stamped with prKey, or nil.
 	LatestForPR(ctx context.Context, prKey string) (*WebhookDelivery, error)
+	// LatestByDeliveryPrefix returns the newest delivery for an endpoint whose
+	// delivery ID starts with prefix, or nil.
+	LatestByDeliveryPrefix(ctx context.Context, endpoint, prefix string) (*WebhookDelivery, error)
 	// FindReviewDuplicate returns a completed or in-flight delivery, other than
 	// excludeID, with the same review key updated at/after cutoff, or nil.
 	FindReviewDuplicate(ctx context.Context, endpoint, reviewKey string, excludeID, cutoff int64) (*WebhookDelivery, error)

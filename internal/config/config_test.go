@@ -1192,3 +1192,56 @@ func TestWebhookEndpointCommentTrigger(t *testing.T) {
 		t.Errorf("ep2 CommentTrigger = %#v, want empty", ep2.CommentTrigger)
 	}
 }
+
+func TestLoadExpandsWebhookSpoolDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
+	path := writeConfig(t, t.TempDir(), `webhooks:
+  policy:
+    trust_review_logins: []
+    verdicts:
+      approved: ['approved']
+      request_changes: ['request changes', 'request_changes']
+  runtime:
+    max_body_size: 10MB
+    max_concurrent_events: 16
+    max_queued_per_key: 8
+    processing_timeout: 30m
+    claim_grace: 32m
+    retry_after: 30s
+    workspace_retry_backoff: [30s, 60s, 120s]
+    retention: 720h
+    retention_keep: 500
+    prune_interval: 10m
+    dispatcher_idle_ttl: 1h
+    dispatcher_stuck_after: 5m
+    watchdog_interval: 1m
+    http_read_header_timeout: 10s
+    http_read_timeout: 30s
+    http_write_timeout: 30s
+    http_idle_timeout: 2m
+    review_dedupe_window: 60m
+    isolated_workspace_ttl: 24h
+    spool_dir: ~/.occa/spool
+  endpoints:
+    - name: test
+      path: /test
+      secret: s
+      platform: telegram
+      channel_id: c1
+      prompt: p
+      admit:
+        - event: ping
+      workspace:
+        type: none
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := filepath.Join(home, ".occa", "spool")
+	if got := cfg.Webhooks.Runtime.SpoolDir; got != want {
+		t.Fatalf("spool dir = %q, want %q", got, want)
+	}
+}
