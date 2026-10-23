@@ -68,6 +68,11 @@ type WebhookRuntime struct {
 	HTTPIdleTimeout       time.Duration   `yaml:"http_idle_timeout"`
 	ReviewDedupeWindow    time.Duration   `yaml:"review_dedupe_window"`
 	IsolatedWorkspaceTTL  time.Duration   `yaml:"isolated_workspace_ttl"`
+	AckBudget             time.Duration   `yaml:"ack_budget"`
+	ReconcileInterval     time.Duration   `yaml:"reconcile_interval"`
+	ReconcileFloor        time.Duration   `yaml:"reconcile_floor"`
+	ReconcileMaxPRs       int             `yaml:"reconcile_max_prs"`
+	SpoolDir              string          `yaml:"spool_dir"`
 }
 
 const (
@@ -78,6 +83,10 @@ const (
 	defaultReplayInterval      = 30 * time.Second
 	defaultReplayMaxAttempts   = 3
 	defaultReplayTTL           = 30 * time.Minute
+	defaultAckBudget           = 1500 * time.Millisecond
+	defaultReconcileInterval   = 2 * time.Minute
+	defaultReconcileFloor      = 10 * time.Minute
+	defaultReconcileMaxPRs     = 25
 )
 
 var defaultReplayBackoff = []time.Duration{30 * time.Second, 2 * time.Minute, 10 * time.Minute}
@@ -136,6 +145,34 @@ func (r WebhookRuntime) EffectiveReplayTTL() time.Duration {
 		return defaultReplayTTL
 	}
 	return r.ReplayTTL
+}
+
+func (r WebhookRuntime) EffectiveAckBudget() time.Duration {
+	if r.AckBudget <= 0 {
+		return defaultAckBudget
+	}
+	return r.AckBudget
+}
+
+func (r WebhookRuntime) EffectiveReconcileInterval() time.Duration {
+	if r.ReconcileInterval <= 0 {
+		return defaultReconcileInterval
+	}
+	return r.ReconcileInterval
+}
+
+func (r WebhookRuntime) EffectiveReconcileFloor() time.Duration {
+	if r.ReconcileFloor <= 0 {
+		return defaultReconcileFloor
+	}
+	return r.ReconcileFloor
+}
+
+func (r WebhookRuntime) EffectiveReconcileMaxPRs() int {
+	if r.ReconcileMaxPRs <= 0 {
+		return defaultReconcileMaxPRs
+	}
+	return r.ReconcileMaxPRs
 }
 
 var knownRequireFlags = map[string]bool{
@@ -356,6 +393,18 @@ func validateWebhookRuntime(runtime WebhookRuntime) (WebhookRuntime, error) {
 	}
 	if runtime.IsolatedWorkspaceTTL <= 0 {
 		return WebhookRuntime{}, missing("isolated_workspace_ttl")
+	}
+	if runtime.AckBudget < 0 {
+		return WebhookRuntime{}, fmt.Errorf("config: webhooks.runtime.ack_budget must be >= 0")
+	}
+	if runtime.ReconcileInterval < 0 {
+		return WebhookRuntime{}, fmt.Errorf("config: webhooks.runtime.reconcile_interval must be >= 0")
+	}
+	if runtime.ReconcileFloor < 0 {
+		return WebhookRuntime{}, fmt.Errorf("config: webhooks.runtime.reconcile_floor must be >= 0")
+	}
+	if runtime.ReconcileMaxPRs < 0 {
+		return WebhookRuntime{}, fmt.Errorf("config: webhooks.runtime.reconcile_max_prs must be >= 0")
 	}
 	return runtime, nil
 }

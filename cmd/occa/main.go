@@ -152,6 +152,9 @@ func main() {
 	reaped, err := manager.ReapOrphans(ctx)
 	slog.Info("agent orphan sweep complete", "reaped", reaped, "error", err)
 
+	cleared, sweepErr := db.SessionRepo().SweepActive(ctx, process.Alive)
+	slog.Info("session active sweep complete", "cleared", cleared, "error", sweepErr)
+
 	rt := router.NewWithAllowlists(managerProvider{manager}, db, cfg.Agent.DefaultWorkdir, cfg.AdminID, cfg.Discord.AllowedSenderIDs, cfg.Telegram.AllowedSenderIDs, router.Config{
 		ContextStaleAfter:      cfg.Runtime.Router.ContextStaleAfter,
 		ProgressQuietThreshold: cfg.Runtime.Router.ProgressQuietThreshold,

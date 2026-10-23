@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"strings"
 	"sync"
@@ -147,6 +148,20 @@ func (s *Server) endActiveRun(run *activeRun) {
 
 func (s *Server) SetSessionLiveness(fn SessionLiveness) {
 	s.sessionLiveness = fn
+}
+
+func (s *Server) deactivateSession(platform, channelID, threadID string) {
+	if s.sessions == nil || strings.TrimSpace(threadID) == "" {
+		return
+	}
+	if err := s.sessions.Deactivate(context.Background(), platform, channelID, threadID, ""); err != nil {
+		slog.Warn("webhook: session deactivate failed",
+			"platform", platform,
+			"channel_id", channelID,
+			"thread_id", threadID,
+			"error", err,
+		)
+	}
 }
 
 func (s *Server) SetPRStateResolver(fn PRStateResolver) {

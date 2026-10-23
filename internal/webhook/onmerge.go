@@ -51,6 +51,18 @@ func (s *Server) handleMergedWorkflow(item dispatchItem, receipt *store.WebhookD
 	s.handleMergedDelivery(item, receipt, envelope, d)
 }
 
+func (s *Server) markMergeConfirmed(ctx context.Context, ep config.EndpointConfig, envelope WebhookEnvelope, workCtx *WebhookWorkContext) {
+	if workCtx == nil || strings.TrimSpace(workCtx.PRKey) == "" {
+		return
+	}
+	s.syncPhaseParent(ctx, ep, workCtx.PRKey, envelope, PhaseMerged)
+	if strings.TrimSpace(workCtx.ThreadID) == "" {
+		return
+	}
+	repo, branch := TaskRepoBranch(workCtx.Key, envelope)
+	s.ensureThreadStatus(ctx, ep.Platform, ep.ChannelID, workCtx.ThreadID, repo, branch, workCtx.PRKey, ThreadStatusUpdate{Phase: PhaseMerged})
+}
+
 // handleMergedDelivery closes a merged PR without an agent turn: the queue is
 // drained, the task becomes terminal, a session left over from an earlier run
 // is aborted, and the post-merge work runs outside the queue lane.
@@ -67,6 +79,22 @@ func (s *Server) handleMergedDelivery(item dispatchItem, receipt *store.WebhookD
 	if prKey != "" {
 		if err := s.deliveries.SetPRKey(ctx, receipt.ID, prKey); err != nil {
 			slog.Warn("webhook: pr key stamp failed", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "error", err)
+		}
+		if state, lookupErr := s.resolveLivePRState(ctx, prKey); lookupErr != nil || state != PRStateMerged {
+			slog.Warn("webhook: merge not confirmed",
+				"endpoint", item.ep.Name,
+				"delivery_id", item.deliveryID,
+				"pr_key", prKey,
+				"state", state,
+				"error", lookupErr,
+			)
+			ok, tErr := s.deliveries.Transition(ctx, receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived, store.WebhookStatusAccepted, store.WebhookStatusProcessing}, store.WebhookStatusSkipped, "merge not confirmed: PR is "+state)
+			if tErr != nil {
+				slog.Warn("webhook: merge skip transition failed", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "error", tErr)
+			} else if !ok {
+				slog.Warn("webhook: merge skip transition lost race", "endpoint", item.ep.Name, "delivery_id", item.deliveryID)
+			}
+			return
 		}
 	}
 	dropped := 0

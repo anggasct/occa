@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -15,6 +16,17 @@ const (
 	SchemaVersion    = schemaVersion
 	busyTimeoutMilli = 5000
 )
+
+func sqliteDSN(path string) string {
+	if path == ":memory:" || strings.Contains(path, "_txlock=") {
+		return path
+	}
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	return path + separator + "_txlock=immediate&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+}
 
 var migrations = []func(s *SQLiteStore, tx *sql.Tx) error{
 	createInitialSchema,
@@ -464,6 +476,7 @@ CREATE INDEX IF NOT EXISTS idx_schedule_enabled ON schedule (enabled);
 
 type SQLiteStore struct {
 	db                *sql.DB
+	ingestDB          *sql.DB
 	sessions          *sqliteSessionRepo
 	channels          *sqliteChannelRepo
 	overrides         *sqliteOverrideRepo
@@ -484,7 +497,8 @@ func OpenWithDefaultWorkdir(path, defaultWorkdir string) (*SQLiteStore, error) {
 }
 
 func OpenWithRetention(path, defaultWorkdir string, usage UsageRetention, recoveryRetention time.Duration) (*SQLiteStore, error) {
-	db, err := sql.Open("sqlite", path)
+	dsn := sqliteDSN(path)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open: %w", err)
 	}
@@ -502,11 +516,20 @@ func OpenWithRetention(path, defaultWorkdir string, usage UsageRetention, recove
 		return nil, fmt.Errorf("store: foreign keys: %w", err)
 	}
 
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(4)
 
-	s := &SQLiteStore{db: db, defaultWorkdir: defaultWorkdir}
+	ingestDB, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("store: open ingest: %w", err)
+	}
+	ingestDB.SetMaxOpenConns(2)
+	ingestDB.SetMaxIdleConns(2)
+
+	s := &SQLiteStore{db: db, ingestDB: ingestDB, defaultWorkdir: defaultWorkdir}
 	if err := s.migrate(); err != nil {
+		_ = ingestDB.Close()
 		_ = db.Close()
 		return nil, err
 	}
@@ -525,7 +548,7 @@ func OpenWithRetention(path, defaultWorkdir string, usage UsageRetention, recove
 	s.threadConfigs = &sqliteThreadConfigRepo{db: db}
 	s.permissionRules = &sqlitePermissionRuleRepo{db: db}
 	s.usage = &sqliteUsageRepo{db: db, retention: usage.Retention, maxRows: usage.MaxRows}
-	s.webhookDeliveries = &sqliteWebhookDeliveryRepo{db: db}
+	s.webhookDeliveries = &sqliteWebhookDeliveryRepo{db: ingestDB}
 	s.recoveryEvents = &sqliteRecoveryEventRepo{db: db, retention: recoveryRetention}
 	s.prQueues = &sqlitePRQueueRepo{db: db}
 	s.webhookReplays = &sqliteWebhookReplayRepo{db: db}
@@ -578,7 +601,13 @@ func (s *SQLiteStore) PRQueueRepo() PRQueueRepo                 { return s.prQue
 func (s *SQLiteStore) WebhookReplayRepo() WebhookReplayRepo     { return s.webhookReplays }
 
 func (s *SQLiteStore) Close() error {
-	return s.db.Close()
+	err := s.db.Close()
+	if s.ingestDB != nil {
+		if ingestErr := s.ingestDB.Close(); err == nil {
+			err = ingestErr
+		}
+	}
+	return err
 }
 
 func (s *SQLiteStore) DB() *sql.DB { return s.db }

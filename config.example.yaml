@@ -55,6 +55,11 @@ webhooks:
     http_idle_timeout: 2m # keep-alive idle timeout
     review_dedupe_window: 60m # duplicate pull_request_review suppression window
     isolated_workspace_ttl: 24h # expiry for detached isolated worktrees
+    ack_budget: 1500ms # handler wait for the delivery-row insert before spooling; 0 = default
+    reconcile_interval: 2m # stalled-PR reconciliation cadence; 0 = default
+    reconcile_floor: 10m # minimum gap between reconcile enqueues for one PR/head/lane
+    reconcile_max_prs: 25 # bound PRs examined per reconcile tick
+    spool_dir: ~/.occa/spool # durable overflow spool for deliveries that miss the ACK budget
   dispatch: # task entry API (disabled unless enabled: true)
     enabled: false # POST /dispatch with bearer-token auth; relay posts a 2-line summary + thread
     path: /dispatch # API route suffix (must not collide with an endpoint path)

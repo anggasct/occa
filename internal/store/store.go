@@ -170,6 +170,9 @@ type SessionRepo interface {
 	ThreadRoot(ctx context.Context, platform, channelID, threadID string) (*ThreadRootCard, error)
 	MarkParked(ctx context.Context, platform, channelID, threadID, userID, reason string) error
 	ParkState(ctx context.Context, platform, channelID, threadID, userID string) (parked bool, reason string, err error)
+	// SweepActive clears active rows whose agent process is gone and keeps
+	// rows whose process is alive. It never deletes session history.
+	SweepActive(ctx context.Context, alive func(pid int) bool) (int, error)
 }
 
 type ChannelRepo interface {
@@ -216,6 +219,10 @@ type WebhookDeliveryRepo interface {
 	// new row was created; a duplicate (same endpoint + delivery ID) bumps the
 	// attempt count and reports created=false.
 	Create(ctx context.Context, d WebhookDelivery) (bool, error)
+	// Ensure inserts a receipt only when its key is absent. Unlike Create it
+	// never bumps the attempt count of an existing row, so replaying a durable
+	// spool is idempotent.
+	Ensure(ctx context.Context, d WebhookDelivery) (bool, error)
 	// Get returns the current receipt, or nil when the key is unknown.
 	Get(ctx context.Context, endpoint, deliveryID string) (*WebhookDelivery, error)
 	// GetByID returns the receipt with the row id, or nil when unknown.
