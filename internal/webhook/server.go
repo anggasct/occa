@@ -621,18 +621,27 @@ func (s *Server) pruneIfDue() {
 	}
 }
 
+// repairPRQueueInvariants repairs phantom active rows left behind by a
+// delivery exit. A non-empty prKey keeps the sweep scoped to that PR; an empty
+// prKey is the startup sweep. Exit-path calls never pass an empty key.
+func (s *Server) repairPRQueueInvariants(ctx context.Context, prKey string) {
+	if s.prQueues == nil {
+		return
+	}
+	repaired, err := s.prQueues.RepairInvariants(ctx, prKey)
+	if err != nil {
+		slog.Warn("webhook: pr queue invariant check failed", "error", err)
+		return
+	}
+	for _, key := range repaired {
+		slog.Warn("webhook: pr queue invariant repaired", "pr_key", key, "status", "drained")
+	}
+}
+
 func (s *Server) Start(ctx context.Context) error {
 	s.recoverStale(ctx)
 	slog.Info("webhook: " + s.RecoverPRQueue())
-	if s.prQueues != nil {
-		repaired, err := s.prQueues.RepairInvariants(ctx)
-		if err != nil {
-			slog.Warn("webhook: pr queue invariant check failed", "error", err)
-		}
-		for _, key := range repaired {
-			slog.Warn("webhook: pr queue invariant repaired", "pr_key", key, "status", "drained")
-		}
-	}
+	s.repairPRQueueInvariants(ctx, "")
 
 	mux := http.NewServeMux()
 	if s.dispatchEnabled {
@@ -1249,6 +1258,9 @@ func (d *dispatcher) retire(reason string) {
 
 func (d *dispatcher) handle(item dispatchItem) {
 	s := d.server
+	if item.prKey != "" {
+		defer s.repairPRQueueInvariants(context.Background(), item.prKey)
+	}
 	receipt := s.beginExecution(item)
 	if receipt == nil {
 		return
@@ -1828,6 +1840,9 @@ func (s *Server) logDuplicate(item dispatchItem, observed store.WebhookStatus) {
 // now so overload rejections and queue waits leave no rows behind.
 func (s *Server) abandon(item dispatchItem, reason string) {
 	ctx := context.Background()
+	if strings.TrimSpace(item.prKey) != "" {
+		defer s.repairPRQueueInvariants(ctx, item.prKey)
+	}
 	s.mirrorDelete(item.queueID)
 	created, err := s.deliveries.Create(ctx, store.WebhookDelivery{
 		Endpoint:    item.ep.Name,
