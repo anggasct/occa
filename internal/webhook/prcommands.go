@@ -276,12 +276,22 @@ func (s *Server) inferRetryKind(ctx context.Context, row *store.PRRun) string {
 			rec = got
 		}
 	}
-	return retryKindForDelivery(rec)
+	return s.retryKindForDelivery(rec)
 }
 
-func retryKindForDelivery(rec *store.WebhookDelivery) string {
+func (s *Server) retryKindForDelivery(rec *store.WebhookDelivery) string {
 	if rec == nil {
 		return ""
+	}
+	if ep, ok := s.endpointsByName[strings.TrimSpace(rec.Endpoint)]; ok {
+		switch kind := strings.TrimSpace(strings.ToLower(ep.Workflow)); kind {
+		case "review", "reviewer":
+			return "review"
+		case "fix", "pr-fix":
+			return "fix"
+		case "merge", "merged":
+			return kind
+		}
 	}
 	summary := strings.ToUpper(rec.ErrorSummary)
 	switch strings.ToLower(strings.TrimSpace(rec.EventType)) {

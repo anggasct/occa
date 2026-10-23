@@ -1905,8 +1905,15 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 	workdir := ""
 	if lease != nil {
 		workdir = lease.Path
+		workCtx.Worktree = lease.Path
+		defer func() {
+			if rErr := lease.Release(context.Background()); rErr != nil {
+				slog.Warn("webhook: workspace cleanup failed", "endpoint", ep.Name, "delivery_id", deliveryID, "workspace", lease.Path, "error", rErr)
+			}
+		}()
 	}
 	run := s.beginActiveRun(workCtx.PRKey, ep.Name, deliveryID, workdir)
+	defer s.endActiveRun(run)
 	if heartbeat != nil {
 		progress := heartbeat
 		workCtx.Heartbeat = func() {
@@ -1972,14 +1979,6 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		)
 		s.failUnboundRun(ep, id, envelope, prKey, summary)
 		return nil
-	}
-	if lease != nil {
-		workCtx.Worktree = lease.Path
-		defer func() {
-			if rErr := lease.Release(context.Background()); rErr != nil {
-				slog.Warn("webhook: workspace cleanup failed", "endpoint", ep.Name, "delivery_id", deliveryID, "workspace", lease.Path, "error", rErr)
-			}
-		}()
 	}
 	workCtx.ReportSession = func(sessionID string) {
 		workCtx.SessionID = strings.TrimSpace(sessionID)

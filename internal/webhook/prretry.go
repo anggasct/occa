@@ -480,6 +480,7 @@ func (s *Server) RecoverPRQueue() string {
 			droppedHere = n
 			dropped += n
 		}
+		kind := s.inferRetryKind(ctx, run)
 		if run.ActiveDelivery != 0 {
 			if rec, rerr := s.deliveries.GetByID(ctx, run.ActiveDelivery); rerr == nil && rec != nil && rec.Status == store.WebhookStatusProcessing {
 				if _, terr := s.deliveries.Transition(ctx, rec.ID, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusFailed, "interrupted by restart"); terr == nil {
@@ -487,7 +488,6 @@ func (s *Server) RecoverPRQueue() string {
 				}
 			}
 		}
-		kind := s.inferRetryKind(ctx, run)
 		if serr := s.prQueues.SetResumePending(ctx, run.PRKey, kind, run.ActiveDelivery); serr != nil {
 			slog.Warn("webhook: pr queue recovery resume mark failed", "pr_key", run.PRKey, "error", serr)
 			continue
