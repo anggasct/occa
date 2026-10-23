@@ -638,7 +638,7 @@ func waitForCompletedCount(t *testing.T, st *store.SQLiteStore, want int) {
 		}
 		completed := 0
 		for _, d := range deliveries {
-			if isTerminal(d.Status) {
+			if d.Status == store.WebhookStatusCompleted || d.Status == store.WebhookStatusFailed {
 				completed++
 			}
 		}
@@ -3144,7 +3144,7 @@ func TestWebhookEnqueueRacingShutdownNeverLosesDelivery(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Get %s: %v", id, err)
 		}
-		if receipt == nil || !isTerminal(receipt.Status) {
+		if receipt == nil || (receipt.Status != store.WebhookStatusCompleted && receipt.Status != store.WebhookStatusFailed && receipt.Status != store.WebhookStatusSkipped && receipt.Status != store.WebhookStatusRejected) {
 			t.Fatalf("accepted delivery %s was neither executed nor recorded on shutdown: %+v", id, receipt)
 		}
 	}

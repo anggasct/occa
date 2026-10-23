@@ -2347,16 +2347,12 @@ func (s *Server) shouldSkip(ep config.EndpointConfig, eventType string) bool {
 }
 
 func isTerminal(status store.WebhookStatus) bool {
-	switch status {
-	case store.WebhookStatusCompleted, store.WebhookStatusFailed:
-		return true
-	}
-	return false
+	return status == store.WebhookStatusCompleted
 }
 
 func isReopenable(status store.WebhookStatus) bool {
 	switch status {
-	case store.WebhookStatusSkipped, store.WebhookStatusRejected:
+	case store.WebhookStatusSkipped, store.WebhookStatusRejected, store.WebhookStatusFailed:
 		return true
 	}
 	return false

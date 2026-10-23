@@ -10,8 +10,8 @@ import (
 	"github.com/anggasct/occa/internal/store"
 )
 
-func TestRedeliveryReopensSkippedAndRejected(t *testing.T) {
-	for _, status := range []store.WebhookStatus{store.WebhookStatusSkipped, store.WebhookStatusRejected} {
+func TestRedeliveryReopensNonTerminalReceipts(t *testing.T) {
+	for _, status := range []store.WebhookStatus{store.WebhookStatusSkipped, store.WebhookStatusRejected, store.WebhookStatusFailed} {
 		t.Run(string(status), func(t *testing.T) {
 			srv, exec, st := newTestServerFull(t, []config.EndpointConfig{
 				{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
