@@ -340,6 +340,24 @@ func waitForDeliveryStatus(t *testing.T, st *store.SQLiteStore, endpoint, delive
 	t.Fatalf("delivery %s never reached %s", deliveryID, status)
 }
 
+// waitForPRQueueStatus waits until the dispatcher's deferred active clear has
+// landed. The receipt reaches its terminal status before that cleanup runs.
+func waitForPRQueueStatus(t *testing.T, st *store.SQLiteStore, prKey string, want store.PRStatus) *store.PRRun {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	var run *store.PRRun
+	var err error
+	for time.Now().Before(deadline) {
+		run, err = st.PRQueueRepo().Get(context.Background(), prKey)
+		if err == nil && run != nil && run.Status == want {
+			return run
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("pr queue %s never reached %s: %+v %v", prKey, want, run, err)
+	return nil
+}
+
 func TestAutomationGateFullAuthor(t *testing.T) {
 	rec := newPRRecorder("thread-pr", nil)
 	ep := prTestEndpoint("fix", "/fix", config.AutomationReviewOnly)

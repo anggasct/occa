@@ -771,6 +771,7 @@ func TestPRDeliveryWritesOneLineParentAndOneOutcome(t *testing.T) {
 	}
 	waitForDeliveryStatus(t, st, "github-widget-review", "del-parent-1", store.WebhookStatusCompleted)
 	waitForSurface(t, rec, 1)
+	waitForRunOutcome(t, rec, "🔍 REVIEW")
 
 	sent, edited, notified, _ := rec.snapshot()
 	if len(sent) != 0 {
@@ -841,6 +842,30 @@ func waitForSurface(t *testing.T, rec *surfaceRecorder, want int) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("state lines = %d, want %d", count, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// waitForRunOutcome waits until the terminal card is recorded. The delivery
+// transitions to completed before its audit surfaces are written, so polling
+// the receipt alone would race the outcome notification.
+func waitForRunOutcome(t *testing.T, rec *surfaceRecorder, prefix string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, _, notified, _ := rec.snapshot()
+		matches := 0
+		for _, msg := range notified {
+			if strings.HasPrefix(msg.text, prefix) && msg.text != prefix+" started" {
+				matches++
+			}
+		}
+		if matches > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run outcome %q never recorded: %+v", prefix, notified)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
