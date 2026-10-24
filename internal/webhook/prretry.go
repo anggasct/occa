@@ -70,6 +70,9 @@ func classifyFailure(execErr error, workCtx *WebhookWorkContext, stallFreshness 
 	if errors.Is(execErr, errNoWorkInLease) {
 		return failureNoWork
 	}
+	if errors.Is(execErr, ErrRevisionMissing) {
+		return failureBuild
+	}
 	if timedOut {
 		var progress relay.TurnProgress
 		if workCtx != nil {
@@ -380,6 +383,7 @@ func (s *Server) planRetry(ep config.EndpointConfig, prKey string, receiptID int
 	if err := s.deliveries.BumpAttempt(ctx, receiptID); err != nil {
 		slog.Warn("webhook: retry bump failed", "endpoint", ep.Name, "pr_key", prKey, "error", err)
 	}
+	s.reopenPRSurface(prKey)
 	slog.Info("webhook: retry scheduled",
 		"endpoint", ep.Name,
 		"pr_key", prKey,

@@ -378,8 +378,8 @@ func (s *Server) syncPhaseParent(ctx context.Context, ep config.EndpointConfig, 
 		if previous == phase {
 			return rootID, false
 		}
-		// A blocked parent stays frozen until the operator acts on the PR.
-		if IsTerminalPhase(previous) && (previous != PhaseBlocked || !s.tasks.SurfaceReopened(prKey)) {
+		// A blocked or failed parent stays frozen until a retry is admitted.
+		if IsTerminalPhase(previous) && !surfaceReopenedForRetry(s.tasks, prKey, previous) {
 			slog.Info("webhook: write refused, PR terminal",
 				"pr_key", prKey,
 				"surface", "parent",
@@ -626,10 +626,17 @@ func SurfaceFrozen(tasks *TaskThreadRegistry, prKey string, phase Phase) bool {
 	if !IsTerminalPhase(current) {
 		return false
 	}
-	if current == PhaseBlocked && tasks.SurfaceReopened(prKey) {
+	if surfaceReopenedForRetry(tasks, prKey, current) {
 		return false
 	}
 	return true
+}
+
+func surfaceReopenedForRetry(tasks *TaskThreadRegistry, prKey string, phase Phase) bool {
+	if phase != PhaseBlocked && phase != PhaseFailed {
+		return false
+	}
+	return tasks.SurfaceReopened(prKey)
 }
 
 func (s *Server) escalateToChannel(ctx context.Context, ep config.EndpointConfig, repo, prNumber string, phase Phase, what, why string) {

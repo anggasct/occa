@@ -1534,7 +1534,34 @@ func (d *dispatcher) handle(item dispatchItem) {
 			s.standDownBusy(item, receipt, werr)
 			return
 		}
-		s.failWorkspace(item, receipt, werr)
+		if s.failWorkspace(item, receipt, werr) && item.prKey != "" {
+			switch d.sleepForRetry(item.prKey, s.shutdownCtx) {
+			case wakeFire:
+				if d.watchdogTookOver() {
+					slog.Error("webhook: retry dropped, run taken over by watchdog",
+						"endpoint", item.ep.Name,
+						"delivery_id", item.deliveryID,
+						"pr_key", item.prKey,
+					)
+					return
+				}
+				if !s.retryStillAllowed(item.ep, item.prKey, receipt.ID) {
+					return
+				}
+				receipt.Attempt++
+				continue
+			case wakeSkip:
+				s.markSkipped(receipt.ID, item.ep, earlyEnvelope, "skipped by operator")
+				return
+			case wakeCancel:
+				s.drainPRQueue(d, item.prKey)
+				s.markSkipped(receipt.ID, item.ep, earlyEnvelope, "cancelled by operator")
+				return
+			default:
+				s.failAbandonedReceipt(receipt, "shutting down")
+				return
+			}
+		}
 		return
 	}
 }
@@ -1578,6 +1605,7 @@ func (s *Server) resolveWorkspace(item dispatchItem) (*WorkspaceLease, error) {
 	if strings.TrimSpace(ep.Workspace.Path) != "" {
 		bindingWorktree = generateWorktreePath(ep.Workspace.Path, key)
 	}
+	_, prNumber, _ := splitPRKey(item.prKey)
 	req := WorkspaceRequest{
 		Repository:      ep.Repository,
 		Path:            ep.Workspace.Path,
@@ -1585,6 +1613,7 @@ func (s *Server) resolveWorkspace(item dispatchItem) (*WorkspaceLease, error) {
 		Key:             key,
 		DeliveryID:      item.deliveryID,
 		Lane:            ep.Workflow,
+		PRNumber:        prNumber,
 		BindingWorktree: bindingWorktree,
 		TTL:             ttl,
 	}
@@ -1633,7 +1662,7 @@ func (s *Server) standDownBusy(item dispatchItem, receipt *store.WebhookDelivery
 	}
 }
 
-func (s *Server) failWorkspace(item dispatchItem, receipt *store.WebhookDelivery, err error) {
+func (s *Server) failWorkspace(item dispatchItem, receipt *store.WebhookDelivery, err error) bool {
 	envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", item.ep.CommentTrigger)
 	key := ExtractExecutionKey(item.body)
 	workCtx := &WebhookWorkContext{
@@ -1644,11 +1673,17 @@ func (s *Server) failWorkspace(item dispatchItem, receipt *store.WebhookDelivery
 		ProgressCard: item.ep.ProgressCard,
 		Workflow:     item.ep.Workflow,
 		Envelope:     envelope,
+		PRKey:        item.prKey,
 	}
 	if repo, branch := TaskRepoBranch(key, envelope); repo != "" && branch != "" {
 		if rec, ok := s.tasks.ResolveTaskThread(repo, branch, "workspace-fail"); ok {
 			workCtx.ThreadID = rec.ThreadID
 			workCtx.RootMessageID = rec.RootMessageID
+		}
+	}
+	if item.prKey != "" && errors.Is(err, ErrRevisionMissing) {
+		if s.planRetry(item.ep, item.prKey, receipt.ID, err, workCtx, false, false) {
+			return true
 		}
 	}
 	base := redactSummary(err.Error(), maxErrorSummaryRunes, item.ep.Secret)
@@ -1665,7 +1700,7 @@ func (s *Server) failWorkspace(item dispatchItem, receipt *store.WebhookDelivery
 		}
 	}
 	if threadID == "" {
-		return
+		return false
 	}
 	slim := redactAuditSummary(FormatThreadSlimCard(envelope, item.ep.Workflow, TaskFailed, s.statusIcons), item.ep.Secret)
 	target := threadTargetFor(item.ep.Platform, item.ep.ChannelID, threadID)
@@ -1680,11 +1715,12 @@ func (s *Server) failWorkspace(item dispatchItem, receipt *store.WebhookDelivery
 		slim = strings.TrimSpace(slim) + "\n" + strings.TrimSpace(summary)
 	}
 	if strings.TrimSpace(slim) == "" {
-		return
+		return false
 	}
 	if nErr := s.notifyThread(context.Background(), item.ep.Platform, target, slim); nErr != nil {
 		slog.Warn("webhook: workspace failure thread card failed", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "thread_id", threadID, "error", nErr)
 	}
+	return false
 }
 
 func (s *Server) enrichCommentBody(item dispatchItem) ([]byte, error) {

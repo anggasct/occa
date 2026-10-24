@@ -244,9 +244,9 @@ func (s *Server) operatorRetry(ctx context.Context, msg channel.IncomingMessage,
 		if err := s.prQueues.Unblock(ctx, prKey); err != nil {
 			return "", true, err
 		}
-		s.reopenPRSurface(prKey)
 		s.clearEscalated(prKey)
 	}
+	s.reopenPRSurface(prKey)
 	repo, number, _ := splitPRKey(prKey)
 	if err := s.enqueueSyntheticRetry(ctx, repo, number, kind, prKey); err != nil {
 		return "Retry reset, but re-run failed: " + err.Error(), true, nil
