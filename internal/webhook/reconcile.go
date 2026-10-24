@@ -207,7 +207,7 @@ func (s *Server) reconcileEnqueue(ctx context.Context, row store.PRRun, lane str
 		slog.Warn("webhook: reconcile body failed", "pr_key", row.PRKey, "lane", lane, "error", err)
 		return
 	}
-	deliveryID := fmt.Sprintf("reconcile-%s-%s-%d", lane, normalizeRevision(facts.HeadSHA), now.UnixNano())
+	deliveryID := fmt.Sprintf("%s%s-%s-%d", reconcileDeliveryPrefix, lane, normalizeRevision(facts.HeadSHA), now.UnixNano())
 	item := dispatchItem{
 		ep:          ep,
 		body:        body,

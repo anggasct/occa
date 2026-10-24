@@ -231,3 +231,71 @@ func waitForBucketMidpoint(t *testing.T, floor time.Duration) {
 	}
 	t.Fatalf("never reached the midpoint of a reconcile bucket")
 }
+
+func TestReconcileReviewDeliveryBypassesCommentAuthorsAllowlist(t *testing.T) {
+	ep := config.EndpointConfig{
+		Name:           "github-widget-review",
+		Workflow:       "review",
+		Repository:     "acme/widget",
+		CommentTrigger: []string{"please re-review"},
+		CommentAuthors: []string{"anggasct"},
+		Admit: []config.AdmitRule{
+			{Event: "issue_comment", Actions: []string{"created"}, Require: []string{"comment_trigger", "pr_open"}},
+		},
+	}
+	facts := ReconcileFacts{
+		State:    "OPEN",
+		HeadSHA:  "c0ffee81",
+		HeadRef:  "feat/x",
+		BaseRef:  "main",
+		Title:    "T",
+		URL:      "https://github.com/acme/widget/pull/181",
+		Author:   "owner",
+		HeadRepo: "acme/widget",
+	}
+	policy := policyFromConfig(testPolicy())
+	body, eventType, err := reconcileBody(ep, "review", "acme/widget", facts)
+	if err != nil {
+		t.Fatalf("reconcile body: %v", err)
+	}
+	internal := normalizeWebhook(body, eventType, "reconcile-review-c0ffee81-1", testVerdicts(), false, "", ep.CommentTrigger)
+	if ok, why := admitDelivery(ep, policy, internal); !ok {
+		t.Fatalf("reconcile review rejected: %s", why)
+	}
+
+	externalBody := []byte(`{"action":"created","issue":{"number":181,"state":"open","pull_request":{"html_url":"https://github.com/acme/widget/pull/181"}},"comment":{"body":"please re-review","user":{"login":"kumasct"}},"repository":{"full_name":"acme/widget"}}`)
+	external := normalizeWebhook(externalBody, "issue_comment", "9bccf660-cbe5-11f1-9d3c-1197f0c92220", testVerdicts(), false, "", ep.CommentTrigger)
+	if ok, _ := admitDelivery(ep, policy, external); ok {
+		t.Fatal("external comment from a non-allowlisted login must stay gated")
+	}
+}
+
+func TestReconcilePRAdmitsReviewWithCommentAuthorsAllowlist(t *testing.T) {
+	srv, st, _ := newSurfaceServer(t)
+	ctx := context.Background()
+	reviewEP := srv.endpoints["/review"]
+	reviewEP.CommentTrigger = []string{"please re-review"}
+	reviewEP.CommentAuthors = []string{"anggasct"}
+	srv.endpoints["/review"] = reviewEP
+	prKey := "acme/widget#182"
+	if _, err := st.PRQueueRepo().EnsurePR(ctx, prKey, "thread-182", "root-182"); err != nil {
+		t.Fatalf("ensure pr binding: %v", err)
+	}
+	facts := ReconcileFacts{
+		State:    "OPEN",
+		HeadSHA:  "c0ffee82",
+		HeadRef:  "feat/x",
+		BaseRef:  "main",
+		Title:    "T",
+		URL:      "https://github.com/acme/widget/pull/182",
+		Author:   "owner",
+		HeadRepo: "acme/widget",
+		CIGreen:  true,
+	}
+	srv.SetReconcileFacts(func(context.Context, string, string) (ReconcileFacts, error) {
+		return facts, nil
+	})
+	srv.reconcilePR(ctx, store.PRRun{PRKey: prKey, ThreadID: "thread-182"})
+	prefix := "reconcile-review-" + normalizeRevision(facts.HeadSHA) + "-"
+	waitForReconcileDelivery(t, st, "github-widget-review", prefix, 1)
+}

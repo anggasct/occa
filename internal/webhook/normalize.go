@@ -406,10 +406,26 @@ func reviewDedupeKey(envelope WebhookEnvelope) string {
 	return prefix + head
 }
 
-const operatorRetryDeliveryPrefix = "op-retry-"
+const (
+	operatorRetryDeliveryPrefix = "op-retry-"
+	reconcileDeliveryPrefix     = "reconcile-"
+)
 
 func isOperatorRetryDelivery(deliveryID string) bool {
 	return strings.HasPrefix(strings.TrimSpace(deliveryID), operatorRetryDeliveryPrefix)
+}
+
+func isReconcileDelivery(deliveryID string) bool {
+	return strings.HasPrefix(strings.TrimSpace(deliveryID), reconcileDeliveryPrefix)
+}
+
+// isInternalDelivery reports deliveries the server synthesizes itself. Their
+// delivery id is not supplied by a commenter, so they bypass gates meant for
+// human comment authors.
+func isInternalDelivery(deliveryID string) bool {
+	return isInternalReviewDelivery(deliveryID) ||
+		isOperatorRetryDelivery(deliveryID) ||
+		isReconcileDelivery(deliveryID)
 }
 
 func isReviewWorkflow(workflow string) bool {

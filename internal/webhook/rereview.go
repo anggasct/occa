@@ -14,7 +14,10 @@ import (
 
 // internalReviewTrigger is the comment the internal re-review delivery
 // carries when the review endpoint has no comment trigger of its own.
-const internalReviewTrigger = "please re-review"
+const (
+	internalReviewTrigger        = "please re-review"
+	internalReviewDeliveryPrefix = "internal-review-"
+)
 
 // enqueueInternalReview queues one review for a PR whose fix round pushed
 // commits. The review is an internal delivery, not a webhook: a human push
@@ -130,7 +133,11 @@ func internalReviewCommentBody(repo, number, trigger, prURL, branch, headSHA str
 // and the head commit it reviews.
 func internalReviewDeliveryID(prKey, headSHA string) string {
 	sum := sha256.Sum256([]byte(prKey + "@" + headSHA))
-	return "internal-review-" + hex.EncodeToString(sum[:])[:16]
+	return internalReviewDeliveryPrefix + hex.EncodeToString(sum[:])[:16]
+}
+
+func isInternalReviewDelivery(deliveryID string) bool {
+	return strings.HasPrefix(strings.TrimSpace(deliveryID), internalReviewDeliveryPrefix)
 }
 
 func payloadHashOf(body []byte) string {

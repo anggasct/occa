@@ -98,6 +98,7 @@ type EndpointConfig struct {
 	NotifySkip       *bool             `yaml:"notify_skip,omitempty"`
 	Model            string            `yaml:"model,omitempty"`
 	CommentTrigger   []string          `yaml:"comment_trigger,omitempty"`
+	CommentAuthors   []string          `yaml:"comment_authors,omitempty"`
 	Admit            []AdmitRule       `yaml:"admit"`
 	Limits           *EndpointLimits   `yaml:"limits,omitempty"`
 	VerifyEndpoint   string            `yaml:"verify_endpoint,omitempty"`
@@ -126,6 +127,7 @@ func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
 		NotifySkip     *bool             `yaml:"notify_skip,omitempty"`
 		Model          string            `yaml:"model,omitempty"`
 		CommentTrigger []string          `yaml:"comment_trigger,omitempty"`
+		CommentAuthors []string          `yaml:"comment_authors,omitempty"`
 		Admit          []AdmitRule       `yaml:"admit"`
 		Limits         *EndpointLimits   `yaml:"limits,omitempty"`
 		VerifyEndpoint string            `yaml:"verify_endpoint,omitempty"`
@@ -154,6 +156,7 @@ func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
 	e.Thread = raw.Thread
 	e.Model = strings.TrimSpace(raw.Model)
 	e.CommentTrigger = raw.CommentTrigger
+	e.CommentAuthors = raw.CommentAuthors
 	e.Admit = raw.Admit
 	e.Limits = raw.Limits
 	e.OnMerged = raw.OnMerged

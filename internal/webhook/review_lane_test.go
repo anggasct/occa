@@ -152,6 +152,7 @@ func TestFixRoundQueuesExactlyOneReview(t *testing.T) {
 		Thread:         true,
 		Repository:     "acme/widget",
 		CommentTrigger: []string{"please re-review"},
+		CommentAuthors: []string{"anggasct"},
 		Limits:         &config.EndpointLimits{MaxRunsPerPR: 3, Window: time.Hour},
 		Admit:          defaultCatchAllAdmit(),
 	}

@@ -89,6 +89,18 @@ func (s *Server) automationAllows(ep config.EndpointConfig, key WebhookExecution
 	if workflow != "fix" && workflow != "merge" {
 		return true
 	}
+	// A matched comment trigger is an explicit human instruction, so it may
+	// start a fix run even in review-only mode. Merge stays policy-gated.
+	// An operator retry is an internal recovery path and bypasses the
+	// review-only gate the same way an internal re-review does.
+	if workflow == "fix" && isInternalDelivery(stringValue(envelope["delivery_id"])) {
+		return true
+	}
+	trigger := strings.TrimSpace(stringValue(envelope["comment_trigger"]))
+	if workflow == "fix" && trigger != "" && len(ep.CommentAuthors) > 0 &&
+		commentAuthorAllowed(ep.CommentAuthors, trigger, stringValue(envelope["review_user"])) {
+		return true
+	}
 	author := strings.TrimSpace(stringValue(envelope["pr_author"]))
 	if author == "" {
 		if prKey, ok := prKeyForEndpoint(ep, key, envelope); ok {

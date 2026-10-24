@@ -89,6 +89,7 @@ webhooks:
     comment_trigger:
       review: ['please re-review'] # default re-review phrase; override per repo
       fix: ['please fix review', 'please fix ci'] # default fix phrases; override per repo
+    # comment_authors: ['owner-login'] # allowlisted commenters; required to unlock fix under review-only
     limits:
       max_runs_per_pr: 3 # comment-trigger runs allowed per PR per window
       window: 60m # sliding window for the trigger cap
@@ -110,6 +111,7 @@ webhooks:
       secret: <your-webhook-secret> # one secret shared by the 4 hooks
       checkout: /home/operator/projects/widget # required checkout root; review snapshots and fix branch worktrees live under it
       # model: openai/gpt-4o # optional per-repo model override
+      # comment_authors: ['owner-login'] # allowlisted commenters; required to unlock fix under review-only
       # comment_trigger: # optional per-workflow phrases merged with the defaults (review and fix only)
       #   review: ['please re-review']
       # automation: # optional per-author policy (absent = review-only for everyone)
