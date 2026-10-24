@@ -10,6 +10,7 @@ var (
 	ErrMessageNotFound             = errors.New("channel: message not found")
 	ErrThreadNotFound              = errors.New("channel: thread not found")
 	ErrParentResolutionUnsupported = errors.New("channel: parent resolution unsupported")
+	ErrRateLimited                 = errors.New("channel: rate limited")
 )
 
 type ThreadParentResolver interface {

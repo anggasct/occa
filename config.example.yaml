@@ -96,6 +96,8 @@ webhooks:
     thread: true # dispatch deliveries run in the PR thread
     escalation_mention: operator # user or role mentioned when a PR queue blocks on retry exhaustion; empty disables the mention
     verbose_steps: false # per-step tool lines in the PR thread; off by default, a run posts one tool summary
+    refresh_interval: 30s # how often an in-flight PR card refreshes its run age; zero falls back to 30s
+    idle_after: 90s # no surface activity for this long adds the idle marker; zero falls back to 90s
     status_icons: # phase icons of the operator surface (overrides webhooks.status_icons)
       queued: ⏳ # phase: PR accepted, waiting for its turn
       dispatch: 🛠️ # phase: dispatch task running on the PR branch
@@ -111,6 +113,8 @@ webhooks:
       secret: <your-webhook-secret> # one secret shared by the 4 hooks
       checkout: /home/operator/projects/widget # required checkout root; review snapshots and fix branch worktrees live under it
       # model: openai/gpt-4o # optional per-repo model override
+      # refresh_interval: 30s # optional per-repo card age cadence
+      # idle_after: 90s # optional per-repo idle threshold
       # comment_authors: ['owner-login'] # allowlisted commenters; required to unlock fix under review-only
       # comment_trigger: # optional per-workflow phrases merged with the defaults (review and fix only)
       #   review: ['please re-review']

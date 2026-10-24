@@ -204,6 +204,7 @@ type Server struct {
 	mergeGate             MergeGateChecker
 	escalationMu          sync.Mutex
 	escalated             map[string]bool
+	ageState              *runAgeState
 }
 
 func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) *Server {
@@ -287,6 +288,7 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 	srv.dispatchToken = strings.TrimSpace(cfg.Dispatch.Token)
 	srv.dispatchTasks = NewDispatchStore()
 	srv.escalated = make(map[string]bool)
+	srv.ageState = &runAgeState{cards: make(map[string]*runAgeCardState)}
 	srv.fallbackAfter = cfg.FallbackPollAfter
 	srv.branchChecker = ghBranchPRChecker
 	srv.branchExists = ghBranchExistsChecker
@@ -713,6 +715,8 @@ func (s *Server) Start(ctx context.Context) error {
 	go s.replayLoop(s.shutdownCtx)
 	s.dispatchWG.Add(1)
 	go s.reconcileLoop(s.shutdownCtx)
+	s.dispatchWG.Add(1)
+	go s.runAgeLoop()
 
 	slog.Info("webhook server started", "bind", s.bind, "endpoints", len(s.endpoints))
 	for _, ep := range s.endpoints {

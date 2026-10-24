@@ -190,6 +190,7 @@ type SurfaceUpdate struct {
 	Phase           string
 	StatusMessageID string
 	Reopened        bool
+	LastWriteAt     time.Time
 }
 
 // SurfaceGate holds the approval and CI state a delivery reported for a PR.
@@ -558,6 +559,11 @@ func (t *TaskThreadRegistry) SetSurface(prKey string, update SurfaceUpdate) Task
 		surface.ThreadID = threadID
 	}
 	surface.Phase = strings.TrimSpace(update.Phase)
+	if update.LastWriteAt.IsZero() {
+		surface.LastWriteAt = time.Now()
+	} else {
+		surface.LastWriteAt = update.LastWriteAt
+	}
 	t.surfaces[key] = surface
 
 	if t.records == nil {

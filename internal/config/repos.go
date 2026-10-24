@@ -29,19 +29,21 @@ type RepoPromptRef struct {
 }
 
 type RepoConfig struct {
-	Repo           string                   `yaml:"repo"`
-	Provider       string                   `yaml:"provider"`
-	Platform       string                   `yaml:"platform"`
-	ChannelID      string                   `yaml:"channel_id"`
-	Secret         string                   `yaml:"secret"`
-	Checkout       string                   `yaml:"checkout"`
-	Model          string                   `yaml:"model,omitempty"`
-	CommentTrigger map[string][]string      `yaml:"comment_trigger,omitempty"`
-	CommentAuthors []string                 `yaml:"comment_authors,omitempty"`
-	Limits         *EndpointLimits          `yaml:"limits,omitempty"`
-	Automation     RepoAutomation           `yaml:"automation,omitempty"`
-	OnMerged       []MergedAction           `yaml:"on_merged,omitempty"`
-	Prompts        map[string]RepoPromptRef `yaml:"prompts,omitempty"`
+	Repo            string                   `yaml:"repo"`
+	Provider        string                   `yaml:"provider"`
+	Platform        string                   `yaml:"platform"`
+	ChannelID       string                   `yaml:"channel_id"`
+	Secret          string                   `yaml:"secret"`
+	Checkout        string                   `yaml:"checkout"`
+	Model           string                   `yaml:"model,omitempty"`
+	CommentTrigger  map[string][]string      `yaml:"comment_trigger,omitempty"`
+	CommentAuthors  []string                 `yaml:"comment_authors,omitempty"`
+	Limits          *EndpointLimits          `yaml:"limits,omitempty"`
+	RefreshInterval time.Duration            `yaml:"refresh_interval,omitempty"`
+	IdleAfter       time.Duration            `yaml:"idle_after,omitempty"`
+	Automation      RepoAutomation           `yaml:"automation,omitempty"`
+	OnMerged        []MergedAction           `yaml:"on_merged,omitempty"`
+	Prompts         map[string]RepoPromptRef `yaml:"prompts,omitempty"`
 }
 
 type WebhookDefaults struct {
@@ -52,7 +54,14 @@ type WebhookDefaults struct {
 	EscalationMention string              `yaml:"escalation_mention,omitempty"`
 	VerboseSteps      bool                `yaml:"verbose_steps,omitempty"`
 	StatusIcons       map[string]string   `yaml:"status_icons,omitempty"`
+	RefreshInterval   time.Duration       `yaml:"refresh_interval,omitempty"`
+	IdleAfter         time.Duration       `yaml:"idle_after,omitempty"`
 }
+
+const (
+	DefaultRefreshInterval = 30 * time.Second
+	DefaultIdleAfter       = 90 * time.Second
+)
 
 var defaultReviewTriggers = []string{"please re-review"}
 var defaultFixTriggers = []string{"please fix review", "please fix ci"}
@@ -178,6 +187,26 @@ func resolveCommentAuthors(defaults WebhookDefaults, repo RepoConfig) []string {
 		return nil
 	}
 	return out
+}
+
+func resolveRefreshInterval(defaults WebhookDefaults, repo RepoConfig) time.Duration {
+	if repo.RefreshInterval > 0 {
+		return repo.RefreshInterval
+	}
+	if defaults.RefreshInterval > 0 {
+		return defaults.RefreshInterval
+	}
+	return DefaultRefreshInterval
+}
+
+func resolveIdleAfter(defaults WebhookDefaults, repo RepoConfig) time.Duration {
+	if repo.IdleAfter > 0 {
+		return repo.IdleAfter
+	}
+	if defaults.IdleAfter > 0 {
+		return defaults.IdleAfter
+	}
+	return DefaultIdleAfter
 }
 
 func resolveRepoLimits(defaults WebhookDefaults, repo RepoConfig) *EndpointLimits {
@@ -306,26 +335,28 @@ func expandRepos(repos []RepoConfig, defaults WebhookDefaults) ([]EndpointConfig
 			}
 			prompt, promptFile, source := resolveRepoPrompt(repo.Prompts, workflow)
 			ep := EndpointConfig{
-				Name:           "github-" + short + "-" + suffix,
-				Path:           "/webhooks/github-" + short + "-" + suffix,
-				Auth:           "github_hmac_sha256",
-				Secret:         strings.TrimSpace(repo.Secret),
-				Workflow:       workflow,
-				Platform:       strings.TrimSpace(repo.Platform),
-				ChannelID:      strings.TrimSpace(repo.ChannelID),
-				Prompt:         prompt,
-				PromptFile:     promptFile,
-				PromptSource:   source,
-				CommentTrigger: resolveTriggers(defaults, *repo, workflow),
-				CommentAuthors: resolveCommentAuthors(defaults, *repo),
-				Thread:         true,
-				NotifySkip:     boolPtr(false),
-				Model:          strings.TrimSpace(repo.Model),
-				Repository:     "github.com/" + name,
-				Admit:          lockedAdmitRules(workflow),
-				Limits:         resolveRepoLimits(defaults, *repo),
-				Automation:     &automationCopy,
-				VerifyEndpoint: "",
+				Name:            "github-" + short + "-" + suffix,
+				Path:            "/webhooks/github-" + short + "-" + suffix,
+				Auth:            "github_hmac_sha256",
+				Secret:          strings.TrimSpace(repo.Secret),
+				Workflow:        workflow,
+				Platform:        strings.TrimSpace(repo.Platform),
+				ChannelID:       strings.TrimSpace(repo.ChannelID),
+				Prompt:          prompt,
+				PromptFile:      promptFile,
+				PromptSource:    source,
+				CommentTrigger:  resolveTriggers(defaults, *repo, workflow),
+				CommentAuthors:  resolveCommentAuthors(defaults, *repo),
+				Thread:          true,
+				NotifySkip:      boolPtr(false),
+				Model:           strings.TrimSpace(repo.Model),
+				Repository:      "github.com/" + name,
+				Admit:           lockedAdmitRules(workflow),
+				Limits:          resolveRepoLimits(defaults, *repo),
+				RefreshInterval: resolveRefreshInterval(defaults, *repo),
+				IdleAfter:       resolveIdleAfter(defaults, *repo),
+				Automation:      &automationCopy,
+				VerifyEndpoint:  "",
 			}
 			if len(ep.CommentTrigger) > 0 {
 				slog.Info("config: effective comment triggers", "endpoint", ep.Name, "workflow", workflow, "triggers", strings.Join(ep.CommentTrigger, ", "))

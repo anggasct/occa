@@ -144,7 +144,7 @@ func surfaceEnvelope() WebhookEnvelope {
 	}
 }
 
-var phaseParentPattern = regexp.MustCompile(`^(\S+) ([^#\s]+/[^#\s]+)#(\d+) — (queued|dispatch|review|fix|merge|merged|blocked|failed)$`)
+var phaseParentPattern = regexp.MustCompile(`^(\S+) ([^#\s]+/[^#\s]+)#(\d+) — (queued|dispatch|review|fix|merge|merged|blocked|failed)( · ⏱️ \d+m( · idle \d+m)?| · \d+m total)?$`)
 
 func TestPhaseParentIsOneLineForEveryPhase(t *testing.T) {
 	for _, phase := range KnownPhases {
@@ -782,7 +782,7 @@ func TestPRDeliveryWritesOneLineParentAndOneOutcome(t *testing.T) {
 		if !phaseParentPattern.MatchString(msg.text) {
 			t.Errorf("parent %q must match the one-line phase contract", msg.text)
 		}
-		if !strings.HasSuffix(msg.text, " — "+phases[i]) {
+		if !strings.Contains(msg.text, " — "+phases[i]) {
 			t.Errorf("parent %q must show the phase %q", msg.text, phases[i])
 		}
 		for _, banned := range []string{"Delivery", "Reason", "Event", "del-parent-1", "c0ffee-parent", "feat/x", "queued:", "━━━"} {
