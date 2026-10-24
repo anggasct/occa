@@ -1,9 +1,11 @@
 package webhook
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -349,12 +351,14 @@ func TestFinalizeNoWorkFailsWithNoWorkClass(t *testing.T) {
 	if !errors.Is(err, errNoWorkInLease) {
 		t.Fatalf("Finalize error = %v, want no-work", err)
 	}
-	class := classifyFailure(err, &WebhookWorkContext{}, 2*time.Minute, false)
-	if class != failureNoWork {
-		t.Fatalf("class = %v, want no-work", class)
-	}
-	if got := class.label(); got != "no work in lease" {
-		t.Fatalf("label = %q", got)
+	for _, timedOut := range []bool{false, true} {
+		class := classifyFailure(err, &WebhookWorkContext{}, 2*time.Minute, timedOut)
+		if class != failureNoWork {
+			t.Fatalf("class(timedOut=%t) = %v, want no-work", timedOut, class)
+		}
+		if got := class.label(); got != "no work in lease" {
+			t.Fatalf("label = %q", got)
+		}
 	}
 	max, waits := retryPolicyFor(failureNoWork)
 	if max != 2 || len(waits) != 2 || waits[0] != 60*time.Second || waits[1] != 5*time.Minute {
@@ -423,6 +427,53 @@ func TestRenderedEnvelopePublishesLeaseOnly(t *testing.T) {
 	injectTaskContext(env, WebhookExecutionKey{}, nil)
 	if _, ok := env["worktree"]; ok {
 		t.Fatal("task context must not publish a worktree path")
+	}
+}
+
+func TestResolveWorkspacePublishesTaskBindingWorktree(t *testing.T) {
+	resolver := &recordingWorkspaceResolver{}
+	s := &Server{workspaceResolver: resolver}
+	body := []byte(fixLaneReviewBody("testowner/myrepo", "feat/review-lane"))
+	ep := config.EndpointConfig{
+		Name:       "github-widget-review",
+		Workflow:   "review",
+		Repository: "github.com/testowner/myrepo",
+		Workspace:  config.EndpointWorkspace{Type: config.WorkspaceTypeGit, Path: "/projects/occa", Mode: config.WorkspaceModeIsolated},
+	}
+	if _, err := s.resolveWorkspace(dispatchItem{ep: ep, body: body, deliveryID: "del-binding"}); err != nil {
+		t.Fatalf("resolveWorkspace: %v", err)
+	}
+	want := filepath.Join("/projects/occa", ".worktree", "feat-review-lane")
+	if resolver.last.BindingWorktree != want {
+		t.Fatalf("binding worktree = %q, want %q", resolver.last.BindingWorktree, want)
+	}
+}
+
+func TestWorkspaceBindingMismatchLogsAndUsesLease(t *testing.T) {
+	root := t.TempDir()
+	initTestGitRepo(t, root)
+	runGit(t, root, "branch", "fix/test-lane")
+
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(previous)
+
+	req := gitEndpointRequest(WebhookExecutionKey{Repository: "testowner/myrepo", Branch: "fix/test-lane"}, config.WorkspaceModeMutable)
+	req.Path = root
+	req.DeliveryID = "del-binding"
+	req.Lane = "fix"
+	req.BindingWorktree = filepath.Join(root, ".worktree", "some-other-lane")
+	lease, err := NewWorkspaceManager().ResolveWorkspace(context.Background(), req)
+	if err != nil {
+		t.Fatalf("ResolveWorkspace: %v", err)
+	}
+	defer func() { _ = lease.Release(context.Background()) }()
+	if filepath.Clean(lease.Path) == filepath.Clean(req.BindingWorktree) {
+		t.Fatalf("resolver returned the binding path %q instead of the lease", lease.Path)
+	}
+	if !strings.Contains(logs.String(), "workspace binding mismatch") || !strings.Contains(logs.String(), "ignored=true") {
+		t.Fatalf("binding mismatch not logged: %s", logs.String())
 	}
 }
 

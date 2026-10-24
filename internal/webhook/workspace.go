@@ -30,13 +30,14 @@ func IsWorkspaceRetryable(err error) bool {
 }
 
 type WorkspaceRequest struct {
-	Repository string
-	Path       string
-	Mode       string
-	Key        WebhookExecutionKey
-	DeliveryID string
-	Lane       string
-	TTL        time.Duration
+	Repository      string
+	Path            string
+	Mode            string
+	Key             WebhookExecutionKey
+	DeliveryID      string
+	Lane            string
+	BindingWorktree string
+	TTL             time.Duration
 }
 
 type WorkspaceResolver interface {
@@ -187,7 +188,36 @@ func (m *WorkspaceManager) ResolveWorkspace(ctx context.Context, req WorkspaceRe
 	if resolveErr != nil {
 		return nil, resolveErr
 	}
+	m.logBindingMismatch(req, lease)
 	return lease, nil
+}
+
+func (m *WorkspaceManager) logBindingMismatch(req WorkspaceRequest, lease *WorkspaceLease) {
+	binding := strings.TrimSpace(req.BindingWorktree)
+	if binding == "" || lease == nil || strings.TrimSpace(lease.Path) == "" {
+		return
+	}
+	if filepath.Clean(binding) == filepath.Clean(lease.Path) {
+		return
+	}
+	slog.Warn("webhook: workspace binding mismatch",
+		"lane", req.Lane,
+		"lease", lease.Path,
+		"binding", binding,
+		"ignored", true,
+	)
+}
+
+func (m *WorkspaceManager) canonicalRevision(ctx context.Context, root, revision string) (string, error) {
+	out, err := m.runner.Run(ctx, root, "rev-parse", "--verify", revision+"^{commit}")
+	if err != nil {
+		return "", fmt.Errorf("%w: resolve revision %s: %v", ErrWorkspaceUnavailable, revision, err)
+	}
+	canonical := strings.TrimSpace(out)
+	if canonical == "" {
+		return "", fmt.Errorf("%w: resolve revision %s: empty object id", ErrWorkspaceUnavailable, revision)
+	}
+	return canonical, nil
 }
 
 func (m *WorkspaceManager) resolveIsolated(ctx context.Context, root string, req WorkspaceRequest) (*WorkspaceLease, error) {
@@ -201,6 +231,11 @@ func (m *WorkspaceManager) resolveIsolated(ctx context.Context, root string, req
 	if req.Key.HeadRevision == "" {
 		return nil, fmt.Errorf("%w: %s mode requires an exact head revision and the event did not provide one", ErrRevisionRequired, config.WorkspaceModeIsolated)
 	}
+	revision, err := m.canonicalRevision(ctx, root, req.Key.HeadRevision)
+	if err != nil {
+		return nil, err
+	}
+	req.Key.HeadRevision = revision
 
 	revShort := req.Key.HeadRevision
 	if len(revShort) > 10 {
@@ -598,14 +633,21 @@ func (m *WorkspaceManager) ReapExpiredWorkspaces(ctx context.Context) int {
 			return true
 		}
 		for _, entry := range entries {
-			if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "review-") {
+			if !entry.IsDir() {
 				continue
 			}
 			workspace := filepath.Join(dir, entry.Name())
 			lock := m.lockFor(workspace)
 			lock.Lock()
 			meta, mErr := readIsolatedMetadata(workspace)
-			if mErr == nil && m.now().Unix() < meta.ExpiresAt {
+			if mErr == nil {
+				if m.now().Unix() < meta.ExpiresAt {
+					lock.Unlock()
+					continue
+				}
+			} else if !strings.HasPrefix(entry.Name(), "review-") {
+				// Without a readable sidecar, only review- workspaces are
+				// known to be ours; leave anything else for an operator.
 				lock.Unlock()
 				continue
 			}

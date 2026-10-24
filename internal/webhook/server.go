@@ -1573,14 +1573,20 @@ func (s *Server) resolveWorkspace(item dispatchItem) (*WorkspaceLease, error) {
 	if strings.TrimSpace(mode) == "" {
 		return nil, fmt.Errorf("%w: workspace mode is not configured for lane %q", ErrWorkspaceUnavailable, ep.Workflow)
 	}
+	key := ExtractExecutionKey(item.body)
+	bindingWorktree := ""
+	if strings.TrimSpace(ep.Workspace.Path) != "" {
+		bindingWorktree = generateWorktreePath(ep.Workspace.Path, key)
+	}
 	req := WorkspaceRequest{
-		Repository: ep.Repository,
-		Path:       ep.Workspace.Path,
-		Mode:       mode,
-		Key:        ExtractExecutionKey(item.body),
-		DeliveryID: item.deliveryID,
-		Lane:       ep.Workflow,
-		TTL:        ttl,
+		Repository:      ep.Repository,
+		Path:            ep.Workspace.Path,
+		Mode:            mode,
+		Key:             key,
+		DeliveryID:      item.deliveryID,
+		Lane:            ep.Workflow,
+		BindingWorktree: bindingWorktree,
+		TTL:             ttl,
 	}
 	lease, err := s.workspaceResolver.ResolveWorkspace(context.Background(), req)
 	if err != nil {
