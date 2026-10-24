@@ -52,7 +52,7 @@ func TestInjectTaskContextWithoutTask(t *testing.T) {
 	envelope := minimalEnvelope()
 	key := WebhookExecutionKey{Repository: "acme/widget", Branch: "feat/x"}
 	injectTaskContext(envelope, key, NewDispatchStore())
-	if envelope["task_id"] != "" || envelope["task_spec"] != "" || envelope["task_spec_is_url"] != false || envelope["task_scope"] != "" || envelope["task_verify"] != "" {
+	if envelope["task_id"] != "" || envelope["task_brief"] != "" || envelope["task_spec"] != "" || envelope["task_spec_is_url"] != false || envelope["task_scope"] != "" || envelope["task_verify"] != "" {
 		t.Fatalf("empty task should set empty keys: %+v", envelope)
 	}
 	rendered, err := renderTemplate("static", map[string]any{"webhook": envelope})
@@ -81,6 +81,7 @@ func TestBuiltinPromptsRenderOnMinimalEnvelope(t *testing.T) {
 		}
 		envelope := minimalEnvelope()
 		envelope["task_id"] = ""
+		envelope["task_brief"] = ""
 		envelope["task_spec"] = ""
 		envelope["task_spec_is_url"] = false
 		envelope["task_scope"] = ""

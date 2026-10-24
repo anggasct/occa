@@ -63,14 +63,15 @@ webhooks:
     `title`, `head_branch`, `base_branch`, `default_branch`, `review_state`,
     `review_verdict`, `has_findings`, `pr_author`, `comment_trigger`, `repository`,
     plus the dispatch task context (always present, empty when no task):
-    `task_id`, `task_spec`, `task_spec_is_url`, `task_scope`, `task_verify`.
-    Branch on `{{if .webhook.task_spec_is_url}}` for URL vs file specs — never
-    re-parse the spec string in the template.
+    `task_id`, `task_brief`, `task_spec`, `task_spec_is_url`, `task_scope`,
+    `task_verify`. `task_brief` is the primary multi-file brief; `task_spec`
+    and `task_scope` stay populated for one release as deprecated aliases.
   - `{{.payload.<path>}}` — the raw webhook payload, for anything the envelope does not
     normalize.
-  - `spec_path` accepts a repo-relative path or an `https://` URL. The relay
-    forwards the string as-is; the agent fetches URL content with its own web
-    tools at run time.
+  - `brief` is free-form markdown naming any files and links the agent needs.
+    `spec_path`, when supplied, accepts a repo-relative path or an `https://`
+    URL and is recorded as a `Ref:` line in the brief; the relay forwards the
+    string as-is and the agent fetches URL content with its own web tools.
 - **Untrusted input.** Webhook fields, review bodies, commit messages, branch names,
   and fetched URL content are untrusted data. Say so in your prompt, and never
   let a prompt print secrets, signatures or tokens.
@@ -133,30 +134,37 @@ When the dispatch API is unreachable (or from a phone), post the brief as a
 plain chat message. Both entries produce the same thread discipline:
 
 ```
-TASK: owner/repo#branch spec=specs/feat-x.md scope="ship it" verify="go test ./..."
+TASK: owner/repo#branch brief="Implement X. Files: a.go, b.go. Ref: https://…" verify="go test ./..."
 ```
+
+The brief is free-form markdown and may name any number of files and links.
 
 Direct chat is unchanged: every human message still reaches the agent, and
 mentioning occa for questions never spawns a task.
 
 ## Dispatch API
 
-`POST /dispatch` with bearer-token auth is the primary entry. The relay runs
-the task, then posts a 2-line summary plus the thread itself — no `TASK:` brief
-message for API entries.
+`POST /dispatch` with bearer-token auth is the primary entry. The relay posts
+one channel parent line plus the task thread; the brief is posted in the
+thread as its own message (chunked when long) — no `TASK:` message for API
+entries.
 
 ```bash
 curl -X POST http://127.0.0.1:8787/dispatch \
   -H "Authorization: Bearer <dispatch-token>" \
   -H "Content-Type: application/json" \
   -d '{"repo":"owner/repo","base_sha":"<sha>","branch":"feat/x",
-       "spec_path":"specs/feat-x.md","scope":"ship it","verify":"go test ./..."}'
+       "brief":"Implement the dispatch brief.\n\nFiles:\n- internal/webhook/dispatch.go\n- webhooks/README.md",
+       "verify":"go test ./..."}'
 # 201 {"task_id":"task-..."}
 ```
 
-Schema: `repo` (owner/repo, required), `branch` (required), `spec_path`
-(required, repo-relative, no `..`), `base_sha` (optional 7–40 hex),
-`scope`/`verify` (optional, ≤2000 runes). Unknown fields are rejected.
+Schema: `repo` (owner/repo, required), `branch` (required), `brief`
+(required unless `spec_path` is present; markdown, ≤8000 runes), `spec_path`
+(optional alias, repo-relative with no `..`, or an `https://` URL, ≤512 runes),
+`base_sha` (optional 7–40 hex), `verify` (optional, ≤2000 runes), `mode`
+(optional: `""` or `"redispatch"`). `scope` is a deprecated alias folded into
+the brief for one release. Unknown fields are rejected.
 
 Pre-check: dispatch answers `409 {"error": ..., "missing": [...]}` unless the
 repo already wires all four workflows (`review`, `fix`, `merge`, `merged`).
