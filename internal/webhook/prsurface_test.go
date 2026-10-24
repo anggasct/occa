@@ -1025,3 +1025,64 @@ func TestPrSurfaceIgnoresForeignChannelRoot(t *testing.T) {
 		t.Fatalf("the card must land in the endpoint channel, got %q", sent[0].channelID)
 	}
 }
+
+func TestPrSurfaceReusesPersistedHomeAfterRestart(t *testing.T) {
+	for _, phase := range []Phase{PhaseQueued, PhaseBlocked, PhaseMerged} {
+		t.Run(string(phase), func(t *testing.T) {
+			srv, st, rec := newSurfaceServer(t)
+			ep := srv.endpoints["/review"]
+			ctx := context.Background()
+			prKey := "acme/widget#181"
+			if _, err := st.PRQueueRepo().EnsurePR(ctx, prKey, "thread-9", "dispatch-parent"); err != nil {
+				t.Fatalf("ensure pr: %v", err)
+			}
+
+			srv.syncPhaseParent(ctx, ep, prKey, surfaceEnvelope(), phase)
+
+			sent, edited, _, _ := rec.snapshot()
+			if len(sent) != 0 {
+				t.Fatalf("a persisted home must not post another card, got %d: %+v", len(sent), sent)
+			}
+			if len(edited) != 1 || edited[0].messageID != "dispatch-parent" {
+				t.Fatalf("the persisted home must be edited in place, got %+v", edited)
+			}
+			row, err := st.PRQueueRepo().Get(ctx, prKey)
+			if err != nil {
+				t.Fatalf("get pr: %v", err)
+			}
+			if row == nil || strings.TrimSpace(row.RootMsgID) != "dispatch-parent" {
+				t.Fatalf("persisted root = %+v, want the dispatch parent", row)
+			}
+			detail, ok := srv.tasks.SurfaceDetail(prKey)
+			if !ok || detail.ThreadID != "thread-9" {
+				t.Fatalf("surface detail = %+v (known %v), want the persisted thread", detail, ok)
+			}
+		})
+	}
+}
+
+func TestPrSurfaceKeepsPersistedRootWhenHomeIsForeign(t *testing.T) {
+	srv, st, rec := newSurfaceServer(t)
+	ep := srv.endpoints["/review"]
+	ep.ChannelID = "chan-2"
+	ctx := context.Background()
+	prKey := "acme/widget#181"
+	if _, err := st.PRQueueRepo().EnsurePR(ctx, prKey, "thread-9", "dispatch-parent"); err != nil {
+		t.Fatalf("ensure pr: %v", err)
+	}
+
+	rootID, _ := srv.syncPhaseParent(ctx, ep, prKey, surfaceEnvelope(), PhaseQueued)
+	srv.prMirrorSync(&WebhookWorkContext{PRKey: prKey, ThreadID: "thread-9", RootMessageID: rootID})
+
+	sent, edited, _, _ := rec.snapshot()
+	if len(sent) != 1 || len(edited) != 0 {
+		t.Fatalf("a foreign home must post one card and edit none, got %d sent and %d edited", len(sent), len(edited))
+	}
+	row, err := st.PRQueueRepo().Get(ctx, prKey)
+	if err != nil {
+		t.Fatalf("get pr: %v", err)
+	}
+	if row == nil || strings.TrimSpace(row.RootMsgID) != "dispatch-parent" {
+		t.Fatalf("persisted root = %+v, want the original home preserved", row)
+	}
+}
