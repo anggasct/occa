@@ -605,9 +605,9 @@ func (a *Adapter) EditNotification(channelID, messageID, text string) error {
 		Content:         &content,
 		AllowedMentions: &discordgo.MessageAllowedMentions{},
 		Flags:           discordgo.MessageFlagsSuppressEmbeds,
-	})
+	}, discordgo.WithRetryOnRatelimit(false))
 	if err != nil {
-		return fmt.Errorf("discord: edit notification: %w", err)
+		return discordRateLimit(fmt.Errorf("discord: edit notification: %w", err))
 	}
 	return nil
 }
@@ -719,11 +719,26 @@ func (a *Adapter) EditNotificationWithButtons(channelID, messageID, text string,
 		Components:      &components,
 		AllowedMentions: &discordgo.MessageAllowedMentions{},
 		Flags:           discordgo.MessageFlagsSuppressEmbeds,
-	})
+	}, discordgo.WithRetryOnRatelimit(false))
 	if err != nil {
-		return fmt.Errorf("discord: edit notification with buttons: %w", err)
+		return discordRateLimit(fmt.Errorf("discord: edit notification with buttons: %w", err))
 	}
 	return nil
+}
+
+func discordRateLimit(err error) error {
+	if err == nil {
+		return nil
+	}
+	var limitErr *discordgo.RateLimitError
+	if errors.As(err, &limitErr) {
+		return fmt.Errorf("%w: %v", channel.ErrRateLimited, err)
+	}
+	var restErr *discordgo.RESTError
+	if errors.As(err, &restErr) && restErr.Response != nil && restErr.Response.StatusCode == http.StatusTooManyRequests {
+		return fmt.Errorf("%w: %v", channel.ErrRateLimited, err)
+	}
+	return err
 }
 
 func (a *Adapter) ReplyNotification(channelID, replyToMessageID, text string) (string, error) {

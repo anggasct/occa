@@ -78,6 +78,12 @@ func newSurfaceServer(t *testing.T) (*Server, *store.SQLiteStore, *surfaceRecord
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
+	srv, rec := newSurfaceServerOn(t, st)
+	return srv, st, rec
+}
+
+func newSurfaceServerOn(t *testing.T, st *store.SQLiteStore) (*Server, *surfaceRecorder) {
+	t.Helper()
 	cfg := config.WebhookConfig{
 		Bind:    "127.0.0.1:0",
 		Policy:  testPolicy(),
@@ -129,7 +135,7 @@ func newSurfaceServer(t *testing.T) (*Server, *store.SQLiteStore, *surfaceRecord
 		}
 		return "", false
 	})
-	return srv, st, rec
+	return srv, rec
 }
 
 func surfaceEnvelope() WebhookEnvelope {

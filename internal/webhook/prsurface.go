@@ -421,6 +421,13 @@ func (s *Server) syncPhaseParent(ctx context.Context, ep config.EndpointConfig, 
 	if threadID == "" {
 		threadID = persistedThreadID
 	}
+	if s.prQueues != nil && (branch != "" || prURL != "") {
+		if row, err := s.prQueues.Get(ctx, prKey); err == nil && row != nil {
+			if err := s.prQueues.UpdatePRMeta(ctx, prKey, branch, prURL); err != nil {
+				slog.Warn("webhook: pr surface meta persist failed", "pr_key", prKey, "error", err)
+			}
+		}
+	}
 	base := FormatPhaseParent(repo, prNumber, phase, s.statusIcons)
 	text := appendStatusSegment(base, s.runAgeSegment(ctx, prKey, phase))
 	buttons := s.phaseParentButtons(ep, prKey, repo, branch, prURL, threadID)

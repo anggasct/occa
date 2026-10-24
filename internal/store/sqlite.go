@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	schemaVersion    = 21
+	schemaVersion    = 22
 	SchemaVersion    = schemaVersion
 	busyTimeoutMilli = 5000
 )
@@ -50,6 +50,17 @@ var migrations = []func(s *SQLiteStore, tx *sql.Tx) error{
 	addPRQueue,
 	addPRQueueRetryAt,
 	addWebhookReplay,
+	addPRQueueMeta,
+}
+
+func addPRQueueMeta(_ *SQLiteStore, tx *sql.Tx) error {
+	if _, err := tx.Exec(`ALTER TABLE pr_queue ADD COLUMN branch TEXT NOT NULL DEFAULT '';`); err != nil {
+		return fmt.Errorf("store: migrate pr queue branch: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE pr_queue ADD COLUMN pr_url TEXT NOT NULL DEFAULT '';`); err != nil {
+		return fmt.Errorf("store: migrate pr queue pr url: %w", err)
+	}
+	return nil
 }
 
 func addWebhookReplay(_ *SQLiteStore, tx *sql.Tx) error {

@@ -183,7 +183,7 @@ func TestParentCardEditsOncePerMinute(t *testing.T) {
 }
 
 func TestParentCardAgeSurvivesRestart(t *testing.T) {
-	srv, st, rec := newSurfaceServer(t)
+	srv, st, _ := newSurfaceServer(t)
 	ctx := context.Background()
 	prKey := "acme/widget#181"
 	now := time.Now()
@@ -191,20 +191,76 @@ func TestParentCardAgeSurvivesRestart(t *testing.T) {
 	delivery := seedRunDelivery(t, st, prKey, startedAt, now)
 	seedActiveRun(t, st, prKey, "thread-9", "parent-1", delivery.ID)
 
-	if _, ok := srv.tasks.SurfaceDetail(prKey); ok {
+	srv.syncPhaseParent(ctx, srv.endpoints["/review"], prKey, surfaceEnvelope(), PhaseReview)
+
+	row, err := st.PRQueueRepo().Get(ctx, prKey)
+	if err != nil || row == nil {
+		t.Fatalf("load queue row: %v", err)
+	}
+	if row.Branch != "feat/x" || row.PRURL != "https://github.com/acme/widget/pull/181" {
+		t.Fatalf("persisted surface meta = %+v, want branch and PR URL", row)
+	}
+
+	restarted, rec := newSurfaceServerOn(t, st)
+	if _, ok := restarted.tasks.SurfaceDetail(prKey); ok {
 		t.Fatal("registry must be empty to simulate a restart")
 	}
-	segment := srv.runAgeSegment(ctx, prKey, PhaseReview)
+	segment := restarted.runAgeSegment(ctx, prKey, PhaseReview)
 	if !strings.HasSuffix(segment, "· ⏱️ 12m") {
 		t.Fatalf("age segment after restart = %q, want the delivery row age", segment)
 	}
 
-	if got := srv.refreshRunAges(ctx, now); got != 1 {
+	if got := restarted.refreshRunAges(ctx, now); got != 1 {
 		t.Fatalf("first tick after restart edits = %d, want one", got)
 	}
 	edits := parentEdits(rec)
 	if len(edits) != 1 || !strings.HasSuffix(edits[0].text, "· ⏱️ 12m") {
 		t.Fatalf("first tick after restart = %+v, want the delivery row age", edits)
+	}
+	labels := make(map[string]bool, len(edits[0].buttons))
+	for _, button := range edits[0].buttons {
+		labels[button.Label] = true
+	}
+	for _, want := range []string{"Open PR", "Merge", "Re-dispatch"} {
+		if !labels[want] {
+			t.Fatalf("first tick after restart buttons = %+v, want %q", edits[0].buttons, want)
+		}
+	}
+}
+
+func TestParentCardAgeTickKeepsConcurrentPhase(t *testing.T) {
+	srv, st, rec := newSurfaceServer(t)
+	ctx := context.Background()
+	prKey := "acme/widget#181"
+	now := time.Now()
+	startedAt := now.Add(-12*time.Minute - 20*time.Second)
+	delivery := seedRunDelivery(t, st, prKey, startedAt, now)
+	seedActiveRun(t, st, prKey, "thread-9", "parent-1", delivery.ID)
+	seedParentSurface(srv, prKey, "thread-9", "parent-1", PhaseReview, now)
+
+	transitioned := false
+	srv.SetEditorWithButtons(func(_ context.Context, _, _, msgID, text string, buttons []channel.Button) error {
+		if msgID == "parent-1" && !transitioned {
+			transitioned = true
+			srv.syncPhaseParent(ctx, srv.endpoints["/merge"], prKey, surfaceEnvelope(), PhaseMerge)
+			// The stale age write lands after the transition, as it would when
+			// the platform call completes out of order.
+			rec.add(&rec.edited, surfaceMessage{messageID: msgID, text: text, buttons: buttons})
+			return nil
+		}
+		rec.add(&rec.edited, surfaceMessage{messageID: msgID, text: text, buttons: buttons})
+		return nil
+	})
+
+	if got := srv.refreshRunAges(ctx, now); got != 1 {
+		t.Fatalf("tick edits = %d, want one", got)
+	}
+	edits := parentEdits(rec)
+	if len(edits) == 0 {
+		t.Fatal("tick produced no parent writes")
+	}
+	if last := edits[len(edits)-1].text; !strings.Contains(last, "— merge") {
+		t.Fatalf("final parent text = %q, want the merge phase", last)
 	}
 }
 

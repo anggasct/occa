@@ -18,6 +18,7 @@ type runAgeCardState struct {
 	nextAttempt time.Time
 	parentBase  string
 	parentText  string
+	parentGen   uint64
 	threadBase  string
 	threadText  string
 }
@@ -56,6 +57,7 @@ func (s *Server) rememberParentAge(prKey, base, text string) {
 	state := s.runAgeCard(strings.TrimSpace(prKey))
 	state.parentBase = base
 	state.parentText = text
+	state.parentGen++
 }
 
 func (s *Server) rememberThreadAge(prKey, base, text string) {
@@ -270,6 +272,7 @@ func (s *Server) refreshRunAges(ctx context.Context, now time.Time) int {
 		state.nextAttempt = now.Add(interval)
 		parentBase := state.parentBase
 		parentText := state.parentText
+		parentGen := state.parentGen
 		threadBase := state.threadBase
 		threadText := state.threadText
 		s.ageState.mu.Unlock()
@@ -280,11 +283,10 @@ func (s *Server) refreshRunAges(ctx context.Context, now time.Time) int {
 			parentBase = FormatPhaseParent(repo, prNumber, phase, s.statusIcons)
 		}
 		segment := FormatRunAgeSegment(now, deliveryStartedAt(receipt), s.runAgeActivity(row.PRKey, receipt), phase, ep.EffectiveIdleAfter())
-		if rootID != "" {
+		if rootID != "" && branch != "" {
 			text := appendStatusSegment(parentBase, segment)
 			if text != parentText {
-				buttons := s.phaseParentButtons(ep, row.PRKey, repo, branch, prURL, threadID)
-				if err := s.editPhaseParent(ctx, ep.Platform, ep.ChannelID, rootID, text, buttons); err != nil {
+				if err := s.editParentAge(ctx, ep, row.PRKey, repo, rootID, branch, prURL, threadID, text, parentGen, state); err != nil {
 					slog.Warn("webhook: run age edit failed", "pr_key", row.PRKey, "surface", "parent", "error", err)
 					if errors.Is(err, channel.ErrRateLimited) {
 						s.ageState.mu.Lock()
@@ -292,11 +294,6 @@ func (s *Server) refreshRunAges(ctx context.Context, now time.Time) int {
 						s.ageState.mu.Unlock()
 					}
 				} else {
-					s.ageState.mu.Lock()
-					if state.parentBase == parentBase {
-						state.parentText = text
-					}
-					s.ageState.mu.Unlock()
 					edits++
 				}
 			}
@@ -334,15 +331,46 @@ func (s *Server) refreshRunAges(ctx context.Context, now time.Time) int {
 	return edits
 }
 
+// editParentAge writes an age-only update and repairs it when a phase
+// transition lands while the update is in flight. The generation check makes
+// the newer phase render win instead of letting the stale age snapshot
+// overwrite it.
+func (s *Server) editParentAge(ctx context.Context, ep config.EndpointConfig, prKey, repo, rootID, branch, prURL, threadID, text string, gen uint64, state *runAgeCardState) error {
+	for attempt := 0; ; attempt++ {
+		buttons := s.phaseParentButtons(ep, prKey, repo, branch, prURL, threadID)
+		if err := s.editPhaseParent(ctx, ep.Platform, ep.ChannelID, rootID, text, buttons); err != nil {
+			return err
+		}
+		s.ageState.mu.Lock()
+		currentGen := state.parentGen
+		currentText := state.parentText
+		if currentGen == gen {
+			state.parentText = text
+			s.ageState.mu.Unlock()
+			return nil
+		}
+		s.ageState.mu.Unlock()
+		if attempt >= 2 || currentText == "" || currentText == text {
+			return nil
+		}
+		gen = currentGen
+		text = currentText
+	}
+}
+
 func (s *Server) runAgeSurface(row store.PRRun) (string, string, string, string) {
-	rootID, threadID, prURL, branch := "", strings.TrimSpace(row.ThreadID), "", ""
+	rootID, threadID, prURL, branch := "", strings.TrimSpace(row.ThreadID), strings.TrimSpace(row.PRURL), strings.TrimSpace(row.Branch)
 	if detail, ok := s.tasks.SurfaceDetail(row.PRKey); ok {
 		rootID = strings.TrimSpace(detail.RootMessageID)
 		if value := strings.TrimSpace(detail.ThreadID); value != "" {
 			threadID = value
 		}
-		prURL = strings.TrimSpace(detail.PRURL)
-		branch = strings.TrimSpace(detail.Branch)
+		if value := strings.TrimSpace(detail.PRURL); value != "" {
+			prURL = value
+		}
+		if value := strings.TrimSpace(detail.Branch); value != "" {
+			branch = value
+		}
 	}
 	if rootID == "" {
 		rootID = strings.TrimSpace(row.RootMsgID)

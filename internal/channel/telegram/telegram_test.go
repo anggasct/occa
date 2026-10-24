@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -551,5 +552,18 @@ func TestAdapterEditNotification(t *testing.T) {
 	simulateNotModified = true
 	if err := a.EditNotification("-1001234", "42", "same text"); err != nil {
 		t.Fatalf("EditNotification with not modified should return nil, got: %v", err)
+	}
+}
+
+func TestAdapterEditNotificationRateLimited(t *testing.T) {
+	bot := fakeTelegramServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 1","parameters":{"retry_after":1}}`))
+	})
+	a := &Adapter{maxDownloadSize: 10 * 1024 * 1024, bot: bot}
+
+	err := a.EditNotification("-1001234:777", "42", "updated text")
+	if !errors.Is(err, channel.ErrRateLimited) {
+		t.Fatalf("EditNotification error = %v, want channel.ErrRateLimited", err)
 	}
 }

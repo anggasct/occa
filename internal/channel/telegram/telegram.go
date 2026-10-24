@@ -37,7 +37,10 @@ type Config struct {
 	InitAttempts    int
 }
 
-const initBotBackoff = 3 * time.Second
+const (
+	initBotBackoff      = 3 * time.Second
+	maxRateLimitRetries = 1
+)
 
 func New(token string, menu []channel.MenuCommand, cfg Config) *Adapter {
 	return &Adapter{token: token, menu: menu, downloadClient: &http.Client{Timeout: cfg.DownloadTimeout}, maxDownloadSize: cfg.MaxDownloadSize, initTimeout: cfg.InitTimeout, initAttempts: cfg.InitAttempts}
@@ -276,6 +279,9 @@ func (a *Adapter) editMessage(chatID int64, messageID int, text string) error {
 		}
 		if strings.Contains(err.Error(), "message is not modified") {
 			return nil
+		}
+		if extractRetryAfter(err) > 0 {
+			return fmt.Errorf("%w: %v", channel.ErrRateLimited, err)
 		}
 		return err
 	}
@@ -648,6 +654,7 @@ func (rc *replyContext) EditWithButtons(ref channel.MessageRef, text string, but
 }
 
 func (rc *replyContext) request(method string, params tgbotapi.Params) (tgbotapi.Message, error) {
+	retries := 0
 	for {
 		resp, err := rc.bot.MakeRequest(method, params)
 		if err == nil {
@@ -661,12 +668,17 @@ func (rc *replyContext) request(method string, params tgbotapi.Params) (tgbotapi
 		if retryAfter <= 0 {
 			return tgbotapi.Message{}, err
 		}
+		if retries >= maxRateLimitRetries {
+			return tgbotapi.Message{}, fmt.Errorf("%w: %v", channel.ErrRateLimited, err)
+		}
+		retries++
 		slog.Warn("telegram: rate limited, retrying", "method", method, "retry_after", retryAfter)
 		time.Sleep(time.Duration(retryAfter) * time.Second)
 	}
 }
 
 func (rc *replyContext) requestSilent(method string, params tgbotapi.Params) error {
+	retries := 0
 	for {
 		_, err := rc.bot.MakeRequest(method, params)
 		if err == nil {
@@ -676,6 +688,10 @@ func (rc *replyContext) requestSilent(method string, params tgbotapi.Params) err
 		if retryAfter <= 0 {
 			return err
 		}
+		if retries >= maxRateLimitRetries {
+			return fmt.Errorf("%w: %v", channel.ErrRateLimited, err)
+		}
+		retries++
 		slog.Warn("telegram: rate limited, retrying", "method", method, "retry_after", retryAfter)
 		time.Sleep(time.Duration(retryAfter) * time.Second)
 	}

@@ -754,6 +754,20 @@ func TestSendNotificationAndEditNotification(t *testing.T) {
 	}
 }
 
+func TestEditNotificationRateLimited(t *testing.T) {
+	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
+		return []byte(`{"message":"You are being rate limited.","retry_after":0.01,"global":false}`), http.StatusTooManyRequests
+	})
+	a := &Adapter{session: session}
+
+	if err := a.EditNotification("chan-1", "msg-123", "updated"); !errors.Is(err, channel.ErrRateLimited) {
+		t.Fatalf("EditNotification error = %v, want channel.ErrRateLimited", err)
+	}
+	if err := a.EditNotificationWithButtons("chan-1", "msg-123", "updated", []channel.Button{{Label: "Open", Value: "open"}}); !errors.Is(err, channel.ErrRateLimited) {
+		t.Fatalf("EditNotificationWithButtons error = %v, want channel.ErrRateLimited", err)
+	}
+}
+
 func TestStartThreadClampsNameAndTracksThread(t *testing.T) {
 	var threadPath, threadReqBody string
 	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {

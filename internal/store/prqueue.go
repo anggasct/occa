@@ -20,6 +20,8 @@ type PRRun struct {
 	PRKey          string
 	ThreadID       string
 	RootMsgID      string
+	Branch         string
+	PRURL          string
 	Status         PRStatus
 	ActiveKind     string
 	ActiveSession  string
@@ -53,6 +55,7 @@ type PRQueueRepo interface {
 	ListItems(ctx context.Context, prKey string) ([]PRQueueItem, error)
 	PruneDrained(ctx context.Context, cutoff int64) (int, error)
 	UpdateThread(ctx context.Context, prKey, threadID, rootMsgID string) error
+	UpdatePRMeta(ctx context.Context, prKey, branch, prURL string) error
 	UpdateSession(ctx context.Context, prKey, sessionID string) error
 	SetRetryState(ctx context.Context, prKey string, retryCount int, nextRetryAt int64) error
 	SetResumePending(ctx context.Context, prKey, kind string, deliveryID int64) error
@@ -67,12 +70,12 @@ type sqlitePRQueueRepo struct {
 	db *sql.DB
 }
 
-const prRunColumns = `pr_key, thread_id, root_msg_id, status, active_kind, active_session, active_delivery, active_since, retry_count, next_retry_at, blocked_reason, created_at, updated_at`
+const prRunColumns = `pr_key, thread_id, root_msg_id, branch, pr_url, status, active_kind, active_session, active_delivery, active_since, retry_count, next_retry_at, blocked_reason, created_at, updated_at`
 
 func scanPRRun(row interface{ Scan(...any) error }) (*PRRun, error) {
 	var r PRRun
 	var status, kind, session, reason string
-	err := row.Scan(&r.PRKey, &r.ThreadID, &r.RootMsgID, &status, &kind, &session,
+	err := row.Scan(&r.PRKey, &r.ThreadID, &r.RootMsgID, &r.Branch, &r.PRURL, &status, &kind, &session,
 		&r.ActiveDelivery, &r.ActiveSince, &r.RetryCount, &r.NextRetryAt, &reason,
 		&r.CreatedAt, &r.UpdatedAt)
 	if err != nil {
@@ -348,6 +351,26 @@ func (r *sqlitePRQueueRepo) UpdateThread(ctx context.Context, prKey, threadID, r
 		return fmt.Errorf("store: pr queue update thread rows: %w", err)
 	} else if n == 0 {
 		return fmt.Errorf("store: pr queue update thread: unknown pr_key %q", prKey)
+	}
+	return nil
+}
+
+func (r *sqlitePRQueueRepo) UpdatePRMeta(ctx context.Context, prKey, branch, prURL string) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE pr_queue
+		 SET branch = CASE WHEN ? != '' THEN ? ELSE branch END,
+		     pr_url = CASE WHEN ? != '' THEN ? ELSE pr_url END,
+		     updated_at = ?
+		 WHERE pr_key = ?`,
+		branch, branch, prURL, prURL, time.Now().Unix(), prKey,
+	)
+	if err != nil {
+		return fmt.Errorf("store: pr queue update meta: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("store: pr queue update meta rows: %w", err)
+	} else if n == 0 {
+		return fmt.Errorf("store: pr queue update meta: unknown pr_key %q", prKey)
 	}
 	return nil
 }

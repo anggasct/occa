@@ -480,6 +480,9 @@ func requiredColumnsForVersion(version int) map[string][]string {
 	if version >= 20 {
 		columns["pr_queue"] = append(columns["pr_queue"], "next_retry_at")
 	}
+	if version >= 22 {
+		columns["pr_queue"] = append(columns["pr_queue"], "branch", "pr_url")
+	}
 	return columns
 }
 
