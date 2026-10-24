@@ -451,7 +451,7 @@ func (s *Server) syncPhaseParent(ctx context.Context, ep config.EndpointConfig, 
 				ThreadID:      threadID,
 				Phase:         string(phase),
 			})
-			s.rememberParentBase(prKey, base)
+			s.rememberParentBase(prKey, base, phase)
 		}
 		return rootID, false
 	}
@@ -465,7 +465,7 @@ func (s *Server) syncPhaseParent(ctx context.Context, ep config.EndpointConfig, 
 		Phase:         string(phase),
 	})
 	s.tasks.ClearReopen(prKey)
-	s.rememberParentAge(prKey, base, text)
+	s.rememberParentAge(prKey, base, text, phase)
 	slog.Info("webhook: phase parent updated", "pr_key", prKey, "from_phase", string(previous), "to_phase", string(phase))
 	return rootID, true
 }
@@ -588,7 +588,7 @@ func (s *Server) refreshPhaseParentButtons(ctx context.Context, ep config.Endpoi
 		ThreadID:      threadID,
 		Phase:         string(phase),
 	})
-	s.rememberParentAge(prKey, base, text)
+	s.rememberParentAge(prKey, base, text, phase)
 	slog.Info("webhook: phase parent buttons refreshed", "pr_key", prKey, "phase", string(phase))
 }
 
@@ -609,9 +609,14 @@ func (s *Server) ensureThreadStatus(ctx context.Context, platform, channelID, th
 	writer := s.threadStatusWriter(ctx, platform, target, update.Phase)
 	msgID := writer.Write(target, threadID, repo, branch, prKey, text)
 	if msgID != "" {
-		s.rememberThreadAge(prKey, base, text)
+		s.rememberThreadAge(prKey, base, text, update.Phase)
 	} else {
-		s.rememberThreadBase(prKey, base)
+		s.rememberThreadBase(prKey, base, update.Phase)
+	}
+	if strings.TrimSpace(prKey) != "" && s.prQueues != nil {
+		if err := s.prQueues.UpdateThreadStatus(ctx, prKey, base, msgID); err != nil {
+			slog.Warn("webhook: thread status persist failed", "pr_key", prKey, "error", err)
+		}
 	}
 	return msgID
 }

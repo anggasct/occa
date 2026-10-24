@@ -518,3 +518,153 @@ type configEndpoint struct {
 func (c configEndpoint) endpoint() config.EndpointConfig {
 	return config.EndpointConfig{RefreshInterval: c.refresh, IdleAfter: c.idle}
 }
+
+func TestParentCardAgeTickRepairsTerminalPhase(t *testing.T) {
+	srv, st, rec := newSurfaceServer(t)
+	ctx := context.Background()
+	prKey := "acme/widget#181"
+	now := time.Now()
+	startedAt := now.Add(-12*time.Minute - 20*time.Second)
+	delivery := seedRunDelivery(t, st, prKey, startedAt, now)
+	seedActiveRun(t, st, prKey, "thread-9", "parent-1", delivery.ID)
+	seedParentSurface(srv, prKey, "thread-9", "parent-1", PhaseReview, now)
+
+	transitioned := false
+	srv.SetEditorWithButtons(func(_ context.Context, _, _, msgID, text string, buttons []channel.Button) error {
+		if msgID == "parent-1" && !transitioned {
+			transitioned = true
+			srv.syncPhaseParent(ctx, srv.endpoints["/merged"], prKey, surfaceEnvelope(), PhaseMerged)
+		}
+		rec.add(&rec.edited, surfaceMessage{messageID: msgID, text: text, buttons: buttons})
+		return nil
+	})
+
+	if got := srv.refreshRunAges(ctx, now); got != 1 {
+		t.Fatalf("tick edits = %d, want one", got)
+	}
+	edits := parentEdits(rec)
+	if len(edits) == 0 {
+		t.Fatal("tick produced no parent writes")
+	}
+	if last := edits[len(edits)-1].text; !strings.HasSuffix(last, "· 12m total") {
+		t.Fatalf("final parent text = %q, want the frozen terminal total", last)
+	}
+}
+
+func TestThreadAgeTickRepairsTerminalPhase(t *testing.T) {
+	srv, st, rec := newSurfaceServer(t)
+	ctx := context.Background()
+	prKey := "acme/widget#181"
+	now := time.Now()
+	delivery := seedRunDelivery(t, st, prKey, now.Add(-12*time.Minute-20*time.Second), now)
+	seedActiveRun(t, st, prKey, "thread-9", "parent-1", delivery.ID)
+	seedParentSurface(srv, prKey, "thread-9", "parent-1", PhaseReview, now)
+	srv.ensureThreadStatus(ctx, "discord", "chan-1", "thread-9", "acme/widget", "feat/x", prKey, ThreadStatusUpdate{
+		Phase: PhaseReview,
+		Next:  "fix",
+	})
+
+	transitioned := false
+	srv.SetEditor(func(_ context.Context, _, _, msgID, text string) error {
+		if msgID == "status-1" && !transitioned {
+			transitioned = true
+			srv.ensureThreadStatus(ctx, "discord", "chan-1", "thread-9", "acme/widget", "feat/x", prKey, ThreadStatusUpdate{
+				Phase: PhaseMerged,
+				Next:  "merge",
+			})
+		}
+		rec.add(&rec.edited, surfaceMessage{messageID: msgID, text: text})
+		return nil
+	})
+
+	srv.refreshRunAges(ctx, now.Add(61*time.Second))
+
+	rec.mu.Lock()
+	var threadEdits []surfaceMessage
+	for _, msg := range rec.edited {
+		if msg.messageID == "status-1" {
+			threadEdits = append(threadEdits, msg)
+		}
+	}
+	rec.mu.Unlock()
+	if len(threadEdits) == 0 {
+		t.Fatal("tick produced no thread writes")
+	}
+	if last := threadEdits[len(threadEdits)-1].text; !strings.HasSuffix(last, "· 13m total") {
+		t.Fatalf("final thread text = %q, want the frozen terminal total", last)
+	}
+}
+
+func TestThreadStatusLineAgeSurvivesRestart(t *testing.T) {
+	srv, st, _ := newSurfaceServer(t)
+	ctx := context.Background()
+	prKey := "acme/widget#181"
+	now := time.Now()
+	delivery := seedRunDelivery(t, st, prKey, now.Add(-12*time.Minute-20*time.Second), now)
+	seedActiveRun(t, st, prKey, "thread-9", "parent-1", delivery.ID)
+
+	srv.ensureThreadStatus(ctx, "discord", "chan-1", "thread-9", "acme/widget", "feat/x", prKey, ThreadStatusUpdate{
+		Phase:  PhaseReview,
+		Queued: "merge (1)",
+		Next:   "fix",
+	})
+
+	row, err := st.PRQueueRepo().Get(ctx, prKey)
+	if err != nil || row == nil {
+		t.Fatalf("load queue row: %v", err)
+	}
+	if row.ThreadStatusBase == "" || row.ThreadStatusMsgID != "status-1" {
+		t.Fatalf("persisted thread status = %+v, want the base and message id", row)
+	}
+
+	restarted, rec := newSurfaceServerOn(t, st)
+	if _, ok := restarted.tasks.SurfaceDetail(prKey); ok {
+		t.Fatal("registry must be empty to simulate a restart")
+	}
+	if got := restarted.refreshRunAges(ctx, now); got != 1 {
+		t.Fatalf("first tick after restart edits = %d, want one", got)
+	}
+
+	rec.mu.Lock()
+	var threadEdits []surfaceMessage
+	for _, msg := range rec.edited {
+		if msg.messageID == "status-1" {
+			threadEdits = append(threadEdits, msg)
+		}
+	}
+	rec.mu.Unlock()
+	if len(threadEdits) != 1 {
+		t.Fatalf("thread edits after restart = %d, want the pinned line edited in place", len(threadEdits))
+	}
+	if !strings.HasSuffix(threadEdits[0].text, "· ⏱️ 12m") {
+		t.Fatalf("thread line after restart = %q, want the delivery row age", threadEdits[0].text)
+	}
+	if got := len(rec.threadSends()); got != 0 {
+		t.Fatalf("thread sends after restart = %d, want no duplicate status line", got)
+	}
+}
+
+func TestParentCardRestartActivityUnknownHasNoIdle(t *testing.T) {
+	_, st, _ := newSurfaceServer(t)
+	ctx := context.Background()
+	prKey := "acme/widget#181"
+	now := time.Now()
+	startedAt := now.Add(-12 * time.Minute)
+	delivery := seedRunDelivery(t, st, prKey, startedAt, startedAt.Add(time.Minute))
+	seedActiveRun(t, st, prKey, "thread-9", "parent-1", delivery.ID)
+	if err := st.PRQueueRepo().UpdatePRMeta(ctx, prKey, "feat/x", "https://github.com/acme/widget/pull/181"); err != nil {
+		t.Fatalf("persist surface meta: %v", err)
+	}
+
+	restarted, rec := newSurfaceServerOn(t, st)
+	if got := restarted.refreshRunAges(ctx, now); got != 1 {
+		t.Fatalf("first tick after restart edits = %d, want one", got)
+	}
+	edits := parentEdits(rec)
+	if len(edits) != 1 {
+		t.Fatalf("parent edits after restart = %d, want one", len(edits))
+	}
+	if strings.Contains(edits[0].text, "idle") {
+		t.Fatalf("parent text after restart = %q, must not claim idle without an in-memory activity source", edits[0].text)
+	}
+}

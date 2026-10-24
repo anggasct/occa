@@ -13,8 +13,8 @@ func TestPRQueueSchemaVersion(t *testing.T) {
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatalf("read schema version: %v", err)
 	}
-	if version != 22 {
-		t.Fatalf("schema version = %d, want 22", version)
+	if version != SchemaVersion {
+		t.Fatalf("schema version = %d, want %d", version, SchemaVersion)
 	}
 }
 
@@ -59,6 +59,29 @@ func TestPRQueueUpdatePRMeta(t *testing.T) {
 	}
 	if row.Branch != "feat/x" || row.PRURL != "https://github.com/acme/widget/pull/42" {
 		t.Fatalf("meta = %+v, want branch and PR URL preserved", row)
+	}
+}
+
+func TestPRQueueUpdateThreadStatus(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+	repo := s.PRQueueRepo()
+	const key = "acme/widget#42"
+	if _, err := repo.EnsurePR(ctx, key, "thread-1", "root-1"); err != nil {
+		t.Fatalf("EnsurePR: %v", err)
+	}
+	if err := repo.UpdateThreadStatus(ctx, key, "📌 Status — 👀 review", "status-1"); err != nil {
+		t.Fatalf("UpdateThreadStatus: %v", err)
+	}
+	if err := repo.UpdateThreadStatus(ctx, key, "📌 Status — 🔀 merge", ""); err != nil {
+		t.Fatalf("UpdateThreadStatus without message id: %v", err)
+	}
+	row, err := repo.Get(ctx, key)
+	if err != nil || row == nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if row.ThreadStatusBase != "📌 Status — 🔀 merge" || row.ThreadStatusMsgID != "status-1" {
+		t.Fatalf("thread status = %+v, want base advanced and message id preserved", row)
 	}
 }
 

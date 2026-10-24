@@ -19,9 +19,11 @@ type runAgeCardState struct {
 	parentBase  string
 	parentText  string
 	parentGen   uint64
+	parentPhase Phase
 	threadBase  string
 	threadText  string
 	threadGen   uint64
+	threadPhase Phase
 }
 
 type runAgeState struct {
@@ -49,7 +51,7 @@ func (s *Server) runAgeCard(prKey string) *runAgeCardState {
 	return state
 }
 
-func (s *Server) rememberParentAge(prKey, base, text string) {
+func (s *Server) rememberParentAge(prKey, base, text string, phase Phase) {
 	if s == nil || s.ageState == nil || strings.TrimSpace(prKey) == "" {
 		return
 	}
@@ -58,13 +60,14 @@ func (s *Server) rememberParentAge(prKey, base, text string) {
 	state := s.runAgeCard(strings.TrimSpace(prKey))
 	state.parentBase = base
 	state.parentText = text
+	state.parentPhase = phase
 	state.parentGen++
 }
 
 // rememberParentBase records a phase whose platform write has not landed. The
 // cached text stays stale on purpose: the next tick renders the new phase
 // because its text differs, so a throttled write repairs itself.
-func (s *Server) rememberParentBase(prKey, base string) {
+func (s *Server) rememberParentBase(prKey, base string, phase Phase) {
 	if s == nil || s.ageState == nil || strings.TrimSpace(prKey) == "" {
 		return
 	}
@@ -72,10 +75,11 @@ func (s *Server) rememberParentBase(prKey, base string) {
 	defer s.ageState.mu.Unlock()
 	state := s.runAgeCard(strings.TrimSpace(prKey))
 	state.parentBase = base
+	state.parentPhase = phase
 	state.parentGen++
 }
 
-func (s *Server) rememberThreadAge(prKey, base, text string) {
+func (s *Server) rememberThreadAge(prKey, base, text string, phase Phase) {
 	if s == nil || s.ageState == nil || strings.TrimSpace(prKey) == "" {
 		return
 	}
@@ -84,10 +88,11 @@ func (s *Server) rememberThreadAge(prKey, base, text string) {
 	state := s.runAgeCard(strings.TrimSpace(prKey))
 	state.threadBase = base
 	state.threadText = text
+	state.threadPhase = phase
 	state.threadGen++
 }
 
-func (s *Server) rememberThreadBase(prKey, base string) {
+func (s *Server) rememberThreadBase(prKey, base string, phase Phase) {
 	if s == nil || s.ageState == nil || strings.TrimSpace(prKey) == "" {
 		return
 	}
@@ -95,6 +100,7 @@ func (s *Server) rememberThreadBase(prKey, base string) {
 	defer s.ageState.mu.Unlock()
 	state := s.runAgeCard(strings.TrimSpace(prKey))
 	state.threadBase = base
+	state.threadPhase = phase
 	state.threadGen++
 }
 
@@ -183,7 +189,7 @@ func (s *Server) runAgeSegment(ctx context.Context, prKey string, phase Phase) s
 	if ep, ok := s.endpointForPR(prKey, phase); ok {
 		idleAfter = ep.EffectiveIdleAfter()
 	}
-	return FormatRunAgeSegment(s.ageNow(), deliveryStartedAt(receipt), s.runAgeActivity(prKey, receipt), phase, idleAfter)
+	return FormatRunAgeSegment(s.ageNow(), deliveryStartedAt(receipt), s.runAgeActivity(prKey), phase, idleAfter)
 }
 
 func (s *Server) endpointForPR(prKey string, phase Phase) (config.EndpointConfig, bool) {
@@ -212,7 +218,7 @@ func (s *Server) activeRunForPR(prKey string) *activeRun {
 	return s.activeRuns["pr:"+strings.TrimSpace(prKey)]
 }
 
-func (s *Server) runAgeActivity(prKey string, receipt *store.WebhookDelivery) time.Time {
+func (s *Server) runAgeActivity(prKey string) time.Time {
 	var last time.Time
 	if run := s.activeRunForPR(prKey); run != nil {
 		last = run.progressAt()
@@ -220,12 +226,9 @@ func (s *Server) runAgeActivity(prKey string, receipt *store.WebhookDelivery) ti
 	if detail, ok := s.tasks.SurfaceDetail(prKey); ok && detail.LastWriteAt.After(last) {
 		last = detail.LastWriteAt
 	}
-	if last.IsZero() && receipt != nil && receipt.UpdatedAt > 0 {
-		last = time.Unix(receipt.UpdatedAt, 0)
-	}
-	if last.IsZero() {
-		last = deliveryStartedAt(receipt)
-	}
+	// The delivery row's updated_at only moves on claim/retry, not on agent
+	// progress. Treating it as the last write would report a healthy run as
+	// idle after a restart, so an unknown activity time stays unknown.
 	return last
 }
 
@@ -303,6 +306,7 @@ func (s *Server) refreshRunAges(ctx context.Context, now time.Time) int {
 		threadBase := state.threadBase
 		threadText := state.threadText
 		threadGen := state.threadGen
+		threadPhase := state.threadPhase
 		s.ageState.mu.Unlock()
 
 		repo, prNumber, _ := splitPRKey(row.PRKey)
@@ -310,11 +314,24 @@ func (s *Server) refreshRunAges(ctx context.Context, now time.Time) int {
 		if parentBase == "" {
 			parentBase = FormatPhaseParent(repo, prNumber, phase, s.statusIcons)
 		}
-		segment := FormatRunAgeSegment(now, deliveryStartedAt(receipt), s.runAgeActivity(row.PRKey, receipt), phase, ep.EffectiveIdleAfter())
+		if threadBase == "" {
+			threadBase = strings.TrimSpace(row.ThreadStatusBase)
+		}
+		startedAt := deliveryStartedAt(receipt)
+		lastActivity := s.runAgeActivity(row.PRKey)
+		idleAfter := ep.EffectiveIdleAfter()
+		segmentFor := func(p Phase) string {
+			return FormatRunAgeSegment(now, startedAt, lastActivity, p, idleAfter)
+		}
+		parentSegment := segmentFor(phase)
+		threadSegment := parentSegment
+		if threadPhase != "" {
+			threadSegment = segmentFor(threadPhase)
+		}
 		if rootID != "" && branch != "" {
-			text := appendStatusSegment(parentBase, segment)
+			text := appendStatusSegment(parentBase, parentSegment)
 			if text != parentText {
-				if err := s.editParentAge(ctx, ep, row.PRKey, repo, rootID, branch, prURL, threadID, parentBase, segment, parentGen, state); err != nil {
+				if err := s.editParentAge(ctx, ep, row.PRKey, repo, rootID, branch, prURL, threadID, parentBase, segmentFor, phase, parentGen, state); err != nil {
 					slog.Warn("webhook: run age edit failed", "pr_key", row.PRKey, "surface", "parent", "error", err)
 					if errors.Is(err, channel.ErrRateLimited) {
 						s.ageState.mu.Lock()
@@ -333,11 +350,18 @@ func (s *Server) refreshRunAges(ctx context.Context, now time.Time) int {
 					msgID = strings.TrimSpace(detail.StatusMessageID)
 				}
 			}
+			if msgID == "" {
+				msgID = strings.TrimSpace(row.ThreadStatusMsgID)
+			}
 			if msgID != "" {
-				text := appendStatusSegment(threadBase, segment)
+				threadPhaseValue := threadPhase
+				if threadPhaseValue == "" {
+					threadPhaseValue = phase
+				}
+				text := appendStatusSegment(threadBase, threadSegment)
 				if text != threadText {
 					target := threadTargetFor(ep.Platform, ep.ChannelID, threadID)
-					if err := s.editThreadAge(ctx, ep.Platform, target, msgID, threadBase, segment, threadGen, state); err != nil {
+					if err := s.editThreadAge(ctx, ep.Platform, target, msgID, threadBase, segmentFor, threadPhaseValue, threadGen, state); err != nil {
 						slog.Warn("webhook: run age edit failed", "pr_key", row.PRKey, "surface", "thread", "error", err)
 						if errors.Is(err, channel.ErrRateLimited) {
 							s.ageState.mu.Lock()
@@ -358,9 +382,9 @@ func (s *Server) refreshRunAges(ctx context.Context, now time.Time) int {
 // transition lands while the update is in flight. The generation check makes
 // the newer phase render win instead of letting the stale age snapshot
 // overwrite it.
-func (s *Server) editParentAge(ctx context.Context, ep config.EndpointConfig, prKey, repo, rootID, branch, prURL, threadID, base, segment string, gen uint64, state *runAgeCardState) error {
+func (s *Server) editParentAge(ctx context.Context, ep config.EndpointConfig, prKey, repo, rootID, branch, prURL, threadID, base string, segmentFor func(Phase) string, phase Phase, gen uint64, state *runAgeCardState) error {
 	for attempt := 0; ; attempt++ {
-		text := appendStatusSegment(base, segment)
+		text := appendStatusSegment(base, segmentFor(phase))
 		buttons := s.phaseParentButtons(ep, prKey, repo, branch, prURL, threadID)
 		if err := s.editAgePhaseParent(ctx, ep.Platform, ep.ChannelID, rootID, text, buttons); err != nil {
 			return err
@@ -368,6 +392,7 @@ func (s *Server) editParentAge(ctx context.Context, ep config.EndpointConfig, pr
 		s.ageState.mu.Lock()
 		currentGen := state.parentGen
 		currentBase := state.parentBase
+		currentPhase := state.parentPhase
 		if currentGen == gen {
 			state.parentText = text
 			s.ageState.mu.Unlock()
@@ -379,21 +404,29 @@ func (s *Server) editParentAge(ctx context.Context, ep config.EndpointConfig, pr
 		}
 		gen = currentGen
 		base = currentBase
+		if currentPhase != "" {
+			phase = currentPhase
+		}
 	}
 }
 
 // editThreadAge mirrors editParentAge for the pinned thread line.
-func (s *Server) editThreadAge(ctx context.Context, platform, target, messageID, base, segment string, gen uint64, state *runAgeCardState) error {
+func (s *Server) editThreadAge(ctx context.Context, platform, target, messageID, base string, segmentFor func(Phase) string, phase Phase, gen uint64, state *runAgeCardState) error {
 	for attempt := 0; ; attempt++ {
-		text := appendStatusSegment(base, segment)
+		text := appendStatusSegment(base, segmentFor(phase))
 		if err := s.editAgeThread(ctx, platform, target, messageID, text); err != nil {
 			return err
 		}
 		s.ageState.mu.Lock()
 		currentGen := state.threadGen
 		currentBase := state.threadBase
+		currentPhase := state.threadPhase
 		if currentGen == gen {
 			state.threadText = text
+			if state.threadBase == "" {
+				state.threadBase = base
+				state.threadPhase = phase
+			}
 			s.ageState.mu.Unlock()
 			return nil
 		}
@@ -403,6 +436,9 @@ func (s *Server) editThreadAge(ctx context.Context, platform, target, messageID,
 		}
 		gen = currentGen
 		base = currentBase
+		if currentPhase != "" {
+			phase = currentPhase
+		}
 	}
 }
 
