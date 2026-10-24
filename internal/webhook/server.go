@@ -1544,6 +1544,8 @@ func (s *Server) resolveWorkspace(item dispatchItem) (*WorkspaceLease, error) {
 	policy, laneKnown := lanePolicyForWorkflow(ep.Workflow)
 	workspaceType := ep.Workspace.Type
 	if laneKnown {
+		// A zero type means no workspace block was supplied; loaded configs
+		// always set an explicit type.
 		if workspaceType == "" {
 			return nil, nil
 		}
