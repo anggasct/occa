@@ -412,6 +412,13 @@ func isOperatorRetryDelivery(deliveryID string) bool {
 	return strings.HasPrefix(strings.TrimSpace(deliveryID), operatorRetryDeliveryPrefix)
 }
 
+// isInternalDelivery reports deliveries the server synthesizes itself. Their
+// delivery id is not supplied by a commenter, so they bypass gates meant for
+// human comment authors.
+func isInternalDelivery(deliveryID string) bool {
+	return isInternalReviewDelivery(deliveryID) || isOperatorRetryDelivery(deliveryID)
+}
+
 func isReviewWorkflow(workflow string) bool {
 	switch strings.TrimSpace(strings.ToLower(workflow)) {
 	case "review", "reviewer":

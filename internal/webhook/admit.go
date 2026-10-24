@@ -101,7 +101,7 @@ func admitDelivery(ep config.EndpointConfig, policy admissionPolicy, envelope We
 		if !requireFlagsHold(rule.Require, envelope, selfReview, reviewVerdict) {
 			continue
 		}
-		if !isInternalReviewDelivery(stringValue(envelope["delivery_id"])) &&
+		if !isInternalDelivery(stringValue(envelope["delivery_id"])) &&
 			!commentAuthorAllowed(ep.CommentAuthors, stringValue(envelope["comment_trigger"]), reviewUser) {
 			return false, fmt.Sprintf("skipped: comment author %s is not in comment_authors", displayLogin(reviewUser))
 		}

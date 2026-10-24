@@ -425,6 +425,121 @@ func TestOperatorRetryBypassesSameHeadReviewDedupe(t *testing.T) {
 	}
 }
 
+func operatorSyntheticCommentBody(trigger, prAuthor, head string) []byte {
+	return []byte(fmt.Sprintf(`{"action":"created","issue":{"number":7,"state":"open","title":"widget","user":{"login":%q},"pull_request":{"html_url":"https://github.com/acme/widget/pull/7"}},"comment":{"body":%q,"user":{"login":"operator"}},"repository":{"full_name":"acme/widget"},"branch":"feat/x","head_revision":%q}`, prAuthor, trigger, head))
+}
+
+func waitSyntheticRetryCompleted(t *testing.T, ctx context.Context, st *store.SQLiteStore, calls *int64) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		all, err := st.WebhookDeliveryRepo().List(ctx, 50)
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		for _, d := range all {
+			if !strings.HasPrefix(d.DeliveryID, operatorRetryDeliveryPrefix) {
+				continue
+			}
+			if d.Status == store.WebhookStatusSkipped {
+				t.Fatalf("operator retry was skipped: %+v", d)
+			}
+			if d.Status == store.WebhookStatusCompleted {
+				if got := atomic.LoadInt64(calls); got != 1 {
+					t.Fatalf("executor calls = %d, want 1", got)
+				}
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("synthetic retry never completed: %+v", all)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestOperatorRetryAdmittedWithCommentAuthorsAllowlist(t *testing.T) {
+	allow := func(platform, userID string) bool { return true }
+	const head = "5932515abc123"
+
+	t.Run("review", func(t *testing.T) {
+		reviewEp := prTestEndpoint("review", "/review", config.AutomationFull)
+		reviewEp.CommentTrigger = []string{"please re-review"}
+		reviewEp.CommentAuthors = []string{"anggasct"}
+		reviewEp.Limits = &config.EndpointLimits{MaxRunsPerPR: 10, Window: time.Hour}
+		srv, st, _ := operatorTestServer(t, allow, reviewEp)
+		ctx := context.Background()
+		linkPRThread(t, srv, "acme/widget#7", "thread-pr")
+		if _, err := st.PRQueueRepo().EnsurePR(ctx, "acme/widget#7", "thread-pr", "root-1"); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.PRQueueRepo().SetActive(ctx, "acme/widget#7", "review", "sess-9", 11); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.PRQueueRepo().SetBlocked(ctx, "acme/widget#7", "interrupted by restart — re-run via /retry or re-trigger"); err != nil {
+			t.Fatal(err)
+		}
+
+		var calls int64
+		srv.executor = func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+			atomic.AddInt64(&calls, 1)
+			return nil
+		}
+		srv.retryBodyBuilder = func(ctx context.Context, repo, number, kind string) ([]byte, string, error) {
+			if repo != "acme/widget" || number != "7" || kind != "review" {
+				t.Fatalf("retry builder got %q %q %q", repo, number, kind)
+			}
+			return operatorSyntheticCommentBody("please re-review", "anggasct", head), "issue_comment", nil
+		}
+
+		reply, handled, err := srv.HandleOperatorCommand(ctx, operatorMsg("thread-pr", "/retry"), "retry", "")
+		if err != nil || !handled || !strings.Contains(reply, "Re-running review") {
+			t.Fatalf("retry = %q %v %v", reply, handled, err)
+		}
+		waitSyntheticRetryCompleted(t, ctx, st, &calls)
+	})
+
+	t.Run("fix review-only", func(t *testing.T) {
+		fixEp := prTestEndpoint("fix", "/fix", config.AutomationReviewOnly)
+		fixEp.CommentTrigger = []string{"/fix"}
+		fixEp.CommentAuthors = []string{"anggasct"}
+		fixEp.Limits = &config.EndpointLimits{MaxRunsPerPR: 10, Window: time.Hour}
+		srv, st, _ := operatorTestServer(t, allow, fixEp)
+		ctx := context.Background()
+		linkPRThread(t, srv, "acme/widget#7", "thread-pr")
+		if _, err := st.PRQueueRepo().EnsurePR(ctx, "acme/widget#7", "thread-pr", "root-1"); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.PRQueueRepo().SetActive(ctx, "acme/widget#7", "fix", "sess-9", 11); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.PRQueueRepo().SetBlocked(ctx, "acme/widget#7", "interrupted by restart — re-run via /retry or re-trigger"); err != nil {
+			t.Fatal(err)
+		}
+		srv.prAuthorResolver = func(ctx context.Context, repo, number string) (string, error) {
+			return "unlisted-author", nil
+		}
+
+		var calls int64
+		srv.executor = func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+			atomic.AddInt64(&calls, 1)
+			return nil
+		}
+		srv.retryBodyBuilder = func(ctx context.Context, repo, number, kind string) ([]byte, string, error) {
+			if repo != "acme/widget" || number != "7" || kind != "fix" {
+				t.Fatalf("retry builder got %q %q %q", repo, number, kind)
+			}
+			return operatorSyntheticCommentBody("/fix", "unlisted-author", head), "issue_comment", nil
+		}
+
+		reply, handled, err := srv.HandleOperatorCommand(ctx, operatorMsg("thread-pr", "/retry"), "retry", "")
+		if err != nil || !handled || !strings.Contains(reply, "Re-running fix") {
+			t.Fatalf("retry = %q %v %v", reply, handled, err)
+		}
+		waitSyntheticRetryCompleted(t, ctx, st, &calls)
+	})
+}
+
 func TestOperatorSkipNoActive(t *testing.T) {
 	allow := func(platform, userID string) bool { return true }
 	srv, _, _ := operatorTestServer(t, allow)
