@@ -21,9 +21,12 @@ var (
 	ErrWorkspaceUnavailable = errors.New("workspace unavailable")
 	ErrRepositoryMismatch   = errors.New("workspace repository mismatch")
 	ErrRevisionRequired     = errors.New("workspace revision required")
+	ErrRevisionMissing      = errors.New("workspace revision missing")
 	ErrWorkspaceLeased      = errors.New("workspace leased")
 	ErrWorkspaceDirty       = errors.New("workspace dirty")
 )
+
+const defaultWorkspaceFetchTimeout = 30 * time.Second
 
 func IsWorkspaceRetryable(err error) bool {
 	return errors.Is(err, ErrWorkspaceLeased) || errors.Is(err, ErrWorkspaceDirty)
@@ -36,6 +39,7 @@ type WorkspaceRequest struct {
 	Key             WebhookExecutionKey
 	DeliveryID      string
 	Lane            string
+	PRNumber        string
 	BindingWorktree string
 	TTL             time.Duration
 }
@@ -60,12 +64,13 @@ func NewWorkspaceManagerWithTTL(ttl time.Duration) *WorkspaceManager {
 }
 
 type WorkspaceManager struct {
-	runner      gitRunner
-	leases      sync.Map
-	roots       sync.Map
-	repoLocks   sync.Map
-	Now         func() time.Time
-	IsolatedTTL time.Duration
+	runner       gitRunner
+	leases       sync.Map
+	roots        sync.Map
+	repoLocks    sync.Map
+	Now          func() time.Time
+	IsolatedTTL  time.Duration
+	FetchTimeout time.Duration
 }
 
 type WorkspaceLease struct {
@@ -208,16 +213,85 @@ func (m *WorkspaceManager) logBindingMismatch(req WorkspaceRequest, lease *Works
 	)
 }
 
-func (m *WorkspaceManager) canonicalRevision(ctx context.Context, root, revision string) (string, error) {
+func (m *WorkspaceManager) canonicalRevision(ctx context.Context, root, revision, branch, prNumber string) (string, error) {
+	if canonical, ok := m.verifyRevision(ctx, root, revision); ok {
+		return canonical, nil
+	}
+
+	var tried []string
+	if b := strings.TrimSpace(branch); b != "" {
+		tried = append(tried, "origin/"+b)
+		if ferr := m.fetchRevision(ctx, root, b, "fetch", "--no-tags", "--prune", "origin", b); fetchAborted(ferr) {
+			return "", fmt.Errorf("%w: %w: %w", ErrWorkspaceUnavailable, ErrRevisionMissing, ferr)
+		}
+		if canonical, ok := m.verifyRevision(ctx, root, revision); ok {
+			return canonical, nil
+		}
+	}
+
+	if n := strings.TrimSpace(prNumber); n != "" {
+		ref := "refs/pull/" + n + "/head"
+		tried = append(tried, ref)
+		if ferr := m.fetchRevision(ctx, root, ref, "fetch", "--no-tags", "origin", "+"+ref+":refs/occa/pull/"+n); fetchAborted(ferr) {
+			return "", fmt.Errorf("%w: %w: %w", ErrWorkspaceUnavailable, ErrRevisionMissing, ferr)
+		}
+		if canonical, ok := m.verifyRevision(ctx, root, revision); ok {
+			return canonical, nil
+		}
+	}
+
+	if len(tried) == 0 {
+		tried = append(tried, "none")
+	}
+	return "", fmt.Errorf("%w: %w: revision %s not in %s after fetch (refs tried: %s); action: verify the checkout remote and fetch the PR head", ErrWorkspaceUnavailable, ErrRevisionMissing, revision, root, strings.Join(tried, ", "))
+}
+
+func (m *WorkspaceManager) verifyRevision(ctx context.Context, root, revision string) (string, bool) {
 	out, err := m.runner.Run(ctx, root, "rev-parse", "--verify", revision+"^{commit}")
 	if err != nil {
-		return "", fmt.Errorf("%w: resolve revision %s: %v", ErrWorkspaceUnavailable, revision, err)
+		return "", false
 	}
 	canonical := strings.TrimSpace(out)
 	if canonical == "" {
-		return "", fmt.Errorf("%w: resolve revision %s: empty object id", ErrWorkspaceUnavailable, revision)
+		return "", false
 	}
-	return canonical, nil
+	return canonical, true
+}
+
+func (m *WorkspaceManager) fetchRevision(ctx context.Context, checkout, ref string, args ...string) error {
+	timeout := m.fetchTimeout()
+	fetchCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	start := time.Now()
+	_, err := m.runner.Run(fetchCtx, checkout, args...)
+	result := "ok"
+	if err != nil {
+		result = "error"
+	}
+	slog.Info("webhook: workspace fetch",
+		"checkout", checkout,
+		"ref", ref,
+		"duration_ms", time.Since(start).Milliseconds(),
+		"result", result,
+	)
+	if err != nil {
+		if abortErr := fetchCtx.Err(); abortErr != nil {
+			return fmt.Errorf("fetch %s timed out after %s: %w", ref, timeout, abortErr)
+		}
+		return err
+	}
+	return nil
+}
+
+func (m *WorkspaceManager) fetchTimeout() time.Duration {
+	if m.FetchTimeout > 0 {
+		return m.FetchTimeout
+	}
+	return defaultWorkspaceFetchTimeout
+}
+
+func fetchAborted(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
 }
 
 func (m *WorkspaceManager) resolveIsolated(ctx context.Context, root string, req WorkspaceRequest) (*WorkspaceLease, error) {
@@ -231,7 +305,7 @@ func (m *WorkspaceManager) resolveIsolated(ctx context.Context, root string, req
 	if req.Key.HeadRevision == "" {
 		return nil, fmt.Errorf("%w: %s mode requires an exact head revision and the event did not provide one", ErrRevisionRequired, config.WorkspaceModeIsolated)
 	}
-	revision, err := m.canonicalRevision(ctx, root, req.Key.HeadRevision)
+	revision, err := m.canonicalRevision(ctx, root, req.Key.HeadRevision, req.Key.Branch, req.PRNumber)
 	if err != nil {
 		return nil, err
 	}
