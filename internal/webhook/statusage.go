@@ -412,7 +412,7 @@ func (s *Server) refreshRunAges(ctx context.Context, now time.Time) int {
 		if threadPhase != "" {
 			threadSegment = segmentFor(threadPhase)
 		}
-		if rootID != "" && branch != "" && !(IsTerminalPhase(phase) && !parentPending) {
+		if rootID != "" && branch != "" && (!IsTerminalPhase(phase) || parentPending) {
 			text := appendStatusSegment(parentBase, parentSegment)
 			if parentPending && parentPendingText != "" {
 				text = parentPendingText
@@ -436,7 +436,7 @@ func (s *Server) refreshRunAges(ctx context.Context, now time.Time) int {
 				}
 			}
 		}
-		if threadID != "" && threadBase != "" && !(IsTerminalPhase(threadPhaseValue) && !threadPending) {
+		if threadID != "" && threadBase != "" && (!IsTerminalPhase(threadPhaseValue) || threadPending) {
 			msgID := s.tasks.StatusMessageIDForThread(threadID)
 			if msgID == "" {
 				if detail, ok := s.tasks.SurfaceDetail(row.PRKey); ok {
