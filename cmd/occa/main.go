@@ -498,6 +498,22 @@ func main() {
 			}
 			return errors.New("webhook channel adapter unavailable")
 		})
+		webhookSrv.SetAgeEditor(func(ctx context.Context, platform, channelID, messageID, text string) error {
+			for _, ch := range channels {
+				if ch.Name() == platform {
+					return notifyEditNoRetry(ch, channelID, messageID, text)
+				}
+			}
+			return errors.New("webhook channel adapter unavailable")
+		})
+		webhookSrv.SetAgeEditorWithButtons(func(ctx context.Context, platform, channelID, messageID, text string, buttons []channel.Button) error {
+			for _, ch := range channels {
+				if ch.Name() == platform {
+					return notifyEditWithButtonsNoRetry(ch, channelID, messageID, text, buttons)
+				}
+			}
+			return errors.New("webhook channel adapter unavailable")
+		})
 		webhookSrv.SetPinner(func(ctx context.Context, platform, channelID, messageID string) error {
 			for _, ch := range channels {
 				if ch.Name() != platform {
@@ -781,6 +797,30 @@ func notifyEditWithButtons(ch channel.Channel, channelID, messageID, text string
 		}
 	}
 	return notifyEdit(ch, channelID, messageID, chunks[0])
+}
+
+func notifyEditNoRetry(ch channel.Channel, channelID, messageID, text string) error {
+	chunks, err := outboundRenderer.Render(text, render.PlatformFor(ch.Name()))
+	if err != nil || len(chunks) == 0 {
+		chunks = []string{text}
+	}
+	if editor, ok := ch.(channel.MessageEditorNoRetry); ok {
+		return editor.EditNotificationNoRetry(channelID, messageID, chunks[0])
+	}
+	return notifyEdit(ch, channelID, messageID, chunks[0])
+}
+
+func notifyEditWithButtonsNoRetry(ch channel.Channel, channelID, messageID, text string, buttons []channel.Button) error {
+	chunks, err := outboundRenderer.Render(text, render.PlatformFor(ch.Name()))
+	if err != nil || len(chunks) == 0 {
+		chunks = []string{text}
+	}
+	if len(buttons) > 0 {
+		if editor, ok := ch.(channel.MessageEditorWithButtonsNoRetry); ok {
+			return editor.EditNotificationWithButtonsNoRetry(channelID, messageID, chunks[0], buttons)
+		}
+	}
+	return notifyEditNoRetry(ch, channelID, messageID, chunks[0])
 }
 
 func guildIDForButtons(ch channel.Channel, channelID, threadID string) string {

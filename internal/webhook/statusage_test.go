@@ -398,6 +398,118 @@ func TestThreadStatusLineAge(t *testing.T) {
 	}
 }
 
+func TestPhaseParentRateLimitKeepsSurfacePhase(t *testing.T) {
+	srv, st, rec := newSurfaceServer(t)
+	ctx := context.Background()
+	prKey := "acme/widget#181"
+	now := time.Now()
+	delivery := seedRunDelivery(t, st, prKey, now.Add(-5*time.Minute), now)
+	seedActiveRun(t, st, prKey, "thread-9", "parent-1", delivery.ID)
+	seedParentSurface(srv, prKey, "thread-9", "parent-1", PhaseReview, now)
+
+	attempts := 0
+	srv.SetEditorWithButtons(func(_ context.Context, _, _, _, _ string, _ []channel.Button) error {
+		attempts++
+		return fmt.Errorf("%w: slow down", channel.ErrRateLimited)
+	})
+	srv.syncPhaseParent(ctx, srv.endpoints["/merge"], prKey, surfaceEnvelope(), PhaseMerge)
+	if attempts != 1 {
+		t.Fatalf("phase edit attempts = %d, want one", attempts)
+	}
+	if _, phase, _, ok := srv.tasks.SurfaceState(prKey); !ok || phase != PhaseMerge {
+		t.Fatalf("surface phase = %q, want merge after a throttled edit", phase)
+	}
+
+	srv.SetEditorWithButtons(func(_ context.Context, _, _, msgID, text string, buttons []channel.Button) error {
+		rec.add(&rec.edited, surfaceMessage{messageID: msgID, text: text, buttons: buttons})
+		return nil
+	})
+	if got := srv.refreshRunAges(ctx, now.Add(time.Minute)); got == 0 {
+		t.Fatal("tick after the throttled phase edit produced no write")
+	}
+	edits := parentEdits(rec)
+	if len(edits) == 0 {
+		t.Fatal("tick produced no parent writes")
+	}
+	if last := edits[len(edits)-1].text; !strings.Contains(last, "— merge") {
+		t.Fatalf("repaired parent text = %q, want the merge phase", last)
+	}
+}
+
+func TestThreadStatusRateLimitDoesNotDuplicate(t *testing.T) {
+	srv, _, rec := newSurfaceServer(t)
+	ctx := context.Background()
+	prKey := "acme/widget#181"
+	srv.ensureThreadStatus(ctx, "discord", "chan-1", "thread-9", "acme/widget", "feat/x", prKey, ThreadStatusUpdate{
+		Phase: PhaseReview,
+		Next:  "fix",
+	})
+	if got := len(rec.threadSends()); got != 1 {
+		t.Fatalf("thread sends = %d, want one", got)
+	}
+
+	attempts := 0
+	srv.SetEditor(func(_ context.Context, _, _, _, _ string) error {
+		attempts++
+		return fmt.Errorf("%w: slow down", channel.ErrRateLimited)
+	})
+	srv.ensureThreadStatus(ctx, "discord", "chan-1", "thread-9", "acme/widget", "feat/x", prKey, ThreadStatusUpdate{
+		Phase: PhaseFix,
+		Next:  "push + re-review",
+	})
+	if attempts != 1 {
+		t.Fatalf("thread edit attempts = %d, want one", attempts)
+	}
+	if got := len(rec.threadSends()); got != 1 {
+		t.Fatalf("thread sends after a throttled edit = %d, want no duplicate", got)
+	}
+}
+
+func TestThreadAgeTickKeepsConcurrentPhase(t *testing.T) {
+	srv, st, rec := newSurfaceServer(t)
+	ctx := context.Background()
+	prKey := "acme/widget#181"
+	now := time.Now()
+	startedAt := now.Add(-12*time.Minute - 20*time.Second)
+	delivery := seedRunDelivery(t, st, prKey, startedAt, now)
+	seedActiveRun(t, st, prKey, "thread-9", "parent-1", delivery.ID)
+	seedParentSurface(srv, prKey, "thread-9", "parent-1", PhaseReview, now)
+	srv.ensureThreadStatus(ctx, "discord", "chan-1", "thread-9", "acme/widget", "feat/x", prKey, ThreadStatusUpdate{
+		Phase: PhaseReview,
+		Next:  "fix",
+	})
+
+	transitioned := false
+	srv.SetEditor(func(_ context.Context, _, _, msgID, text string) error {
+		if msgID == "status-1" && !transitioned {
+			transitioned = true
+			srv.ensureThreadStatus(ctx, "discord", "chan-1", "thread-9", "acme/widget", "feat/x", prKey, ThreadStatusUpdate{
+				Phase: PhaseMerge,
+				Next:  "merge",
+			})
+		}
+		rec.add(&rec.edited, surfaceMessage{messageID: msgID, text: text})
+		return nil
+	})
+
+	srv.refreshRunAges(ctx, now.Add(61*time.Second))
+
+	rec.mu.Lock()
+	var threadEdits []surfaceMessage
+	for _, msg := range rec.edited {
+		if msg.messageID == "status-1" {
+			threadEdits = append(threadEdits, msg)
+		}
+	}
+	rec.mu.Unlock()
+	if len(threadEdits) == 0 {
+		t.Fatal("tick produced no thread writes")
+	}
+	if last := threadEdits[len(threadEdits)-1].text; !strings.Contains(last, "merge") {
+		t.Fatalf("final thread text = %q, want the merge phase", last)
+	}
+}
+
 type configEndpoint struct {
 	refresh time.Duration
 	idle    time.Duration

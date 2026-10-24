@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -440,6 +441,18 @@ func (s *Server) syncPhaseParent(ctx context.Context, ep config.EndpointConfig, 
 		rootID = strings.TrimSpace(id)
 	} else if err := s.editPhaseParent(ctx, ep.Platform, ep.ChannelID, rootID, text, buttons); err != nil {
 		slog.Warn("webhook: phase parent edit failed", "pr_key", prKey, "phase", string(phase), "error", err)
+		if errors.Is(err, channel.ErrRateLimited) {
+			s.tasks.SetSurface(prKey, SurfaceUpdate{
+				RootMessageID: rootID,
+				Repo:          repo,
+				PRNumber:      prNumber,
+				PRURL:         prURL,
+				Branch:        branch,
+				ThreadID:      threadID,
+				Phase:         string(phase),
+			})
+			s.rememberParentBase(prKey, base)
+		}
 		return rootID, false
 	}
 	s.tasks.SetSurface(prKey, SurfaceUpdate{
@@ -597,6 +610,8 @@ func (s *Server) ensureThreadStatus(ctx context.Context, platform, channelID, th
 	msgID := writer.Write(target, threadID, repo, branch, prKey, text)
 	if msgID != "" {
 		s.rememberThreadAge(prKey, base, text)
+	} else {
+		s.rememberThreadBase(prKey, base)
 	}
 	return msgID
 }
@@ -1116,4 +1131,14 @@ func (s *Server) editPhaseParent(ctx context.Context, platform, channelID, messa
 		return s.rawEditor(ctx, platform, channelID, messageID, text)
 	}
 	return s.editParent(ctx, platform, channelID, messageID, text, buttons)
+}
+
+func (s *Server) editAgePhaseParent(ctx context.Context, platform, channelID, messageID, text string, buttons []channel.Button) error {
+	if len(buttons) > 0 && s.rawAgeEditorButtons != nil {
+		return s.rawAgeEditorButtons(ctx, platform, channelID, messageID, text, buttons)
+	}
+	if s.rawAgeEditor != nil {
+		return s.rawAgeEditor(ctx, platform, channelID, messageID, text)
+	}
+	return s.editPhaseParent(ctx, platform, channelID, messageID, text, buttons)
 }

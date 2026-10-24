@@ -591,6 +591,16 @@ func (a *Adapter) SendNotification(channelID, text string) (string, error) {
 }
 
 func (a *Adapter) EditNotification(channelID, messageID, text string) error {
+	return a.editNotification(channelID, messageID, text, true)
+}
+
+// EditNotificationNoRetry surfaces a rate limit instead of sleeping through it.
+// Background writers use it so their own cadence, not the HTTP client, backs off.
+func (a *Adapter) EditNotificationNoRetry(channelID, messageID, text string) error {
+	return a.editNotification(channelID, messageID, text, false)
+}
+
+func (a *Adapter) editNotification(channelID, messageID, text string, retry bool) error {
 	if a.session == nil {
 		return errors.New("discord: session not ready")
 	}
@@ -605,7 +615,7 @@ func (a *Adapter) EditNotification(channelID, messageID, text string) error {
 		Content:         &content,
 		AllowedMentions: &discordgo.MessageAllowedMentions{},
 		Flags:           discordgo.MessageFlagsSuppressEmbeds,
-	}, discordgo.WithRetryOnRatelimit(false))
+	}, discordgo.WithRetryOnRatelimit(retry))
 	if err != nil {
 		return discordRateLimit(fmt.Errorf("discord: edit notification: %w", err))
 	}
@@ -707,6 +717,14 @@ func isDiscordSnowflake(value string) bool {
 }
 
 func (a *Adapter) EditNotificationWithButtons(channelID, messageID, text string, buttons []channel.Button) error {
+	return a.editNotificationWithButtons(channelID, messageID, text, buttons, true)
+}
+
+func (a *Adapter) EditNotificationWithButtonsNoRetry(channelID, messageID, text string, buttons []channel.Button) error {
+	return a.editNotificationWithButtons(channelID, messageID, text, buttons, false)
+}
+
+func (a *Adapter) editNotificationWithButtons(channelID, messageID, text string, buttons []channel.Button, retry bool) error {
 	if a.session == nil {
 		return errors.New("discord: session not ready")
 	}
@@ -719,7 +737,7 @@ func (a *Adapter) EditNotificationWithButtons(channelID, messageID, text string,
 		Components:      &components,
 		AllowedMentions: &discordgo.MessageAllowedMentions{},
 		Flags:           discordgo.MessageFlagsSuppressEmbeds,
-	}, discordgo.WithRetryOnRatelimit(false))
+	}, discordgo.WithRetryOnRatelimit(retry))
 	if err != nil {
 		return discordRateLimit(fmt.Errorf("discord: edit notification with buttons: %w", err))
 	}

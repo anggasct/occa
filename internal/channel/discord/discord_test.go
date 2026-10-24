@@ -754,17 +754,36 @@ func TestSendNotificationAndEditNotification(t *testing.T) {
 	}
 }
 
-func TestEditNotificationRateLimited(t *testing.T) {
+func TestEditNotificationNoRetryRateLimited(t *testing.T) {
 	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
 		return []byte(`{"message":"You are being rate limited.","retry_after":0.01,"global":false}`), http.StatusTooManyRequests
 	})
 	a := &Adapter{session: session}
 
-	if err := a.EditNotification("chan-1", "msg-123", "updated"); !errors.Is(err, channel.ErrRateLimited) {
-		t.Fatalf("EditNotification error = %v, want channel.ErrRateLimited", err)
+	if err := a.EditNotificationNoRetry("chan-1", "msg-123", "updated"); !errors.Is(err, channel.ErrRateLimited) {
+		t.Fatalf("EditNotificationNoRetry error = %v, want channel.ErrRateLimited", err)
 	}
-	if err := a.EditNotificationWithButtons("chan-1", "msg-123", "updated", []channel.Button{{Label: "Open", Value: "open"}}); !errors.Is(err, channel.ErrRateLimited) {
-		t.Fatalf("EditNotificationWithButtons error = %v, want channel.ErrRateLimited", err)
+	if err := a.EditNotificationWithButtonsNoRetry("chan-1", "msg-123", "updated", []channel.Button{{Label: "Open", Value: "open"}}); !errors.Is(err, channel.ErrRateLimited) {
+		t.Fatalf("EditNotificationWithButtonsNoRetry error = %v, want channel.ErrRateLimited", err)
+	}
+}
+
+func TestEditNotificationRetriesRateLimit(t *testing.T) {
+	attempts := 0
+	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
+		attempts++
+		if attempts == 1 {
+			return []byte(`{"message":"You are being rate limited.","retry_after":0.01,"global":false}`), http.StatusTooManyRequests
+		}
+		return []byte(`{"id":"msg-123","channel_id":"chan-1","content":"updated"}`), http.StatusOK
+	})
+	a := &Adapter{session: session}
+
+	if err := a.EditNotification("chan-1", "msg-123", "updated"); err != nil {
+		t.Fatalf("EditNotification after 429: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want the shared editor to retry once", attempts)
 	}
 }
 

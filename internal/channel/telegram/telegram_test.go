@@ -555,15 +555,58 @@ func TestAdapterEditNotification(t *testing.T) {
 	}
 }
 
-func TestAdapterEditNotificationRateLimited(t *testing.T) {
+func TestAdapterEditNotificationNoRetryRateLimited(t *testing.T) {
 	bot := fakeTelegramServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		_, _ = w.Write([]byte(`{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 1","parameters":{"retry_after":1}}`))
 	})
 	a := &Adapter{maxDownloadSize: 10 * 1024 * 1024, bot: bot}
 
-	err := a.EditNotification("-1001234:777", "42", "updated text")
+	err := a.EditNotificationNoRetry("-1001234:777", "42", "updated text")
 	if !errors.Is(err, channel.ErrRateLimited) {
-		t.Fatalf("EditNotification error = %v, want channel.ErrRateLimited", err)
+		t.Fatalf("EditNotificationNoRetry error = %v, want channel.ErrRateLimited", err)
+	}
+}
+
+func TestAdapterEditNotificationRetriesRateLimit(t *testing.T) {
+	attempts := 0
+	bot := fakeTelegramServer(t, func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 1","parameters":{"retry_after":1}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":42}}`))
+	})
+	a := &Adapter{maxDownloadSize: 10 * 1024 * 1024, bot: bot}
+
+	if err := a.EditNotification("-1001234:777", "42", "updated text"); err != nil {
+		t.Fatalf("EditNotification after 429: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want the shared editor to retry once", attempts)
+	}
+}
+
+func TestReplyContextRetriesRateLimit(t *testing.T) {
+	attempts := 0
+	bot := fakeTelegramServer(t, func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts <= 2 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 1","parameters":{"retry_after":1}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":7}}`))
+	})
+	rc := &replyContext{bot: bot, chatID: 1001}
+
+	if _, err := rc.Send("reply text"); err != nil {
+		t.Fatalf("Send after two rate limits: %v", err)
+	}
+	attempts = 0
+	if err := rc.Edit(messageRef{id: "7"}, "edited"); err != nil {
+		t.Fatalf("Edit after two rate limits: %v", err)
 	}
 }

@@ -111,9 +111,11 @@ type Server struct {
 	editorButtons         EditorWithButtons
 	rawSenderButtons      SenderWithButtons
 	rawEditorButtons      EditorWithButtons
+	rawAgeEditorButtons   EditorWithButtons
 	rawNotifier           Notifier
 	rawSender             Sender
 	rawEditor             Editor
+	rawAgeEditor          Editor
 	threadStarter         ThreadStarter
 	guildResolver         GuildResolver
 	pinner                Pinner
@@ -399,6 +401,17 @@ func (s *Server) SetEditorWithButtons(n EditorWithButtons) {
 	}
 }
 
+// SetAgeEditor sets the editor the background age loop uses. It differs from
+// the synchronous editor in one way: a platform rate limit is reported instead
+// of retried, so the loop can schedule the next attempt itself.
+func (s *Server) SetAgeEditor(e Editor) {
+	s.rawAgeEditor = e
+}
+
+func (s *Server) SetAgeEditorWithButtons(n EditorWithButtons) {
+	s.rawAgeEditorButtons = n
+}
+
 func (s *Server) SetThreadStarter(n ThreadStarter) {
 	if n == nil {
 		s.threadStarter = nil
@@ -550,6 +563,13 @@ func (s *Server) editThread(ctx context.Context, platform, channelID, messageID,
 		return nil
 	}
 	return s.editor(ctx, platform, channelID, messageID, text)
+}
+
+func (s *Server) editAgeThread(ctx context.Context, platform, channelID, messageID, text string) error {
+	if s.rawAgeEditor != nil {
+		return s.rawAgeEditor(ctx, platform, channelID, messageID, text)
+	}
+	return s.editThread(ctx, platform, channelID, messageID, text)
 }
 
 func threadTargetFor(platform, channelID, threadID string) string {

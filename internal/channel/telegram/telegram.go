@@ -37,10 +37,7 @@ type Config struct {
 	InitAttempts    int
 }
 
-const (
-	initBotBackoff      = 3 * time.Second
-	maxRateLimitRetries = 1
-)
+const initBotBackoff = 3 * time.Second
 
 func New(token string, menu []channel.MenuCommand, cfg Config) *Adapter {
 	return &Adapter{token: token, menu: menu, downloadClient: &http.Client{Timeout: cfg.DownloadTimeout}, maxDownloadSize: cfg.MaxDownloadSize, initTimeout: cfg.InitTimeout, initAttempts: cfg.InitAttempts}
@@ -264,7 +261,7 @@ func (a *Adapter) sendMessage(chatID, threadID int64, replyToID int, text string
 	return msg, nil
 }
 
-func (a *Adapter) editMessage(chatID int64, messageID int, text string) error {
+func (a *Adapter) editMessage(chatID int64, messageID int, text string, retry bool) error {
 	params := tgbotapi.Params{
 		"chat_id":                  strconv.FormatInt(chatID, 10),
 		"message_id":               strconv.Itoa(messageID),
@@ -272,20 +269,27 @@ func (a *Adapter) editMessage(chatID int64, messageID int, text string) error {
 		"parse_mode":               "HTML",
 		"disable_web_page_preview": "true",
 	}
-	_, err := a.bot.MakeRequest("editMessageText", params)
-	if err != nil {
+	for {
+		_, err := a.bot.MakeRequest("editMessageText", params)
+		if err == nil {
+			return nil
+		}
 		if apiErr, ok := err.(*tgbotapi.Error); ok && strings.Contains(apiErr.Message, "message is not modified") {
 			return nil
 		}
 		if strings.Contains(err.Error(), "message is not modified") {
 			return nil
 		}
-		if extractRetryAfter(err) > 0 {
+		retryAfter := extractRetryAfter(err)
+		if retryAfter <= 0 {
+			return err
+		}
+		if !retry {
 			return fmt.Errorf("%w: %v", channel.ErrRateLimited, err)
 		}
-		return err
+		slog.Warn("telegram: rate limited, retrying", "method", "editMessageText", "retry_after", retryAfter)
+		time.Sleep(time.Duration(retryAfter) * time.Second)
 	}
-	return nil
 }
 
 func (a *Adapter) Notify(channelID string, text string) error {
@@ -330,6 +334,16 @@ func (a *Adapter) SendNotification(channelID, text string) (string, error) {
 }
 
 func (a *Adapter) EditNotification(channelID, messageID, text string) error {
+	return a.editNotification(channelID, messageID, text, true)
+}
+
+// EditNotificationNoRetry surfaces a rate limit instead of sleeping through the
+// platform's retry-after. Background refresh loops use it to back off themselves.
+func (a *Adapter) EditNotificationNoRetry(channelID, messageID, text string) error {
+	return a.editNotification(channelID, messageID, text, false)
+}
+
+func (a *Adapter) editNotification(channelID, messageID, text string, retry bool) error {
 	if a.bot == nil {
 		return errors.New("telegram: bot not ready")
 	}
@@ -345,7 +359,7 @@ func (a *Adapter) EditNotification(channelID, messageID, text string) error {
 	if len(chunks) == 0 {
 		return nil
 	}
-	if err := a.editMessage(chatID, msgID, chunks[0]); err != nil {
+	if err := a.editMessage(chatID, msgID, chunks[0], retry); err != nil {
 		return fmt.Errorf("telegram: edit notification: %w", err)
 	}
 	return nil
@@ -654,7 +668,6 @@ func (rc *replyContext) EditWithButtons(ref channel.MessageRef, text string, but
 }
 
 func (rc *replyContext) request(method string, params tgbotapi.Params) (tgbotapi.Message, error) {
-	retries := 0
 	for {
 		resp, err := rc.bot.MakeRequest(method, params)
 		if err == nil {
@@ -668,17 +681,12 @@ func (rc *replyContext) request(method string, params tgbotapi.Params) (tgbotapi
 		if retryAfter <= 0 {
 			return tgbotapi.Message{}, err
 		}
-		if retries >= maxRateLimitRetries {
-			return tgbotapi.Message{}, fmt.Errorf("%w: %v", channel.ErrRateLimited, err)
-		}
-		retries++
 		slog.Warn("telegram: rate limited, retrying", "method", method, "retry_after", retryAfter)
 		time.Sleep(time.Duration(retryAfter) * time.Second)
 	}
 }
 
 func (rc *replyContext) requestSilent(method string, params tgbotapi.Params) error {
-	retries := 0
 	for {
 		_, err := rc.bot.MakeRequest(method, params)
 		if err == nil {
@@ -688,10 +696,6 @@ func (rc *replyContext) requestSilent(method string, params tgbotapi.Params) err
 		if retryAfter <= 0 {
 			return err
 		}
-		if retries >= maxRateLimitRetries {
-			return fmt.Errorf("%w: %v", channel.ErrRateLimited, err)
-		}
-		retries++
 		slog.Warn("telegram: rate limited, retrying", "method", method, "retry_after", retryAfter)
 		time.Sleep(time.Duration(retryAfter) * time.Second)
 	}
