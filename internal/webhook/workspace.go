@@ -26,7 +26,7 @@ var (
 	ErrWorkspaceDirty       = errors.New("workspace dirty")
 )
 
-const defaultWorkspaceFetchTimeout = 30 * time.Second
+const workspaceFetchTimeout = 30 * time.Second
 
 func IsWorkspaceRetryable(err error) bool {
 	return errors.Is(err, ErrWorkspaceLeased) || errors.Is(err, ErrWorkspaceDirty)
@@ -287,7 +287,7 @@ func (m *WorkspaceManager) fetchTimeout() time.Duration {
 	if m.FetchTimeout > 0 {
 		return m.FetchTimeout
 	}
-	return defaultWorkspaceFetchTimeout
+	return workspaceFetchTimeout
 }
 
 func fetchAborted(err error) bool {
