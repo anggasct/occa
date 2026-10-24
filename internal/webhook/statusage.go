@@ -15,15 +15,19 @@ import (
 )
 
 type runAgeCardState struct {
-	nextAttempt time.Time
-	parentBase  string
-	parentText  string
-	parentGen   uint64
-	parentPhase Phase
-	threadBase  string
-	threadText  string
-	threadGen   uint64
-	threadPhase Phase
+	nextAttempt       time.Time
+	parentBase        string
+	parentText        string
+	parentGen         uint64
+	parentPhase       Phase
+	parentPending     bool
+	parentPendingText string
+	threadBase        string
+	threadText        string
+	threadGen         uint64
+	threadPhase       Phase
+	threadPending     bool
+	threadPendingText string
 }
 
 type runAgeState struct {
@@ -62,12 +66,15 @@ func (s *Server) rememberParentAge(prKey, base, text string, phase Phase) {
 	state.parentText = text
 	state.parentPhase = phase
 	state.parentGen++
+	state.parentPending = false
+	state.parentPendingText = ""
 }
 
 // rememberParentBase records a phase whose platform write has not landed. The
 // cached text stays stale on purpose: the next tick renders the new phase
-// because its text differs, so a throttled write repairs itself.
-func (s *Server) rememberParentBase(prKey, base string, phase Phase) {
+// because its text differs. A terminal write also stays pending so the tick
+// keeps retrying it after the run stops.
+func (s *Server) rememberParentBase(prKey, base, text string, phase Phase) {
 	if s == nil || s.ageState == nil || strings.TrimSpace(prKey) == "" {
 		return
 	}
@@ -77,6 +84,13 @@ func (s *Server) rememberParentBase(prKey, base string, phase Phase) {
 	state.parentBase = base
 	state.parentPhase = phase
 	state.parentGen++
+	if IsTerminalPhase(phase) {
+		state.parentPending = true
+		state.parentPendingText = text
+		return
+	}
+	state.parentPending = false
+	state.parentPendingText = ""
 }
 
 func (s *Server) rememberThreadAge(prKey, base, text string, phase Phase) {
@@ -90,9 +104,11 @@ func (s *Server) rememberThreadAge(prKey, base, text string, phase Phase) {
 	state.threadText = text
 	state.threadPhase = phase
 	state.threadGen++
+	state.threadPending = false
+	state.threadPendingText = ""
 }
 
-func (s *Server) rememberThreadBase(prKey, base string, phase Phase) {
+func (s *Server) rememberThreadBase(prKey, base, text string, phase Phase) {
 	if s == nil || s.ageState == nil || strings.TrimSpace(prKey) == "" {
 		return
 	}
@@ -102,6 +118,28 @@ func (s *Server) rememberThreadBase(prKey, base string, phase Phase) {
 	state.threadBase = base
 	state.threadPhase = phase
 	state.threadGen++
+	if IsTerminalPhase(phase) {
+		state.threadPending = true
+		state.threadPendingText = text
+		return
+	}
+	state.threadPending = false
+	state.threadPendingText = ""
+}
+
+func (s *Server) pendingRunAgeKeys() []string {
+	if s == nil || s.ageState == nil {
+		return nil
+	}
+	s.ageState.mu.Lock()
+	defer s.ageState.mu.Unlock()
+	var keys []string
+	for key, state := range s.ageState.cards {
+		if state != nil && (state.parentPending || state.threadPending) {
+			keys = append(keys, key)
+		}
+	}
+	return keys
 }
 
 func FormatRunAgeSegment(now, startedAt, lastActivity time.Time, phase Phase, idleAfter time.Duration) string {
@@ -270,24 +308,62 @@ func (s *Server) refreshRunAges(ctx context.Context, now time.Time) int {
 	rows, err := s.prQueues.ListUnresolved(ctx)
 	if err != nil {
 		slog.Warn("webhook: run age list failed", "error", err)
-		return 0
+	}
+	if pending := s.pendingRunAgeKeys(); len(pending) > 0 {
+		known := make(map[string]bool, len(rows))
+		for _, row := range rows {
+			known[row.PRKey] = true
+		}
+		for _, prKey := range pending {
+			if known[prKey] {
+				continue
+			}
+			row, err := s.prQueues.Get(ctx, prKey)
+			if err != nil || row == nil {
+				continue
+			}
+			rows = append(rows, *row)
+		}
 	}
 	edits := 0
 	for _, row := range rows {
 		if ctx.Err() != nil {
 			return edits
 		}
-		if strings.TrimSpace(row.PRKey) == "" || row.ActiveDelivery == 0 {
+		if strings.TrimSpace(row.PRKey) == "" {
 			continue
 		}
-		receipt, err := s.deliveries.GetByID(ctx, row.ActiveDelivery)
-		if err != nil || !deliveryInFlight(receipt) {
-			continue
+
+		s.ageState.mu.Lock()
+		pendingState := s.runAgeCard(row.PRKey)
+		pendingPhase := pendingState.parentPhase
+		parentPending := pendingState.parentPending
+		threadPending := pendingState.threadPending
+		if threadPending && pendingState.threadPhase != "" {
+			pendingPhase = pendingState.threadPhase
 		}
+		s.ageState.mu.Unlock()
+
+		pending := parentPending || threadPending
 		phase := s.runAgePhase(row)
-		if phase == "" || IsTerminalPhase(phase) {
+		if pending && pendingPhase != "" {
+			phase = pendingPhase
+		}
+		if phase == "" {
 			continue
 		}
+
+		var receipt *store.WebhookDelivery
+		if !pending {
+			if row.ActiveDelivery == 0 || IsTerminalPhase(phase) {
+				continue
+			}
+			receipt, err = s.deliveries.GetByID(ctx, row.ActiveDelivery)
+			if err != nil || !deliveryInFlight(receipt) {
+				continue
+			}
+		}
+
 		ep, ok := s.endpointForPR(row.PRKey, phase)
 		if !ok {
 			continue
@@ -303,10 +379,14 @@ func (s *Server) refreshRunAges(ctx context.Context, now time.Time) int {
 		parentBase := state.parentBase
 		parentText := state.parentText
 		parentGen := state.parentGen
+		parentPending = state.parentPending
+		parentPendingText := state.parentPendingText
 		threadBase := state.threadBase
 		threadText := state.threadText
 		threadGen := state.threadGen
 		threadPhase := state.threadPhase
+		threadPending = state.threadPending
+		threadPendingText := state.threadPendingText
 		s.ageState.mu.Unlock()
 
 		repo, prNumber, _ := splitPRKey(row.PRKey)
@@ -325,15 +405,28 @@ func (s *Server) refreshRunAges(ctx context.Context, now time.Time) int {
 		}
 		parentSegment := segmentFor(phase)
 		threadSegment := parentSegment
+		threadPhaseValue := threadPhase
+		if threadPhaseValue == "" {
+			threadPhaseValue = phase
+		}
 		if threadPhase != "" {
 			threadSegment = segmentFor(threadPhase)
 		}
-		if rootID != "" && branch != "" {
+		if rootID != "" && branch != "" && !(IsTerminalPhase(phase) && !parentPending) {
 			text := appendStatusSegment(parentBase, parentSegment)
-			if text != parentText {
-				if err := s.editParentAge(ctx, ep, row.PRKey, repo, rootID, branch, prURL, threadID, parentBase, segmentFor, phase, parentGen, state); err != nil {
-					slog.Warn("webhook: run age edit failed", "pr_key", row.PRKey, "surface", "parent", "error", err)
-					if errors.Is(err, channel.ErrRateLimited) {
+			if parentPending && parentPendingText != "" {
+				text = parentPendingText
+			}
+			if text != parentText || parentPending {
+				var editErr error
+				if parentPending && parentPendingText != "" {
+					editErr = s.editPendingParent(ctx, ep, row.PRKey, repo, rootID, branch, prURL, threadID, text, parentGen, state)
+				} else {
+					editErr = s.editParentAge(ctx, ep, row.PRKey, repo, rootID, branch, prURL, threadID, parentBase, segmentFor, phase, parentGen, state)
+				}
+				if editErr != nil {
+					slog.Warn("webhook: run age edit failed", "pr_key", row.PRKey, "surface", "parent", "error", editErr)
+					if errors.Is(editErr, channel.ErrRateLimited) {
 						s.ageState.mu.Lock()
 						state.nextAttempt = now.Add(2 * interval)
 						s.ageState.mu.Unlock()
@@ -343,7 +436,7 @@ func (s *Server) refreshRunAges(ctx context.Context, now time.Time) int {
 				}
 			}
 		}
-		if threadID != "" && threadBase != "" {
+		if threadID != "" && threadBase != "" && !(IsTerminalPhase(threadPhaseValue) && !threadPending) {
 			msgID := s.tasks.StatusMessageIDForThread(threadID)
 			if msgID == "" {
 				if detail, ok := s.tasks.SurfaceDetail(row.PRKey); ok {
@@ -354,16 +447,21 @@ func (s *Server) refreshRunAges(ctx context.Context, now time.Time) int {
 				msgID = strings.TrimSpace(row.ThreadStatusMsgID)
 			}
 			if msgID != "" {
-				threadPhaseValue := threadPhase
-				if threadPhaseValue == "" {
-					threadPhaseValue = phase
-				}
 				text := appendStatusSegment(threadBase, threadSegment)
-				if text != threadText {
+				if threadPending && threadPendingText != "" {
+					text = threadPendingText
+				}
+				if text != threadText || threadPending {
 					target := threadTargetFor(ep.Platform, ep.ChannelID, threadID)
-					if err := s.editThreadAge(ctx, ep.Platform, target, msgID, threadBase, segmentFor, threadPhaseValue, threadGen, state); err != nil {
-						slog.Warn("webhook: run age edit failed", "pr_key", row.PRKey, "surface", "thread", "error", err)
-						if errors.Is(err, channel.ErrRateLimited) {
+					var editErr error
+					if threadPending && threadPendingText != "" {
+						editErr = s.editPendingThread(ctx, ep.Platform, target, msgID, text, threadGen, state)
+					} else {
+						editErr = s.editThreadAge(ctx, ep.Platform, target, msgID, threadBase, segmentFor, threadPhaseValue, threadGen, state)
+					}
+					if editErr != nil {
+						slog.Warn("webhook: run age edit failed", "pr_key", row.PRKey, "surface", "thread", "error", editErr)
+						if errors.Is(editErr, channel.ErrRateLimited) {
 							s.ageState.mu.Lock()
 							state.nextAttempt = now.Add(2 * interval)
 							s.ageState.mu.Unlock()
@@ -439,6 +537,53 @@ func (s *Server) editThreadAge(ctx context.Context, platform, target, messageID,
 		if currentPhase != "" {
 			phase = currentPhase
 		}
+	}
+}
+
+func (s *Server) editPendingParent(ctx context.Context, ep config.EndpointConfig, prKey, repo, rootID, branch, prURL, threadID, text string, gen uint64, state *runAgeCardState) error {
+	for attempt := 0; ; attempt++ {
+		buttons := s.phaseParentButtons(ep, prKey, repo, branch, prURL, threadID)
+		if err := s.editAgePhaseParent(ctx, ep.Platform, ep.ChannelID, rootID, text, buttons); err != nil {
+			return err
+		}
+		s.ageState.mu.Lock()
+		if state.parentGen == gen {
+			state.parentText = text
+			state.parentPending = false
+			state.parentPendingText = ""
+			s.ageState.mu.Unlock()
+			return nil
+		}
+		if !state.parentPending || state.parentPendingText == "" || attempt >= 2 {
+			s.ageState.mu.Unlock()
+			return nil
+		}
+		text = state.parentPendingText
+		gen = state.parentGen
+		s.ageState.mu.Unlock()
+	}
+}
+
+func (s *Server) editPendingThread(ctx context.Context, platform, target, messageID, text string, gen uint64, state *runAgeCardState) error {
+	for attempt := 0; ; attempt++ {
+		if err := s.editAgeThread(ctx, platform, target, messageID, text); err != nil {
+			return err
+		}
+		s.ageState.mu.Lock()
+		if state.threadGen == gen {
+			state.threadText = text
+			state.threadPending = false
+			state.threadPendingText = ""
+			s.ageState.mu.Unlock()
+			return nil
+		}
+		if !state.threadPending || state.threadPendingText == "" || attempt >= 2 {
+			s.ageState.mu.Unlock()
+			return nil
+		}
+		text = state.threadPendingText
+		gen = state.threadGen
+		s.ageState.mu.Unlock()
 	}
 }
 

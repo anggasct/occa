@@ -436,6 +436,74 @@ func TestPhaseParentRateLimitKeepsSurfacePhase(t *testing.T) {
 	}
 }
 
+func TestTerminalRateLimitRetriesParentAndThread(t *testing.T) {
+	srv, st, rec := newSurfaceServer(t)
+	ctx := context.Background()
+	prKey := "acme/widget#181"
+	now := time.Now()
+	delivery := seedRunDelivery(t, st, prKey, now.Add(-5*time.Minute), now)
+	seedActiveRun(t, st, prKey, "thread-9", "parent-1", delivery.ID)
+
+	srv.ensureThreadStatus(ctx, "discord", "chan-1", "thread-9", "acme/widget", "feat/x", prKey, ThreadStatusUpdate{
+		Phase: PhaseReview,
+		Next:  "fix",
+	})
+	if got := len(rec.threadSends()); got != 1 {
+		t.Fatalf("initial thread sends = %d, want one", got)
+	}
+
+	srv.SetEditorWithButtons(func(_ context.Context, _, _, _, _ string, _ []channel.Button) error {
+		return fmt.Errorf("%w: slow down", channel.ErrRateLimited)
+	})
+	srv.SetEditor(func(_ context.Context, _, _, _, _ string) error {
+		return fmt.Errorf("%w: slow down", channel.ErrRateLimited)
+	})
+
+	srv.syncPhaseParent(ctx, srv.endpoints["/merged"], prKey, surfaceEnvelope(), PhaseMerged)
+	srv.ensureThreadStatus(ctx, "discord", "chan-1", "thread-9", "acme/widget", "feat/x", prKey, ThreadStatusUpdate{Phase: PhaseMerged})
+
+	srv.SetEditorWithButtons(func(_ context.Context, _, _, msgID, text string, buttons []channel.Button) error {
+		rec.add(&rec.edited, surfaceMessage{messageID: msgID, text: text, buttons: buttons})
+		return nil
+	})
+	srv.SetEditor(func(_ context.Context, _, _, msgID, text string) error {
+		rec.add(&rec.edited, surfaceMessage{messageID: msgID, text: text})
+		return nil
+	})
+
+	if got := srv.refreshRunAges(ctx, now.Add(30*time.Second)); got != 2 {
+		t.Fatalf("retry tick edits = %d, want two", got)
+	}
+	rec.mu.Lock()
+	var parentRetries, threadRetries []surfaceMessage
+	for _, msg := range rec.edited {
+		switch msg.messageID {
+		case "parent-1":
+			parentRetries = append(parentRetries, msg)
+		case "status-1":
+			threadRetries = append(threadRetries, msg)
+		}
+	}
+	rec.mu.Unlock()
+	if len(parentRetries) == 0 || !strings.HasSuffix(parentRetries[len(parentRetries)-1].text, "· 5m total") {
+		t.Fatalf("parent retries = %+v, want a frozen total", parentRetries)
+	}
+	if len(threadRetries) == 0 || !strings.HasSuffix(threadRetries[len(threadRetries)-1].text, "· 5m total") {
+		t.Fatalf("thread retries = %+v, want a frozen total", threadRetries)
+	}
+	if got := len(rec.threadSends()); got != 1 {
+		t.Fatalf("thread sends after retry = %d, want one", got)
+	}
+
+	before := len(rec.edited)
+	if got := srv.refreshRunAges(ctx, now.Add(2*time.Minute)); got != 0 {
+		t.Fatalf("terminal tick after repair edits = %d, want none", got)
+	}
+	if after := len(rec.edited); after != before {
+		t.Fatalf("terminal tick after repair wrote %d messages", after-before)
+	}
+}
+
 func TestThreadStatusRateLimitDoesNotDuplicate(t *testing.T) {
 	srv, _, rec := newSurfaceServer(t)
 	ctx := context.Background()

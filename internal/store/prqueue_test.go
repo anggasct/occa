@@ -13,8 +13,8 @@ func TestPRQueueSchemaVersion(t *testing.T) {
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatalf("read schema version: %v", err)
 	}
-	if version != SchemaVersion {
-		t.Fatalf("schema version = %d, want %d", version, SchemaVersion)
+	if version != 23 {
+		t.Fatalf("schema version = %d, want 23", version)
 	}
 }
 

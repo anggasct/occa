@@ -451,7 +451,7 @@ func (s *Server) syncPhaseParent(ctx context.Context, ep config.EndpointConfig, 
 				ThreadID:      threadID,
 				Phase:         string(phase),
 			})
-			s.rememberParentBase(prKey, base, phase)
+			s.rememberParentBase(prKey, base, text, phase)
 		}
 		return rootID, false
 	}
@@ -611,7 +611,7 @@ func (s *Server) ensureThreadStatus(ctx context.Context, platform, channelID, th
 	if msgID != "" {
 		s.rememberThreadAge(prKey, base, text, update.Phase)
 	} else {
-		s.rememberThreadBase(prKey, base, update.Phase)
+		s.rememberThreadBase(prKey, base, text, update.Phase)
 	}
 	if strings.TrimSpace(prKey) != "" && s.prQueues != nil {
 		if err := s.prQueues.UpdateThreadStatus(ctx, prKey, base, msgID); err != nil {
