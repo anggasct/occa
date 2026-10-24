@@ -79,7 +79,6 @@ var knownTaskStatuses = []string{"dispatched", "claimed", "pr_opened", "merged",
 var knownPhaseIcons = []string{"queued", "dispatch", "review", "fix", "merge", "merged", "blocked", "failed"}
 
 type EndpointConfig struct {
-type EndpointConfig struct {
 	Name             string            `yaml:"name"`
 	Path             string            `yaml:"path"`
 	Auth             string            `yaml:"auth,omitempty"`
@@ -106,7 +105,6 @@ type EndpointConfig struct {
 	OnMerged         []MergedAction    `yaml:"on_merged,omitempty"`
 	Automation       *RepoAutomation   `yaml:"-"`
 	PromptSource     string            `yaml:"-"`
-}
 }
 
 func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
