@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	schemaVersion    = 21
+	schemaVersion    = 23
 	SchemaVersion    = schemaVersion
 	busyTimeoutMilli = 5000
 )
@@ -50,6 +50,28 @@ var migrations = []func(s *SQLiteStore, tx *sql.Tx) error{
 	addPRQueue,
 	addPRQueueRetryAt,
 	addWebhookReplay,
+	addPRQueueMeta,
+	addPRQueueThreadStatus,
+}
+
+func addPRQueueMeta(_ *SQLiteStore, tx *sql.Tx) error {
+	if _, err := tx.Exec(`ALTER TABLE pr_queue ADD COLUMN branch TEXT NOT NULL DEFAULT '';`); err != nil {
+		return fmt.Errorf("store: migrate pr queue branch: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE pr_queue ADD COLUMN pr_url TEXT NOT NULL DEFAULT '';`); err != nil {
+		return fmt.Errorf("store: migrate pr queue pr url: %w", err)
+	}
+	return nil
+}
+
+func addPRQueueThreadStatus(_ *SQLiteStore, tx *sql.Tx) error {
+	if _, err := tx.Exec(`ALTER TABLE pr_queue ADD COLUMN thread_status_base TEXT NOT NULL DEFAULT '';`); err != nil {
+		return fmt.Errorf("store: migrate pr queue thread status base: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE pr_queue ADD COLUMN thread_status_msg_id TEXT NOT NULL DEFAULT '';`); err != nil {
+		return fmt.Errorf("store: migrate pr queue thread status message id: %w", err)
+	}
+	return nil
 }
 
 func addWebhookReplay(_ *SQLiteStore, tx *sql.Tx) error {

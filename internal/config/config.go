@@ -101,6 +101,8 @@ type EndpointConfig struct {
 	CommentAuthors   []string          `yaml:"comment_authors,omitempty"`
 	Admit            []AdmitRule       `yaml:"admit"`
 	Limits           *EndpointLimits   `yaml:"limits,omitempty"`
+	RefreshInterval  time.Duration     `yaml:"refresh_interval,omitempty"`
+	IdleAfter        time.Duration     `yaml:"idle_after,omitempty"`
 	VerifyEndpoint   string            `yaml:"verify_endpoint,omitempty"`
 	OnMerged         []MergedAction    `yaml:"on_merged,omitempty"`
 	Automation       *RepoAutomation   `yaml:"-"`
@@ -109,29 +111,31 @@ type EndpointConfig struct {
 
 func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
 	type rawEndpoint struct {
-		Name           string            `yaml:"name"`
-		Path           string            `yaml:"path"`
-		Auth           string            `yaml:"auth,omitempty"`
-		Secret         string            `yaml:"secret"`
-		Workflow       string            `yaml:"workflow,omitempty"`
-		Platform       string            `yaml:"platform"`
-		ChannelID      string            `yaml:"channel_id"`
-		ThreadID       string            `yaml:"thread_id,omitempty"`
-		Prompt         string            `yaml:"prompt"`
-		PromptFile     string            `yaml:"prompt_file,omitempty"`
-		SkipEvents     []string          `yaml:"skip_events,omitempty"`
-		Repository     string            `yaml:"repository,omitempty"`
-		Workspace      EndpointWorkspace `yaml:"workspace"`
-		Thread         bool              `yaml:"thread,omitempty"`
-		ProgressCard   *bool             `yaml:"progress_card,omitempty"`
-		NotifySkip     *bool             `yaml:"notify_skip,omitempty"`
-		Model          string            `yaml:"model,omitempty"`
-		CommentTrigger []string          `yaml:"comment_trigger,omitempty"`
-		CommentAuthors []string          `yaml:"comment_authors,omitempty"`
-		Admit          []AdmitRule       `yaml:"admit"`
-		Limits         *EndpointLimits   `yaml:"limits,omitempty"`
-		VerifyEndpoint string            `yaml:"verify_endpoint,omitempty"`
-		OnMerged       []MergedAction    `yaml:"on_merged,omitempty"`
+		Name            string            `yaml:"name"`
+		Path            string            `yaml:"path"`
+		Auth            string            `yaml:"auth,omitempty"`
+		Secret          string            `yaml:"secret"`
+		Workflow        string            `yaml:"workflow,omitempty"`
+		Platform        string            `yaml:"platform"`
+		ChannelID       string            `yaml:"channel_id"`
+		ThreadID        string            `yaml:"thread_id,omitempty"`
+		Prompt          string            `yaml:"prompt"`
+		PromptFile      string            `yaml:"prompt_file,omitempty"`
+		SkipEvents      []string          `yaml:"skip_events,omitempty"`
+		Repository      string            `yaml:"repository,omitempty"`
+		Workspace       EndpointWorkspace `yaml:"workspace"`
+		Thread          bool              `yaml:"thread,omitempty"`
+		ProgressCard    *bool             `yaml:"progress_card,omitempty"`
+		NotifySkip      *bool             `yaml:"notify_skip,omitempty"`
+		Model           string            `yaml:"model,omitempty"`
+		CommentTrigger  []string          `yaml:"comment_trigger,omitempty"`
+		CommentAuthors  []string          `yaml:"comment_authors,omitempty"`
+		Admit           []AdmitRule       `yaml:"admit"`
+		Limits          *EndpointLimits   `yaml:"limits,omitempty"`
+		RefreshInterval time.Duration     `yaml:"refresh_interval,omitempty"`
+		IdleAfter       time.Duration     `yaml:"idle_after,omitempty"`
+		VerifyEndpoint  string            `yaml:"verify_endpoint,omitempty"`
+		OnMerged        []MergedAction    `yaml:"on_merged,omitempty"`
 	}
 	var raw rawEndpoint
 	dec := yaml.NewDecoder(bytes.NewReader(mustEncodeNode(node)))
@@ -159,6 +163,8 @@ func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
 	e.CommentAuthors = raw.CommentAuthors
 	e.Admit = raw.Admit
 	e.Limits = raw.Limits
+	e.RefreshInterval = raw.RefreshInterval
+	e.IdleAfter = raw.IdleAfter
 	e.OnMerged = raw.OnMerged
 	e.VerifyEndpoint = strings.TrimSpace(raw.VerifyEndpoint)
 	e.NotifySkip = raw.NotifySkip
@@ -172,6 +178,20 @@ func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
 
 func (e EndpointConfig) NotifyOnSkip() bool {
 	return e.NotifySkip == nil || *e.NotifySkip
+}
+
+func (e EndpointConfig) EffectiveRefreshInterval() time.Duration {
+	if e.RefreshInterval > 0 {
+		return e.RefreshInterval
+	}
+	return DefaultRefreshInterval
+}
+
+func (e EndpointConfig) EffectiveIdleAfter() time.Duration {
+	if e.IdleAfter > 0 {
+		return e.IdleAfter
+	}
+	return DefaultIdleAfter
 }
 
 type EndpointWorkspace struct {

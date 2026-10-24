@@ -111,9 +111,11 @@ type Server struct {
 	editorButtons         EditorWithButtons
 	rawSenderButtons      SenderWithButtons
 	rawEditorButtons      EditorWithButtons
+	rawAgeEditorButtons   EditorWithButtons
 	rawNotifier           Notifier
 	rawSender             Sender
 	rawEditor             Editor
+	rawAgeEditor          Editor
 	threadStarter         ThreadStarter
 	guildResolver         GuildResolver
 	pinner                Pinner
@@ -204,6 +206,7 @@ type Server struct {
 	mergeGate             MergeGateChecker
 	escalationMu          sync.Mutex
 	escalated             map[string]bool
+	ageState              *runAgeState
 }
 
 func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) *Server {
@@ -287,6 +290,7 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 	srv.dispatchToken = strings.TrimSpace(cfg.Dispatch.Token)
 	srv.dispatchTasks = NewDispatchStore()
 	srv.escalated = make(map[string]bool)
+	srv.ageState = &runAgeState{cards: make(map[string]*runAgeCardState)}
 	srv.fallbackAfter = cfg.FallbackPollAfter
 	srv.branchChecker = ghBranchPRChecker
 	srv.branchExists = ghBranchExistsChecker
@@ -395,6 +399,17 @@ func (s *Server) SetEditorWithButtons(n EditorWithButtons) {
 	s.editorButtons = func(ctx context.Context, platform, channelID, messageID, text string, buttons []channel.Button) error {
 		return n(ctx, platform, channelID, messageID, FormatWebhookMessage(text), buttons)
 	}
+}
+
+// SetAgeEditor sets the editor the background age loop uses. It differs from
+// the synchronous editor in one way: a platform rate limit is reported instead
+// of retried, so the loop can schedule the next attempt itself.
+func (s *Server) SetAgeEditor(e Editor) {
+	s.rawAgeEditor = e
+}
+
+func (s *Server) SetAgeEditorWithButtons(n EditorWithButtons) {
+	s.rawAgeEditorButtons = n
 }
 
 func (s *Server) SetThreadStarter(n ThreadStarter) {
@@ -548,6 +563,13 @@ func (s *Server) editThread(ctx context.Context, platform, channelID, messageID,
 		return nil
 	}
 	return s.editor(ctx, platform, channelID, messageID, text)
+}
+
+func (s *Server) editAgeThread(ctx context.Context, platform, channelID, messageID, text string) error {
+	if s.rawAgeEditor != nil {
+		return s.rawAgeEditor(ctx, platform, channelID, messageID, text)
+	}
+	return s.editThread(ctx, platform, channelID, messageID, text)
 }
 
 func threadTargetFor(platform, channelID, threadID string) string {
@@ -713,6 +735,8 @@ func (s *Server) Start(ctx context.Context) error {
 	go s.replayLoop(s.shutdownCtx)
 	s.dispatchWG.Add(1)
 	go s.reconcileLoop(s.shutdownCtx)
+	s.dispatchWG.Add(1)
+	go s.runAgeLoop()
 
 	slog.Info("webhook server started", "bind", s.bind, "endpoints", len(s.endpoints))
 	for _, ep := range s.endpoints {

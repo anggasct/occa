@@ -10,6 +10,7 @@ var (
 	ErrMessageNotFound             = errors.New("channel: message not found")
 	ErrThreadNotFound              = errors.New("channel: thread not found")
 	ErrParentResolutionUnsupported = errors.New("channel: parent resolution unsupported")
+	ErrRateLimited                 = errors.New("channel: rate limited")
 )
 
 type ThreadParentResolver interface {
@@ -163,6 +164,17 @@ type MessageEditor interface {
 
 type MessageEditorWithButtons interface {
 	EditNotificationWithButtons(channelID, messageID string, text string, buttons []Button) error
+}
+
+// MessageEditorNoRetry reports a platform rate limit to the caller instead of
+// sleeping through it. Background refresh loops use it to schedule their own
+// retry; synchronous writers keep the default retrying behaviour.
+type MessageEditorNoRetry interface {
+	EditNotificationNoRetry(channelID, messageID string, text string) error
+}
+
+type MessageEditorWithButtonsNoRetry interface {
+	EditNotificationWithButtonsNoRetry(channelID, messageID string, text string, buttons []Button) error
 }
 
 type ThreadStarter interface {

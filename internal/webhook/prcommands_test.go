@@ -626,10 +626,7 @@ func TestOperatorSkipDuringBackoff(t *testing.T) {
 	if got := atomic.LoadInt64(calls); got != 1 {
 		t.Fatalf("skipped retry must not re-execute, calls = %d", got)
 	}
-	run, err := st.PRQueueRepo().Get(ctx, "acme/widget#7")
-	if err != nil || run == nil || run.Status != store.PRStatusDrained {
-		t.Fatalf("after skip: %+v %v", run, err)
-	}
+	waitForPRQueueStatus(t, st, "acme/widget#7", store.PRStatusDrained)
 }
 
 func TestOperatorCancelDuringBackoff(t *testing.T) {
@@ -647,10 +644,7 @@ func TestOperatorCancelDuringBackoff(t *testing.T) {
 	if got := atomic.LoadInt64(calls); got != 1 {
 		t.Fatalf("cancelled retry must not re-execute, calls = %d", got)
 	}
-	run, err := st.PRQueueRepo().Get(ctx, "acme/widget#7")
-	if err != nil || run == nil || run.Status != store.PRStatusDrained {
-		t.Fatalf("after cancel: %+v %v", run, err)
-	}
+	waitForPRQueueStatus(t, st, "acme/widget#7", store.PRStatusDrained)
 }
 
 func TestOperatorCancelClears(t *testing.T) {

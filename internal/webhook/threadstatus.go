@@ -42,10 +42,12 @@ func (w *ThreadStatusWriter) Write(target, threadID, repo, branch, prKey, text s
 		return ""
 	}
 	if existing := w.Registry.StatusMessageIDForThread(threadID); existing != "" {
-		if err := w.edit(target, existing, text); err == nil {
-			w.Registry.RecordStatusMessage(threadID, repo, branch, prKey, existing)
-			return existing
+		if err := w.edit(target, existing, text); err != nil {
+			slog.Warn("webhook: thread status edit failed", "thread_id", threadID, "message_id", existing, "error", err)
+			return ""
 		}
+		w.Registry.RecordStatusMessage(threadID, repo, branch, prKey, existing)
+		return existing
 	}
 	msgID, err := w.send(target, text)
 	if err != nil || strings.TrimSpace(msgID) == "" {
