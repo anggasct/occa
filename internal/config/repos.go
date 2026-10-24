@@ -37,6 +37,7 @@ type RepoConfig struct {
 	Checkout       string                   `yaml:"checkout"`
 	Model          string                   `yaml:"model,omitempty"`
 	CommentTrigger map[string][]string      `yaml:"comment_trigger,omitempty"`
+	CommentAuthors []string                 `yaml:"comment_authors,omitempty"`
 	Limits         *EndpointLimits          `yaml:"limits,omitempty"`
 	Automation     RepoAutomation           `yaml:"automation,omitempty"`
 	OnMerged       []MergedAction           `yaml:"on_merged,omitempty"`
@@ -45,6 +46,7 @@ type RepoConfig struct {
 
 type WebhookDefaults struct {
 	CommentTrigger    map[string][]string `yaml:"comment_trigger,omitempty"`
+	CommentAuthors    []string            `yaml:"comment_authors,omitempty"`
 	Limits            *EndpointLimits     `yaml:"limits,omitempty"`
 	Thread            *bool               `yaml:"thread,omitempty"`
 	EscalationMention string              `yaml:"escalation_mention,omitempty"`
@@ -153,6 +155,31 @@ func mergeTriggers(base, additions []string) []string {
 	return out
 }
 
+func resolveCommentAuthors(defaults WebhookDefaults, repo RepoConfig) []string {
+	source := repo.CommentAuthors
+	if len(source) == 0 {
+		source = defaults.CommentAuthors
+	}
+	out := make([]string, 0, len(source))
+	seen := make(map[string]bool, len(source))
+	for _, login := range source {
+		trimmed := strings.TrimSpace(login)
+		if trimmed == "" {
+			continue
+		}
+		key := strings.ToLower(trimmed)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func resolveRepoLimits(defaults WebhookDefaults, repo RepoConfig) *EndpointLimits {
 	if repo.Limits != nil {
 		return &EndpointLimits{MaxRunsPerPR: repo.Limits.MaxRunsPerPR, Window: repo.Limits.Window}
@@ -251,6 +278,11 @@ func expandRepos(repos []RepoConfig, defaults WebhookDefaults) ([]EndpointConfig
 				return nil, fmt.Errorf("config: %scomment_trigger supports only review and fix workflows, got %q", context, workflow)
 			}
 		}
+		for _, login := range repo.CommentAuthors {
+			if strings.TrimSpace(login) == "" {
+				return nil, fmt.Errorf("config: %scomment_authors must not contain empty entries", context)
+			}
+		}
 		automation, err := normalizeAutomation(repo.Automation, context)
 		if err != nil {
 			return nil, err
@@ -280,6 +312,7 @@ func expandRepos(repos []RepoConfig, defaults WebhookDefaults) ([]EndpointConfig
 				PromptFile:     promptFile,
 				PromptSource:   source,
 				CommentTrigger: resolveTriggers(defaults, *repo, workflow),
+				CommentAuthors: resolveCommentAuthors(defaults, *repo),
 				Thread:         true,
 				NotifySkip:     boolPtr(false),
 				Model:          strings.TrimSpace(repo.Model),

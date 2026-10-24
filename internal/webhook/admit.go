@@ -101,6 +101,9 @@ func admitDelivery(ep config.EndpointConfig, policy admissionPolicy, envelope We
 		if !requireFlagsHold(rule.Require, envelope, selfReview, reviewVerdict) {
 			continue
 		}
+		if !commentAuthorAllowed(ep.CommentAuthors, stringValue(envelope["comment_trigger"]), reviewUser) {
+			return false, fmt.Sprintf("skipped: comment author %s is not in comment_authors", displayLogin(reviewUser))
+		}
 		if failReason := requireClosedPR(rule.Require, envelope, prNumber); failReason != "" {
 			return false, failReason
 		}
@@ -159,6 +162,29 @@ func requireClosedPR(require []string, envelope WebhookEnvelope, prNumber string
 		return fmt.Sprintf("skipped: PR #%s is %s; no re-review execution", prNumber, state)
 	}
 	return ""
+}
+
+// commentAuthorAllowed gates comment-triggered workflows on the configured
+// allowlist. An empty allowlist keeps the historical behaviour (any author),
+// and events that carry no matched comment trigger are unaffected.
+func commentAuthorAllowed(allowed []string, trigger, reviewUser string) bool {
+	if len(allowed) == 0 || strings.TrimSpace(trigger) == "" {
+		return true
+	}
+	for _, login := range allowed {
+		if strings.EqualFold(strings.TrimSpace(login), strings.TrimSpace(reviewUser)) {
+			return true
+		}
+	}
+	return false
+}
+
+func displayLogin(login string) string {
+	trimmed := strings.TrimSpace(login)
+	if trimmed == "" {
+		return "(unknown)"
+	}
+	return "@" + trimmed
 }
 
 func containsFold(values []string, want string) bool {

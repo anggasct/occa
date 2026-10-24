@@ -89,6 +89,11 @@ func (s *Server) automationAllows(ep config.EndpointConfig, key WebhookExecution
 	if workflow != "fix" && workflow != "merge" {
 		return true
 	}
+	// A matched comment trigger is an explicit human instruction, so it may
+	// start a fix run even in review-only mode. Merge stays policy-gated.
+	if workflow == "fix" && strings.TrimSpace(stringValue(envelope["comment_trigger"])) != "" {
+		return true
+	}
 	author := strings.TrimSpace(stringValue(envelope["pr_author"]))
 	if author == "" {
 		if prKey, ok := prKeyForEndpoint(ep, key, envelope); ok {
