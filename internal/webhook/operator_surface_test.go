@@ -59,7 +59,7 @@ func TestThreadStatusLineIsOnePerThreadAndPinned(t *testing.T) {
 // TestDispatchParentCarriesNoBrief asserts the channel parent stays one line
 // and keeps the task brief out of the channel.
 func TestDispatchParentCarriesNoBrief(t *testing.T) {
-	task := DispatchTask{ID: "task-1", Repo: "acme/widget", Branch: "feat/x", SpecPath: "specs/feat-x.md", Verify: "go test ./..."}
+	task := DispatchTask{ID: "task-1", Repo: "acme/widget", Branch: "feat/x", Brief: "Read specs/feat-x.md and run go test ./...", SpecPath: "specs/feat-x.md", Verify: "go test ./..."}
 	summary := FormatDispatchSummary(task, nil)
 	if strings.Contains(summary, "\n") {
 		t.Fatalf("dispatch parent must be one line: %q", summary)
@@ -69,7 +69,7 @@ func TestDispatchParentCarriesNoBrief(t *testing.T) {
 	}
 	brief := FormatDispatchBrief(task)
 	if !strings.Contains(brief, "specs/feat-x.md") || !strings.Contains(brief, "go test") {
-		t.Fatalf("dispatch brief = %q, want the spec and the verify command", brief)
+		t.Fatalf("dispatch brief = %q, want the brief content", brief)
 	}
 }
 

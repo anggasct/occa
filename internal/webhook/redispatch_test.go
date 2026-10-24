@@ -185,8 +185,8 @@ func TestRedispatchOpenReusesSameParentThreadWithOriginalSpec(t *testing.T) {
 		t.Errorf("thread post must be retry separator: %q", notifyTexts[0])
 	}
 	head := strings.SplitN(notifyTexts[0], "\n", 2)[0]
-	if !strings.Contains(head, "Spec: specs/orig.md") {
-		t.Errorf("the thread separator must carry the brief: %q", notifyTexts[0])
+	if !strings.Contains(head, "Read specs/orig.md") {
+		t.Errorf("the thread separator must carry the brief's first line: %q", notifyTexts[0])
 	}
 	if !strings.Contains(notifyTexts[0], "specs/orig.md") {
 		t.Errorf("separator must carry original spec: %q", notifyTexts[0])

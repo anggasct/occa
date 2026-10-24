@@ -65,6 +65,7 @@ func normalizeWebhook(body []byte, eventType, deliveryID string, verdicts map[st
 		"skip":                       skipped,
 		"skip_reason":                skipReason,
 		"task_id":                    "",
+		"task_brief":                 "",
 		"task_spec":                  "",
 		"task_spec_is_url":           false,
 		"task_scope":                 "",

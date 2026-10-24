@@ -16,9 +16,16 @@ import (
 	"time"
 
 	"github.com/anggasct/occa/internal/config"
+	"github.com/anggasct/occa/internal/render"
 )
 
 const defaultDispatchPath = "/dispatch"
+
+const dispatchBriefMaxRunes = 8000
+
+const continuationReserve = 100
+
+const redispatchSeparatorBriefRunes = 120
 
 const dispatchThreadAttempts = 3
 
@@ -32,9 +39,11 @@ type DispatchRequest struct {
 	Repo     string `json:"repo"`
 	BaseSHA  string `json:"base_sha"`
 	Branch   string `json:"branch"`
+	Brief    string `json:"brief"`
 	SpecPath string `json:"spec_path"`
 	Scope    string `json:"scope"`
 	Verify   string `json:"verify"`
+	Mode     string `json:"mode"`
 }
 
 func isSpecURL(s string) bool {
@@ -78,21 +87,32 @@ func (req DispatchRequest) Validate() error {
 	if sha := strings.TrimSpace(req.BaseSHA); sha != "" && normalizeRevision(sha) == "" {
 		return fmt.Errorf("base_sha must be a 7-40 char hex revision")
 	}
+	switch strings.TrimSpace(req.Mode) {
+	case "", "redispatch":
+	default:
+		return fmt.Errorf("mode is invalid")
+	}
+	brief := strings.TrimSpace(req.Brief)
 	spec := strings.TrimSpace(req.SpecPath)
-	if spec == "" {
-		return fmt.Errorf("spec_path is required")
+	if brief == "" && spec == "" {
+		return fmt.Errorf("brief is required")
 	}
-	if len([]rune(spec)) > 512 {
-		return fmt.Errorf("spec_path is too long")
+	if len([]rune(brief)) > dispatchBriefMaxRunes {
+		return fmt.Errorf("brief is too long")
 	}
-	if strings.Contains(spec, "://") {
-		if !isSpecURL(spec) {
-			return fmt.Errorf("spec looks like a URL but is not a valid https:// URL with host")
+	if spec != "" {
+		if len([]rune(spec)) > 512 {
+			return fmt.Errorf("spec_path is too long")
 		}
-	} else {
-		for _, part := range strings.Split(spec, "/") {
-			if part == ".." {
-				return fmt.Errorf("spec_path must not escape the repository")
+		if strings.Contains(spec, "://") {
+			if !isSpecURL(spec) {
+				return fmt.Errorf("spec looks like a URL but is not a valid https:// URL with host")
+			}
+		} else {
+			for _, part := range strings.Split(spec, "/") {
+				if part == ".." {
+					return fmt.Errorf("spec_path must not escape the repository")
+				}
 			}
 		}
 	}
@@ -105,11 +125,48 @@ func (req DispatchRequest) Validate() error {
 	return nil
 }
 
+func resolveBrief(req DispatchRequest) (string, string) {
+	specPath := strings.TrimSpace(req.SpecPath)
+	brief := req.Brief
+	if strings.TrimSpace(brief) == "" {
+		if specPath == "" {
+			return "", specPath
+		}
+		brief = "Read " + specPath
+	}
+	if scope := strings.TrimSpace(req.Scope); scope != "" {
+		brief += "\n\nScope: " + scope
+	}
+	if specPath != "" && !strings.Contains(brief, specPath) {
+		brief += "\n\nRef: " + specPath
+	}
+	return brief, specPath
+}
+
+func briefSource(req DispatchRequest) string {
+	hasBrief := strings.TrimSpace(req.Brief) != ""
+	hasSpec := strings.TrimSpace(req.SpecPath) != ""
+	switch {
+	case hasBrief && hasSpec:
+		return "both"
+	case hasBrief:
+		return "brief"
+	case hasSpec:
+		return "spec_path"
+	}
+	return ""
+}
+
+func isRedispatchRequest(req DispatchRequest) bool {
+	return strings.TrimSpace(req.Mode) == "redispatch" || isRedispatchScope(req.Scope)
+}
+
 type DispatchTask struct {
 	ID        string
 	Repo      string
 	Branch    string
 	BaseSHA   string
+	Brief     string
 	SpecPath  string
 	Scope     string
 	Verify    string
@@ -128,17 +185,20 @@ func NewDispatchStore() *DispatchStore {
 }
 
 func (d *DispatchStore) Create(req DispatchRequest) DispatchTask {
+	brief, specPath := resolveBrief(req)
 	n := atomic.AddInt64(&d.counter, 1)
 	task := DispatchTask{
 		ID:        fmt.Sprintf("task-%d-%d", time.Now().UnixNano(), n),
 		Repo:      normalizeRepoKey(req.Repo),
 		Branch:    strings.TrimSpace(req.Branch),
 		BaseSHA:   strings.ToLower(strings.TrimSpace(req.BaseSHA)),
-		SpecPath:  strings.TrimSpace(req.SpecPath),
+		Brief:     brief,
+		SpecPath:  specPath,
 		Scope:     clipTaskField(strings.TrimSpace(req.Scope), 2000),
 		Verify:    clipTaskField(strings.TrimSpace(req.Verify), 2000),
 		CreatedAt: time.Now(),
 	}
+	slog.Info("webhook: task brief resolved", "repo", task.Repo, "branch", task.Branch, "task_id", task.ID, "brief_runes", len([]rune(brief)), "source", briefSource(req))
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.tasks == nil {
@@ -195,6 +255,7 @@ func injectTaskContext(envelope WebhookEnvelope, key WebhookExecutionKey, store 
 	}
 	empty := func() {
 		envelope["task_id"] = ""
+		envelope["task_brief"] = ""
 		envelope["task_spec"] = ""
 		envelope["task_spec_is_url"] = false
 		envelope["task_scope"] = ""
@@ -211,6 +272,7 @@ func injectTaskContext(envelope WebhookEnvelope, key WebhookExecutionKey, store 
 		return
 	}
 	envelope["task_id"] = task.ID
+	envelope["task_brief"] = task.Brief
 	envelope["task_spec"] = task.SpecPath
 	envelope["task_spec_is_url"] = isSpecURL(task.SpecPath)
 	envelope["task_scope"] = task.Scope
@@ -228,14 +290,16 @@ func FormatDispatchSummary(task DispatchTask, icons map[string]string) string {
 
 // FormatDispatchBrief renders the task brief that belongs in the thread.
 func FormatDispatchBrief(task DispatchTask) string {
-	parts := make([]string, 0, 2)
-	if spec := strings.TrimSpace(task.SpecPath); spec != "" {
-		parts = append(parts, "Spec: "+spec)
+	return strings.TrimSpace(task.Brief)
+}
+
+func firstBriefLine(brief string, limit int) string {
+	line := strings.TrimSpace(strings.SplitN(brief, "\n", 2)[0])
+	runes := []rune(line)
+	if len(runes) > limit {
+		return string(runes[:limit]) + "…"
 	}
-	if verify := strings.TrimSpace(task.Verify); verify != "" {
-		parts = append(parts, "Verify: "+verify)
-	}
-	return strings.Join(parts, " · ")
+	return line
 }
 
 func FormatDispatchFailed(task DispatchTask, icons map[string]string, attempts int) string {
@@ -313,7 +377,7 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if isRedispatchScope(req.Scope) && s.handleRedispatch(w, r, req) {
+	if isRedispatchRequest(req) && s.handleRedispatch(w, r, req) {
 		return
 	}
 	s.dispatchCreateMu.Lock()
@@ -358,8 +422,8 @@ func isRedispatchScope(scope string) bool {
 
 func FormatRedispatchSeparator(task DispatchTask, icons map[string]string) string {
 	separator := "🔁 Re-dispatch requested — retrying in this thread. · " + FormatDispatchSummary(task, icons)
-	if brief := FormatDispatchBrief(task); brief != "" {
-		separator += " · " + brief
+	if line := firstBriefLine(task.Brief, redispatchSeparatorBriefRunes); line != "" {
+		separator += " · " + line
 	}
 	return separator
 }
@@ -375,8 +439,7 @@ func (s *Server) handleRedispatch(w http.ResponseWriter, r *http.Request, req Di
 		return false
 	}
 	if strings.TrimSpace(rec.RootMessageID) == "" {
-		orig := strings.TrimSpace(rec.SpecPath)
-		if orig != "" {
+		if orig := strings.TrimSpace(rec.SpecPath); orig != "" && strings.TrimSpace(req.Brief) == "" {
 			req.SpecPath = orig
 		}
 		task := s.dispatchTasks.Create(req)
@@ -427,8 +490,7 @@ func (s *Server) handleRedispatch(w http.ResponseWriter, r *http.Request, req Di
 			return true
 		}
 	}
-	origSpec := strings.TrimSpace(rec.SpecPath)
-	if origSpec != "" {
+	if origSpec := strings.TrimSpace(rec.SpecPath); origSpec != "" && strings.TrimSpace(req.Brief) == "" {
 		req.SpecPath = origSpec
 	}
 	task := s.dispatchTasks.Create(req)
@@ -566,17 +628,12 @@ func (s *Server) openDispatchThread(task DispatchTask, platform, channelID, root
 		slog.Warn("webhook: dispatch parent buttons failed", "repo", task.Repo, "branch", task.Branch, "error", err)
 	}
 	ctx := context.Background()
+	target := threadTargetFor(platform, channelID, threadID)
 	opener := FormatThreadOpener(WebhookEnvelope{"repository": task.Repo, "head_branch": task.Branch}, "dispatch", TaskDispatched, s.statusIcons)
-	if brief := FormatDispatchBrief(task); brief != "" {
-		if opener == "" {
-			opener = brief
-		} else {
-			opener += " · " + brief
-		}
-	}
 	if strings.TrimSpace(opener) != "" {
-		_ = s.notifyThread(ctx, platform, threadTargetFor(platform, channelID, threadID), opener)
+		_ = s.notifyThread(ctx, platform, target, opener)
 	}
+	s.postDispatchBrief(ctx, platform, target, task.Brief)
 	s.postPhaseBannerIfChanged(ctx, platform, channelID, threadID, task.Repo, task.Branch, "dispatch", "")
 	s.ensureThreadStatus(ctx, platform, channelID, threadID, task.Repo, task.Branch, "", ThreadStatusUpdate{
 		Phase: PhaseDispatch,
@@ -586,6 +643,22 @@ func (s *Server) openDispatchThread(task DispatchTask, platform, channelID, root
 		return fresh, true
 	}
 	return rec, true
+}
+
+func (s *Server) postDispatchBrief(ctx context.Context, platform, target, brief string) {
+	brief = strings.TrimSpace(brief)
+	if brief == "" {
+		return
+	}
+	for _, chunk := range render.Split(brief, render.DiscordLimit-continuationReserve) {
+		if chunk == "" {
+			continue
+		}
+		if err := s.notifyThread(ctx, platform, target, chunk); err != nil {
+			slog.Warn("webhook: dispatch brief post failed", "platform", platform, "error", err)
+			return
+		}
+	}
 }
 
 func (s *Server) startDispatchThread(task DispatchTask, platform, channelID, rootID string) (string, error) {
