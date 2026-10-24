@@ -79,30 +79,31 @@ var knownTaskStatuses = []string{"dispatched", "claimed", "pr_opened", "merged",
 var knownPhaseIcons = []string{"queued", "dispatch", "review", "fix", "merge", "merged", "blocked", "failed"}
 
 type EndpointConfig struct {
-	Name           string            `yaml:"name"`
-	Path           string            `yaml:"path"`
-	Auth           string            `yaml:"auth,omitempty"`
-	Secret         string            `yaml:"secret"`
-	Workflow       string            `yaml:"workflow,omitempty"`
-	Platform       string            `yaml:"platform"`
-	ChannelID      string            `yaml:"channel_id"`
-	ThreadID       string            `yaml:"thread_id,omitempty"`
-	Prompt         string            `yaml:"prompt"`
-	PromptFile     string            `yaml:"prompt_file,omitempty"`
-	SkipEvents     []string          `yaml:"skip_events,omitempty"`
-	Repository     string            `yaml:"repository,omitempty"`
-	Workspace      EndpointWorkspace `yaml:"workspace"`
-	Thread         bool              `yaml:"thread,omitempty"`
-	ProgressCard   bool              `yaml:"progress_card,omitempty"`
-	NotifySkip     *bool             `yaml:"notify_skip,omitempty"`
-	Model          string            `yaml:"model,omitempty"`
-	CommentTrigger []string          `yaml:"comment_trigger,omitempty"`
-	Admit          []AdmitRule       `yaml:"admit"`
-	Limits         *EndpointLimits   `yaml:"limits,omitempty"`
-	VerifyEndpoint string            `yaml:"verify_endpoint,omitempty"`
-	OnMerged       []MergedAction    `yaml:"on_merged,omitempty"`
-	Automation     *RepoAutomation   `yaml:"-"`
-	PromptSource   string            `yaml:"-"`
+	Name             string            `yaml:"name"`
+	Path             string            `yaml:"path"`
+	Auth             string            `yaml:"auth,omitempty"`
+	Secret           string            `yaml:"secret"`
+	Workflow         string            `yaml:"workflow,omitempty"`
+	Platform         string            `yaml:"platform"`
+	ChannelID        string            `yaml:"channel_id"`
+	ThreadID         string            `yaml:"thread_id,omitempty"`
+	Prompt           string            `yaml:"prompt"`
+	PromptFile       string            `yaml:"prompt_file,omitempty"`
+	SkipEvents       []string          `yaml:"skip_events,omitempty"`
+	Repository       string            `yaml:"repository,omitempty"`
+	Workspace        EndpointWorkspace `yaml:"workspace"`
+	WorkspaceModeSet bool              `yaml:"-"`
+	Thread           bool              `yaml:"thread,omitempty"`
+	ProgressCard     bool              `yaml:"progress_card,omitempty"`
+	NotifySkip       *bool             `yaml:"notify_skip,omitempty"`
+	Model            string            `yaml:"model,omitempty"`
+	CommentTrigger   []string          `yaml:"comment_trigger,omitempty"`
+	Admit            []AdmitRule       `yaml:"admit"`
+	Limits           *EndpointLimits   `yaml:"limits,omitempty"`
+	VerifyEndpoint   string            `yaml:"verify_endpoint,omitempty"`
+	OnMerged         []MergedAction    `yaml:"on_merged,omitempty"`
+	Automation       *RepoAutomation   `yaml:"-"`
+	PromptSource     string            `yaml:"-"`
 }
 
 func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
@@ -149,6 +150,7 @@ func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
 	e.SkipEvents = raw.SkipEvents
 	e.Repository = raw.Repository
 	e.Workspace = raw.Workspace
+	e.WorkspaceModeSet = strings.TrimSpace(raw.Workspace.Mode) != ""
 	e.Thread = raw.Thread
 	e.Model = strings.TrimSpace(raw.Model)
 	e.CommentTrigger = raw.CommentTrigger

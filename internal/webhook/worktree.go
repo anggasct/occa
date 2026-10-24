@@ -3,8 +3,6 @@ package webhook
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -97,12 +95,10 @@ func generateWorktreePath(repoDir string, key WebhookExecutionKey) string {
 	if headRepo == "" {
 		headRepo = key.Repository
 	}
-	h := sha256.Sum256([]byte(key.Repository + "\x00" + headRepo + "\x00" + key.Branch))
-	hashHex := hex.EncodeToString(h[:])
 
 	slug := sanitizeBranchSlug(key.Branch)
-	if len(slug) > 30 {
-		slug = slug[:30]
+	if len(slug) > 40 {
+		slug = slug[:40]
 		slug = strings.Trim(slug, "-")
 	}
 
@@ -114,8 +110,7 @@ func generateWorktreePath(repoDir string, key WebhookExecutionKey) string {
 		slug = owner + "-" + slug
 	}
 
-	folderName := fmt.Sprintf("%s-%s", slug, hashHex)
-	return filepath.Join(repoDir, ".worktree", folderName)
+	return filepath.Join(repoDir, ".worktree", slug)
 }
 
 func writeKeySidecar(keyPath, keyStr string) error {

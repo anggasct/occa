@@ -19,6 +19,7 @@ const (
 	failureModel failureClass = iota
 	failureStall
 	failureBuild
+	failureNoWork
 )
 
 func (c failureClass) label() string {
@@ -27,6 +28,8 @@ func (c failureClass) label() string {
 		return "provider stall"
 	case failureBuild:
 		return "build/test failure"
+	case failureNoWork:
+		return "no work in lease"
 	default:
 		return "model error"
 	}
@@ -36,7 +39,7 @@ func retryPolicyFor(class failureClass) (int, []time.Duration) {
 	switch class {
 	case failureStall:
 		return 1, []time.Duration{0}
-	case failureBuild:
+	case failureBuild, failureNoWork:
 		return 2, []time.Duration{60 * time.Second, 5 * time.Minute}
 	default:
 		return 3, []time.Duration{30 * time.Second, 2 * time.Minute, 5 * time.Minute}
@@ -64,6 +67,9 @@ func isStallProgress(progress relay.TurnProgress, stallFreshness time.Duration) 
 }
 
 func classifyFailure(execErr error, workCtx *WebhookWorkContext, stallFreshness time.Duration, timedOut bool) failureClass {
+	if errors.Is(execErr, errNoWorkInLease) {
+		return failureNoWork
+	}
 	if timedOut {
 		var progress relay.TurnProgress
 		if workCtx != nil {

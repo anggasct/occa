@@ -295,9 +295,12 @@ func expandRepos(repos []RepoConfig, defaults WebhookDefaults) ([]EndpointConfig
 			if workflow == "merged" {
 				ep.OnMerged = append([]MergedAction(nil), repo.OnMerged...)
 			}
-			if workflow == "fix" {
+			switch workflow {
+			case "review":
 				ep.Workspace = EndpointWorkspace{Type: WorkspaceTypeGit, Path: strings.TrimSpace(repo.Checkout), Mode: WorkspaceModeIsolated}
-			} else {
+			case "fix":
+				ep.Workspace = EndpointWorkspace{Type: WorkspaceTypeGit, Path: strings.TrimSpace(repo.Checkout), Mode: WorkspaceModeMutable}
+			default:
 				ep.Workspace = EndpointWorkspace{Type: WorkspaceTypeNone}
 			}
 			out = append(out, ep)
