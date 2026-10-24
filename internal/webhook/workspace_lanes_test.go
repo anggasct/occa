@@ -1,11 +1,9 @@
 package webhook
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -98,6 +96,7 @@ func TestResolveWorkspaceAppliesLanePolicy(t *testing.T) {
 		workflow  string
 		workspace config.EndpointWorkspace
 		modeSet   bool
+		wantErr   bool
 		wantCalls int
 		wantMode  string
 		wantTTL   time.Duration
@@ -111,6 +110,12 @@ func TestResolveWorkspaceAppliesLanePolicy(t *testing.T) {
 			wantMode:  config.WorkspaceModeIsolated,
 			wantTTL:   2 * time.Hour,
 			wantLane:  "review",
+		},
+		{
+			name:      "review rejects a non-git workspace",
+			workflow:  "review",
+			workspace: config.EndpointWorkspace{Type: config.WorkspaceTypeNone},
+			wantErr:   true,
 		},
 		{
 			name:      "fix mutable branch lease",
@@ -145,6 +150,12 @@ func TestResolveWorkspaceAppliesLanePolicy(t *testing.T) {
 			wantCalls: 0,
 		},
 		{
+			name:      "merge ignores a configured git workspace",
+			workflow:  "merge",
+			workspace: config.EndpointWorkspace{Type: config.WorkspaceTypeGit, Path: "/projects/occa", Mode: config.WorkspaceModeMutable},
+			wantCalls: 0,
+		},
+		{
 			name:      "merged has no workspace",
 			workflow:  "merged",
 			workspace: config.EndpointWorkspace{Type: config.WorkspaceTypeNone},
@@ -163,6 +174,15 @@ func TestResolveWorkspaceAppliesLanePolicy(t *testing.T) {
 				WorkspaceModeSet: tt.modeSet,
 			}, deliveryID: "del-1"}
 			lease, err := s.resolveWorkspace(item)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("resolveWorkspace = %+v, want error", lease)
+				}
+				if resolver.calls != 0 {
+					t.Fatalf("resolver calls = %d, want 0 on lane type rejection", resolver.calls)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("resolveWorkspace: %v", err)
 			}
@@ -199,6 +219,65 @@ func TestWorkspaceFixLeaseChecksOutBranch(t *testing.T) {
 	}
 	if lease.StartRevision == "" {
 		t.Fatal("fix lease must record its start revision")
+	}
+}
+
+func TestReviewCheckoutRecoversFromInvalidMetadata(t *testing.T) {
+	root := t.TempDir()
+	initTestGitRepo(t, root)
+	head := runGit(t, root, "rev-parse", "HEAD")
+
+	cases := []struct {
+		name    string
+		prepare func(t *testing.T, path string)
+	}{
+		{"missing", func(t *testing.T, target string) {
+			if err := os.Remove(isolatedMetadataPath(target)); err != nil {
+				t.Fatalf("remove metadata: %v", err)
+			}
+		}},
+		{"unreadable", func(t *testing.T, target string) {
+			if err := os.WriteFile(isolatedMetadataPath(target), []byte("not-json"), 0644); err != nil {
+				t.Fatalf("corrupt metadata: %v", err)
+			}
+		}},
+		{"drifted checkout", func(t *testing.T, target string) {
+			runGit(t, target, "commit", "--allow-empty", "-m", "drift")
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewWorkspaceManagerWithTTL(2 * time.Hour)
+			req := gitEndpointRequest(WebhookExecutionKey{Repository: "testowner/myrepo", Branch: "main", HeadRevision: head}, config.WorkspaceModeIsolated)
+			req.Path = root
+			req.DeliveryID = "del-first"
+			lease, err := m.ResolveWorkspace(context.Background(), req)
+			if err != nil {
+				t.Fatalf("first resolve: %v", err)
+			}
+			target := lease.Path
+			if err := lease.Release(context.Background()); err != nil {
+				t.Fatalf("release: %v", err)
+			}
+
+			tc.prepare(t, target)
+
+			req.DeliveryID = "del-second"
+			recovered, err := m.ResolveWorkspace(context.Background(), req)
+			if err != nil {
+				t.Fatalf("re-resolve after %s metadata: %v", tc.name, err)
+			}
+			defer func() { _ = recovered.Release(context.Background()) }()
+			if filepath.Clean(recovered.Path) != filepath.Clean(target) {
+				t.Fatalf("recovered path = %q, want %q", recovered.Path, target)
+			}
+			if got := runGit(t, target, "rev-parse", "HEAD"); got != head {
+				t.Fatalf("recovered checkout at %s, want %s", got, head)
+			}
+			if _, err := readIsolatedMetadata(target); err != nil {
+				t.Fatalf("metadata not restored: %v", err)
+			}
+		})
 	}
 }
 
@@ -299,67 +378,51 @@ func TestFinalizeSkipsReaderLanesAndFailedTurns(t *testing.T) {
 }
 
 func TestRenderedEnvelopePublishesLeaseOnly(t *testing.T) {
+	body := []byte(fixLaneReviewBody("testowner/myrepo", "feat/review-lane"))
+	key := ExtractExecutionKey(body)
+	envelope := normalizeWebhook(body, "pull_request_review", "del-render", testVerdicts(), false, "")
+
 	reviewLease := filepath.Join("/projects/occa/.occa-workspaces", "review-8a7682e244-699397daa3")
-	data := map[string]any{
-		"worktree": reviewLease,
-		"webhook":  WebhookEnvelope{"task_spec": "docs/task.md"},
-	}
-	rendered, err := renderTemplate("Workspace: {{.worktree}} Task: {{.webhook.task_spec}}", data)
-	if err != nil {
-		t.Fatalf("render: %v", err)
-	}
-	if !strings.Contains(rendered, reviewLease) {
-		t.Fatalf("rendered prompt missing lease: %q", rendered)
-	}
-	if strings.Contains(rendered, ".worktree/") {
-		t.Fatalf("rendered prompt carried a task worktree path: %q", rendered)
-	}
-
 	fixLease := filepath.Join("/projects/occa/.worktree", "fix-test-lane")
-	data["worktree"] = fixLease
-	rendered, err = renderTemplate("Workspace: {{.worktree}}", data)
-	if err != nil {
-		t.Fatalf("render: %v", err)
+
+	tests := []struct {
+		name            string
+		workflow        string
+		prompt          string
+		lease           string
+		wantLeaseInText bool
+	}{
+		{"review custom prompt", "review", "Workspace: {{.worktree}} Task: {{.webhook.task_spec}}", reviewLease, true},
+		{"fix custom prompt", "fix", "Workspace: {{.worktree}}", fixLease, true},
+		{"review builtin prompt", "review", config.BuiltinPrompt("review"), reviewLease, false},
+		{"fix builtin prompt", "fix", config.BuiltinPrompt("fix"), fixLease, false},
+		{"merge builtin prompt", "merge", config.BuiltinPrompt("merge"), "", false},
+		{"merged builtin prompt", "merged", config.BuiltinPrompt("merged"), "", false},
 	}
-	if !strings.Contains(rendered, fixLease) {
-		t.Fatalf("rendered fix prompt missing lease: %q", rendered)
-	}
-	if leftover := strings.ReplaceAll(rendered, fixLease, ""); strings.Contains(leftover, ".worktree/") {
-		t.Fatalf("rendered fix prompt carried a second worktree path: %q", rendered)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workCtx := &WebhookWorkContext{Key: key, Worktree: tt.lease, Envelope: envelope}
+			ep := config.EndpointConfig{Name: "render-" + tt.workflow, Workflow: tt.workflow, Prompt: tt.prompt}
+			data, rendered, err := renderDeliveryPrompt(ep, body, workCtx)
+			if err != nil {
+				t.Fatalf("renderDeliveryPrompt: %v", err)
+			}
+			if data["worktree"] != tt.lease {
+				t.Fatalf("template data worktree = %v, want %s", data["worktree"], tt.lease)
+			}
+			if tt.wantLeaseInText && !strings.Contains(rendered, tt.lease) {
+				t.Fatalf("rendered prompt missing lease: %q", rendered)
+			}
+			if leftover := strings.ReplaceAll(rendered, tt.lease, ""); strings.Contains(leftover, ".worktree/") {
+				t.Fatalf("rendered prompt carried a foreign worktree path: %q", rendered)
+			}
+		})
 	}
 
-	envelope := WebhookEnvelope{}
-	injectTaskContext(envelope, WebhookExecutionKey{}, nil)
-	if _, ok := envelope["worktree"]; ok {
+	env := WebhookEnvelope{}
+	injectTaskContext(env, WebhookExecutionKey{}, nil)
+	if _, ok := env["worktree"]; ok {
 		t.Fatal("task context must not publish a worktree path")
-	}
-}
-
-func TestWorkspaceBindingMismatchLogsAndUsesLease(t *testing.T) {
-	root := t.TempDir()
-	initTestGitRepo(t, root)
-	runGit(t, root, "branch", "fix/test-lane")
-
-	var logs bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	defer slog.SetDefault(previous)
-
-	req := gitEndpointRequest(WebhookExecutionKey{Repository: "testowner/myrepo", Branch: "fix/test-lane"}, config.WorkspaceModeMutable)
-	req.Path = root
-	req.DeliveryID = "del-binding"
-	req.Lane = "fix"
-	req.BindingWorktree = filepath.Join(root, ".worktree", "some-other-lane")
-	lease, err := NewWorkspaceManager().ResolveWorkspace(context.Background(), req)
-	if err != nil {
-		t.Fatalf("ResolveWorkspace: %v", err)
-	}
-	defer func() { _ = lease.Release(context.Background()) }()
-	if filepath.Clean(lease.Path) == filepath.Clean(req.BindingWorktree) {
-		t.Fatalf("resolver returned the binding path %q instead of the lease", lease.Path)
-	}
-	if !strings.Contains(logs.String(), "workspace binding mismatch") || !strings.Contains(logs.String(), "ignored=true") {
-		t.Fatalf("binding mismatch not logged: %s", logs.String())
 	}
 }
 

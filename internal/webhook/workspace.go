@@ -30,14 +30,13 @@ func IsWorkspaceRetryable(err error) bool {
 }
 
 type WorkspaceRequest struct {
-	Repository      string
-	Path            string
-	Mode            string
-	Key             WebhookExecutionKey
-	DeliveryID      string
-	Lane            string
-	BindingWorktree string
-	TTL             time.Duration
+	Repository string
+	Path       string
+	Mode       string
+	Key        WebhookExecutionKey
+	DeliveryID string
+	Lane       string
+	TTL        time.Duration
 }
 
 type WorkspaceResolver interface {
@@ -188,24 +187,7 @@ func (m *WorkspaceManager) ResolveWorkspace(ctx context.Context, req WorkspaceRe
 	if resolveErr != nil {
 		return nil, resolveErr
 	}
-	m.logBindingMismatch(req, lease)
 	return lease, nil
-}
-
-func (m *WorkspaceManager) logBindingMismatch(req WorkspaceRequest, lease *WorkspaceLease) {
-	binding := strings.TrimSpace(req.BindingWorktree)
-	if binding == "" || lease == nil || strings.TrimSpace(lease.Path) == "" {
-		return
-	}
-	if filepath.Clean(binding) == filepath.Clean(lease.Path) {
-		return
-	}
-	slog.Warn("webhook: workspace binding mismatch",
-		"lane", req.Lane,
-		"lease", lease.Path,
-		"binding", binding,
-		"ignored", true,
-	)
 }
 
 func (m *WorkspaceManager) resolveIsolated(ctx context.Context, root string, req WorkspaceRequest) (*WorkspaceLease, error) {
@@ -233,7 +215,7 @@ func (m *WorkspaceManager) resolveIsolated(ctx context.Context, root string, req
 	lock.Lock()
 	defer lock.Unlock()
 
-	lease, err := m.reuseIsolated(ctx, target, req, ttl)
+	lease, err := m.reuseIsolated(ctx, root, target, req, ttl)
 	if err != nil {
 		return nil, err
 	}
@@ -245,7 +227,7 @@ func (m *WorkspaceManager) resolveIsolated(ctx context.Context, root string, req
 		return nil, fmt.Errorf("%w: create isolated workspace parent: %v", ErrWorkspaceUnavailable, err)
 	}
 	if _, err := m.runner.Run(ctx, root, "worktree", "add", "--detach", target, req.Key.HeadRevision); err != nil {
-		if lease, rerr := m.reuseIsolated(ctx, target, req, ttl); rerr == nil && lease != nil {
+		if lease, rerr := m.reuseIsolated(ctx, root, target, req, ttl); rerr == nil && lease != nil {
 			return lease, nil
 		}
 		_ = os.RemoveAll(target)
@@ -274,22 +256,45 @@ func (m *WorkspaceManager) resolveIsolated(ctx context.Context, root string, req
 	return &WorkspaceLease{manager: m, Path: target, Mode: config.WorkspaceModeIsolated, Branch: req.Key.Branch, StartRevision: req.Key.HeadRevision}, nil
 }
 
-func (m *WorkspaceManager) reuseIsolated(ctx context.Context, target string, req WorkspaceRequest, ttl time.Duration) (*WorkspaceLease, error) {
+func (m *WorkspaceManager) reuseIsolated(ctx context.Context, root, target string, req WorkspaceRequest, ttl time.Duration) (*WorkspaceLease, error) {
 	if _, err := os.Stat(target); err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("%w: inspect isolated workspace %s: %v", ErrWorkspaceUnavailable, target, err)
 	}
+	now := m.now()
 	meta, err := readIsolatedMetadata(target)
 	if err != nil {
-		return nil, fmt.Errorf("%w: isolated workspace %s is not a live occa checkout: %v", ErrWorkspaceUnavailable, target, err)
+		out, revErr := m.runner.Run(ctx, target, "rev-parse", "HEAD")
+		if revErr != nil || strings.TrimSpace(out) != req.Key.HeadRevision {
+			if dErr := m.discardIsolated(ctx, root, target); dErr != nil {
+				return nil, dErr
+			}
+			return nil, nil
+		}
+		meta = isolatedMetadata{
+			Owner:      "occa",
+			DeliveryID: req.DeliveryID,
+			Revision:   req.Key.HeadRevision,
+			CreatedAt:  now.Unix(),
+			ExpiresAt:  now.Add(ttl).Unix(),
+		}
+		if wErr := writeIsolatedMetadata(target, meta); wErr != nil {
+			if dErr := m.discardIsolated(ctx, root, target); dErr != nil {
+				return nil, dErr
+			}
+			return nil, fmt.Errorf("%w: restore isolated workspace metadata: %v", ErrWorkspaceUnavailable, wErr)
+		}
 	}
 	if meta.Revision != req.Key.HeadRevision {
-		return nil, fmt.Errorf("%w: isolated workspace %s tracks revision %s, not %s", ErrWorkspaceUnavailable, target, meta.Revision, req.Key.HeadRevision)
+		if dErr := m.discardIsolated(ctx, root, target); dErr != nil {
+			return nil, dErr
+		}
+		return nil, nil
 	}
 
-	now := m.now()
+	now = m.now()
 	if now.Unix() >= meta.ExpiresAt {
 		if _, leased := m.leases.Load(target); !leased {
 			if err := m.removeIsolated(ctx, target); err != nil {
@@ -301,10 +306,16 @@ func (m *WorkspaceManager) reuseIsolated(ctx context.Context, target string, req
 
 	out, err := m.runner.Run(ctx, target, "rev-parse", "HEAD")
 	if err != nil {
-		return nil, fmt.Errorf("%w: read isolated workspace revision: %v", ErrWorkspaceUnavailable, err)
+		if dErr := m.discardIsolated(ctx, root, target); dErr != nil {
+			return nil, dErr
+		}
+		return nil, nil
 	}
 	if strings.TrimSpace(out) != req.Key.HeadRevision {
-		return nil, fmt.Errorf("%w: isolated workspace %s is not at revision %s", ErrWorkspaceUnavailable, target, req.Key.HeadRevision)
+		if dErr := m.discardIsolated(ctx, root, target); dErr != nil {
+			return nil, dErr
+		}
+		return nil, nil
 	}
 	status, err := m.runner.Run(ctx, target, "status", "--porcelain")
 	if err != nil {
@@ -326,6 +337,19 @@ func (m *WorkspaceManager) reuseIsolated(ctx context.Context, target string, req
 		"delivery_id", req.DeliveryID,
 	)
 	return &WorkspaceLease{manager: m, Path: target, Mode: config.WorkspaceModeIsolated, Branch: req.Key.Branch, StartRevision: req.Key.HeadRevision}, nil
+}
+
+func (m *WorkspaceManager) discardIsolated(ctx context.Context, root, target string) error {
+	if _, leased := m.leases.Load(target); leased {
+		return fmt.Errorf("%w: isolated workspace %s is in use by another delivery", ErrWorkspaceUnavailable, target)
+	}
+	if err := m.removeIsolated(ctx, target); err != nil {
+		return fmt.Errorf("%w: remove unusable isolated workspace %s: %v", ErrWorkspaceUnavailable, target, err)
+	}
+	if _, err := m.runner.Run(ctx, root, "worktree", "prune"); err != nil {
+		slog.Warn("webhook: isolated workspace prune failed", "workspace", target, "error", err)
+	}
+	return nil
 }
 
 func (m *WorkspaceManager) lockFor(key string) *sync.Mutex {
@@ -574,24 +598,27 @@ func (m *WorkspaceManager) ReapExpiredWorkspaces(ctx context.Context) int {
 			return true
 		}
 		for _, entry := range entries {
-			if !entry.IsDir() {
+			if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "review-") {
 				continue
 			}
 			workspace := filepath.Join(dir, entry.Name())
+			lock := m.lockFor(workspace)
+			lock.Lock()
 			meta, mErr := readIsolatedMetadata(workspace)
-			if mErr != nil {
-				continue
-			}
-			if m.now().Unix() < meta.ExpiresAt {
+			if mErr == nil && m.now().Unix() < meta.ExpiresAt {
+				lock.Unlock()
 				continue
 			}
 			if _, leased := m.leases.Load(workspace); leased {
+				lock.Unlock()
 				continue
 			}
 			if rErr := m.removeIsolated(ctx, workspace); rErr != nil {
 				slog.Warn("webhook: expired isolated workspace cleanup failed", "workspace", workspace, "error", rErr)
+				lock.Unlock()
 				continue
 			}
+			lock.Unlock()
 			reaped++
 		}
 		return true
