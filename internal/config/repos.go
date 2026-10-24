@@ -240,6 +240,11 @@ func expandRepos(repos []RepoConfig, defaults WebhookDefaults) ([]EndpointConfig
 	if defaults.Thread != nil && !*defaults.Thread {
 		return nil, fmt.Errorf("config: webhooks.defaults.thread is locked true by the per-PR queue")
 	}
+	for _, login := range defaults.CommentAuthors {
+		if strings.TrimSpace(login) == "" {
+			return nil, fmt.Errorf("config: webhooks.defaults.comment_authors must not contain empty entries")
+		}
+	}
 	seen := map[string]struct{}{}
 	var out []EndpointConfig
 	for i := range repos {

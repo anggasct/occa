@@ -44,6 +44,31 @@ func TestRepoCommentAuthors(t *testing.T) {
 	}
 }
 
+func TestDefaultsCommentAuthorsRejectsBlankEntries(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
+	for name, authors := range map[string]string{
+		"blank entry":       "['ok', '  ']",
+		"all blank entries": "['  ', '']",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := writeConfig(t, dir, repoConfigYAML(`  defaults:
+    comment_authors: `+authors+`
+  repos:
+    - repo: acme/widget
+      provider: github
+      platform: discord
+      channel_id: chan-1
+      secret: s3cret
+      checkout: /tmp/widget
+`))
+			if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "webhooks.defaults.comment_authors") {
+				t.Fatalf("Load error = %v, want webhooks.defaults.comment_authors validation error", err)
+			}
+		})
+	}
+}
+
 func TestRepoCommentAuthorsRejectsEmptyEntry(t *testing.T) {
 	t.Setenv("OCCA_ADMIN_ID", "admin123")
 	dir := t.TempDir()

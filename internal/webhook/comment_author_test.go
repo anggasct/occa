@@ -54,20 +54,31 @@ func TestAdmitCommentAuthorsGate(t *testing.T) {
 func TestAutomationAllowsCommentTriggeredFix(t *testing.T) {
 	reviewOnly := &config.RepoAutomation{Default: config.AutomationReviewOnly}
 	srv := &Server{}
-	ep := config.EndpointConfig{Workflow: "fix", Automation: reviewOnly}
 	key := WebhookExecutionKey{Repository: "acme/widget", Branch: "feat/x"}
 
+	unconfigured := config.EndpointConfig{Workflow: "fix", Automation: reviewOnly}
 	triggered := commentEnvelope(t, "anggasct", "fix ci")
 	triggered["pr_author"] = "anggasct"
-	if !srv.automationAllows(ep, key, triggered) {
-		t.Fatal("comment-triggered fix must run in review-only mode")
+	if srv.automationAllows(unconfigured, key, triggered) {
+		t.Fatal("comment-triggered fix must stay blocked in review-only mode without a comment_authors allowlist")
 	}
+
+	configured := config.EndpointConfig{Workflow: "fix", Automation: reviewOnly, CommentAuthors: []string{"anggasct"}}
+	if !srv.automationAllows(configured, key, triggered) {
+		t.Fatal("allowlisted comment-triggered fix must run in review-only mode")
+	}
+	stranger := commentEnvelope(t, "kumasct", "fix ci")
+	stranger["pr_author"] = "kumasct"
+	if srv.automationAllows(configured, key, stranger) {
+		t.Fatal("non-allowlisted commenter must not unlock fix in review-only mode")
+	}
+
 	plain := commentEnvelope(t, "anggasct", "lgtm")
 	plain["pr_author"] = "anggasct"
-	if srv.automationAllows(ep, key, plain) {
+	if srv.automationAllows(configured, key, plain) {
 		t.Fatal("fix without a matched comment trigger must stay blocked in review-only mode")
 	}
-	merge := config.EndpointConfig{Workflow: "merge", Automation: reviewOnly}
+	merge := config.EndpointConfig{Workflow: "merge", Automation: reviewOnly, CommentAuthors: []string{"anggasct"}}
 	if srv.automationAllows(merge, key, triggered) {
 		t.Fatal("comment trigger must not unlock merge in review-only mode")
 	}
