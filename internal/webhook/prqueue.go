@@ -416,7 +416,18 @@ func (s *Server) prMirrorSync(workCtx *WebhookWorkContext) {
 		}
 	}
 	if strings.TrimSpace(workCtx.ThreadID) != "" {
-		if err := s.prQueues.UpdateThread(ctx, workCtx.PRKey, workCtx.ThreadID, workCtx.RootMessageID); err != nil {
+		rootID := strings.TrimSpace(workCtx.RootMessageID)
+		if row, err := s.prQueues.Get(ctx, workCtx.PRKey); err == nil && row != nil {
+			if persisted := strings.TrimSpace(row.RootMsgID); persisted != "" && persisted != rootID {
+				slog.Warn("webhook: pr root preserved",
+					"pr_key", workCtx.PRKey,
+					"kept_root_message_id", persisted,
+					"ignored_root_message_id", rootID,
+				)
+				rootID = persisted
+			}
+		}
+		if err := s.prQueues.UpdateThread(ctx, workCtx.PRKey, workCtx.ThreadID, rootID); err != nil {
 			slog.Warn("webhook: pr thread stamp failed", "pr_key", workCtx.PRKey, "error", err)
 		}
 	}

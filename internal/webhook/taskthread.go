@@ -579,8 +579,18 @@ func (t *TaskThreadRegistry) SetSurface(prKey string, update SurfaceUpdate) Task
 		prev.PRNumber = surface.PRNumber
 	}
 	prev.SurfacePhase = surface.Phase
-	if surface.RootMessageID != "" {
-		prev.RootMessageID = surface.RootMessageID
+	if id := strings.TrimSpace(surface.RootMessageID); id != "" {
+		switch {
+		case strings.TrimSpace(prev.RootMessageID) == "":
+			prev.RootMessageID = id
+		case strings.TrimSpace(prev.RootMessageID) != id:
+			slog.Info("webhook: task thread root preserved",
+				"pr_key", key,
+				"task_key", taskKey,
+				"kept_root_message_id", prev.RootMessageID,
+				"ignored_root_message_id", id,
+			)
+		}
 	}
 	if surface.ThreadID != "" {
 		prev.ThreadID = surface.ThreadID

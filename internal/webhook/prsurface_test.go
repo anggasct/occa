@@ -1,7 +1,9 @@
 package webhook
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -835,5 +837,252 @@ func waitForSurface(t *testing.T, rec *surfaceRecorder, want int) {
 			t.Fatalf("state lines = %d, want %d", count, want)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestPrSurfaceReusesBranchParent(t *testing.T) {
+	srv, _, rec := newSurfaceServer(t)
+	ep := srv.endpoints["/review"]
+	prKey := "acme/widget#181"
+	srv.tasks.Upsert("acme/widget", "feat/x", "dispatch-parent", "thread-9", TaskDispatched)
+
+	srv.syncPhaseParent(context.Background(), ep, prKey, surfaceEnvelope(), PhaseQueued)
+
+	sent, edited, _, _ := rec.snapshot()
+	if len(sent) != 0 {
+		t.Fatalf("a branch binding must reuse the dispatch parent, got %d new cards: %+v", len(sent), sent)
+	}
+	if len(edited) != 1 || edited[0].messageID != "dispatch-parent" {
+		t.Fatalf("the dispatch parent must be edited in place, got %+v", edited)
+	}
+	if root, _, _, ok := srv.prSurfaceState(prKey); !ok || root != "dispatch-parent" {
+		t.Fatalf("surface root = %q (known %v), want the dispatch parent", root, ok)
+	}
+}
+
+func TestPrSurfaceBranchRootFallback(t *testing.T) {
+	srv, _, rec := newSurfaceServer(t)
+	ep := srv.endpoints["/review"]
+	prKey := "acme/widget#181"
+	srv.tasks.Upsert("acme/widget", "feat/x", "dispatch-parent", "thread-9", TaskDispatched)
+	stale := srv.tasks.Upsert("acme/widget", "feat/stale", "", "thread-stale", TaskClaimed)
+	srv.tasks.LinkPRThread(prKey, stale)
+
+	srv.syncPhaseParent(context.Background(), ep, prKey, surfaceEnvelope(), PhaseQueued)
+
+	sent, edited, _, _ := rec.snapshot()
+	if len(sent) != 0 {
+		t.Fatalf("an empty PR binding must fall back to the branch parent, got %d new cards: %+v", len(sent), sent)
+	}
+	if len(edited) != 1 || edited[0].messageID != "dispatch-parent" {
+		t.Fatalf("the branch parent must be edited in place, got %+v", edited)
+	}
+}
+
+func TestPrSurfacePostsCardWhenNoHome(t *testing.T) {
+	srv, _, rec := newSurfaceServer(t)
+	ep := srv.endpoints["/review"]
+	prKey := "acme/widget#181"
+
+	srv.syncPhaseParent(context.Background(), ep, prKey, surfaceEnvelope(), PhaseQueued)
+
+	sent, edited, _, _ := rec.snapshot()
+	if len(sent) != 1 {
+		t.Fatalf("a PR without a home must get exactly one card, got %d: %+v", len(sent), sent)
+	}
+	if len(edited) != 0 {
+		t.Fatalf("a new card must not be edited on its first write: %+v", edited)
+	}
+	if root, _, _, ok := srv.prSurfaceState(prKey); !ok || root != sent[0].messageID {
+		t.Fatalf("surface root = %q, want the posted card %q", root, sent[0].messageID)
+	}
+}
+
+func TestPrSurfaceSingleParentAcrossPhases(t *testing.T) {
+	srv, _, rec := newSurfaceServer(t)
+	ep := srv.endpoints["/review"]
+	prKey := "acme/widget#181"
+
+	srv.syncPhaseParent(context.Background(), ep, prKey, surfaceEnvelope(), PhaseQueued)
+	srv.syncPhaseParent(context.Background(), ep, prKey, surfaceEnvelope(), PhaseReview)
+	srv.syncPhaseParent(context.Background(), ep, prKey, surfaceEnvelope(), PhaseFix)
+
+	sent, edited, _, _ := rec.snapshot()
+	if len(sent) != 1 {
+		t.Fatalf("one PR must have one parent, got %d sends: %+v", len(sent), sent)
+	}
+	if len(edited) != 2 {
+		t.Fatalf("phase changes must edit the same parent, got %d edits: %+v", len(edited), edited)
+	}
+	for _, msg := range edited {
+		if msg.messageID != sent[0].messageID {
+			t.Errorf("edit target = %q, want %q", msg.messageID, sent[0].messageID)
+		}
+	}
+}
+
+func TestTaskThreadRootImmutable(t *testing.T) {
+	srv, _, _ := newSurfaceServer(t)
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	srv.tasks.Upsert("acme/widget", "feat/x", "dispatch-parent", "thread-9", TaskDispatched)
+	rec := srv.tasks.SetSurface("acme/widget#181", SurfaceUpdate{
+		RootMessageID: "card-2",
+		Repo:          "acme/widget",
+		Branch:        "feat/x",
+		Phase:         string(PhaseQueued),
+	})
+
+	if rec.RootMessageID != "dispatch-parent" {
+		t.Fatalf("task thread root = %q, want the existing dispatch parent", rec.RootMessageID)
+	}
+	if stored, ok := srv.tasks.Lookup("acme/widget", "feat/x"); !ok || stored.RootMessageID != "dispatch-parent" {
+		t.Fatalf("stored root = %q (found %v), want the existing dispatch parent", stored.RootMessageID, ok)
+	}
+	if !strings.Contains(logs.String(), "webhook: task thread root preserved") {
+		t.Fatalf("a replaced root must be logged, got %q", logs.String())
+	}
+}
+
+func TestTaskThreadRootFilledWhenEmpty(t *testing.T) {
+	srv, _, _ := newSurfaceServer(t)
+	srv.tasks.Upsert("acme/widget", "feat/x", "", "thread-9", TaskClaimed)
+
+	rec := srv.tasks.SetSurface("acme/widget#181", SurfaceUpdate{
+		RootMessageID: "card-1",
+		Repo:          "acme/widget",
+		Branch:        "feat/x",
+		Phase:         string(PhaseQueued),
+	})
+
+	if rec.RootMessageID != "card-1" {
+		t.Fatalf("task thread root = %q, want the first parent", rec.RootMessageID)
+	}
+}
+
+func TestPrSurfaceBranchFromPRRecord(t *testing.T) {
+	t.Run("envelope branch selects the binding", func(t *testing.T) {
+		srv, _, rec := newSurfaceServer(t)
+		ep := srv.endpoints["/review"]
+		prKey := "acme/widget#181"
+		srv.tasks.Upsert("acme/widget", "feat/x", "dispatch-parent", "thread-9", TaskDispatched)
+		srv.tasks.Upsert("acme/widget", "feat/other", "other-parent", "thread-other", TaskDispatched)
+		empty := srv.tasks.Upsert("acme/widget", "feat/empty", "", "thread-empty", TaskClaimed)
+		srv.tasks.LinkPRThread(prKey, empty)
+
+		srv.syncPhaseParent(context.Background(), ep, prKey, surfaceEnvelope(), PhaseQueued)
+
+		sent, edited, _, _ := rec.snapshot()
+		if len(sent) != 0 {
+			t.Fatalf("a known branch must reuse its parent, got %d new cards: %+v", len(sent), sent)
+		}
+		if len(edited) != 1 || edited[0].messageID != "dispatch-parent" {
+			t.Fatalf("the envelope branch parent must be edited, got %+v", edited)
+		}
+	})
+
+	t.Run("pr record fills missing branch", func(t *testing.T) {
+		srv, _, rec := newSurfaceServer(t)
+		ep := srv.endpoints["/review"]
+		prKey := "acme/widget#181"
+		srv.tasks.Upsert("acme/widget", "feat/x", "dispatch-parent", "thread-9", TaskDispatched)
+		srv.tasks.SetSurface(prKey, SurfaceUpdate{Branch: "feat/x"})
+		envelope := surfaceEnvelope()
+		delete(envelope, "head_branch")
+
+		srv.syncPhaseParent(context.Background(), ep, prKey, envelope, PhaseQueued)
+
+		sent, edited, _, _ := rec.snapshot()
+		if len(sent) != 0 {
+			t.Fatalf("a branch from the PR record must reuse its parent, got %d new cards: %+v", len(sent), sent)
+		}
+		if len(edited) != 1 || edited[0].messageID != "dispatch-parent" {
+			t.Fatalf("the PR record branch parent must be edited, got %+v", edited)
+		}
+	})
+}
+
+func TestPrSurfaceIgnoresForeignChannelRoot(t *testing.T) {
+	srv, _, rec := newSurfaceServer(t)
+	ep := srv.endpoints["/review"]
+	ep.ChannelID = "chan-2"
+	prKey := "acme/widget#181"
+	srv.tasks.Upsert("acme/widget", "feat/x", "dispatch-parent", "thread-9", TaskDispatched)
+
+	srv.syncPhaseParent(context.Background(), ep, prKey, surfaceEnvelope(), PhaseQueued)
+
+	sent, edited, _, _ := rec.snapshot()
+	if len(edited) != 0 {
+		t.Fatalf("a parent in another channel must not be edited: %+v", edited)
+	}
+	if len(sent) != 1 {
+		t.Fatalf("a foreign-channel home must get exactly one card, got %d: %+v", len(sent), sent)
+	}
+	if sent[0].channelID != "chan-2" {
+		t.Fatalf("the card must land in the endpoint channel, got %q", sent[0].channelID)
+	}
+}
+
+func TestPrSurfaceReusesPersistedHomeAfterRestart(t *testing.T) {
+	for _, phase := range []Phase{PhaseQueued, PhaseBlocked, PhaseMerged} {
+		t.Run(string(phase), func(t *testing.T) {
+			srv, st, rec := newSurfaceServer(t)
+			ep := srv.endpoints["/review"]
+			ctx := context.Background()
+			prKey := "acme/widget#181"
+			if _, err := st.PRQueueRepo().EnsurePR(ctx, prKey, "thread-9", "dispatch-parent"); err != nil {
+				t.Fatalf("ensure pr: %v", err)
+			}
+
+			srv.syncPhaseParent(ctx, ep, prKey, surfaceEnvelope(), phase)
+
+			sent, edited, _, _ := rec.snapshot()
+			if len(sent) != 0 {
+				t.Fatalf("a persisted home must not post another card, got %d: %+v", len(sent), sent)
+			}
+			if len(edited) != 1 || edited[0].messageID != "dispatch-parent" {
+				t.Fatalf("the persisted home must be edited in place, got %+v", edited)
+			}
+			row, err := st.PRQueueRepo().Get(ctx, prKey)
+			if err != nil {
+				t.Fatalf("get pr: %v", err)
+			}
+			if row == nil || strings.TrimSpace(row.RootMsgID) != "dispatch-parent" {
+				t.Fatalf("persisted root = %+v, want the dispatch parent", row)
+			}
+			detail, ok := srv.tasks.SurfaceDetail(prKey)
+			if !ok || detail.ThreadID != "thread-9" {
+				t.Fatalf("surface detail = %+v (known %v), want the persisted thread", detail, ok)
+			}
+		})
+	}
+}
+
+func TestPrSurfaceKeepsPersistedRootWhenHomeIsForeign(t *testing.T) {
+	srv, st, rec := newSurfaceServer(t)
+	ep := srv.endpoints["/review"]
+	ep.ChannelID = "chan-2"
+	ctx := context.Background()
+	prKey := "acme/widget#181"
+	if _, err := st.PRQueueRepo().EnsurePR(ctx, prKey, "thread-9", "dispatch-parent"); err != nil {
+		t.Fatalf("ensure pr: %v", err)
+	}
+
+	rootID, _ := srv.syncPhaseParent(ctx, ep, prKey, surfaceEnvelope(), PhaseQueued)
+	srv.prMirrorSync(&WebhookWorkContext{PRKey: prKey, ThreadID: "thread-9", RootMessageID: rootID})
+
+	sent, edited, _, _ := rec.snapshot()
+	if len(sent) != 1 || len(edited) != 0 {
+		t.Fatalf("a foreign home must post one card and edit none, got %d sent and %d edited", len(sent), len(edited))
+	}
+	row, err := st.PRQueueRepo().Get(ctx, prKey)
+	if err != nil {
+		t.Fatalf("get pr: %v", err)
+	}
+	if row == nil || strings.TrimSpace(row.RootMsgID) != "dispatch-parent" {
+		t.Fatalf("persisted root = %+v, want the original home preserved", row)
 	}
 }

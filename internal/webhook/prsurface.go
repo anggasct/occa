@@ -361,11 +361,18 @@ func (s *Server) syncPhaseParent(ctx context.Context, ep config.EndpointConfig, 
 		return "", false
 	}
 	rootID, previous, _, known := s.prSurfaceState(prKey)
-	if !known && strings.TrimSpace(rootID) == "" {
+	persistedThreadID := ""
+	if strings.TrimSpace(rootID) == "" {
 		// The task that opened this PR already has a channel parent: the
 		// dispatch parent. Reusing it keeps one parent per task in the
 		// channel instead of a second one for the same work.
-		rootID = s.reusableTaskParent(ep, prKey)
+		rootID = s.reusableTaskParent(ep, prKey, envelope)
+	}
+	if strings.TrimSpace(rootID) == "" {
+		// The registry is in memory only. After a restart the queue row is
+		// the only surviving home, so reuse it instead of posting a card the
+		// PR already owns.
+		rootID, persistedThreadID = s.reusablePersistedParent(ctx, ep, prKey, envelope)
 	}
 	if known {
 		if previous == phase {
@@ -403,6 +410,9 @@ func (s *Server) syncPhaseParent(ctx context.Context, ep config.EndpointConfig, 
 			threadID = detail.ThreadID
 		}
 	}
+	if threadID == "" {
+		threadID = persistedThreadID
+	}
 	text := FormatPhaseParent(repo, prNumber, phase, s.statusIcons)
 	buttons := s.phaseParentButtons(ep, prKey, repo, branch, prURL, threadID)
 	if rootID == "" {
@@ -433,19 +443,37 @@ func (s *Server) syncPhaseParent(ctx context.Context, ep config.EndpointConfig, 
 // reusableTaskParent returns the channel parent of the task that owns a PR,
 // when that parent lives in the channel this endpoint writes to. A parent in
 // another channel cannot be edited from here, so a new one is posted instead.
-func (s *Server) reusableTaskParent(ep config.EndpointConfig, prKey string) string {
+func (s *Server) reusableTaskParent(ep config.EndpointConfig, prKey string, envelope WebhookEnvelope) string {
 	if s == nil || s.tasks == nil {
 		return ""
 	}
-	rec, ok := s.tasks.ResolvePRThread(prKey)
-	if !ok || strings.TrimSpace(rec.RootMessageID) == "" {
+	repo, _ := repoAndNumber(prKey, envelope)
+	repo = normalizeRepoKey(repo)
+	branch := strings.TrimSpace(stringValue(envelope["head_branch"]))
+	prRec, hasPR := s.tasks.ResolvePRThread(prKey)
+	if branch == "" && hasPR {
+		branch = strings.TrimSpace(prRec.Branch)
+	}
+	if branch == "" {
+		if detail, ok := s.tasks.SurfaceDetail(prKey); ok {
+			branch = strings.TrimSpace(detail.Branch)
+		}
+	}
+	rootID := ""
+	if hasPR {
+		rootID = strings.TrimSpace(prRec.RootMessageID)
+	}
+	if rootID == "" && repo != "" && branch != "" {
+		if rec, ok := s.tasks.Lookup(repo, branch); ok {
+			rootID = strings.TrimSpace(rec.RootMessageID)
+		}
+	}
+	if rootID == "" {
 		return ""
 	}
-	rootID := strings.TrimSpace(rec.RootMessageID)
 	if owner, taken := s.tasks.SurfaceRootOwner(rootID); taken && owner != prKey {
 		return ""
 	}
-	repo, _, _ := splitPRKey(prKey)
 	platform, channelID := s.dispatchNotifyTarget(repo)
 	if platform == "" || channelID == "" {
 		return ""
@@ -453,7 +481,33 @@ func (s *Server) reusableTaskParent(ep config.EndpointConfig, prKey string) stri
 	if platform != ep.Platform || channelID != ep.ChannelID {
 		return ""
 	}
-	return strings.TrimSpace(rec.RootMessageID)
+	return rootID
+}
+
+// reusablePersistedParent returns the PR parent stored on the queue row when
+// the message lives in the channel this endpoint writes to.
+func (s *Server) reusablePersistedParent(ctx context.Context, ep config.EndpointConfig, prKey string, envelope WebhookEnvelope) (string, string) {
+	if s == nil || s.tasks == nil || s.prQueues == nil {
+		return "", ""
+	}
+	row, err := s.prQueues.Get(ctx, prKey)
+	if err != nil || row == nil {
+		return "", ""
+	}
+	rootID := strings.TrimSpace(row.RootMsgID)
+	if rootID == "" {
+		return "", ""
+	}
+	repo, _ := repoAndNumber(prKey, envelope)
+	repo = normalizeRepoKey(repo)
+	platform, channelID := s.dispatchNotifyTarget(repo)
+	if platform == "" || channelID == "" || platform != ep.Platform || channelID != ep.ChannelID {
+		return "", ""
+	}
+	if owner, taken := s.tasks.SurfaceRootOwner(rootID); taken && owner != prKey {
+		return "", ""
+	}
+	return rootID, strings.TrimSpace(row.ThreadID)
 }
 
 // refreshPhaseParentButtons re-renders the channel parent once the thread of
