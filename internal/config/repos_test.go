@@ -92,10 +92,13 @@ func TestReposExpandLockedEndpoints(t *testing.T) {
 	if byWorkflow["fix"].PromptSource != "builtin" || byWorkflow["review"].PromptSource != "builtin" {
 		t.Fatalf("prompt source should be builtin: fix=%q review=%q", byWorkflow["fix"].PromptSource, byWorkflow["review"].PromptSource)
 	}
-	if ws := byWorkflow["fix"].Workspace; ws.Type != WorkspaceTypeGit || ws.Path != "/tmp/widget" || ws.Mode != WorkspaceModeIsolated {
-		t.Fatalf("fix workspace = %+v, want git isolated /tmp/widget", ws)
+	if ws := byWorkflow["fix"].Workspace; ws.Type != WorkspaceTypeGit || ws.Path != "/tmp/widget" || ws.Mode != WorkspaceModeMutable {
+		t.Fatalf("fix workspace = %+v, want git mutable /tmp/widget", ws)
 	}
-	for _, workflow := range []string{"review", "merge", "merged"} {
+	if ws := byWorkflow["review"].Workspace; ws.Type != WorkspaceTypeGit || ws.Path != "/tmp/widget" || ws.Mode != WorkspaceModeIsolated {
+		t.Fatalf("review workspace = %+v, want git isolated /tmp/widget", ws)
+	}
+	for _, workflow := range []string{"merge", "merged"} {
 		if ws := byWorkflow[workflow].Workspace; ws.Type != WorkspaceTypeNone {
 			t.Fatalf("%s workspace = %+v, want none", workflow, ws)
 		}

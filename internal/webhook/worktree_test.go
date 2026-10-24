@@ -174,7 +174,7 @@ func TestWorkspaceIsolatedRequiresRevision(t *testing.T) {
 	}
 }
 
-func TestWorkspaceIsolatedCreatesDetachedSnapshotAndCleansUp(t *testing.T) {
+func TestWorkspaceIsolatedCreatesDetachedSnapshotAndPersistsForTTL(t *testing.T) {
 	root := t.TempDir()
 	initTestGitRepo(t, root)
 	rev := commitFile(t, root, "NOTES.md", "v1\n")
@@ -208,18 +208,18 @@ func TestWorkspaceIsolatedCreatesDetachedSnapshotAndCleansUp(t *testing.T) {
 	if err := lease.Release(context.Background()); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
-	if _, err := os.Stat(lease.Path); !os.IsNotExist(err) {
-		t.Fatalf("isolated worktree still exists after release: %v", err)
+	if _, err := os.Stat(lease.Path); err != nil {
+		t.Fatalf("isolated worktree must survive release for TTL reuse: %v", err)
 	}
-	if _, err := os.Stat(isolatedMetadataPath(lease.Path)); !os.IsNotExist(err) {
-		t.Fatal("isolated metadata sidecar still exists after release")
+	if _, err := os.Stat(isolatedMetadataPath(lease.Path)); err != nil {
+		t.Fatalf("isolated metadata sidecar must survive release: %v", err)
 	}
 	if err := lease.Release(context.Background()); err != nil {
 		t.Fatalf("second Release must be idempotent: %v", err)
 	}
 }
 
-func TestWorkspaceIsolatedUniquePerDelivery(t *testing.T) {
+func TestWorkspaceIsolatedReusesCheckoutForSameHead(t *testing.T) {
 	root := t.TempDir()
 	initTestGitRepo(t, root)
 	rev := headRevision(t, root)
@@ -229,22 +229,127 @@ func TestWorkspaceIsolatedUniquePerDelivery(t *testing.T) {
 	reqA := gitEndpointRequest(key, config.WorkspaceModeIsolated)
 	reqA.Path = root
 	reqA.DeliveryID = "delivery-a"
+	leaseA, err := m.ResolveWorkspace(context.Background(), reqA)
+	if err != nil {
+		t.Fatalf("ResolveWorkspace A: %v", err)
+	}
+	if err := leaseA.Release(context.Background()); err != nil {
+		t.Fatalf("Release A: %v", err)
+	}
+
 	reqB := gitEndpointRequest(key, config.WorkspaceModeIsolated)
 	reqB.Path = root
 	reqB.DeliveryID = "delivery-b"
+	leaseB, err := m.ResolveWorkspace(context.Background(), reqB)
+	if err != nil {
+		t.Fatalf("ResolveWorkspace B: %v", err)
+	}
+	defer func() { _ = leaseB.Release(context.Background()) }()
+	if leaseA.Path != leaseB.Path {
+		t.Fatalf("same head must reuse one checkout: %q != %q", leaseA.Path, leaseB.Path)
+	}
+	entries, err := os.ReadDir(filepath.Join(root, ".occa-workspaces"))
+	if err != nil {
+		t.Fatalf("read isolated checkouts: %v", err)
+	}
+	checkouts := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			checkouts++
+		}
+	}
+	if checkouts != 1 {
+		t.Fatalf("expected one isolated checkout, got %d", checkouts)
+	}
+	meta, err := readIsolatedMetadata(leaseB.Path)
+	if err != nil || meta.DeliveryID != "delivery-b" {
+		t.Fatalf("reused checkout must be owned by the current delivery: %+v (%v)", meta, err)
+	}
+}
 
+func TestWorkspaceIsolatedReusesCheckoutForShortHead(t *testing.T) {
+	root := t.TempDir()
+	initTestGitRepo(t, root)
+	full := headRevision(t, root)
+	short := full[:7]
+	m := NewWorkspaceManagerWithTTL(time.Hour)
+	key := WebhookExecutionKey{Repository: "testowner/myrepo", Branch: "main", HeadRevision: short}
+
+	reqA := gitEndpointRequest(key, config.WorkspaceModeIsolated)
+	reqA.Path = root
+	reqA.DeliveryID = "delivery-short-a"
+	leaseA, err := m.ResolveWorkspace(context.Background(), reqA)
+	if err != nil {
+		t.Fatalf("ResolveWorkspace A: %v", err)
+	}
+	metaA, err := readIsolatedMetadata(leaseA.Path)
+	if err != nil {
+		t.Fatalf("read metadata A: %v", err)
+	}
+	if err := leaseA.Release(context.Background()); err != nil {
+		t.Fatalf("Release A: %v", err)
+	}
+
+	reqB := gitEndpointRequest(key, config.WorkspaceModeIsolated)
+	reqB.Path = root
+	reqB.DeliveryID = "delivery-short-b"
+	leaseB, err := m.ResolveWorkspace(context.Background(), reqB)
+	if err != nil {
+		t.Fatalf("ResolveWorkspace B: %v", err)
+	}
+	defer func() { _ = leaseB.Release(context.Background()) }()
+	if leaseA.Path != leaseB.Path {
+		t.Fatalf("short head must reuse one checkout: %q != %q", leaseA.Path, leaseB.Path)
+	}
+	metaB, err := readIsolatedMetadata(leaseB.Path)
+	if err != nil || metaB.DeliveryID != "delivery-short-b" {
+		t.Fatalf("reused checkout must be owned by the current delivery: %+v (%v)", metaB, err)
+	}
+	if metaB.CreatedAt != metaA.CreatedAt {
+		t.Fatalf("short head recreated the checkout: created_at %d -> %d", metaA.CreatedAt, metaB.CreatedAt)
+	}
+	if metaB.Revision != full {
+		t.Fatalf("metadata revision = %q, want canonical %q", metaB.Revision, full)
+	}
+	entries, err := os.ReadDir(filepath.Join(root, ".occa-workspaces"))
+	if err != nil {
+		t.Fatalf("read isolated checkouts: %v", err)
+	}
+	checkouts := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			checkouts++
+		}
+	}
+	if checkouts != 1 {
+		t.Fatalf("expected one isolated checkout, got %d", checkouts)
+	}
+}
+
+func TestWorkspaceIsolatedDifferentHeadUsesNewCheckout(t *testing.T) {
+	root := t.TempDir()
+	initTestGitRepo(t, root)
+	revA := headRevision(t, root)
+	revB := commitFile(t, root, "NOTES.md", "v1\n")
+	m := NewWorkspaceManagerWithTTL(time.Hour)
+
+	reqA := gitEndpointRequest(WebhookExecutionKey{Repository: "testowner/myrepo", Branch: "main", HeadRevision: revA}, config.WorkspaceModeIsolated)
+	reqA.Path = root
 	leaseA, err := m.ResolveWorkspace(context.Background(), reqA)
 	if err != nil {
 		t.Fatalf("ResolveWorkspace A: %v", err)
 	}
 	defer func() { _ = leaseA.Release(context.Background()) }()
+
+	reqB := gitEndpointRequest(WebhookExecutionKey{Repository: "testowner/myrepo", Branch: "main", HeadRevision: revB}, config.WorkspaceModeIsolated)
+	reqB.Path = root
 	leaseB, err := m.ResolveWorkspace(context.Background(), reqB)
 	if err != nil {
 		t.Fatalf("ResolveWorkspace B: %v", err)
 	}
 	defer func() { _ = leaseB.Release(context.Background()) }()
 	if leaseA.Path == leaseB.Path {
-		t.Fatalf("two deliveries shared one isolated workspace: %s", leaseA.Path)
+		t.Fatalf("different heads must not share one checkout: %s", leaseA.Path)
 	}
 }
 
@@ -464,6 +569,55 @@ func TestWorkspaceReapExpiredIsolatedOnly(t *testing.T) {
 	}
 }
 
+func TestReaperRemovesLegacyExpiredWorkspace(t *testing.T) {
+	root := t.TempDir()
+	m := NewWorkspaceManager()
+	m.roots.Store(root, struct{}{})
+
+	workspace := filepath.Join(root, ".occa-workspaces", "fix-legacy-branch-2190146-deadbeef00")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatalf("mkdir legacy workspace: %v", err)
+	}
+	expired := isolatedMetadata{
+		Owner:      "occa",
+		DeliveryID: "legacy",
+		Revision:   "2190146",
+		CreatedAt:  time.Now().Add(-3 * time.Hour).Unix(),
+		ExpiresAt:  time.Now().Add(-time.Hour).Unix(),
+	}
+	if err := writeIsolatedMetadata(workspace, expired); err != nil {
+		t.Fatalf("write legacy metadata: %v", err)
+	}
+
+	if reaped := m.ReapExpiredWorkspaces(context.Background()); reaped != 1 {
+		t.Fatalf("expected legacy workspace reaped, got %d", reaped)
+	}
+	if _, err := os.Stat(workspace); !os.IsNotExist(err) {
+		t.Fatal("legacy expired workspace still exists after reap")
+	}
+	if _, err := os.Stat(isolatedMetadataPath(workspace)); !os.IsNotExist(err) {
+		t.Fatal("legacy workspace metadata still exists after reap")
+	}
+}
+
+func TestReaperKeepsUnreadableNonReviewWorkspace(t *testing.T) {
+	root := t.TempDir()
+	m := NewWorkspaceManager()
+	m.roots.Store(root, struct{}{})
+
+	workspace := filepath.Join(root, ".occa-workspaces", "fix-legacy-branch-without-metadata")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatalf("mkdir legacy workspace: %v", err)
+	}
+
+	if reaped := m.ReapExpiredWorkspaces(context.Background()); reaped != 0 {
+		t.Fatalf("unreadable non-review workspace must not be reaped, got %d", reaped)
+	}
+	if _, err := os.Stat(workspace); err != nil {
+		t.Fatalf("unreadable non-review workspace removed: %v", err)
+	}
+}
+
 func TestWorkspaceMutableLeaseOnPreexistingWorktree(t *testing.T) {
 	root := t.TempDir()
 	initTestGitRepo(t, root)
@@ -558,11 +712,14 @@ func TestReaperSkipsActiveIsolatedLease(t *testing.T) {
 	if err := lease.Release(context.Background()); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
-	if _, err := os.Stat(lease.Path); !os.IsNotExist(err) {
-		t.Fatal("workspace still exists after release")
+	if _, err := os.Stat(lease.Path); err != nil {
+		t.Fatalf("released workspace must survive until its TTL: %v", err)
 	}
-	if reaped := m.ReapExpiredWorkspaces(context.Background()); reaped != 0 {
-		t.Fatalf("released workspace must not be reaped again, reaped %d", reaped)
+	if reaped := m.ReapExpiredWorkspaces(context.Background()); reaped != 1 {
+		t.Fatalf("expected the expired workspace to be reaped, reaped %d", reaped)
+	}
+	if _, err := os.Stat(lease.Path); !os.IsNotExist(err) {
+		t.Fatal("expired workspace still exists after reap")
 	}
 }
 

@@ -54,7 +54,7 @@ webhooks:
     http_write_timeout: 30s # max time writing the response
     http_idle_timeout: 2m # keep-alive idle timeout
     review_dedupe_window: 60m # duplicate pull_request_review suppression window
-    isolated_workspace_ttl: 24h # expiry for detached isolated worktrees
+    isolated_workspace_ttl: 24h # expiry for explicitly isolated endpoints; the review lane uses 2h
     ack_budget: 1500ms # handler wait for the delivery-row insert before spooling; 0 = default
     reconcile_interval: 2m # stalled-PR reconciliation cadence; 0 = default
     reconcile_floor: 10m # minimum gap between reconcile enqueues for one PR/head/lane
@@ -108,7 +108,7 @@ webhooks:
       platform: discord # where runs and audit cards go: discord | telegram
       channel_id: '<channel-id>' # destination chat for runs and audit cards
       secret: <your-webhook-secret> # one secret shared by the 4 hooks
-      checkout: /home/operator/projects/widget # required checkout root for fix runs (isolated worktree)
+      checkout: /home/operator/projects/widget # required checkout root; review snapshots and fix branch worktrees live under it
       # model: openai/gpt-4o # optional per-repo model override
       # comment_trigger: # optional per-workflow phrases merged with the defaults (review and fix only)
       #   review: ['please re-review']

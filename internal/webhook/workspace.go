@@ -30,11 +30,14 @@ func IsWorkspaceRetryable(err error) bool {
 }
 
 type WorkspaceRequest struct {
-	Repository string
-	Path       string
-	Mode       string
-	Key        WebhookExecutionKey
-	DeliveryID string
+	Repository      string
+	Path            string
+	Mode            string
+	Key             WebhookExecutionKey
+	DeliveryID      string
+	Lane            string
+	BindingWorktree string
+	TTL             time.Duration
 }
 
 type WorkspaceResolver interface {
@@ -66,11 +69,13 @@ type WorkspaceManager struct {
 }
 
 type WorkspaceLease struct {
-	manager  *WorkspaceManager
-	Path     string
-	Mode     string
-	mu       sync.Mutex
-	released bool
+	manager       *WorkspaceManager
+	Path          string
+	Mode          string
+	Branch        string
+	StartRevision string
+	mu            sync.Mutex
+	released      bool
 }
 
 func (l *WorkspaceLease) Release(ctx context.Context) error {
@@ -86,11 +91,8 @@ func (l *WorkspaceLease) Release(ctx context.Context) error {
 	if l.manager == nil {
 		return nil
 	}
-	if l.Mode == config.WorkspaceModeIsolated {
-		err := l.manager.removeIsolated(ctx, l.Path)
-		l.manager.leases.Delete(l.Path)
-		return err
-	}
+	// Isolated checkouts live for their TTL so a re-review of the same head
+	// reuses the checkout instead of paying for a fresh one.
 	l.manager.leases.Delete(l.Path)
 	return nil
 }
@@ -173,43 +175,96 @@ func (m *WorkspaceManager) ResolveWorkspace(ctx context.Context, req WorkspaceRe
 		return nil, fmt.Errorf("%w: event repository %q does not match endpoint binding %q", ErrRepositoryMismatch, req.Key.Repository, config.RepositoryPath(remoteCanonical))
 	}
 
+	var lease *WorkspaceLease
+	var resolveErr error
 	switch req.Mode {
 	case config.WorkspaceModeIsolated:
-		return m.resolveIsolated(ctx, root, req)
+		lease, resolveErr = m.resolveIsolated(ctx, root, req)
 	case config.WorkspaceModeMutable:
-		return m.resolveMutable(ctx, root, req)
+		lease, resolveErr = m.resolveMutable(ctx, root, req)
 	default:
 		return nil, fmt.Errorf("%w: unknown workspace mode %q", ErrWorkspaceUnavailable, req.Mode)
 	}
+	if resolveErr != nil {
+		return nil, resolveErr
+	}
+	m.logBindingMismatch(req, lease)
+	return lease, nil
+}
+
+func (m *WorkspaceManager) logBindingMismatch(req WorkspaceRequest, lease *WorkspaceLease) {
+	binding := strings.TrimSpace(req.BindingWorktree)
+	if binding == "" || lease == nil || strings.TrimSpace(lease.Path) == "" {
+		return
+	}
+	if filepath.Clean(binding) == filepath.Clean(lease.Path) {
+		return
+	}
+	slog.Warn("webhook: workspace binding mismatch",
+		"lane", req.Lane,
+		"lease", lease.Path,
+		"binding", binding,
+		"ignored", true,
+	)
+}
+
+func (m *WorkspaceManager) canonicalRevision(ctx context.Context, root, revision string) (string, error) {
+	out, err := m.runner.Run(ctx, root, "rev-parse", "--verify", revision+"^{commit}")
+	if err != nil {
+		return "", fmt.Errorf("%w: resolve revision %s: %v", ErrWorkspaceUnavailable, revision, err)
+	}
+	canonical := strings.TrimSpace(out)
+	if canonical == "" {
+		return "", fmt.Errorf("%w: resolve revision %s: empty object id", ErrWorkspaceUnavailable, revision)
+	}
+	return canonical, nil
 }
 
 func (m *WorkspaceManager) resolveIsolated(ctx context.Context, root string, req WorkspaceRequest) (*WorkspaceLease, error) {
-	if m.isolatedTTL() <= 0 {
+	ttl := req.TTL
+	if ttl <= 0 {
+		ttl = m.isolatedTTL()
+	}
+	if ttl <= 0 {
 		return nil, fmt.Errorf("%w: isolated workspace TTL is not configured", ErrWorkspaceUnavailable)
 	}
 	if req.Key.HeadRevision == "" {
 		return nil, fmt.Errorf("%w: %s mode requires an exact head revision and the event did not provide one", ErrRevisionRequired, config.WorkspaceModeIsolated)
 	}
-
-	slug := sanitizeBranchSlug(req.Key.Branch)
-	if len(slug) > 24 {
-		slug = slug[:24]
-		slug = strings.Trim(slug, "-")
+	revision, err := m.canonicalRevision(ctx, root, req.Key.HeadRevision)
+	if err != nil {
+		return nil, err
 	}
+	req.Key.HeadRevision = revision
+
 	revShort := req.Key.HeadRevision
 	if len(revShort) > 10 {
 		revShort = revShort[:10]
 	}
-	seed := sha256Sum(req.DeliveryID + "\x00" + req.Key.HeadRevision)
-	target := filepath.Join(root, ".occa-workspaces", fmt.Sprintf("%s-%s-%s", slug, revShort, seed[:10]))
+	// Keyed by the revision alone so two reviews of the same head share one
+	// checkout; the branch may change without changing the tree under review.
+	seed := sha256Sum(req.Key.HeadRevision)
+	target := filepath.Join(root, ".occa-workspaces", fmt.Sprintf("review-%s-%s", revShort, seed[:10]))
 
-	if _, err := os.Stat(target); err == nil {
-		return nil, fmt.Errorf("%w: isolated workspace target %s already exists", ErrWorkspaceUnavailable, target)
+	lock := m.lockFor(target)
+	lock.Lock()
+	defer lock.Unlock()
+
+	lease, err := m.reuseIsolated(ctx, root, target, req, ttl)
+	if err != nil {
+		return nil, err
 	}
+	if lease != nil {
+		return lease, nil
+	}
+
 	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 		return nil, fmt.Errorf("%w: create isolated workspace parent: %v", ErrWorkspaceUnavailable, err)
 	}
 	if _, err := m.runner.Run(ctx, root, "worktree", "add", "--detach", target, req.Key.HeadRevision); err != nil {
+		if lease, rerr := m.reuseIsolated(ctx, root, target, req, ttl); rerr == nil && lease != nil {
+			return lease, nil
+		}
 		_ = os.RemoveAll(target)
 		return nil, fmt.Errorf("%w: checkout revision %s into isolated workspace: %v", ErrWorkspaceUnavailable, req.Key.HeadRevision, err)
 	}
@@ -220,7 +275,7 @@ func (m *WorkspaceManager) resolveIsolated(ctx context.Context, root string, req
 		DeliveryID: req.DeliveryID,
 		Revision:   req.Key.HeadRevision,
 		CreatedAt:  now.Unix(),
-		ExpiresAt:  now.Add(m.isolatedTTL()).Unix(),
+		ExpiresAt:  now.Add(ttl).Unix(),
 	}
 	if err := writeIsolatedMetadata(target, meta); err != nil {
 		_ = m.removeIsolated(ctx, target)
@@ -233,7 +288,108 @@ func (m *WorkspaceManager) resolveIsolated(ctx context.Context, root string, req
 		"delivery_id", req.DeliveryID,
 	)
 	m.leases.Store(target, &workspaceLeaseEntry{Holder: req.DeliveryID, Acquired: now})
-	return &WorkspaceLease{manager: m, Path: target, Mode: config.WorkspaceModeIsolated}, nil
+	return &WorkspaceLease{manager: m, Path: target, Mode: config.WorkspaceModeIsolated, Branch: req.Key.Branch, StartRevision: req.Key.HeadRevision}, nil
+}
+
+func (m *WorkspaceManager) reuseIsolated(ctx context.Context, root, target string, req WorkspaceRequest, ttl time.Duration) (*WorkspaceLease, error) {
+	if _, err := os.Stat(target); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%w: inspect isolated workspace %s: %v", ErrWorkspaceUnavailable, target, err)
+	}
+	now := m.now()
+	meta, err := readIsolatedMetadata(target)
+	if err != nil {
+		out, revErr := m.runner.Run(ctx, target, "rev-parse", "HEAD")
+		if revErr != nil || strings.TrimSpace(out) != req.Key.HeadRevision {
+			if dErr := m.discardIsolated(ctx, root, target); dErr != nil {
+				return nil, dErr
+			}
+			return nil, nil
+		}
+		meta = isolatedMetadata{
+			Owner:      "occa",
+			DeliveryID: req.DeliveryID,
+			Revision:   req.Key.HeadRevision,
+			CreatedAt:  now.Unix(),
+			ExpiresAt:  now.Add(ttl).Unix(),
+		}
+		if wErr := writeIsolatedMetadata(target, meta); wErr != nil {
+			if dErr := m.discardIsolated(ctx, root, target); dErr != nil {
+				return nil, dErr
+			}
+			return nil, fmt.Errorf("%w: restore isolated workspace metadata: %v", ErrWorkspaceUnavailable, wErr)
+		}
+	}
+	if meta.Revision != req.Key.HeadRevision {
+		if dErr := m.discardIsolated(ctx, root, target); dErr != nil {
+			return nil, dErr
+		}
+		return nil, nil
+	}
+
+	now = m.now()
+	if now.Unix() >= meta.ExpiresAt {
+		if _, leased := m.leases.Load(target); !leased {
+			if err := m.removeIsolated(ctx, target); err != nil {
+				return nil, fmt.Errorf("%w: remove expired isolated workspace %s: %v", ErrWorkspaceUnavailable, target, err)
+			}
+			return nil, nil
+		}
+	}
+
+	out, err := m.runner.Run(ctx, target, "rev-parse", "HEAD")
+	if err != nil {
+		if dErr := m.discardIsolated(ctx, root, target); dErr != nil {
+			return nil, dErr
+		}
+		return nil, nil
+	}
+	if strings.TrimSpace(out) != req.Key.HeadRevision {
+		if dErr := m.discardIsolated(ctx, root, target); dErr != nil {
+			return nil, dErr
+		}
+		return nil, nil
+	}
+	status, err := m.runner.Run(ctx, target, "status", "--porcelain")
+	if err != nil {
+		return nil, fmt.Errorf("%w: inspect isolated workspace status: %v", ErrWorkspaceUnavailable, err)
+	}
+	if strings.TrimSpace(status) != "" {
+		return nil, fmt.Errorf("%w: isolated workspace %s has uncommitted changes", ErrWorkspaceDirty, target)
+	}
+
+	meta.DeliveryID = req.DeliveryID
+	meta.ExpiresAt = now.Add(ttl).Unix()
+	if err := writeIsolatedMetadata(target, meta); err != nil {
+		return nil, fmt.Errorf("%w: refresh isolated workspace metadata: %v", ErrWorkspaceUnavailable, err)
+	}
+	m.leases.Store(target, &workspaceLeaseEntry{Holder: req.DeliveryID, Acquired: now})
+	slog.Info("webhook: isolated workspace reused",
+		"workspace", target,
+		"revision", req.Key.HeadRevision,
+		"delivery_id", req.DeliveryID,
+	)
+	return &WorkspaceLease{manager: m, Path: target, Mode: config.WorkspaceModeIsolated, Branch: req.Key.Branch, StartRevision: req.Key.HeadRevision}, nil
+}
+
+func (m *WorkspaceManager) discardIsolated(ctx context.Context, root, target string) error {
+	if _, leased := m.leases.Load(target); leased {
+		return fmt.Errorf("%w: isolated workspace %s is in use by another delivery", ErrWorkspaceUnavailable, target)
+	}
+	if err := m.removeIsolated(ctx, target); err != nil {
+		return fmt.Errorf("%w: remove unusable isolated workspace %s: %v", ErrWorkspaceUnavailable, target, err)
+	}
+	if _, err := m.runner.Run(ctx, root, "worktree", "prune"); err != nil {
+		slog.Warn("webhook: isolated workspace prune failed", "workspace", target, "error", err)
+	}
+	return nil
+}
+
+func (m *WorkspaceManager) lockFor(key string) *sync.Mutex {
+	mu, _ := m.repoLocks.LoadOrStore("workspace:"+key, &sync.Mutex{})
+	return mu.(*sync.Mutex)
 }
 
 func (m *WorkspaceManager) isolatedTTL() time.Duration {
@@ -250,13 +406,19 @@ func (m *WorkspaceManager) resolveMutable(ctx context.Context, root string, req 
 		return nil, fmt.Errorf("%w: mutable workspace %s is held by another delivery", ErrWorkspaceLeased, target)
 	}
 
-	lease := &WorkspaceLease{manager: m, Path: "", Mode: config.WorkspaceModeMutable}
+	lease := &WorkspaceLease{manager: m, Path: "", Mode: config.WorkspaceModeMutable, Branch: req.Key.Branch}
 	path, err := m.attachMutable(ctx, root, req, target)
 	if err != nil {
 		m.leases.Delete(target)
 		return nil, err
 	}
+	revision, err := m.runner.Run(ctx, path, "rev-parse", "HEAD")
+	if err != nil {
+		m.leases.Delete(target)
+		return nil, fmt.Errorf("%w: read mutable workspace revision: %v", ErrWorkspaceUnavailable, err)
+	}
 	lease.Path = path
+	lease.StartRevision = strings.TrimSpace(revision)
 	if finalPath := filepath.Clean(path); finalPath != filepath.Clean(target) {
 		if _, loaded := m.leases.LoadOrStore(finalPath, &workspaceLeaseEntry{Holder: req.DeliveryID, Acquired: m.now()}); loaded {
 			m.leases.Delete(target)
@@ -475,20 +637,30 @@ func (m *WorkspaceManager) ReapExpiredWorkspaces(ctx context.Context) int {
 				continue
 			}
 			workspace := filepath.Join(dir, entry.Name())
+			lock := m.lockFor(workspace)
+			lock.Lock()
 			meta, mErr := readIsolatedMetadata(workspace)
-			if mErr != nil {
-				continue
-			}
-			if m.now().Unix() < meta.ExpiresAt {
+			if mErr == nil {
+				if m.now().Unix() < meta.ExpiresAt {
+					lock.Unlock()
+					continue
+				}
+			} else if !strings.HasPrefix(entry.Name(), "review-") {
+				// Without a readable sidecar, only review- workspaces are
+				// known to be ours; leave anything else for an operator.
+				lock.Unlock()
 				continue
 			}
 			if _, leased := m.leases.Load(workspace); leased {
+				lock.Unlock()
 				continue
 			}
 			if rErr := m.removeIsolated(ctx, workspace); rErr != nil {
 				slog.Warn("webhook: expired isolated workspace cleanup failed", "workspace", workspace, "error", rErr)
+				lock.Unlock()
 				continue
 			}
+			lock.Unlock()
 			reaped++
 		}
 		return true

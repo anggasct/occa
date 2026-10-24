@@ -1541,29 +1541,73 @@ func (d *dispatcher) handle(item dispatchItem) {
 
 func (s *Server) resolveWorkspace(item dispatchItem) (*WorkspaceLease, error) {
 	ep := item.ep
-	if ep.Workspace.Type != config.WorkspaceTypeGit {
+	policy, laneKnown := lanePolicyForWorkflow(ep.Workflow)
+	workspaceType := ep.Workspace.Type
+	if laneKnown {
+		// A zero type means no workspace block was supplied; loaded configs
+		// always set an explicit type.
+		if workspaceType == "" {
+			return nil, nil
+		}
+		workspaceType = policy.Type
+	}
+	if workspaceType != config.WorkspaceTypeGit {
 		return nil, nil
+	}
+	if laneKnown && ep.Workspace.Type != config.WorkspaceTypeGit {
+		return nil, fmt.Errorf("%w: lane %q requires workspace.type %q, endpoint configures %q", ErrWorkspaceUnavailable, ep.Workflow, config.WorkspaceTypeGit, ep.Workspace.Type)
 	}
 	if s.workspaceResolver == nil {
 		return nil, fmt.Errorf("%w: workspace resolver unavailable", ErrWorkspaceUnavailable)
 	}
+	mode := ep.Workspace.Mode
+	var ttl time.Duration
+	if laneKnown {
+		if !ep.WorkspaceModeSet {
+			mode = policy.Mode
+		}
+		if mode == config.WorkspaceModeIsolated && policy.RevisionKeyed {
+			ttl = policy.IsolatedTTL
+		}
+	}
+	if strings.TrimSpace(mode) == "" {
+		return nil, fmt.Errorf("%w: workspace mode is not configured for lane %q", ErrWorkspaceUnavailable, ep.Workflow)
+	}
+	key := ExtractExecutionKey(item.body)
+	bindingWorktree := ""
+	if strings.TrimSpace(ep.Workspace.Path) != "" {
+		bindingWorktree = generateWorktreePath(ep.Workspace.Path, key)
+	}
 	req := WorkspaceRequest{
-		Repository: ep.Repository,
-		Path:       ep.Workspace.Path,
-		Mode:       ep.Workspace.Mode,
-		Key:        ExtractExecutionKey(item.body),
-		DeliveryID: item.deliveryID,
+		Repository:      ep.Repository,
+		Path:            ep.Workspace.Path,
+		Mode:            mode,
+		Key:             key,
+		DeliveryID:      item.deliveryID,
+		Lane:            ep.Workflow,
+		BindingWorktree: bindingWorktree,
+		TTL:             ttl,
 	}
 	lease, err := s.workspaceResolver.ResolveWorkspace(context.Background(), req)
 	if err != nil {
 		slog.Warn("webhook: workspace resolution failed",
 			"endpoint", ep.Name,
 			"delivery_id", item.deliveryID,
-			"mode", ep.Workspace.Mode,
+			"mode", mode,
 			"error", err,
 		)
 		return nil, err
 	}
+	if lease == nil {
+		return nil, nil
+	}
+	slog.Info("webhook: workspace resolved",
+		"mode", lease.Mode,
+		"key", req.Key.String(),
+		"path", lease.Path,
+		"lane", ep.Workflow,
+		"delivery_id", item.deliveryID,
+	)
 	return lease, nil
 }
 
@@ -2237,20 +2281,7 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		envelope["model_source"] = "fallback"
 	}
 
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		payload = map[string]any{}
-	}
-
-	tmplData := map[string]any{
-		"payload":       payload,
-		"json":          string(body),
-		"execution_key": key.String(),
-		"worktree":      workCtx.Worktree,
-		"webhook":       envelope,
-	}
-
-	rendered, err := renderTemplate(ep.Prompt, tmplData)
+	_, rendered, err := renderDeliveryPrompt(ep, body, workCtx)
 	if err != nil {
 		slog.Error("webhook: template render failed", "endpoint", ep.Name, "delivery_id", deliveryID, "payload_bytes", len(body), "error", err)
 		s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary("template render failed: "+err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
@@ -2278,6 +2309,14 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		fixHeadBefore = normalizeRevision(stringValue(envelope["head_sha"]))
 	}
 	err = s.executor(ctx, ep.Platform, ep.ChannelID, wrapped, workCtx)
+	if err == nil {
+		fctx, fcancel := context.WithTimeout(context.Background(), harnessFinalizeTimeout)
+		_, ferr := lease.Finalize(fctx, ep.Workflow, deliveryID)
+		fcancel()
+		if ferr != nil {
+			err = ferr
+		}
+	}
 	s.prMirrorSync(workCtx)
 	if err == nil && fixHeadBefore != "" {
 		s.queueReviewAfterFix(workCtx.PRKey, fixHeadBefore)
@@ -2565,6 +2604,25 @@ func redactSummary(s string, max int, secrets ...string) string {
 		max = maxErrorSummaryRunes
 	}
 	return clipRunes(s, max)
+}
+
+func renderDeliveryPrompt(ep config.EndpointConfig, body []byte, workCtx *WebhookWorkContext) (map[string]any, string, error) {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		payload = map[string]any{}
+	}
+	data := map[string]any{
+		"payload":       payload,
+		"json":          string(body),
+		"execution_key": workCtx.Key.String(),
+		"worktree":      workCtx.Worktree,
+		"webhook":       workCtx.Envelope,
+	}
+	rendered, err := renderTemplate(ep.Prompt, data)
+	if err != nil {
+		return data, "", err
+	}
+	return data, rendered, nil
 }
 
 func renderTemplate(prompt string, data any) (string, error) {

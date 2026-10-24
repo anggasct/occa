@@ -86,7 +86,7 @@ func TestRunBridgesPRBindingFromHeadBranchLookup(t *testing.T) {
 	}
 	ep := prTestEndpoint("fix", "/fix", config.AutomationFull)
 	ep.Repository = "github.com/acme/widget"
-	ep.Workspace = config.EndpointWorkspace{Type: config.WorkspaceTypeNone}
+	ep.Workspace = config.EndpointWorkspace{}
 	ep.CommentTrigger = []string{"please fix review"}
 	ep.Limits = &config.EndpointLimits{MaxRunsPerPR: 3, Window: time.Hour}
 	srv, st := newPRBindingServer(t, ep, exec)

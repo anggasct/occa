@@ -13,7 +13,7 @@ import (
 	"github.com/anggasct/occa/internal/store"
 )
 
-func reviewNoneEndpoint() config.EndpointConfig {
+func reviewNoWorkspaceEndpoint() config.EndpointConfig {
 	return config.EndpointConfig{
 		Name:           "github-occa-review",
 		Path:           "/webhooks/github-occa-review",
@@ -23,7 +23,7 @@ func reviewNoneEndpoint() config.EndpointConfig {
 		Prompt:         "review {{.webhook.head_branch}}",
 		Workflow:       "review",
 		Repository:     "github.com/anggasct/occa",
-		Workspace:      config.EndpointWorkspace{Type: config.WorkspaceTypeNone},
+		Workspace:      config.EndpointWorkspace{},
 		CommentTrigger: []string{"please re-review"},
 		Admit: []config.AdmitRule{
 			{Event: "pull_request", Actions: []string{"opened", "reopened", "ready_for_review"}},
@@ -34,7 +34,7 @@ func reviewNoneEndpoint() config.EndpointConfig {
 }
 
 func TestReviewRoutingIdentityWithoutWorkspace(t *testing.T) {
-	ep := reviewNoneEndpoint()
+	ep := reviewNoWorkspaceEndpoint()
 	srv, _, _ := newTestServerFull(t, []config.EndpointConfig{ep})
 	fake := &fakePRHeadResolver{head: PRHead{Branch: "fix/turn-delivery", SHA: "abcdef0123456789abcdef0123456789abcdef01", HeadRepo: "anggasct/occa", BaseBranch: "main"}}
 	srv.SetPRHeadResolver(fake)
@@ -46,7 +46,7 @@ func TestReviewRoutingIdentityWithoutWorkspace(t *testing.T) {
 		t.Fatalf("enrichCommentBody: %v", err)
 	}
 	if string(out) != string(body) {
-		t.Fatalf("workspace enrichment must stay skipped for type none")
+		t.Fatalf("workspace enrichment must stay skipped without a workspace")
 	}
 	if fake.calls != 0 {
 		t.Fatalf("enrichment resolver calls = %d, want 0", fake.calls)
@@ -65,7 +65,7 @@ func TestReviewRoutingIdentityWithoutWorkspace(t *testing.T) {
 }
 
 func TestReviewRoutingSkipsNonTriggerWithoutLookup(t *testing.T) {
-	ep := reviewNoneEndpoint()
+	ep := reviewNoWorkspaceEndpoint()
 	srv, _, _ := newTestServerFull(t, []config.EndpointConfig{ep})
 	fake := &fakePRHeadResolver{head: PRHead{Branch: "fix/turn-delivery", SHA: "abcdef0123456789abcdef0123456789abcdef01", HeadRepo: "anggasct/occa"}}
 	srv.SetPRHeadResolver(fake)
@@ -81,7 +81,7 @@ func TestReviewRoutingSkipsNonTriggerWithoutLookup(t *testing.T) {
 }
 
 func TestReviewCommentDeliveryLandsInTaskThread(t *testing.T) {
-	ep := reviewNoneEndpoint()
+	ep := reviewNoWorkspaceEndpoint()
 	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{ep})
 	srv.SetPRHeadResolver(&fakePRHeadResolver{head: PRHead{Branch: "fix/turn-delivery", SHA: "abcdef0123456789abcdef0123456789abcdef01", HeadRepo: "anggasct/occa", BaseBranch: "main"}})
 	srv.TaskRegistry().Upsert("anggasct/occa", "fix/turn-delivery", "root-1", "thread-1", TaskDispatched)
