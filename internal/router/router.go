@@ -76,7 +76,7 @@ type InstanceProvider interface {
 }
 
 type DispatchLifecycle interface {
-	DispatchRunStarted(repo, branch, taskID, sessionID string)
+	DispatchRunStarted(repo, branch, taskID, sessionID, workdir string)
 	DispatchRunFinished(ctx context.Context, repo, branch, taskID, sessionID, outcome string, denied bool)
 }
 
@@ -221,7 +221,7 @@ func (r *Router) Route(ctx context.Context, msg channel.IncomingMessage) error {
 			return nil
 		}
 		if r.dispatchLifecycle != nil {
-			r.dispatchLifecycle.DispatchRunStarted(repo, branch, taskID, "")
+			r.dispatchLifecycle.DispatchRunStarted(repo, branch, taskID, "", "")
 		}
 		msg.IsMention = true
 	} else if err := r.authorize(ctx, msg); err != nil {
@@ -653,7 +653,7 @@ func (r *Router) executePassthrough(taskCtx context.Context, cancel context.Canc
 	if repo, branch, taskID, ok := dispatchSummary(msg); ok {
 		dispatchRun = &dispatchRunReport{repo: repo, branch: branch, taskID: taskID, sessionID: sessionID}
 		if r.dispatchLifecycle != nil {
-			r.dispatchLifecycle.DispatchRunStarted(repo, branch, taskID, sessionID)
+			r.dispatchLifecycle.DispatchRunStarted(repo, branch, taskID, sessionID, inst.Workdir())
 		}
 	}
 

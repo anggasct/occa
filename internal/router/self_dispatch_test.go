@@ -88,7 +88,7 @@ type recordingDispatchLifecycle struct {
 	denied  bool
 }
 
-func (l *recordingDispatchLifecycle) DispatchRunStarted(repo, branch, taskID, sessionID string) {
+func (l *recordingDispatchLifecycle) DispatchRunStarted(repo, branch, taskID, sessionID, workdir string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.started++

@@ -234,17 +234,82 @@ func TestDispatchPR_AC05_PRFailureNonZeroFailureCarriesStderr(t *testing.T) {
 	}
 }
 
+func (f *dispatchFixture) dispatchRunSnapshot() dispatchRunState {
+	f.srv.dispatchRunsMu.Lock()
+	defer f.srv.dispatchRunsMu.Unlock()
+	return f.srv.dispatchRuns[TaskThreadKey(f.repo, f.branch)]
+}
+
+func (f *dispatchFixture) waitDispatchRetries(t *testing.T, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if f.dispatchRunSnapshot().Retries >= want {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("retries = %d, want at least %d", f.dispatchRunSnapshot().Retries, want)
+}
+
+func (f *dispatchFixture) waitDispatchTerminal(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if f.dispatchRunSnapshot().Terminal {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("dispatch run did not reach a terminal state")
+}
+
+func TestDispatchPR_AC04_PushFailureSchedulesRetry(t *testing.T) {
+	f := newDispatchFixture(t, 1)
+	runGit(t, f.wt, "remote", "set-url", "--push", "origin", filepath.Join(t.TempDir(), "missing.git"))
+	f.srv.retryBackoffs = map[failureClass][]time.Duration{failurePush: {5 * time.Millisecond}}
+	f.srv.DispatchRunStarted(f.repo, f.branch, f.task.ID, "session-1", "")
+	f.srv.DispatchRunFinished(context.Background(), f.repo, f.branch, f.task.ID, "session-1", "complete", false)
+	f.waitDispatchRetries(t, 1)
+	f.waitDispatchTerminal(t)
+	if !strings.Contains(f.noteText(), "retry budget exhausted") {
+		t.Fatalf("exhaustion finding missing: %q", f.noteText())
+	}
+	if !strings.Contains(f.noteText(), "push failed") {
+		t.Fatalf("exhaustion finding missing class: %q", f.noteText())
+	}
+}
+
+func TestDispatchPR_AC05_PRFailureSchedulesRetry(t *testing.T) {
+	f := newDispatchFixture(t, 1)
+	f.gh.createErr = errors.New("exit status 1")
+	f.gh.createOut = "boom: repository is not writable\n"
+	f.srv.retryBackoffs = map[failureClass][]time.Duration{failurePRCreate: {5 * time.Millisecond}}
+	f.srv.DispatchRunStarted(f.repo, f.branch, f.task.ID, "session-1", "")
+	f.srv.DispatchRunFinished(context.Background(), f.repo, f.branch, f.task.ID, "session-1", "complete", false)
+	f.waitDispatchRetries(t, 1)
+	f.waitDispatchTerminal(t)
+	if got := f.gh.callCount("create"); got < 3 {
+		t.Fatalf("pr create calls = %d, want initial attempt plus two retries", got)
+	}
+	if !strings.Contains(f.noteText(), "retry budget exhausted") {
+		t.Fatalf("exhaustion finding missing: %q", f.noteText())
+	}
+}
+
 func TestDispatchPR_AC06_StatusMapping(t *testing.T) {
 	cases := []struct {
-		name   string
-		dirty  int
-		denied bool
-		pushOK bool
-		prErr  bool
-		want   DispatchStatus
+		name       string
+		dirty      int
+		denied     bool
+		pushOK     bool
+		prErr      bool
+		selfCommit bool
+		want       DispatchStatus
 	}{
 		{name: "clean", want: DispatchNoWork},
 		{name: "dirty success", dirty: 1, pushOK: true, want: DispatchCompleted},
+		{name: "self committed and pushed", dirty: 1, pushOK: true, selfCommit: true, want: DispatchCompleted},
 		{name: "denied clean", denied: true, want: DispatchPermissionDeny},
 		{name: "denied with artifact", dirty: 1, denied: true, pushOK: true, want: DispatchCompleted},
 		{name: "push failed", dirty: 1, want: DispatchPushFailed},
@@ -253,6 +318,11 @@ func TestDispatchPR_AC06_StatusMapping(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newDispatchFixture(t, tc.dirty)
+			if tc.selfCommit {
+				runGit(t, f.wt, "add", "-A")
+				runGit(t, f.wt, "commit", "-m", "agent commit")
+				runGit(t, f.wt, "push", "origin", "HEAD:refs/heads/"+f.branch)
+			}
 			if !tc.pushOK && tc.dirty > 0 {
 				runGit(t, f.wt, "remote", "set-url", "--push", "origin", filepath.Join(t.TempDir(), "missing.git"))
 			}
@@ -264,6 +334,23 @@ func TestDispatchPR_AC06_StatusMapping(t *testing.T) {
 				t.Fatalf("status = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestDispatchPR_AC06_SelfCommittedArtifactCompletes(t *testing.T) {
+	f := newDispatchFixture(t, 1)
+	runGit(t, f.wt, "add", "-A")
+	runGit(t, f.wt, "commit", "-m", "agent commit")
+	runGit(t, f.wt, "push", "origin", "HEAD:refs/heads/"+f.branch)
+	result := f.finalize(t, false)
+	if result.Status != DispatchCompleted {
+		t.Fatalf("status = %q (%s), want completed", result.Status, result.Detail)
+	}
+	if result.Committed || result.Pushed {
+		t.Fatalf("self-committed run must complete on the artifact, result = %+v", result)
+	}
+	if result.PRNumber == "" {
+		t.Fatalf("completed run has no PR: %+v", result)
 	}
 }
 
@@ -356,7 +443,7 @@ func TestDispatchPR_AC12_DenialWithArtifactCompletes(t *testing.T) {
 
 func TestDispatchPR_AC13_DenialAloneNeverCompletes(t *testing.T) {
 	f := newDispatchFixture(t, 0)
-	f.srv.DispatchRunStarted(f.repo, f.branch, f.task.ID, "session-1")
+	f.srv.DispatchRunStarted(f.repo, f.branch, f.task.ID, "session-1", "")
 	result, err := f.srv.FinalizeDispatch(context.Background(), DispatchReport{
 		Repo:    f.repo,
 		Branch:  f.branch,
@@ -388,7 +475,7 @@ func TestDispatchPR_AC15_ActiveRunBlocksFallback(t *testing.T) {
 	srv := &Server{}
 	now := time.Date(2026, 10, 25, 23, 41, 0, 0, time.UTC)
 	srv.fallbackNow = func() time.Time { return now }
-	srv.DispatchRunStarted("testowner/myrepo", "dispatch/test-branch", "task-1", "session-1")
+	srv.DispatchRunStarted("testowner/myrepo", "dispatch/test-branch", "task-1", "session-1", "")
 	now = now.Add(10 * time.Minute)
 	if !srv.dispatchFallbackBlocked("testowner/myrepo", "dispatch/test-branch", "task-1") {
 		t.Fatal("active run must block the fallback poll")
@@ -399,7 +486,7 @@ func TestDispatchPR_AC16_TerminalFindingDedupesPerRun(t *testing.T) {
 	srv := &Server{}
 	now := time.Date(2026, 10, 25, 23, 41, 0, 0, time.UTC)
 	srv.fallbackNow = func() time.Time { return now }
-	srv.DispatchRunStarted("testowner/myrepo", "dispatch/test-branch", "task-1", "session-1")
+	srv.DispatchRunStarted("testowner/myrepo", "dispatch/test-branch", "task-1", "session-1", "")
 	srv.noteDispatchRun("testowner/myrepo", "dispatch/test-branch", "task-1")
 	now = now.Add(2 * time.Hour)
 	if !srv.dispatchFallbackBlocked("testowner/myrepo", "dispatch/test-branch", "task-1") {
@@ -407,5 +494,40 @@ func TestDispatchPR_AC16_TerminalFindingDedupesPerRun(t *testing.T) {
 	}
 	if srv.dispatchFallbackBlocked("testowner/myrepo", "dispatch/test-branch", "task-2") {
 		t.Fatal("a new run on the branch must not inherit the previous terminal finding")
+	}
+}
+
+func TestDispatchPR_F002_LostRunDoesNotBlockFallback(t *testing.T) {
+	srv := &Server{}
+	now := time.Date(2026, 10, 25, 23, 41, 0, 0, time.UTC)
+	srv.fallbackNow = func() time.Time { return now }
+	srv.DispatchRunStarted("testowner/myrepo", "dispatch/test-branch", "task-1", "", "")
+	now = now.Add(10 * time.Minute)
+	if srv.dispatchFallbackBlocked("testowner/myrepo", "dispatch/test-branch", "task-1") {
+		t.Fatal("a routed run with no session must not suppress the fallback poll")
+	}
+}
+
+func TestDispatchPR_F002_DeadSessionDoesNotBlockFallback(t *testing.T) {
+	srv := &Server{}
+	now := time.Date(2026, 10, 25, 23, 41, 0, 0, time.UTC)
+	srv.fallbackNow = func() time.Time { return now }
+	srv.SetSessionLiveness(func(context.Context, string, string) (bool, error) { return false, nil })
+	srv.DispatchRunStarted("testowner/myrepo", "dispatch/test-branch", "task-1", "session-1", "")
+	now = now.Add(10 * time.Minute)
+	if srv.dispatchFallbackBlocked("testowner/myrepo", "dispatch/test-branch", "task-1") {
+		t.Fatal("a dead session must not suppress the fallback poll")
+	}
+}
+
+func TestDispatchPR_F002_LiveSessionBlocksFallback(t *testing.T) {
+	srv := &Server{}
+	now := time.Date(2026, 10, 25, 23, 41, 0, 0, time.UTC)
+	srv.fallbackNow = func() time.Time { return now }
+	srv.SetSessionLiveness(func(context.Context, string, string) (bool, error) { return true, nil })
+	srv.DispatchRunStarted("testowner/myrepo", "dispatch/test-branch", "task-1", "session-1", "")
+	now = now.Add(10 * time.Minute)
+	if !srv.dispatchFallbackBlocked("testowner/myrepo", "dispatch/test-branch", "task-1") {
+		t.Fatal("a live session must suppress the fallback poll")
 	}
 }

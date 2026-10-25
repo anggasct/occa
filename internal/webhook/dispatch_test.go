@@ -583,6 +583,69 @@ func TestScheduleDispatchFallbackFires(t *testing.T) {
 	}
 }
 
+func TestScheduleDispatchFallbackRearmsForLostRun(t *testing.T) {
+	srv := newDispatchServer(t, dispatchEndpoints("acme/widget"))
+	srv.SetFallbackPollAfter(300 * time.Millisecond)
+	var branchCalls atomic.Int64
+	srv.SetBranchChecker(func(ctx context.Context, repo, branch string) (BranchPRResult, error) {
+		branchCalls.Add(1)
+		return BranchPRResult{}, nil
+	})
+	var probes atomic.Int64
+	srv.SetSessionLiveness(func(context.Context, string, string) (bool, error) {
+		return probes.Add(1) == 1, nil
+	})
+	var mu sync.Mutex
+	var posts []string
+	srv.SetSender(func(_ context.Context, _, c, _ string) (string, error) {
+		if strings.TrimSpace(c) == "chan-1" {
+			return "parent-123", nil
+		}
+		return "status-1", nil
+	})
+	srv.SetEditor(func(_ context.Context, _, _, _ string, _ string) error { return nil })
+	srv.SetThreadStarter(func(_ context.Context, _, _, _, _ string) (string, error) {
+		return "thread-456", nil
+	})
+	srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
+		mu.Lock()
+		posts = append(posts, text)
+		mu.Unlock()
+		return nil
+	})
+	rec := postDispatch(t, srv, "dispatch-token", validDispatchBody)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("dispatch status = %d, want 201", rec.Code)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	srv.DispatchRunStarted("acme/widget", "feat/x", payload["task_id"], "session-1", "")
+
+	deadline := time.Now().Add(5 * time.Second)
+	for branchCalls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := branchCalls.Load(); got != 1 {
+		t.Fatalf("branch checks = %d, want exactly 1 after the session died", got)
+	}
+	if probes.Load() < 2 {
+		t.Fatalf("liveness probes = %d, want the live tick to re-arm the poll", probes.Load())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	found := false
+	for _, text := range posts {
+		if strings.Contains(text, "Fallback poll") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("fallback finding missing in posts = %v", posts)
+	}
+}
+
 func TestScheduleDispatchFallbackNoPRWithoutThreadSuppressed(t *testing.T) {
 	srv := newDispatchServer(t, dispatchEndpoints("acme/widget"))
 	srv.SetFallbackPollAfter(20 * time.Millisecond)

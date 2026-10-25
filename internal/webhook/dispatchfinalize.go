@@ -22,6 +22,7 @@ const (
 	DispatchPushFailed     DispatchStatus = "push failed"
 	DispatchPRCreateFailed DispatchStatus = "pr create failed"
 	DispatchPermissionDeny DispatchStatus = "permission denied"
+	DispatchBlocked        DispatchStatus = "blocked"
 )
 
 const dispatchPRBodyBrief = 1500
@@ -70,12 +71,15 @@ func (d *defaultGHRunner) Run(ctx context.Context, dir string, args ...string) (
 type dispatchRunState struct {
 	TaskID    string
 	SessionID string
+	Workdir   string
 	StartedAt time.Time
 	Active    bool
 	Terminal  bool
+	Retries   int
+	Class     failureClass
 }
 
-func (s *Server) DispatchRunStarted(repo, branch, taskID, sessionID string) {
+func (s *Server) DispatchRunStarted(repo, branch, taskID, sessionID, workdir string) {
 	key := TaskThreadKey(repo, branch)
 	if key == "#" {
 		return
@@ -88,6 +92,7 @@ func (s *Server) DispatchRunStarted(repo, branch, taskID, sessionID string) {
 	s.dispatchRuns[key] = dispatchRunState{
 		TaskID:    strings.TrimSpace(taskID),
 		SessionID: strings.TrimSpace(sessionID),
+		Workdir:   strings.TrimSpace(workdir),
 		StartedAt: s.dispatchNow(),
 		Active:    true,
 	}
@@ -104,7 +109,7 @@ func (s *Server) DispatchRunFinished(ctx context.Context, repo, branch, taskID, 
 	}
 	finishCtx, cancel := context.WithTimeout(ctx, harnessFinalizeTimeout+harnessFinalizeTimeout)
 	defer cancel()
-	result, err := s.FinalizeDispatch(finishCtx, report)
+	result, err := s.finalizeDispatch(finishCtx, report, false)
 	if err != nil {
 		slog.Error("webhook: dispatch finalize failed",
 			"repo", repo,
@@ -115,16 +120,146 @@ func (s *Server) DispatchRunFinished(ctx context.Context, repo, branch, taskID, 
 		s.postDispatchFinalizeError(ctx, report, err)
 		return
 	}
+	s.logDispatchFinalized(report, result)
+	if result.Status == DispatchCompleted {
+		s.postDispatchOutcome(ctx, report, result)
+		s.noteDispatchRun(report.Repo, report.Branch, report.TaskID)
+		return
+	}
+	if s.scheduleDispatchRetry(ctx, report, result) {
+		return
+	}
+	s.noteDispatchRun(report.Repo, report.Branch, report.TaskID)
+}
+
+func (s *Server) logDispatchFinalized(report DispatchReport, result DispatchResult) {
 	slog.Info("webhook: dispatch run finalized",
-		"repo", repo,
-		"branch", branch,
-		"task_id", taskID,
+		"repo", report.Repo,
+		"branch", report.Branch,
+		"task_id", report.TaskID,
 		"status", result.Status,
 		"committed", result.Committed,
 		"pushed", result.Pushed,
 		"pr", result.PRNumber,
 		"denied", result.Denied,
 	)
+}
+
+// postDispatchOutcome applies a durable artifact result to the thread and
+// status surfaces without touching the repository again.
+func (s *Server) postDispatchOutcome(ctx context.Context, report DispatchReport, result DispatchResult) {
+	task, ok := s.dispatchTask(report)
+	if !ok {
+		return
+	}
+	_, ep := s.dispatchRepoEndpoint(report.Repo)
+	s.finishDispatch(ctx, report, task, ep, result, true)
+}
+
+func dispatchFailureClass(status DispatchStatus) (failureClass, bool) {
+	switch status {
+	case DispatchNoWork:
+		return failureNoWork, true
+	case DispatchPushFailed:
+		return failurePush, true
+	case DispatchPRCreateFailed:
+		return failurePRCreate, true
+	case DispatchPermissionDeny:
+		return failurePermission, true
+	default:
+		return failureModel, false
+	}
+}
+
+// scheduleDispatchRetry spends the class retry budget on the artifact step.
+// The agent turn is not replayed: commit, push and PR creation are
+// idempotent, so a transient failure recovers without a second run. When the
+// budget is exhausted the run is marked blocked and the operator is told.
+func (s *Server) scheduleDispatchRetry(ctx context.Context, report DispatchReport, result DispatchResult) bool {
+	class, ok := dispatchFailureClass(result.Status)
+	if !ok {
+		return false
+	}
+	key := TaskThreadKey(report.Repo, report.Branch)
+	s.dispatchRunsMu.Lock()
+	state := s.dispatchRuns[key]
+	retries := state.Retries
+	max, backoffs := s.retryPolicyFor(class)
+	if retries >= max {
+		s.dispatchRunsMu.Unlock()
+		s.postDispatchBlocked(ctx, report, result, class, retries, max)
+		return false
+	}
+	if s.dispatchRuns == nil {
+		s.dispatchRuns = make(map[string]dispatchRunState)
+	}
+	state.Retries = retries + 1
+	state.Active = true
+	state.Terminal = false
+	state.Class = class
+	s.dispatchRuns[key] = state
+	s.dispatchRunsMu.Unlock()
+
+	wait := backoffs[0]
+	if retries < len(backoffs) {
+		wait = backoffs[retries]
+	}
+	slog.Info("webhook: dispatch finalize retry scheduled",
+		"repo", report.Repo,
+		"branch", report.Branch,
+		"task_id", report.TaskID,
+		"class", class.label(),
+		"retry", fmt.Sprintf("%d/%d", retries+1, max),
+	)
+	go func() {
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		if s.shutdownCtx != nil {
+			select {
+			case <-timer.C:
+			case <-s.shutdownCtx.Done():
+				return
+			}
+		} else {
+			<-timer.C
+		}
+		retryCtx, cancel := context.WithTimeout(context.Background(), harnessFinalizeTimeout+harnessFinalizeTimeout)
+		defer cancel()
+		res, err := s.finalizeDispatch(retryCtx, report, false)
+		if err != nil {
+			slog.Error("webhook: dispatch finalize retry failed",
+				"repo", report.Repo,
+				"branch", report.Branch,
+				"task_id", report.TaskID,
+				"error", err,
+			)
+			s.postDispatchFinalizeError(context.Background(), report, err)
+			s.noteDispatchRun(report.Repo, report.Branch, report.TaskID)
+			return
+		}
+		s.logDispatchFinalized(report, res)
+		if res.Status == DispatchCompleted {
+			s.postDispatchOutcome(context.Background(), report, res)
+			s.noteDispatchRun(report.Repo, report.Branch, report.TaskID)
+			return
+		}
+		if s.scheduleDispatchRetry(context.Background(), report, res) {
+			return
+		}
+		s.noteDispatchRun(report.Repo, report.Branch, report.TaskID)
+	}()
+	return true
+}
+
+func (s *Server) postDispatchBlocked(ctx context.Context, report DispatchReport, result DispatchResult, class failureClass, retries, max int) {
+	result.Status = DispatchBlocked
+	result.Detail = fmt.Sprintf("retry budget exhausted after %d/%d retries (%s)", retries, max, class.label())
+	task, ok := s.dispatchTask(report)
+	if !ok {
+		return
+	}
+	_, ep := s.dispatchRepoEndpoint(report.Repo)
+	s.finishDispatch(ctx, report, task, ep, result, true)
 }
 
 func (s *Server) postDispatchFinalizeError(ctx context.Context, report DispatchReport, err error) {
@@ -158,25 +293,47 @@ func (s *Server) dispatchNow() time.Time {
 	return time.Now()
 }
 
+// dispatchFallbackBlocked reports whether the last-resort poll must stay
+// quiet. A terminal delivery is deduped, and a run is only "live" while its
+// agent session is still working — a run that was routed but never reached a
+// session, or whose session died, must still be polled.
 func (s *Server) dispatchFallbackBlocked(repo, branch, taskID string) bool {
+	state, ok := s.dispatchRunState(repo, branch, taskID)
+	if !ok {
+		return false
+	}
+	return state.Terminal || s.dispatchRunLive(state)
+}
+
+func (s *Server) dispatchRunState(repo, branch, taskID string) (dispatchRunState, bool) {
 	key := TaskThreadKey(repo, branch)
 	s.dispatchRunsMu.Lock()
 	state, ok := s.dispatchRuns[key]
 	s.dispatchRunsMu.Unlock()
 	if !ok {
-		return false
+		return dispatchRunState{}, false
 	}
 	if id := strings.TrimSpace(taskID); id != "" && state.TaskID != id {
+		return dispatchRunState{}, false
+	}
+	return state, true
+}
+
+func (s *Server) dispatchRunLive(state dispatchRunState) bool {
+	if !state.Active || strings.TrimSpace(state.SessionID) == "" {
 		return false
+	}
+	if s.sessionLiveness != nil {
+		alive, err := s.sessionLiveness(context.Background(), state.SessionID, state.Workdir)
+		if err == nil {
+			return alive
+		}
 	}
 	ttl := s.processingTimeout
 	if ttl <= 0 {
 		ttl = s.claimGrace
 	}
-	if state.Active && (ttl <= 0 || s.dispatchNow().Sub(state.StartedAt) < ttl) {
-		return true
-	}
-	return state.Terminal
+	return ttl <= 0 || s.dispatchNow().Sub(state.StartedAt) < ttl
 }
 
 func (s *Server) noteDispatchRun(repo, branch, taskID string) {
@@ -198,6 +355,10 @@ func (s *Server) noteDispatchRun(repo, branch, taskID string) {
 // FinalizeDispatch turns a finished dispatch turn into its artifact. The turn
 // outcome is not trusted: commit, push and PR presence decide the status.
 func (s *Server) FinalizeDispatch(ctx context.Context, report DispatchReport) (DispatchResult, error) {
+	return s.finalizeDispatch(ctx, report, true)
+}
+
+func (s *Server) finalizeDispatch(ctx context.Context, report DispatchReport, notify bool) (DispatchResult, error) {
 	var result DispatchResult
 	report.Repo = normalizeRepoKey(report.Repo)
 	report.Branch = strings.TrimSpace(report.Branch)
@@ -222,7 +383,7 @@ func (s *Server) FinalizeDispatch(ctx context.Context, report DispatchReport) (D
 		}
 		result.Detail = err.Error()
 		result.Denied = report.Denied
-		s.finishDispatch(ctx, report, task, ep, result)
+		s.finishDispatch(ctx, report, task, ep, result, notify)
 		return result, nil
 	}
 	result.Worktree = lease.Path
@@ -257,7 +418,7 @@ func (s *Server) FinalizeDispatch(ctx context.Context, report DispatchReport) (D
 			result.Status = DispatchPushFailed
 		}
 		result.Detail = ferr.Error()
-		s.finishDispatch(ctx, report, task, ep, result)
+		s.finishDispatch(ctx, report, task, ep, result, notify)
 		return result, nil
 	}
 
@@ -265,7 +426,7 @@ func (s *Server) FinalizeDispatch(ctx context.Context, report DispatchReport) (D
 	if herr != nil {
 		result.Status = DispatchPushFailed
 		result.Detail = herr.Error()
-		s.finishDispatch(ctx, report, task, ep, result)
+		s.finishDispatch(ctx, report, task, ep, result, notify)
 		return result, nil
 	}
 	if start == "" || head == start {
@@ -273,7 +434,7 @@ func (s *Server) FinalizeDispatch(ctx context.Context, report DispatchReport) (D
 		if report.Denied {
 			result.Status = DispatchPermissionDeny
 		}
-		s.finishDispatch(ctx, report, task, ep, result)
+		s.finishDispatch(ctx, report, task, ep, result, notify)
 		return result, nil
 	}
 
@@ -284,13 +445,13 @@ func (s *Server) FinalizeDispatch(ctx context.Context, report DispatchReport) (D
 	if perr != nil {
 		result.Status = DispatchPRCreateFailed
 		result.Detail = perr.Error()
-		s.finishDispatch(ctx, report, task, ep, result)
+		s.finishDispatch(ctx, report, task, ep, result, notify)
 		return result, nil
 	}
 	result.PRNumber = number
 	result.PRURL = url
 	result.Status = DispatchCompleted
-	s.finishDispatch(ctx, report, task, ep, result)
+	s.finishDispatch(ctx, report, task, ep, result, notify)
 	return result, nil
 }
 
@@ -497,7 +658,7 @@ func FormatDispatchFinding(repo, branch string, result DispatchResult) string {
 	return line
 }
 
-func (s *Server) finishDispatch(ctx context.Context, report DispatchReport, task DispatchTask, ep config.EndpointConfig, result DispatchResult) {
+func (s *Server) finishDispatch(ctx context.Context, report DispatchReport, task DispatchTask, ep config.EndpointConfig, result DispatchResult, notify bool) {
 	repo := normalizeRepoKey(report.Repo)
 	if repo == "" {
 		repo = task.Repo
@@ -545,7 +706,7 @@ func (s *Server) finishDispatch(ctx context.Context, report DispatchReport, task
 			}
 		}
 	}
-	if threadID != "" {
+	if notify && threadID != "" {
 		platform, channelID := ep.Platform, ep.ChannelID
 		if platform == "" || channelID == "" {
 			platform, channelID = s.dispatchNotifyTarget(repo)
@@ -566,7 +727,6 @@ func (s *Server) finishDispatch(ctx context.Context, report DispatchReport, task
 			}
 		}
 	}
-	s.noteDispatchRun(repo, branch, task.ID)
 }
 
 func dispatchPRKey(repo, number string) string {

@@ -408,7 +408,7 @@ func (r *Router) runResponse(
 		r.editRootCard(key.platform, root, followupTerminalLine(outcome, time.Since(started)))
 	}
 	if dispatchRun != nil && r.dispatchLifecycle != nil {
-		denied := r.permissions.HasDenialFor(owner) || r.permissions.HasPendingFor(owner)
+		denied := r.permissions.HasDenialFor(owner)
 		r.dispatchLifecycle.DispatchRunFinished(context.Background(), dispatchRun.repo, dispatchRun.branch, dispatchRun.taskID, dispatchRun.sessionID, outcome, denied)
 	}
 }
