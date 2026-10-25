@@ -67,6 +67,11 @@ type WebhookConfig struct {
 	FallbackPollRepeatAfter *time.Duration    `yaml:"fallback_poll_repeat_after,omitempty"`
 }
 
+func DefaultFallbackPollRepeatAfter() time.Duration {
+	d, _ := time.ParseDuration("30m")
+	return d
+}
+
 type DispatchConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	Path    string `yaml:"path,omitempty"`
@@ -591,7 +596,7 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 			fc.Webhooks.FallbackPollAfter = fallbackDefault
 		}
 		if fc.Webhooks.FallbackPollRepeatAfter == nil {
-			repeatDefault := 30 * time.Minute
+			repeatDefault := DefaultFallbackPollRepeatAfter()
 			fc.Webhooks.FallbackPollRepeatAfter = &repeatDefault
 		} else if *fc.Webhooks.FallbackPollRepeatAfter < 0 {
 			return Config{}, fmt.Errorf("config: webhooks.fallback_poll_repeat_after must not be negative")

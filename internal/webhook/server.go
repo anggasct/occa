@@ -296,7 +296,7 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 	srv.escalated = make(map[string]bool)
 	srv.ageState = &runAgeState{cards: make(map[string]*runAgeCardState)}
 	srv.fallbackAfter = cfg.FallbackPollAfter
-	srv.fallbackRepeatAfter = 30 * time.Minute
+	srv.fallbackRepeatAfter = config.DefaultFallbackPollRepeatAfter()
 	if cfg.FallbackPollRepeatAfter != nil {
 		srv.fallbackRepeatAfter = *cfg.FallbackPollRepeatAfter
 	}
