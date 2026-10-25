@@ -85,6 +85,7 @@ webhooks:
     event: 9807270 # grey
     failed: 15158332 # red
   fallback_poll_after: 10m # no event this long after dispatch/delivery -> one `gh pr list` poll for the branch
+  fallback_poll_repeat_after: 30m # suppress an identical fallback finding repeated within this window; 0s disables
   defaults:
     comment_trigger:
       review: ['please re-review'] # default re-review phrase; override per repo

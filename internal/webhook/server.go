@@ -196,6 +196,10 @@ type Server struct {
 	dispatchToken         string
 	dispatchTasks         *DispatchStore
 	fallbackAfter         time.Duration
+	fallbackRepeatAfter   time.Duration
+	fallbackNow           func() time.Time
+	fallbackMu            sync.Mutex
+	fallbackLast          map[string]time.Time
 	branchChecker         BranchPRChecker
 	branchExists          BranchExistsChecker
 	statusIcons           map[string]string
@@ -292,6 +296,11 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 	srv.escalated = make(map[string]bool)
 	srv.ageState = &runAgeState{cards: make(map[string]*runAgeCardState)}
 	srv.fallbackAfter = cfg.FallbackPollAfter
+	srv.fallbackRepeatAfter = config.DefaultFallbackPollRepeatAfter()
+	if cfg.FallbackPollRepeatAfter != nil {
+		srv.fallbackRepeatAfter = *cfg.FallbackPollRepeatAfter
+	}
+	srv.fallbackLast = make(map[string]time.Time)
 	srv.branchChecker = ghBranchPRChecker
 	srv.branchExists = ghBranchExistsChecker
 	return srv
@@ -618,6 +627,10 @@ func (s *Server) SetFallbackPollAfter(d time.Duration) {
 	if d > 0 {
 		s.fallbackAfter = d
 	}
+}
+
+func (s *Server) SetFallbackPollRepeatAfter(d time.Duration) {
+	s.fallbackRepeatAfter = d
 }
 
 // recoverStale marks deliveries a previous process left in flight as failed so
