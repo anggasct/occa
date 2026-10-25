@@ -202,6 +202,9 @@ type Server struct {
 	fallbackLast          map[string]time.Time
 	branchChecker         BranchPRChecker
 	branchExists          BranchExistsChecker
+	gh                    ghRunner
+	dispatchRunsMu        sync.Mutex
+	dispatchRuns          map[string]dispatchRunState
 	statusIcons           map[string]string
 	statusColors          map[string]int
 	endpointsByName       map[string]config.EndpointConfig
@@ -303,7 +306,16 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 	srv.fallbackLast = make(map[string]time.Time)
 	srv.branchChecker = ghBranchPRChecker
 	srv.branchExists = ghBranchExistsChecker
+	srv.gh = &defaultGHRunner{}
+	srv.dispatchRuns = make(map[string]dispatchRunState)
 	return srv
+}
+
+func (s *Server) SetGHRunner(r ghRunner) {
+	if r == nil {
+		r = &defaultGHRunner{}
+	}
+	s.gh = r
 }
 
 func (s *Server) reviewDedupeCutoff() int64 {

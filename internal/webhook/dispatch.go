@@ -702,6 +702,10 @@ func (s *Server) scheduleDispatchFallback(task DispatchTask, suppressAfter time.
 			return
 		default:
 		}
+		if s.dispatchFallbackBlocked(task.Repo, task.Branch, task.ID) {
+			slog.Info("webhook: fallback poll suppressed", "reason", "dispatch-run", "repo", task.Repo, "branch", task.Branch)
+			return
+		}
 		if rec, ok := s.tasks.ResolveTaskThread(task.Repo, task.Branch, "dispatch-fallback"); ok {
 			if rec.UpdatedAt.After(stamp) {
 				return

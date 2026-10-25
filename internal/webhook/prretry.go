@@ -20,6 +20,9 @@ const (
 	failureStall
 	failureBuild
 	failureNoWork
+	failurePermission
+	failurePush
+	failurePRCreate
 )
 
 func (c failureClass) label() string {
@@ -30,6 +33,12 @@ func (c failureClass) label() string {
 		return "build/test failure"
 	case failureNoWork:
 		return "no work in lease"
+	case failurePermission:
+		return "permission denied"
+	case failurePush:
+		return "push failed"
+	case failurePRCreate:
+		return "pr create failed"
 	default:
 		return "model error"
 	}
@@ -39,7 +48,7 @@ func retryPolicyFor(class failureClass) (int, []time.Duration) {
 	switch class {
 	case failureStall:
 		return 1, []time.Duration{0}
-	case failureBuild, failureNoWork:
+	case failureBuild, failureNoWork, failurePermission, failurePush, failurePRCreate:
 		return 2, []time.Duration{60 * time.Second, 5 * time.Minute}
 	default:
 		return 3, []time.Duration{30 * time.Second, 2 * time.Minute, 5 * time.Minute}

@@ -52,6 +52,7 @@ type permissionRecord struct {
 	buttons    []channel.Button
 	state      permissionState
 	terminal   string
+	denied     bool
 	createdAt  time.Time
 	expiresAt  time.Time
 	attempt    uint64
@@ -432,6 +433,9 @@ func (b *permissionBroker) handle(ctx context.Context, msg channel.IncomingMessa
 	}
 
 	terminal := permissionTerminalLabel(decision)
+	if decision == relay.PermissionReject {
+		b.markDenied(record)
+	}
 	if decision == relay.PermissionAlways {
 		if err := persistRules(ctx, b.rules, record); err != nil {
 			terminal = permissionNotSavedLabel
@@ -518,6 +522,25 @@ func (b *permissionBroker) resolve(record *permissionRecord, attempt uint64, ter
 	record.client = nil
 	record.expiresAt = time.Now().Add(b.tombstoneTTL)
 	return true
+}
+
+func (b *permissionBroker) markDenied(record *permissionRecord) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if record != nil {
+		record.denied = true
+	}
+}
+
+func (b *permissionBroker) HasDenialFor(owner *permissionOwner) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, record := range b.records {
+		if record.owner == owner && record.denied {
+			return true
+		}
+	}
+	return false
 }
 
 // HasPendingFor reports whether owner still has an unresolved permission

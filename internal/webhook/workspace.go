@@ -503,6 +503,74 @@ func (m *WorkspaceManager) resolveMutable(ctx context.Context, root string, req 
 	return lease, nil
 }
 
+// DispatchLease attaches to the worktree a dispatch run already worked in.
+// Unlike ResolveWorkspace it accepts a dirty tree: the run's changes are the
+// artifact the harness is about to commit, so a dirtiness check would reject
+// the exact state finalize must handle.
+func (m *WorkspaceManager) DispatchLease(ctx context.Context, root, branch, preferred string) (*WorkspaceLease, error) {
+	branch = strings.TrimSpace(branch)
+	if m == nil || strings.TrimSpace(root) == "" || branch == "" {
+		return nil, fmt.Errorf("%w: dispatch lease needs repository and branch", ErrWorkspaceUnavailable)
+	}
+	worktrees, err := m.listWorktrees(ctx, root)
+	if err != nil {
+		return nil, fmt.Errorf("%w: list worktrees: %v", ErrWorkspaceUnavailable, err)
+	}
+	branchRef := "refs/heads/" + branch
+	preferred = filepath.Clean(strings.TrimSpace(preferred))
+	candidates := []string{}
+	for _, wt := range worktrees {
+		if preferred != "" && filepath.Clean(wt.Path) == preferred {
+			candidates = append(candidates, wt.Path)
+		}
+	}
+	for _, wt := range worktrees {
+		if wt.Branch == branchRef || wt.Branch == branch {
+			candidates = append(candidates, wt.Path)
+		}
+	}
+	seen := make(map[string]bool, len(candidates))
+	for _, candidate := range candidates {
+		candidate = filepath.Clean(strings.TrimSpace(candidate))
+		if candidate == "" || seen[candidate] {
+			continue
+		}
+		seen[candidate] = true
+		if fi, err := os.Stat(candidate); err != nil || !fi.IsDir() {
+			continue
+		}
+		return &WorkspaceLease{
+			manager: m,
+			Path:    candidate,
+			Mode:    config.WorkspaceModeMutable,
+			Branch:  branch,
+		}, nil
+	}
+	return nil, fmt.Errorf("%w: no worktree for branch %q", ErrWorkspaceUnavailable, branch)
+}
+
+func (m *WorkspaceManager) DispatchHead(ctx context.Context, lease *WorkspaceLease) (string, error) {
+	if lease == nil || lease.manager == nil {
+		return "", errors.New("dispatch: lease has no manager")
+	}
+	out, err := lease.manager.runner.Run(ctx, lease.Path, "rev-parse", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("dispatch: read workspace head: %w", err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
+func (m *WorkspaceManager) MergeBase(ctx context.Context, dir, revision string) (string, error) {
+	if m == nil || strings.TrimSpace(revision) == "" {
+		return "", nil
+	}
+	out, err := m.runner.Run(ctx, dir, "merge-base", "HEAD", revision)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
 func (m *WorkspaceManager) attachMutable(ctx context.Context, root string, req WorkspaceRequest, target string) (string, error) {
 	mu, _ := m.repoLocks.LoadOrStore(root, &sync.Mutex{})
 	lock := mu.(*sync.Mutex)

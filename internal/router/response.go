@@ -220,6 +220,7 @@ func (r *Router) runResponse(
 	sessionID string,
 	events <-chan relay.Event,
 	dispatch func(context.Context) error,
+	dispatchRun *dispatchRunReport,
 ) {
 	started := time.Now()
 	outcome := "complete"
@@ -405,6 +406,12 @@ func (r *Router) runResponse(
 	}
 	if root != nil {
 		r.editRootCard(key.platform, root, followupTerminalLine(outcome, time.Since(started)))
+	}
+	if dispatchRun != nil && r.dispatchLifecycle != nil {
+		denied := r.permissions.HasDenialFor(owner) || r.permissions.HasPendingFor(owner)
+		finishCtx, cancelFinish := context.WithTimeout(context.Background(), 4*time.Minute)
+		r.dispatchLifecycle.DispatchRunFinished(finishCtx, dispatchRun.repo, dispatchRun.branch, dispatchRun.taskID, dispatchRun.sessionID, outcome, denied)
+		cancelFinish()
 	}
 }
 

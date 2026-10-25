@@ -1,0 +1,411 @@
+package webhook
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/anggasct/occa/internal/config"
+)
+
+type fakeDispatchGH struct {
+	mu        sync.Mutex
+	calls     [][]string
+	listOut   string
+	createOut string
+	createErr error
+}
+
+func (f *fakeDispatchGH) Run(_ context.Context, _ string, args ...string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, append([]string(nil), args...))
+	if len(args) >= 2 && args[0] == "pr" && args[1] == "list" {
+		return f.listOut, nil
+	}
+	if len(args) >= 2 && args[0] == "pr" && args[1] == "create" {
+		if f.createErr != nil {
+			return f.createOut, f.createErr
+		}
+		if strings.TrimSpace(f.createOut) == "" {
+			return "https://github.com/testowner/myrepo/pull/42\n", nil
+		}
+		return f.createOut, nil
+	}
+	return "", nil
+}
+
+func (f *fakeDispatchGH) callCount(kind string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, call := range f.calls {
+		if len(call) >= 2 && call[0] == "pr" && call[1] == kind {
+			n++
+		}
+	}
+	return n
+}
+
+func (f *fakeDispatchGH) lastCall(kind string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := len(f.calls) - 1; i >= 0; i-- {
+		if len(f.calls[i]) >= 2 && f.calls[i][0] == "pr" && f.calls[i][1] == kind {
+			return append([]string(nil), f.calls[i]...)
+		}
+	}
+	return nil
+}
+
+type dispatchFixture struct {
+	srv    *Server
+	gh     *fakeDispatchGH
+	root   string
+	remote string
+	wt     string
+	repo   string
+	branch string
+	task   DispatchTask
+	notes  []string
+	mu     sync.Mutex
+}
+
+func newDispatchFixture(t *testing.T, dirty int) *dispatchFixture {
+	t.Helper()
+	f := &dispatchFixture{
+		gh:     &fakeDispatchGH{},
+		repo:   "testowner/myrepo",
+		branch: "dispatch/test-branch",
+	}
+	f.root, f.remote = initRepoWithBareRemote(t, f.branch)
+	f.wt = filepath.Join(f.root, ".worktree", "dispatch-test")
+	if err := os.MkdirAll(filepath.Dir(f.wt), 0755); err != nil {
+		t.Fatalf("mkdir worktree parent: %v", err)
+	}
+	runGit(t, f.root, "worktree", "add", f.wt, f.branch)
+	start := runGit(t, f.wt, "rev-parse", "HEAD")
+
+	ep := config.EndpointConfig{
+		Name:       "dispatch-test",
+		Repository: f.repo,
+		Platform:   "discord",
+		ChannelID:  "channel-1",
+		Workflow:   "review",
+		Workspace:  config.EndpointWorkspace{Type: config.WorkspaceTypeGit, Path: f.root, Mode: config.WorkspaceModeIsolated},
+	}
+	srv, _, st := newTestServerFull(t, []config.EndpointConfig{ep})
+	srv.SetWorkspaceResolver(NewWorkspaceManager())
+	srv.SetGHRunner(f.gh)
+	srv.SetPRQueueRepo(st.PRQueueRepo())
+	srv.SetNotifier(func(_ context.Context, _, _ string, text string) error {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.notes = append(f.notes, text)
+		return nil
+	})
+	srv.tasks.Upsert(f.repo, f.branch, "root-1", "thread-1", TaskDispatched)
+	f.srv = srv
+	f.task = srv.dispatchTasks.Create(DispatchRequest{
+		Repo:     f.repo,
+		Branch:   f.branch,
+		Brief:    "dispatch title\n\nbody of the dispatch brief",
+		SpecPath: "specs/feature.md",
+		Verify:   "go test ./...",
+		BaseSHA:  start,
+	})
+	for i := 0; i < dirty; i++ {
+		name := filepath.Join(f.wt, "change-"+string(rune('a'+i))+".txt")
+		if err := os.WriteFile(name, []byte("work\n"), 0644); err != nil {
+			t.Fatalf("write dirty file: %v", err)
+		}
+	}
+	return f
+}
+
+func (f *dispatchFixture) finalize(t *testing.T, denied bool) DispatchResult {
+	t.Helper()
+	result, err := f.srv.FinalizeDispatch(context.Background(), DispatchReport{
+		Repo:    f.repo,
+		Branch:  f.branch,
+		TaskID:  f.task.ID,
+		Outcome: "complete",
+		Denied:  denied,
+	})
+	if err != nil {
+		t.Fatalf("FinalizeDispatch: %v", err)
+	}
+	return result
+}
+
+func (f *dispatchFixture) noteText() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return strings.Join(f.notes, "\n")
+}
+
+func TestDispatchPR_AC01_CleanTreeIsNoWork(t *testing.T) {
+	f := newDispatchFixture(t, 0)
+	result := f.finalize(t, false)
+	if result.Status != DispatchNoWork {
+		t.Fatalf("status = %q, want %q", result.Status, DispatchNoWork)
+	}
+	if f.gh.callCount("create") != 0 || f.gh.callCount("list") != 0 {
+		t.Fatalf("clean run must not touch gh: %+v", f.gh.calls)
+	}
+	if rec, ok := f.srv.tasks.Lookup(f.repo, f.branch); !ok || rec.Status != TaskFailed {
+		t.Fatalf("task status = %+v, want failed", rec.Status)
+	}
+}
+
+func TestDispatchPR_AC02_DirtyTreeCommitsPushesAndOpensPR(t *testing.T) {
+	f := newDispatchFixture(t, 3)
+	result := f.finalize(t, false)
+	if result.Status != DispatchCompleted {
+		t.Fatalf("status = %q (%s), want completed", result.Status, result.Detail)
+	}
+	if !result.Committed || !result.Pushed || result.Files != 3 {
+		t.Fatalf("result = %+v", result)
+	}
+	if count := runGit(t, f.wt, "rev-list", "--count", f.task.BaseSHA+"..HEAD"); count != "1" {
+		t.Fatalf("commit count = %s, want 1", count)
+	}
+	head := runGit(t, f.wt, "rev-parse", "HEAD")
+	if pushed := runGit(t, f.remote, "rev-parse", "refs/heads/"+f.branch); pushed != head {
+		t.Fatalf("remote branch = %s, want %s", pushed, head)
+	}
+	if f.gh.callCount("create") != 1 {
+		t.Fatalf("pr create calls = %d, want 1", f.gh.callCount("create"))
+	}
+	call := f.gh.lastCall("create")
+	joined := strings.Join(call, " ")
+	for _, want := range []string{"--base main", "--head " + f.branch, "--title dispatch title"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("create args = %v, want %q", call, want)
+		}
+	}
+}
+
+func TestDispatchPR_AC03_ExistingOpenPRIsReused(t *testing.T) {
+	f := newDispatchFixture(t, 1)
+	f.gh.listOut = `[{"number":7,"url":"https://github.com/testowner/myrepo/pull/7"}]`
+	result := f.finalize(t, false)
+	if result.Status != DispatchCompleted || result.PRNumber != "7" {
+		t.Fatalf("result = %+v", result)
+	}
+	if f.gh.callCount("create") != 0 {
+		t.Fatalf("pr create calls = %d, want 0", f.gh.callCount("create"))
+	}
+}
+
+func TestDispatchPR_AC04_PushFailureIsNamed(t *testing.T) {
+	f := newDispatchFixture(t, 1)
+	runGit(t, f.wt, "remote", "set-url", "--push", "origin", filepath.Join(t.TempDir(), "missing.git"))
+	result := f.finalize(t, false)
+	if result.Status != DispatchPushFailed {
+		t.Fatalf("status = %q (%s), want %q", result.Status, result.Detail, DispatchPushFailed)
+	}
+	if f.gh.callCount("create") != 0 {
+		t.Fatalf("pr create calls = %d, want 0", f.gh.callCount("create"))
+	}
+	if max, _ := retryPolicyFor(failurePush); max != 2 {
+		t.Fatalf("push failure retry budget = %d, want 2", max)
+	}
+}
+
+func TestDispatchPR_AC05_PRFailureNonZeroFailureCarriesStderr(t *testing.T) {
+	f := newDispatchFixture(t, 1)
+	f.gh.createErr = errors.New("exit status 1")
+	f.gh.createOut = "boom: repository is not writable\n"
+	result := f.finalize(t, false)
+	if result.Status != DispatchPRCreateFailed {
+		t.Fatalf("status = %q (%s), want %q", result.Status, result.Detail, DispatchPRCreateFailed)
+	}
+	if !strings.Contains(f.noteText(), "boom: repository is not writable") {
+		t.Fatalf("thread summary missing gh stderr: %q", f.noteText())
+	}
+	if max, _ := retryPolicyFor(failurePRCreate); max != 2 {
+		t.Fatalf("pr failure retry budget = %d, want 2", max)
+	}
+}
+
+func TestDispatchPR_AC06_StatusMapping(t *testing.T) {
+	cases := []struct {
+		name   string
+		dirty  int
+		denied bool
+		pushOK bool
+		prErr  bool
+		want   DispatchStatus
+	}{
+		{name: "clean", want: DispatchNoWork},
+		{name: "dirty success", dirty: 1, pushOK: true, want: DispatchCompleted},
+		{name: "denied clean", denied: true, want: DispatchPermissionDeny},
+		{name: "denied with artifact", dirty: 1, denied: true, pushOK: true, want: DispatchCompleted},
+		{name: "push failed", dirty: 1, want: DispatchPushFailed},
+		{name: "pr failed", dirty: 1, pushOK: true, prErr: true, want: DispatchPRCreateFailed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDispatchFixture(t, tc.dirty)
+			if !tc.pushOK && tc.dirty > 0 {
+				runGit(t, f.wt, "remote", "set-url", "--push", "origin", filepath.Join(t.TempDir(), "missing.git"))
+			}
+			if tc.prErr {
+				f.gh.createErr = errors.New("exit status 1")
+				f.gh.createOut = "create failed\n"
+			}
+			if got := f.finalize(t, tc.denied).Status; got != tc.want {
+				t.Fatalf("status = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDispatchPR_AC07_FixLaneDoesNotOpenPR(t *testing.T) {
+	f := newDispatchFixture(t, 1)
+	lease, err := NewWorkspaceManager().DispatchLease(context.Background(), f.root, f.branch, f.wt)
+	if err != nil {
+		t.Fatalf("DispatchLease: %v", err)
+	}
+	if _, err := lease.Finalize(context.Background(), "fix", f.task.ID); err != nil {
+		t.Fatalf("fix Finalize: %v", err)
+	}
+	if f.gh.callCount("create") != 0 {
+		t.Fatalf("fix lane must not create a PR: %+v", f.gh.calls)
+	}
+}
+
+func TestDispatchPR_AC08_NoForceArguments(t *testing.T) {
+	f := newDispatchFixture(t, 1)
+	f.finalize(t, false)
+	for _, call := range f.gh.calls {
+		for _, arg := range call {
+			if arg == "--force" || arg == "-f" {
+				t.Fatalf("force argument in %v", call)
+			}
+		}
+	}
+}
+
+func TestDispatchPR_AC09_SecondDispatchReusesPR(t *testing.T) {
+	f := newDispatchFixture(t, 1)
+	first := f.finalize(t, false)
+	if first.Status != DispatchCompleted {
+		t.Fatalf("first status = %q (%s)", first.Status, first.Detail)
+	}
+	head := runGit(t, f.wt, "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(f.wt, "second.txt"), []byte("more\n"), 0644); err != nil {
+		t.Fatalf("write second change: %v", err)
+	}
+	second := f.srv.dispatchTasks.Create(DispatchRequest{
+		Repo:     f.repo,
+		Branch:   f.branch,
+		Brief:    "second dispatch",
+		SpecPath: "specs/feature.md",
+		BaseSHA:  head,
+	})
+	f.gh.listOut = `[{"number":42,"url":"https://github.com/testowner/myrepo/pull/42"}]`
+	createBefore := f.gh.callCount("create")
+	result, err := f.srv.FinalizeDispatch(context.Background(), DispatchReport{Repo: f.repo, Branch: f.branch, TaskID: second.ID})
+	if err != nil {
+		t.Fatalf("second FinalizeDispatch: %v", err)
+	}
+	if result.Status != DispatchCompleted || result.PRNumber != "42" {
+		t.Fatalf("second result = %+v", result)
+	}
+	if f.gh.callCount("create") != createBefore {
+		t.Fatalf("second dispatch created a duplicate PR: %+v", f.gh.calls)
+	}
+}
+
+func TestDispatchPR_AC10_RunAndFinalizeShareWorktree(t *testing.T) {
+	f := newDispatchFixture(t, 1)
+	result := f.finalize(t, false)
+	if filepath.Clean(result.Worktree) != filepath.Clean(f.wt) {
+		t.Fatalf("lease path = %q, want worktree %q", result.Worktree, f.wt)
+	}
+}
+
+func TestDispatchPR_AC11_PermissionDeniedWithoutCommit(t *testing.T) {
+	f := newDispatchFixture(t, 0)
+	result := f.finalize(t, true)
+	if result.Status != DispatchPermissionDeny {
+		t.Fatalf("status = %q, want %q", result.Status, DispatchPermissionDeny)
+	}
+	if result.Retryable() != true {
+		t.Fatal("permission denied must be retryable")
+	}
+}
+
+func TestDispatchPR_AC12_DenialWithArtifactCompletes(t *testing.T) {
+	f := newDispatchFixture(t, 1)
+	result := f.finalize(t, true)
+	if result.Status != DispatchCompleted {
+		t.Fatalf("status = %q (%s), want completed", result.Status, result.Detail)
+	}
+	if !strings.Contains(f.noteText(), "permission was denied") {
+		t.Fatalf("denial note missing from thread: %q", f.noteText())
+	}
+}
+
+func TestDispatchPR_AC13_DenialAloneNeverCompletes(t *testing.T) {
+	f := newDispatchFixture(t, 0)
+	f.srv.DispatchRunStarted(f.repo, f.branch, f.task.ID, "session-1")
+	result, err := f.srv.FinalizeDispatch(context.Background(), DispatchReport{
+		Repo:    f.repo,
+		Branch:  f.branch,
+		TaskID:  f.task.ID,
+		Outcome: "complete",
+		Denied:  true,
+	})
+	if err != nil {
+		t.Fatalf("FinalizeDispatch: %v", err)
+	}
+	if result.Status != DispatchPermissionDeny {
+		t.Fatalf("status = %q, want %q", result.Status, DispatchPermissionDeny)
+	}
+}
+
+func TestDispatchPR_AC14_FindingPostedAtFinalize(t *testing.T) {
+	f := newDispatchFixture(t, 0)
+	f.finalize(t, false)
+	note := f.noteText()
+	if !strings.Contains(note, "no work in lease") {
+		t.Fatalf("terminal finding missing class: %q", note)
+	}
+	if !strings.Contains(note, "ended without a PR") {
+		t.Fatalf("terminal finding missing missing-PR copy: %q", note)
+	}
+}
+
+func TestDispatchPR_AC15_ActiveRunBlocksFallback(t *testing.T) {
+	srv := &Server{}
+	now := time.Date(2026, 10, 25, 23, 41, 0, 0, time.UTC)
+	srv.fallbackNow = func() time.Time { return now }
+	srv.DispatchRunStarted("testowner/myrepo", "dispatch/test-branch", "task-1", "session-1")
+	now = now.Add(10 * time.Minute)
+	if !srv.dispatchFallbackBlocked("testowner/myrepo", "dispatch/test-branch", "task-1") {
+		t.Fatal("active run must block the fallback poll")
+	}
+}
+
+func TestDispatchPR_AC16_TerminalFindingDedupesPerRun(t *testing.T) {
+	srv := &Server{}
+	now := time.Date(2026, 10, 25, 23, 41, 0, 0, time.UTC)
+	srv.fallbackNow = func() time.Time { return now }
+	srv.DispatchRunStarted("testowner/myrepo", "dispatch/test-branch", "task-1", "session-1")
+	srv.noteDispatchRun("testowner/myrepo", "dispatch/test-branch", "task-1")
+	now = now.Add(2 * time.Hour)
+	if !srv.dispatchFallbackBlocked("testowner/myrepo", "dispatch/test-branch", "task-1") {
+		t.Fatal("terminal finding must suppress a second fallback for the same run")
+	}
+	if srv.dispatchFallbackBlocked("testowner/myrepo", "dispatch/test-branch", "task-2") {
+		t.Fatal("a new run on the branch must not inherit the previous terminal finding")
+	}
+}
