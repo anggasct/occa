@@ -610,3 +610,21 @@ func TestReplyContextRetriesRateLimit(t *testing.T) {
 		t.Fatalf("Edit after two rate limits: %v", err)
 	}
 }
+
+func TestSurfaceDiscipline_AC17(t *testing.T) {
+	var gotBody []byte
+	bot := fakeTelegramServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+	})
+	a := &Adapter{maxDownloadSize: 10 * 1024 * 1024, bot: bot, menu: []channel.MenuCommand{
+		{Alias: "connect-repo", Description: "Show the 4-hook wiring checklist"},
+	}}
+	a.registerCommands()
+	if !strings.Contains(string(gotBody), "connect_repo") {
+		t.Fatalf("registerCommands body = %q, want the sanitized name", gotBody)
+	}
+	if strings.Contains(string(gotBody), "connect-repo") {
+		t.Fatalf("registerCommands body = %q, must not carry the hyphenated alias", gotBody)
+	}
+}

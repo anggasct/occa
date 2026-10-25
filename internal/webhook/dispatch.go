@@ -161,6 +161,55 @@ func isRedispatchRequest(req DispatchRequest) bool {
 	return strings.TrimSpace(req.Mode) == "redispatch" || isRedispatchScope(req.Scope)
 }
 
+func (s *Server) admitBranchRun(ctx context.Context, repo, branch string) (int, string) {
+	if s == nil || s.sessionRows == nil || s.tasks == nil {
+		return 0, ""
+	}
+	platform, channelID := s.dispatchNotifyTarget(repo)
+	if platform == "" || channelID == "" {
+		return 0, ""
+	}
+	rec, ok := s.tasks.Lookup(repo, branch)
+	if !ok || strings.TrimSpace(rec.ThreadID) == "" {
+		return 0, ""
+	}
+	sessionID, pid, err := s.sessionRows.Active(ctx, platform, channelID, rec.ThreadID, "")
+	if err != nil || strings.TrimSpace(sessionID) == "" {
+		return 0, ""
+	}
+	if pid > 0 && s.processAlive != nil && s.processAlive(pid) {
+		return http.StatusConflict, "run in progress"
+	}
+	if dErr := s.sessionRows.Deactivate(ctx, platform, channelID, rec.ThreadID, ""); dErr != nil {
+		slog.Warn("webhook: stale session deactivate failed", "repo", repo, "branch", branch, "thread_id", rec.ThreadID, "error", dErr)
+	}
+	return 0, ""
+}
+
+func (s *Server) sweepBranchSession(ctx context.Context, platform, channelID string, envelope WebhookEnvelope) {
+	if s == nil || s.sessionRows == nil || s.tasks == nil {
+		return
+	}
+	repo, branch := TaskRepoBranch(WebhookExecutionKey{}, envelope)
+	if repo == "" || branch == "" {
+		return
+	}
+	rec, ok := s.tasks.Lookup(repo, branch)
+	if !ok || strings.TrimSpace(rec.ThreadID) == "" {
+		return
+	}
+	sessionID, pid, err := s.sessionRows.Active(ctx, platform, channelID, rec.ThreadID, "")
+	if err != nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	if pid > 0 && s.processAlive != nil && s.processAlive(pid) {
+		return
+	}
+	if dErr := s.sessionRows.Deactivate(ctx, platform, channelID, rec.ThreadID, ""); dErr != nil {
+		slog.Warn("webhook: stale session deactivate failed", "repo", repo, "branch", branch, "thread_id", rec.ThreadID, "error", dErr)
+	}
+}
+
 type DispatchTask struct {
 	ID        string
 	Repo      string
@@ -362,8 +411,24 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		writeDispatchJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid dispatch body: " + err.Error()})
 		return
 	}
+	if isRedispatchRequest(req) && s.tasks != nil {
+		repo := normalizeRepoKey(req.Repo)
+		branch := strings.TrimSpace(req.Branch)
+		if rec, ok := s.tasks.ResolveTaskThread(repo, branch, "redispatch"); ok && strings.TrimSpace(req.Brief) == "" && strings.TrimSpace(req.SpecPath) == "" {
+			if orig := strings.TrimSpace(rec.SpecPath); orig != "" {
+				req.SpecPath = orig
+			} else {
+				writeDispatchJSON(w, http.StatusConflict, map[string]string{"error": "no brief for " + repo + "#" + branch})
+				return
+			}
+		}
+	}
 	if err := req.Validate(); err != nil {
 		writeDispatchJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if status, reason := s.admitBranchRun(r.Context(), normalizeRepoKey(req.Repo), strings.TrimSpace(req.Branch)); status != 0 {
+		writeDispatchJSON(w, status, map[string]string{"error": reason})
 		return
 	}
 	var endpoints []config.EndpointConfig
@@ -551,6 +616,7 @@ func (s *Server) handleRedispatch(w http.ResponseWriter, r *http.Request, req Di
 		if err := s.notifier(ctx, platform, target, FormatRedispatchSeparator(task, s.statusIcons)); err != nil {
 			slog.Warn("webhook: redispatch thread post failed", "repo", task.Repo, "branch", task.Branch, "error", err)
 		}
+		s.postDispatchBrief(ctx, platform, target, task.Brief)
 	}
 	suppressAfter := s.tasks.UpsertWithSpec(task.Repo, task.Branch, rec.RootMessageID, threadID, TaskDispatched, task.SpecPath).UpdatedAt
 	s.scheduleDispatchFallback(task, suppressAfter)

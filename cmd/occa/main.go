@@ -443,12 +443,11 @@ func main() {
 			WebhookAbortTimeout: cfg.Runtime.Relay.WebhookAbortTimeout,
 			VerifyTimeout:       cfg.Runtime.Relay.VerifyTimeout,
 		}, webhook.TaskOptions{
-			Registry:     taskRegistry,
-			Icons:        cfg.Webhooks.StatusIcons,
-			Colors:       cfg.Webhooks.StatusColors,
-			PRQueues:     db.PRQueueRepo(),
-			Endpoints:    cfg.Webhooks.Endpoints,
-			VerboseSteps: cfg.Webhooks.Defaults.VerboseSteps,
+			Registry:  taskRegistry,
+			Icons:     cfg.Webhooks.StatusIcons,
+			Colors:    cfg.Webhooks.StatusColors,
+			PRQueues:  db.PRQueueRepo(),
+			Endpoints: cfg.Webhooks.Endpoints,
 		})
 
 		webhookSrv = webhook.New(cfg.Webhooks, webhookExecutor, db.WebhookDeliveryRepo())
@@ -584,6 +583,8 @@ func main() {
 		})
 		webhookSrv.SetWorkspaceResolver(webhook.NewWorkspaceManagerWithTTL(cfg.Webhooks.Runtime.IsolatedWorkspaceTTL))
 		webhookSrv.SetSessionStore(db.SessionRepo())
+		webhookSrv.SetSessionRowStore(db.SessionRepo())
+		webhookSrv.SetProcessAlive(process.Alive)
 		rt.SetDispatchLifecycle(webhookSrv)
 		webhookSrv.SetOperatorAuthorizer(func(platform, userID string) bool {
 			var list []string
@@ -860,17 +861,6 @@ func refreshThreadBannerAndStatus(ch channel.Channel, taskOpts webhook.TaskOptio
 	if platform == "telegram" && !strings.Contains(channelID, ":") {
 		target = channelID + ":" + threadID
 	}
-	banner := ""
-	if rec, ok := reg.Lookup(repo, branch); ok {
-		if strings.TrimSpace(rec.Phase) != phase {
-			banner = webhook.FormatPhaseBanner(workflow, lastEvent)
-		}
-	} else {
-		banner = webhook.FormatPhaseBanner(workflow, lastEvent)
-	}
-	if strings.TrimSpace(banner) != "" {
-		_, _ = notifySend(ch, target, banner)
-	}
 	reg.SetPhase(repo, branch, phase)
 	surfacePhase := webhook.PhaseForWorkflow(workflow)
 	text := webhook.FormatThreadStatusLine(
@@ -1145,6 +1135,7 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 					)
 					streamer = relay.NewStreamerWithSink(sink, outboundRenderer, render.PlatformFor(platform), relayCfg.NoEventTimeout)
 					streamer.SetVerboseSteps(taskOpts.VerboseSteps)
+					streamer.SetNarration(false)
 				}
 
 				turn := relay.WebhookTurn{

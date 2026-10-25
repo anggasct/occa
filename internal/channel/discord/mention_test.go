@@ -46,8 +46,8 @@ func TestSendNotificationMentionAllowsOnlyTheResolvedUser(t *testing.T) {
 	if len(payload.AllowedMentions.Users) != 1 || payload.AllowedMentions.Users[0] != "user-42" {
 		t.Fatalf("allowed users = %v, want the resolved user id", payload.AllowedMentions.Users)
 	}
-	if len(payload.AllowedMentions.Parse) != 1 || payload.AllowedMentions.Parse[0] != "users" {
-		t.Fatalf("allowed parse = %v, want users", payload.AllowedMentions.Parse)
+	if len(payload.AllowedMentions.Parse) != 0 {
+		t.Fatalf("allowed parse = %v, want empty (Discord rejects parse together with users)", payload.AllowedMentions.Parse)
 	}
 	if !strings.Contains(payload.Content, "needs you") {
 		t.Errorf("escalation copy = %q, want the required copy", payload.Content)
@@ -148,5 +148,34 @@ func TestDisabledButtonIsRendered(t *testing.T) {
 	}
 	if disabled, ok := labels["Open PR"]; !ok || disabled {
 		t.Fatalf("link button must stay enabled: %s", sentBody)
+	}
+}
+
+func TestSurfaceDiscipline_AC13(t *testing.T) {
+	var sentBody string
+	session := fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/channels/chan-1/messages") {
+			b, _ := io.ReadAll(r.Body)
+			sentBody = string(b)
+			return []byte(`{"id":"msg-123","channel_id":"chan-1"}`), http.StatusOK
+		}
+		return []byte(`{}`), http.StatusOK
+	})
+	a := &Adapter{session: session}
+	if _, err := a.SendNotificationMention("chan-1", "acme/widget#7 needs you", "user-42"); err != nil {
+		t.Fatalf("SendNotificationMention: %v", err)
+	}
+	var payload mentionPayload
+	if err := json.Unmarshal([]byte(sentBody), &payload); err != nil {
+		t.Fatalf("decode payload: %v (%s)", err, sentBody)
+	}
+	if len(payload.AllowedMentions.Users) != 1 || payload.AllowedMentions.Users[0] != "user-42" {
+		t.Fatalf("allowed users = %v, want only the resolved user", payload.AllowedMentions.Users)
+	}
+	if len(payload.AllowedMentions.Parse) != 0 {
+		t.Fatalf("allowed parse = %v, want empty (mutually exclusive with users)", payload.AllowedMentions.Parse)
+	}
+	if !strings.Contains(payload.Content, "<@user-42>") {
+		t.Fatalf("content = %q, want the mention token", payload.Content)
 	}
 }

@@ -175,11 +175,13 @@ func TestRedispatchOpenReusesSameParentThreadWithOriginalSpec(t *testing.T) {
 	if strings.Contains(editTexts[0], "specs/orig.md") {
 		t.Errorf("the channel parent must not carry the task brief: %q", editTexts[0])
 	}
-	if len(notifyTexts) != 1 {
-		t.Fatalf("thread posts = %d, want exactly 1 separator in same thread", len(notifyTexts))
+	if len(notifyTexts) != 2 {
+		t.Fatalf("thread posts = %d, want the separator and the brief in the same thread", len(notifyTexts))
 	}
-	if notifyTargets[0] != "thread-1" {
-		t.Errorf("retry thread target = %q, want existing thread-1", notifyTargets[0])
+	for _, target := range notifyTargets {
+		if target != "thread-1" {
+			t.Errorf("retry thread target = %q, want existing thread-1", target)
+		}
 	}
 	if !strings.Contains(strings.ToLower(notifyTexts[0]), "re-dispatch") {
 		t.Errorf("thread post must be retry separator: %q", notifyTexts[0])
@@ -193,6 +195,9 @@ func TestRedispatchOpenReusesSameParentThreadWithOriginalSpec(t *testing.T) {
 	}
 	if strings.Contains(notifyTexts[0], "specs/task.md") {
 		t.Errorf("separator must not contain placeholder: %q", notifyTexts[0])
+	}
+	if !strings.Contains(notifyTexts[1], "Read specs/orig.md") {
+		t.Errorf("re-dispatch must post the brief into the thread, got %q", notifyTexts[1])
 	}
 	after, ok := srv.tasks.Lookup("acme/widget", "feat/x")
 	if !ok {
@@ -276,11 +281,17 @@ func TestRedispatchKeepsPRParentOneLine(t *testing.T) {
 			t.Errorf("parent write %q must not carry %q", text, banned)
 		}
 	}
-	if len(threadWrites) != 1 {
-		t.Fatalf("thread posts = %d, want the dispatch card in the thread: %v", len(threadWrites), threadWrites)
+	if len(threadWrites) != 2 {
+		t.Fatalf("thread posts = %d, want the separator and the brief in the thread: %v", len(threadWrites), threadWrites)
 	}
-	if !strings.Contains(threadWrites[0], "thread-1") {
-		t.Errorf("dispatch card must land in the PR thread, got %q", threadWrites[0])
+	if !strings.Contains(threadWrites[0], "thread-1") || !strings.Contains(threadWrites[1], "thread-1") {
+		t.Errorf("dispatch posts must land in the PR thread, got %q", threadWrites)
+	}
+	if !strings.Contains(strings.ToLower(threadWrites[0]), "re-dispatch") {
+		t.Errorf("first thread post must be the separator, got %q", threadWrites[0])
+	}
+	if !strings.Contains(threadWrites[1], "Read specs/orig.md") {
+		t.Errorf("second thread post must be the brief, got %q", threadWrites[1])
 	}
 }
 

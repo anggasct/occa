@@ -116,8 +116,8 @@ func TestThreadUXLiveProofFullCycle(t *testing.T) {
 			t.Errorf("thread post leaks parent-only fields: %q", text)
 		}
 	}
-	if banners < 3 {
-		t.Errorf("want phase banners present (FIX/MERGE/DONE), got %d in %v", banners, threadPosts)
+	if banners != 0 {
+		t.Errorf("phase banners must never post; got %d in %v", banners, threadPosts)
 	}
 	for _, target := range threadTargets {
 		if strings.TrimSpace(target) != "thread-1" {

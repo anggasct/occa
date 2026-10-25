@@ -173,7 +173,7 @@ func (a *Adapter) registerCommands() {
 	}
 	commands := make([]tgbotapi.BotCommand, len(a.menu))
 	for i, m := range a.menu {
-		commands[i] = tgbotapi.BotCommand{Command: m.Alias, Description: sanitizeDescription(m.Description)}
+		commands[i] = tgbotapi.BotCommand{Command: sanitizeCommandName(m.Alias), Description: sanitizeDescription(m.Description)}
 	}
 	if _, err := a.bot.Request(tgbotapi.NewSetMyCommands(commands...)); err != nil {
 		slog.Warn("telegram: set commands failed", "error", err)

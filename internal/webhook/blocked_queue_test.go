@@ -106,7 +106,6 @@ func TestBlockedQueueSkipNamesPRAndBlockReason(t *testing.T) {
 		t.Fatal("a blocked queue must carry the block reason")
 	}
 
-	statesBefore := len(threads.find(threadStatusPrefix))
 	second := prReviewBody(7, "feat/x", "owner", "commented", "c0ffee-blocked-2")
 	if resp := post(t, url+"/review?secret=s3cret", "del-blocked-2", "pull_request_review", second); resp.StatusCode != http.StatusOK {
 		t.Fatalf("post: status %d", resp.StatusCode)
@@ -117,15 +116,14 @@ func TestBlockedQueueSkipNamesPRAndBlockReason(t *testing.T) {
 		t.Fatalf("executor calls = %d, want 1 + 3 retries, the blocked queue must not run again", got)
 	}
 
-	skips := waitForLoggedSurface(t, notices, "REVIEW skipped", 1)
-	skip := skips[len(skips)-1]
-	for _, want := range []string{"acme/widget#7", reason, "/retry re-runs review"} {
-		if !strings.Contains(skip, want) {
-			t.Errorf("skip card %q must carry %q", skip, want)
-		}
+	if skips := notices.find("REVIEW skipped"); len(skips) != 0 {
+		t.Errorf("a skipped delivery must stay silent, got %v", skips)
 	}
 
-	states := waitForLoggedSurface(t, threads, threadStatusPrefix, statesBefore+1)
+	states := threads.find(threadStatusPrefix)
+	if len(states) == 0 {
+		t.Fatal("the blocked PR must carry a state line")
+	}
 	status := states[len(states)-1]
 	for _, want := range []string{"acme/widget#7", reason, "ACTION:"} {
 		if !strings.Contains(status, want) {

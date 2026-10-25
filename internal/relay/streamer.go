@@ -56,6 +56,7 @@ type Streamer struct {
 	workingEditInterval        time.Duration
 	stopCallbackData           string
 	verboseSteps               bool
+	narration                  bool
 }
 
 type toolPhaseState struct {
@@ -108,7 +109,15 @@ func NewStreamerWithSink(sink Sink, renderer render.Renderer, platform render.Pl
 		now:                 time.Now,
 		workingEditInterval: 2 * time.Second,
 		verboseSteps:        true,
+		narration:           true,
 	}
+}
+
+// SetNarration toggles mid-run assistant text. When narration is off, the run
+// buffers the whole turn and posts only the last assistant segment; reasoning
+// and tool boundaries no longer flush a message.
+func (s *Streamer) SetNarration(enabled bool) {
+	s.narration = enabled
 }
 
 // SetVerboseSteps toggles the per-step tool lines. When they are off the run
@@ -209,6 +218,7 @@ func (s *Streamer) workingHandle(working *workingState) EditHandle {
 
 func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 	var buf strings.Builder
+	var lastSegment string
 	var handles []EditHandle
 	var lastChunks []string
 	var phase toolPhaseState
@@ -286,7 +296,11 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 			switch ev.Type {
 			case EventReasoning:
 				if buf.Len() > 0 {
-					s.finalizeSegment(&handles, &lastChunks, buf.String())
+					if s.narration {
+						s.finalizeSegment(&handles, &lastChunks, buf.String())
+					} else {
+						lastSegment = buf.String()
+					}
 					buf.Reset()
 				}
 				if !phase.working.reasoningActive {
@@ -318,12 +332,16 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 					}
 				}
 				s.resolveWorking(&phase.working, true, respTotal, respTypes, respReasoning)
-				if buf.Len() == 0 {
+				text := buf.String()
+				if !s.narration && strings.TrimSpace(text) == "" {
+					text = lastSegment
+				}
+				if strings.TrimSpace(text) == "" {
 					s.completedNotice(&handles)
 					s.setReaction(channel.ReactionSuccess)
 					return nil
 				}
-				if err := s.finalSync(&handles, &lastChunks, buf.String()); err != nil {
+				if err := s.finalSync(&handles, &lastChunks, text); err != nil {
 					s.setReaction(channel.ReactionError)
 					return err
 				}
@@ -355,7 +373,11 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				s.resetToolPhase(&phase)
 				if buf.Len() > 0 {
 					slog.Debug("streaming: segment break", "finalized_len", buf.Len())
-					s.finalizeSegment(&handles, &lastChunks, buf.String())
+					if s.narration {
+						s.finalizeSegment(&handles, &lastChunks, buf.String())
+					} else {
+						lastSegment = buf.String()
+					}
 					buf.Reset()
 				}
 			case EventTool:
@@ -368,7 +390,11 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 					}
 				}
 				if buf.Len() > 0 {
-					s.finalizeSegment(&handles, &lastChunks, buf.String())
+					if s.narration {
+						s.finalizeSegment(&handles, &lastChunks, buf.String())
+					} else {
+						lastSegment = buf.String()
+					}
 					buf.Reset()
 				}
 				name := ev.Delta
@@ -435,7 +461,9 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 		case <-timer.C:
 			if dirty {
 				dirty = false
-				s.syncMessages(&handles, &lastChunks, buf.String())
+				if s.narration {
+					s.syncMessages(&handles, &lastChunks, buf.String())
+				}
 			}
 			if phase.working.handle != nil || phase.working.ref != nil {
 				s.queueWorking(&phase.working)

@@ -201,7 +201,24 @@ func FormatRootCard(envelope WebhookEnvelope, workflow, status, reason, threadID
 	if threadID != "" && platform == "discord" {
 		card += "\n➡️ Details in thread: <#" + threadID + ">"
 	}
-	return card
+	return stripRootOnlyFields(card, envelope)
+}
+
+func stripRootOnlyFields(text string, envelope WebhookEnvelope) string {
+	lines := strings.Split(text, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "Delivery:") || strings.HasPrefix(trimmed, "Event:") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	text = strings.Join(kept, "\n")
+	if delivery := strings.TrimSpace(stringValue(envelope["delivery_id"])); delivery != "" {
+		text = strings.ReplaceAll(text, delivery, "")
+	}
+	return text
 }
 
 func formatDuration(d time.Duration) string {
@@ -257,7 +274,6 @@ func (s *Server) markSkipped(id int64, ep config.EndpointConfig, envelope Webhoo
 			return
 		}
 	}
-	s.emitAudit(context.Background(), ep, envelope, "SKIP", reason, "")
 }
 
 func FormatProgressStatus(step int, tool, toolCtx string, elapsed time.Duration) string {
@@ -305,60 +321,47 @@ func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelo
 		s.emitPRAudit(ctx, ep, envelope, status, reason, prKey, threadID)
 		return
 	}
-	targetChannel := auditTargetChannel(ep.Platform, ep.ChannelID, threadID)
-
-	if rootID != "" && (s.editor != nil || s.editorButtons != nil) {
-		text := card
-		if text == "" {
-			elapsed := time.Duration(0)
-			if wCtx != nil && !wCtx.StartTime.IsZero() {
-				elapsed = time.Since(wCtx.StartTime)
-			}
-			text = terminalRootCard(envelope, ep.Workflow, status, reason, threadID, ep.Platform, elapsed)
-		}
-		repo, branch := TaskRepoBranch(WebhookExecutionKey{}, envelope)
-		buttons := TaskParentButtons(ep.Platform, s.guildIDFor(ep.Platform, ep.ChannelID, threadID), envelope, repo, branch, threadID)
-		text = WithTaskHeaderWithButtons(text, envelope, ep.Workflow, TaskStatusForAudit(status, ep.Workflow), s.statusIcons, ep.Platform, buttons)
-		text = redactAuditSummary(text, ep.Secret)
-		if err := s.editParent(ctx, ep.Platform, targetChannel, rootID, text, buttons); err != nil {
-			slog.Warn("webhook: failed to edit root card, posting detail into thread once", "endpoint", ep.Name, "error", err)
-			if threadID != "" {
-				s.postThreadDetail(ctx, ep, threadID, envelope, status, reason)
-				return
-			}
-		} else {
-			if repo, branch := TaskRepoBranch(WebhookExecutionKey{}, envelope); repo != "" && branch != "" && threadID != "" {
-				s.postPhaseBannerIfChanged(ctx, ep.Platform, ep.ChannelID, threadID, repo, branch, ep.Workflow, reason)
-				phase := PhaseForWorkflow(ep.Workflow)
-				gated := s.gateEnvelope(ep, envelope)
-				s.ensureThreadStatus(ctx, ep.Platform, ep.ChannelID, threadID, repo, branch, "", ThreadStatusUpdate{
-					Phase:   phase,
-					Waiting: waitingReasonForGate(gated),
-					Next:    NextStepForPhase(phase),
-				})
-			}
-			if status == "SKIP" && threadID != "" {
-				s.postThreadDetail(ctx, ep, threadID, envelope, status, reason)
-			}
-			return
-		}
+	if threadID != "" {
+		s.postThreadDetail(ctx, ep, threadID, envelope, status, reason)
+		return
 	}
 
 	if status == "SKIP" && !ep.NotifyOnSkip() {
 		return
 	}
 
-	summary := redactAuditSummary(formatAuditSummary(envelope, ep.Workflow, status, reason), ep.Secret)
-	if s.notifier == nil {
+	targetChannel := auditTargetChannel(ep.Platform, ep.ChannelID, "")
+	repo, branch := TaskRepoBranch(WebhookExecutionKey{}, envelope)
+	buttons := TaskParentButtons(ep.Platform, s.guildIDFor(ep.Platform, ep.ChannelID, ""), envelope, repo, branch, "")
+	text := card
+	if text == "" {
+		elapsed := time.Duration(0)
+		if wCtx != nil && !wCtx.StartTime.IsZero() {
+			elapsed = time.Since(wCtx.StartTime)
+		}
+		text = terminalRootCard(envelope, ep.Workflow, status, reason, "", ep.Platform, elapsed)
+	}
+	text = WithTaskHeaderWithButtons(text, envelope, ep.Workflow, TaskStatusForAudit(status, ep.Workflow), s.statusIcons, ep.Platform, buttons)
+	text = redactAuditSummary(text, ep.Secret)
+
+	if rootID != "" && (s.editor != nil || s.editorButtons != nil) {
+		if err := s.editParent(ctx, ep.Platform, targetChannel, rootID, text, buttons); err == nil {
+			return
+		} else {
+			slog.Warn("webhook: failed to edit root card, posting it once", "endpoint", ep.Name, "error", err)
+		}
+	}
+	if s.notifier == nil && s.sender == nil && s.senderButtons == nil {
 		slog.Info("webhook: audit notification skipped", "endpoint", ep.Name, "status", status)
 		return
 	}
-	if threadID != "" && rootID != "" {
-		s.postThreadDetail(ctx, ep, threadID, envelope, status, reason)
+	id, err := s.sendParent(ctx, ep.Platform, targetChannel, text, buttons)
+	if err != nil {
+		slog.Warn("webhook: audit notification failed", "endpoint", ep.Name, "status", status, "error", err)
 		return
 	}
-	if err := s.notifier(ctx, ep.Platform, targetChannel, summary); err != nil {
-		slog.Warn("webhook: audit notification failed", "endpoint", ep.Name, "status", status, "error", err)
+	if id != "" && repo != "" && branch != "" && s.tasks != nil {
+		s.tasks.Upsert(repo, branch, id, "", TaskStatusForAudit(status, ep.Workflow))
 	}
 }
 

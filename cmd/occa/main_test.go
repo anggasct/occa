@@ -569,8 +569,8 @@ func TestWebhookExecutorWithThread(t *testing.T) {
 	if !foundStatus {
 		t.Error("missing pinned STATUS in thread")
 	}
-	if !foundBanner {
-		t.Error("missing phase banner in thread")
+	if foundBanner {
+		t.Error("phase banner must not post as its own message")
 	}
 	for i, m := range discordCh.sentMessages {
 		if m.channelID == "thread-999" && len(discordCh.sentButtons[i]) != 0 {
