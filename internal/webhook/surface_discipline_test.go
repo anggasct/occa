@@ -176,11 +176,14 @@ func TestSurfaceDiscipline_AC08(t *testing.T) {
 func TestSurfaceDiscipline_AC08TaskThreadHonorsPostedOutcome(t *testing.T) {
 	tests := []struct {
 		name           string
+		status         string
 		executorPosted bool
 		outcomePosted  bool
 	}{
-		{name: "executor posted the outcome and the audit skips", executorPosted: true, outcomePosted: true},
-		{name: "audit owns the only outcome when the run posted none", executorPosted: false, outcomePosted: false},
+		{name: "executor posted the completion and the audit skips", status: "COMPLETED", executorPosted: true, outcomePosted: true},
+		{name: "audit owns the only completion when the run posted none", status: "COMPLETED", executorPosted: false, outcomePosted: false},
+		{name: "executor posted the failure and the audit skips", status: "FAILED", executorPosted: true, outcomePosted: true},
+		{name: "audit owns the only failure when the run posted none", status: "FAILED", executorPosted: false, outcomePosted: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -203,7 +206,11 @@ func TestSurfaceDiscipline_AC08TaskThreadHonorsPostedOutcome(t *testing.T) {
 			ep := config.EndpointConfig{Platform: "discord", ChannelID: "chan-1", Workflow: "review"}
 			envelope := WebhookEnvelope{"repository": "acme/widget", "head_branch": "feat/x", "delivery_id": "del-ac08-full"}
 			if tc.executorPosted {
-				slim := FormatThreadSlimCard(envelope, ep.Workflow, TaskClaimed, nil)
+				slimStatus := TaskClaimed
+				if tc.status == "FAILED" {
+					slimStatus = TaskFailed
+				}
+				slim := FormatThreadSlimCard(envelope, ep.Workflow, slimStatus, nil)
 				if err := srv.notifyThread(context.Background(), "discord", "thread-1", slim); err != nil {
 					t.Fatalf("executor outcome post: %v", err)
 				}
@@ -213,7 +220,7 @@ func TestSurfaceDiscipline_AC08TaskThreadHonorsPostedOutcome(t *testing.T) {
 				ThreadID:      "thread-1",
 				OutcomePosted: tc.outcomePosted,
 			}
-			srv.emitAudit(context.Background(), ep, envelope, "COMPLETED", "", "", workCtx)
+			srv.emitAudit(context.Background(), ep, envelope, tc.status, "", "", workCtx)
 
 			if threadPosts != 1 {
 				t.Fatalf("thread outcome posts = %d, want exactly one", threadPosts)

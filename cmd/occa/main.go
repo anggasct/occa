@@ -1185,7 +1185,7 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 							// A PR thread carries one outcome line per run,
 							// written by the PR surface path. A second card
 							// here would put the v1 card back in the thread.
-							if strings.TrimSpace(workCtx.PRKey) == "" {
+							if strings.TrimSpace(workCtx.PRKey) == "" && !workCtx.OutcomePosted {
 								slim := webhook.FormatThreadSlimCard(workCtx.Envelope, workCtx.Workflow, webhook.TaskFailed, taskOpts.Icons)
 								if _, sendErr := notifySend(ch, targetChannelID, slim); sendErr == nil {
 									workCtx.OutcomePosted = true
@@ -1228,7 +1228,7 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 
 				if workCtx.RootMessageID != "" {
 					if workCtx.ThreadID != "" {
-						if strings.TrimSpace(workCtx.PRKey) == "" {
+						if strings.TrimSpace(workCtx.PRKey) == "" && !workCtx.OutcomePosted {
 							slim := webhook.FormatThreadSlimCard(workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons)
 							if _, sendErr := notifySend(ch, targetChannelID, slim); sendErr == nil {
 								workCtx.OutcomePosted = true
