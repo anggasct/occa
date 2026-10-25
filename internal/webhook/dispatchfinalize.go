@@ -252,8 +252,12 @@ func (s *Server) scheduleDispatchRetry(ctx context.Context, report DispatchRepor
 }
 
 func (s *Server) postDispatchBlocked(ctx context.Context, report DispatchReport, result DispatchResult, class failureClass, retries, max int) {
+	detail := strings.TrimSpace(result.Detail)
 	result.Status = DispatchBlocked
 	result.Detail = fmt.Sprintf("retry budget exhausted after %d/%d retries (%s)", retries, max, class.label())
+	if detail != "" {
+		result.Detail += ": " + clipTaskField(detail, 230)
+	}
 	task, ok := s.dispatchTask(report)
 	if !ok {
 		return
@@ -291,18 +295,6 @@ func (s *Server) dispatchNow() time.Time {
 		return s.fallbackNow()
 	}
 	return time.Now()
-}
-
-// dispatchFallbackBlocked reports whether the last-resort poll must stay
-// quiet. A terminal delivery is deduped, and a run is only "live" while its
-// agent session is still working — a run that was routed but never reached a
-// session, or whose session died, must still be polled.
-func (s *Server) dispatchFallbackBlocked(repo, branch, taskID string) bool {
-	state, ok := s.dispatchRunState(repo, branch, taskID)
-	if !ok {
-		return false
-	}
-	return state.Terminal || s.dispatchRunLive(state)
 }
 
 func (s *Server) dispatchRunState(repo, branch, taskID string) (dispatchRunState, bool) {
@@ -352,12 +344,8 @@ func (s *Server) noteDispatchRun(repo, branch, taskID string) {
 	s.dispatchRuns[key] = state
 }
 
-// FinalizeDispatch turns a finished dispatch turn into its artifact. The turn
+// finalizeDispatch turns a finished dispatch turn into its artifact. The turn
 // outcome is not trusted: commit, push and PR presence decide the status.
-func (s *Server) FinalizeDispatch(ctx context.Context, report DispatchReport) (DispatchResult, error) {
-	return s.finalizeDispatch(ctx, report, true)
-}
-
 func (s *Server) finalizeDispatch(ctx context.Context, report DispatchReport, notify bool) (DispatchResult, error) {
 	var result DispatchResult
 	report.Repo = normalizeRepoKey(report.Repo)

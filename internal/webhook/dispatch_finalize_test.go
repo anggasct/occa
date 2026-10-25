@@ -130,15 +130,15 @@ func newDispatchFixture(t *testing.T, dirty int) *dispatchFixture {
 
 func (f *dispatchFixture) finalize(t *testing.T, denied bool) DispatchResult {
 	t.Helper()
-	result, err := f.srv.FinalizeDispatch(context.Background(), DispatchReport{
+	result, err := f.srv.finalizeDispatch(context.Background(), DispatchReport{
 		Repo:    f.repo,
 		Branch:  f.branch,
 		TaskID:  f.task.ID,
 		Outcome: "complete",
 		Denied:  denied,
-	})
+	}, true)
 	if err != nil {
-		t.Fatalf("FinalizeDispatch: %v", err)
+		t.Fatalf("finalizeDispatch: %v", err)
 	}
 	return result
 }
@@ -272,11 +272,15 @@ func TestDispatchPR_AC04_PushFailureSchedulesRetry(t *testing.T) {
 	f.srv.DispatchRunFinished(context.Background(), f.repo, f.branch, f.task.ID, "session-1", "complete", false)
 	f.waitDispatchRetries(t, 1)
 	f.waitDispatchTerminal(t)
-	if !strings.Contains(f.noteText(), "retry budget exhausted") {
-		t.Fatalf("exhaustion finding missing: %q", f.noteText())
+	note := f.noteText()
+	if !strings.Contains(note, "retry budget exhausted") {
+		t.Fatalf("exhaustion finding missing: %q", note)
 	}
-	if !strings.Contains(f.noteText(), "push failed") {
-		t.Fatalf("exhaustion finding missing class: %q", f.noteText())
+	if !strings.Contains(note, "push failed") {
+		t.Fatalf("exhaustion finding missing class: %q", note)
+	}
+	if !strings.Contains(note, "does not appear to be a git repository") {
+		t.Fatalf("exhaustion finding missing push error detail: %q", note)
 	}
 }
 
@@ -292,8 +296,12 @@ func TestDispatchPR_AC05_PRFailureSchedulesRetry(t *testing.T) {
 	if got := f.gh.callCount("create"); got < 3 {
 		t.Fatalf("pr create calls = %d, want initial attempt plus two retries", got)
 	}
-	if !strings.Contains(f.noteText(), "retry budget exhausted") {
-		t.Fatalf("exhaustion finding missing: %q", f.noteText())
+	note := f.noteText()
+	if !strings.Contains(note, "retry budget exhausted") {
+		t.Fatalf("exhaustion finding missing: %q", note)
+	}
+	if !strings.Contains(note, "repository is not writable") {
+		t.Fatalf("exhaustion finding missing gh stderr: %q", note)
 	}
 }
 
@@ -399,9 +407,9 @@ func TestDispatchPR_AC09_SecondDispatchReusesPR(t *testing.T) {
 	})
 	f.gh.listOut = `[{"number":42,"url":"https://github.com/testowner/myrepo/pull/42"}]`
 	createBefore := f.gh.callCount("create")
-	result, err := f.srv.FinalizeDispatch(context.Background(), DispatchReport{Repo: f.repo, Branch: f.branch, TaskID: second.ID})
+	result, err := f.srv.finalizeDispatch(context.Background(), DispatchReport{Repo: f.repo, Branch: f.branch, TaskID: second.ID}, true)
 	if err != nil {
-		t.Fatalf("second FinalizeDispatch: %v", err)
+		t.Fatalf("second finalizeDispatch: %v", err)
 	}
 	if result.Status != DispatchCompleted || result.PRNumber != "42" {
 		t.Fatalf("second result = %+v", result)
@@ -443,25 +451,28 @@ func TestDispatchPR_AC12_DenialWithArtifactCompletes(t *testing.T) {
 
 func TestDispatchPR_AC13_DenialAloneNeverCompletes(t *testing.T) {
 	f := newDispatchFixture(t, 0)
+	f.srv.retryBackoffs = map[failureClass][]time.Duration{failurePermission: {time.Millisecond}}
 	f.srv.DispatchRunStarted(f.repo, f.branch, f.task.ID, "session-1", "")
-	result, err := f.srv.FinalizeDispatch(context.Background(), DispatchReport{
-		Repo:    f.repo,
-		Branch:  f.branch,
-		TaskID:  f.task.ID,
-		Outcome: "complete",
-		Denied:  true,
-	})
-	if err != nil {
-		t.Fatalf("FinalizeDispatch: %v", err)
+	f.srv.DispatchRunFinished(context.Background(), f.repo, f.branch, f.task.ID, "session-1", "complete", true)
+	f.waitDispatchTerminal(t)
+	if rec, ok := f.srv.tasks.Lookup(f.repo, f.branch); !ok || rec.Status != TaskFailed {
+		t.Fatalf("task status = %+v, want failed", rec.Status)
 	}
-	if result.Status != DispatchPermissionDeny {
-		t.Fatalf("status = %q, want %q", result.Status, DispatchPermissionDeny)
+	note := f.noteText()
+	if !strings.Contains(note, "permission denied") {
+		t.Fatalf("denial finding missing class: %q", note)
+	}
+	if strings.Contains(note, "PR #") {
+		t.Fatalf("denial alone must not report a completed PR: %q", note)
 	}
 }
 
 func TestDispatchPR_AC14_FindingPostedAtFinalize(t *testing.T) {
 	f := newDispatchFixture(t, 0)
-	f.finalize(t, false)
+	f.srv.retryBackoffs = map[failureClass][]time.Duration{failureNoWork: {time.Millisecond}}
+	f.srv.DispatchRunStarted(f.repo, f.branch, f.task.ID, "session-1", "")
+	f.srv.DispatchRunFinished(context.Background(), f.repo, f.branch, f.task.ID, "session-1", "complete", false)
+	f.waitDispatchTerminal(t)
 	note := f.noteText()
 	if !strings.Contains(note, "no work in lease") {
 		t.Fatalf("terminal finding missing class: %q", note)
@@ -469,65 +480,143 @@ func TestDispatchPR_AC14_FindingPostedAtFinalize(t *testing.T) {
 	if !strings.Contains(note, "ended without a PR") {
 		t.Fatalf("terminal finding missing missing-PR copy: %q", note)
 	}
+	if rec, ok := f.srv.tasks.Lookup(f.repo, f.branch); !ok || rec.Status != TaskFailed {
+		t.Fatalf("task status = %+v, want failed", rec.Status)
+	}
+}
+
+type dispatchFallbackFixture struct {
+	srv         *Server
+	mu          sync.Mutex
+	posts       []string
+	branchCalls int
+}
+
+func newDispatchFallbackFixture(t *testing.T, after time.Duration) *dispatchFallbackFixture {
+	t.Helper()
+	f := &dispatchFallbackFixture{srv: newDispatchServer(t, dispatchEndpoints("testowner/myrepo"))}
+	f.srv.SetFallbackPollAfter(after)
+	f.srv.SetBranchChecker(func(_ context.Context, _, _ string) (BranchPRResult, error) {
+		f.mu.Lock()
+		f.branchCalls++
+		f.mu.Unlock()
+		return BranchPRResult{}, nil
+	})
+	f.srv.SetNotifier(func(_ context.Context, _, _ string, text string) error {
+		f.mu.Lock()
+		f.posts = append(f.posts, text)
+		f.mu.Unlock()
+		return nil
+	})
+	t.Cleanup(f.srv.shutdownCancel)
+	return f
+}
+
+func (f *dispatchFallbackFixture) branchCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.branchCalls
+}
+
+func (f *dispatchFallbackFixture) postCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.posts)
+}
+
+func (f *dispatchFallbackFixture) waitBranchCall(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if f.branchCallCount() > 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("fallback poll never checked the branch")
+}
+
+func dispatchFallbackTask(id string) DispatchTask {
+	return DispatchTask{
+		ID:        id,
+		Repo:      "testowner/myrepo",
+		Branch:    "dispatch/test-branch",
+		CreatedAt: time.Date(2026, 10, 25, 23, 41, 0, 0, time.UTC),
+	}
 }
 
 func TestDispatchPR_AC15_ActiveRunBlocksFallback(t *testing.T) {
-	srv := &Server{}
-	now := time.Date(2026, 10, 25, 23, 41, 0, 0, time.UTC)
-	srv.fallbackNow = func() time.Time { return now }
-	srv.DispatchRunStarted("testowner/myrepo", "dispatch/test-branch", "task-1", "session-1", "")
+	f := newDispatchFallbackFixture(t, 10*time.Millisecond)
+	start := time.Date(2026, 10, 25, 23, 41, 0, 0, time.UTC)
+	var clockMu sync.Mutex
+	now := start
+	f.srv.fallbackNow = func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return now
+	}
+	f.srv.SetSessionLiveness(func(context.Context, string, string) (bool, error) { return true, nil })
+	f.srv.DispatchRunStarted("testowner/myrepo", "dispatch/test-branch", "task-1", "session-1", "")
+	clockMu.Lock()
 	now = now.Add(10 * time.Minute)
-	if !srv.dispatchFallbackBlocked("testowner/myrepo", "dispatch/test-branch", "task-1") {
-		t.Fatal("active run must block the fallback poll")
+	clockMu.Unlock()
+	f.srv.scheduleDispatchFallback(dispatchFallbackTask("task-1"), start)
+	time.Sleep(60 * time.Millisecond)
+	if got := f.branchCallCount(); got != 0 {
+		t.Fatalf("fallback branch checks = %d, want 0 while the run is live", got)
+	}
+	if got := f.postCount(); got != 0 {
+		t.Fatalf("fallback posts = %d, want 0 while the run is live", got)
 	}
 }
 
 func TestDispatchPR_AC16_TerminalFindingDedupesPerRun(t *testing.T) {
-	srv := &Server{}
-	now := time.Date(2026, 10, 25, 23, 41, 0, 0, time.UTC)
-	srv.fallbackNow = func() time.Time { return now }
-	srv.DispatchRunStarted("testowner/myrepo", "dispatch/test-branch", "task-1", "session-1", "")
-	srv.noteDispatchRun("testowner/myrepo", "dispatch/test-branch", "task-1")
-	now = now.Add(2 * time.Hour)
-	if !srv.dispatchFallbackBlocked("testowner/myrepo", "dispatch/test-branch", "task-1") {
-		t.Fatal("terminal finding must suppress a second fallback for the same run")
+	f := newDispatchFallbackFixture(t, 10*time.Millisecond)
+	fixed := time.Date(2026, 10, 25, 23, 41, 0, 0, time.UTC)
+	f.srv.fallbackNow = func() time.Time { return fixed }
+	f.srv.DispatchRunStarted("testowner/myrepo", "dispatch/test-branch", "task-1", "session-1", "")
+	f.srv.noteDispatchRun("testowner/myrepo", "dispatch/test-branch", "task-1")
+	f.srv.scheduleDispatchFallback(dispatchFallbackTask("task-1"), fixed)
+	time.Sleep(60 * time.Millisecond)
+	if got := f.branchCallCount(); got != 0 {
+		t.Fatalf("terminal run fallback branch checks = %d, want 0", got)
 	}
-	if srv.dispatchFallbackBlocked("testowner/myrepo", "dispatch/test-branch", "task-2") {
-		t.Fatal("a new run on the branch must not inherit the previous terminal finding")
+	if got := f.postCount(); got != 0 {
+		t.Fatalf("terminal run fallback posts = %d, want 0", got)
 	}
+	f.srv.DispatchRunStarted("testowner/myrepo", "dispatch/test-branch", "task-2", "", "")
+	f.srv.scheduleDispatchFallback(dispatchFallbackTask("task-2"), fixed)
+	f.waitBranchCall(t)
 }
 
-func TestDispatchPR_F002_LostRunDoesNotBlockFallback(t *testing.T) {
-	srv := &Server{}
-	now := time.Date(2026, 10, 25, 23, 41, 0, 0, time.UTC)
-	srv.fallbackNow = func() time.Time { return now }
-	srv.DispatchRunStarted("testowner/myrepo", "dispatch/test-branch", "task-1", "", "")
-	now = now.Add(10 * time.Minute)
-	if srv.dispatchFallbackBlocked("testowner/myrepo", "dispatch/test-branch", "task-1") {
-		t.Fatal("a routed run with no session must not suppress the fallback poll")
-	}
+func TestScheduleDispatchFallbackLostRun(t *testing.T) {
+	f := newDispatchFallbackFixture(t, 10*time.Millisecond)
+	f.srv.fallbackNow = func() time.Time { return time.Date(2026, 10, 25, 23, 41, 0, 0, time.UTC) }
+	f.srv.DispatchRunStarted("testowner/myrepo", "dispatch/test-branch", "task-1", "", "")
+	f.srv.scheduleDispatchFallback(dispatchFallbackTask("task-1"), time.Now())
+	f.waitBranchCall(t)
 }
 
-func TestDispatchPR_F002_DeadSessionDoesNotBlockFallback(t *testing.T) {
-	srv := &Server{}
-	now := time.Date(2026, 10, 25, 23, 41, 0, 0, time.UTC)
-	srv.fallbackNow = func() time.Time { return now }
-	srv.SetSessionLiveness(func(context.Context, string, string) (bool, error) { return false, nil })
-	srv.DispatchRunStarted("testowner/myrepo", "dispatch/test-branch", "task-1", "session-1", "")
-	now = now.Add(10 * time.Minute)
-	if srv.dispatchFallbackBlocked("testowner/myrepo", "dispatch/test-branch", "task-1") {
-		t.Fatal("a dead session must not suppress the fallback poll")
-	}
+func TestScheduleDispatchFallbackDeadSession(t *testing.T) {
+	f := newDispatchFallbackFixture(t, 10*time.Millisecond)
+	f.srv.fallbackNow = func() time.Time { return time.Date(2026, 10, 25, 23, 41, 0, 0, time.UTC) }
+	f.srv.SetSessionLiveness(func(context.Context, string, string) (bool, error) { return false, nil })
+	f.srv.DispatchRunStarted("testowner/myrepo", "dispatch/test-branch", "task-1", "session-1", "")
+	f.srv.scheduleDispatchFallback(dispatchFallbackTask("task-1"), time.Now())
+	f.waitBranchCall(t)
 }
 
-func TestDispatchPR_F002_LiveSessionBlocksFallback(t *testing.T) {
-	srv := &Server{}
-	now := time.Date(2026, 10, 25, 23, 41, 0, 0, time.UTC)
-	srv.fallbackNow = func() time.Time { return now }
-	srv.SetSessionLiveness(func(context.Context, string, string) (bool, error) { return true, nil })
-	srv.DispatchRunStarted("testowner/myrepo", "dispatch/test-branch", "task-1", "session-1", "")
-	now = now.Add(10 * time.Minute)
-	if !srv.dispatchFallbackBlocked("testowner/myrepo", "dispatch/test-branch", "task-1") {
-		t.Fatal("a live session must suppress the fallback poll")
+func TestScheduleDispatchFallbackLiveSession(t *testing.T) {
+	f := newDispatchFallbackFixture(t, 10*time.Millisecond)
+	f.srv.fallbackNow = func() time.Time { return time.Date(2026, 10, 25, 23, 41, 0, 0, time.UTC) }
+	f.srv.SetSessionLiveness(func(context.Context, string, string) (bool, error) { return true, nil })
+	f.srv.DispatchRunStarted("testowner/myrepo", "dispatch/test-branch", "task-1", "session-1", "")
+	f.srv.scheduleDispatchFallback(dispatchFallbackTask("task-1"), time.Now())
+	time.Sleep(60 * time.Millisecond)
+	if got := f.branchCallCount(); got != 0 {
+		t.Fatalf("live session fallback branch checks = %d, want 0", got)
+	}
+	if got := f.postCount(); got != 0 {
+		t.Fatalf("live session fallback posts = %d, want 0", got)
 	}
 }
