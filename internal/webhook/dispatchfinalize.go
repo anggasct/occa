@@ -24,10 +24,7 @@ const (
 	DispatchPermissionDeny DispatchStatus = "permission denied"
 )
 
-const (
-	dispatchRunActiveTTL = 30 * time.Minute
-	dispatchPRBodyBrief  = 1500
-)
+const dispatchPRBodyBrief = 1500
 
 var errDispatchPRCreate = errors.New("dispatch: pr create failed")
 
@@ -105,7 +102,9 @@ func (s *Server) DispatchRunFinished(ctx context.Context, repo, branch, taskID, 
 		Outcome:   outcome,
 		Denied:    denied,
 	}
-	result, err := s.FinalizeDispatch(ctx, report)
+	finishCtx, cancel := context.WithTimeout(ctx, harnessFinalizeTimeout+harnessFinalizeTimeout)
+	defer cancel()
+	result, err := s.FinalizeDispatch(finishCtx, report)
 	if err != nil {
 		slog.Error("webhook: dispatch finalize failed",
 			"repo", repo,
@@ -170,7 +169,11 @@ func (s *Server) dispatchFallbackBlocked(repo, branch, taskID string) bool {
 	if id := strings.TrimSpace(taskID); id != "" && state.TaskID != id {
 		return false
 	}
-	if state.Active && s.dispatchNow().Sub(state.StartedAt) < dispatchRunActiveTTL {
+	ttl := s.processingTimeout
+	if ttl <= 0 {
+		ttl = s.claimGrace
+	}
+	if state.Active && (ttl <= 0 || s.dispatchNow().Sub(state.StartedAt) < ttl) {
 		return true
 	}
 	return state.Terminal
