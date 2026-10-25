@@ -173,6 +173,58 @@ func TestSurfaceDiscipline_AC08(t *testing.T) {
 	}
 }
 
+func TestSurfaceDiscipline_AC08TaskThreadHonorsPostedOutcome(t *testing.T) {
+	tests := []struct {
+		name           string
+		executorPosted bool
+		outcomePosted  bool
+	}{
+		{name: "executor posted the outcome and the audit skips", executorPosted: true, outcomePosted: true},
+		{name: "audit owns the only outcome when the run posted none", executorPosted: false, outcomePosted: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var threadPosts, statusWrites int
+			srv := &Server{tasks: NewTaskThreadRegistry()}
+			srv.tasks.Upsert("acme/widget", "feat/x", "root-1", "thread-1", TaskClaimed)
+			srv.SetSender(func(_ context.Context, _, target, text string) (string, error) {
+				if target == "thread-1" && strings.Contains(text, threadStatusPrefix) {
+					statusWrites++
+				}
+				return "status-1", nil
+			})
+			srv.SetEditor(func(_ context.Context, _, _, _, _ string) error { return nil })
+			srv.SetNotifier(func(_ context.Context, _, target, _ string) error {
+				if target == "thread-1" {
+					threadPosts++
+				}
+				return nil
+			})
+			ep := config.EndpointConfig{Platform: "discord", ChannelID: "chan-1", Workflow: "review"}
+			envelope := WebhookEnvelope{"repository": "acme/widget", "head_branch": "feat/x", "delivery_id": "del-ac08-full"}
+			if tc.executorPosted {
+				slim := FormatThreadSlimCard(envelope, ep.Workflow, TaskClaimed, nil)
+				if err := srv.notifyThread(context.Background(), "discord", "thread-1", slim); err != nil {
+					t.Fatalf("executor outcome post: %v", err)
+				}
+			}
+			workCtx := &WebhookWorkContext{
+				RootMessageID: "root-1",
+				ThreadID:      "thread-1",
+				OutcomePosted: tc.outcomePosted,
+			}
+			srv.emitAudit(context.Background(), ep, envelope, "COMPLETED", "", "", workCtx)
+
+			if threadPosts != 1 {
+				t.Fatalf("thread outcome posts = %d, want exactly one", threadPosts)
+			}
+			if statusWrites != 1 {
+				t.Fatalf("status writes = %d, want the thread status line updated once", statusWrites)
+			}
+		})
+	}
+}
+
 func TestSurfaceDiscipline_AC09(t *testing.T) {
 	var sends, edits int
 	srv := &Server{tasks: NewTaskThreadRegistry()}

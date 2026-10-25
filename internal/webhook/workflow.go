@@ -323,7 +323,8 @@ func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelo
 		return
 	}
 	if threadID != "" {
-		s.postThreadDetail(ctx, ep, threadID, envelope, status, reason)
+		outcomePosted := wCtx != nil && wCtx.OutcomePosted
+		s.postThreadDetail(ctx, ep, threadID, envelope, status, reason, outcomePosted)
 		return
 	}
 
@@ -366,14 +367,13 @@ func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelo
 	}
 }
 
-func (s *Server) postThreadDetail(ctx context.Context, ep config.EndpointConfig, threadID string, envelope WebhookEnvelope, status, reason string) {
+func (s *Server) postThreadDetail(ctx context.Context, ep config.EndpointConfig, threadID string, envelope WebhookEnvelope, status, reason string, outcomePosted bool) {
 	if threadID == "" {
 		return
 	}
 	repo, branch := TaskRepoBranch(WebhookExecutionKey{}, envelope)
 	taskStatus := TaskStatusForAudit(status, ep.Workflow)
 	envelope = s.gateEnvelope(ep, envelope)
-	slim := redactAuditSummary(FormatThreadSlimCard(envelope, ep.Workflow, taskStatus, s.statusIcons), ep.Secret)
 	var target string
 	if ep.Platform == "telegram" && !strings.Contains(ep.ChannelID, ":") {
 		target = ep.ChannelID + ":" + threadID
@@ -391,6 +391,10 @@ func (s *Server) postThreadDetail(ctx context.Context, ep config.EndpointConfig,
 			Next:    NextStepForPhase(phase),
 		})
 	}
+	if outcomePosted {
+		return
+	}
+	slim := redactAuditSummary(FormatThreadSlimCard(envelope, ep.Workflow, taskStatus, s.statusIcons), ep.Secret)
 	if strings.TrimSpace(slim) == "" {
 		return
 	}

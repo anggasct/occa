@@ -1187,7 +1187,9 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 							// here would put the v1 card back in the thread.
 							if strings.TrimSpace(workCtx.PRKey) == "" {
 								slim := webhook.FormatThreadSlimCard(workCtx.Envelope, workCtx.Workflow, webhook.TaskFailed, taskOpts.Icons)
-								_, _ = notifySend(ch, targetChannelID, slim)
+								if _, sendErr := notifySend(ch, targetChannelID, slim); sendErr == nil {
+									workCtx.OutcomePosted = true
+								}
 							}
 							if taskOpts.Registry != nil {
 								if repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope); repo != "" && branch != "" {
@@ -1228,7 +1230,9 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 					if workCtx.ThreadID != "" {
 						if strings.TrimSpace(workCtx.PRKey) == "" {
 							slim := webhook.FormatThreadSlimCard(workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons)
-							_, _ = notifySend(ch, targetChannelID, slim)
+							if _, sendErr := notifySend(ch, targetChannelID, slim); sendErr == nil {
+								workCtx.OutcomePosted = true
+							}
 						}
 						if taskOpts.Registry != nil {
 							if repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope); repo != "" && branch != "" {
