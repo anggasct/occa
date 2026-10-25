@@ -1172,6 +1172,7 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 				workCtx.SessionAbortOK = result.AbortOK
 				workCtx.AgentPID = inst.PID()
 				workCtx.Progress = result.Progress
+				workCtx.OutcomePosted = err == nil && streamer != nil && streamer.OutcomePosted()
 
 				elapsed := time.Duration(0)
 				if !workCtx.StartTime.IsZero() {

@@ -57,6 +57,7 @@ type Streamer struct {
 	stopCallbackData           string
 	verboseSteps               bool
 	narration                  bool
+	outcomePosted              bool
 }
 
 type toolPhaseState struct {
@@ -118,6 +119,12 @@ func NewStreamerWithSink(sink Sink, renderer render.Renderer, platform render.Pl
 // and tool boundaries no longer flush a message.
 func (s *Streamer) SetNarration(enabled bool) {
 	s.narration = enabled
+}
+
+// OutcomePosted reports whether the completed run already emitted its single
+// human-readable outcome message.
+func (s *Streamer) OutcomePosted() bool {
+	return s.outcomePosted
 }
 
 // SetVerboseSteps toggles the per-step tool lines. When they are off the run
@@ -228,6 +235,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 
 	s.cards = nil
 	s.turnStep = 0
+	s.outcomePosted = false
 	defer func() { s.cards = nil }()
 
 	typingTicker := time.NewTicker(s.typingInterval)
@@ -338,6 +346,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 				}
 				if strings.TrimSpace(text) == "" {
 					s.completedNotice(&handles)
+					s.outcomePosted = true
 					s.setReaction(channel.ReactionSuccess)
 					return nil
 				}
@@ -346,6 +355,7 @@ func (s *Streamer) Run(ctx context.Context, events <-chan Event) error {
 					return err
 				}
 				s.completedNotice(&handles)
+				s.outcomePosted = true
 				s.setReaction(channel.ReactionSuccess)
 				return nil
 			case EventError:

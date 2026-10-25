@@ -318,7 +318,8 @@ func (s *Server) emitAudit(ctx context.Context, ep config.EndpointConfig, envelo
 		prKey = s.prKeyForEnvelope(ep, envelope)
 	}
 	if prKey != "" {
-		s.emitPRAudit(ctx, ep, envelope, status, reason, prKey, threadID)
+		outcomePosted := wCtx != nil && wCtx.OutcomePosted
+		s.emitPRAudit(ctx, ep, envelope, status, reason, prKey, threadID, outcomePosted)
 		return
 	}
 	if threadID != "" {
@@ -415,7 +416,7 @@ func timeoutSummary(budget, stallFreshness time.Duration, workCtx *WebhookWorkCo
 
 // emitPRAudit writes the PR surfaces: the channel parent stays one line, the
 // thread carries the state line and a single run outcome message.
-func (s *Server) emitPRAudit(ctx context.Context, ep config.EndpointConfig, envelope WebhookEnvelope, status, reason, prKey, threadID string) {
+func (s *Server) emitPRAudit(ctx context.Context, ep config.EndpointConfig, envelope WebhookEnvelope, status, reason, prKey, threadID string, outcomePosted bool) {
 	skip := isSkippedStatus(status)
 	phase := s.currentSurfacePhase(prKey)
 	if !skip {
@@ -454,6 +455,9 @@ func (s *Server) emitPRAudit(ctx context.Context, ep config.EndpointConfig, enve
 		Next:    NextStepForPhase(phase),
 		Action:  action,
 	})
+	if outcomePosted {
+		return
+	}
 	outcome := redactAuditSummary(FormatRunOutcome(envelope, ep.Workflow, status, reason, NextStepForPhase(phase)), ep.Secret)
 	if strings.TrimSpace(outcome) == "" {
 		return

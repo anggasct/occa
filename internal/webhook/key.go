@@ -50,6 +50,7 @@ type WebhookWorkContext struct {
 	RootMessageID  string
 	ThreadID       string
 	PRKey          string
+	OutcomePosted  bool
 	StartTime      time.Time
 	Heartbeat      func()
 	ReportSession  func(sessionID string)

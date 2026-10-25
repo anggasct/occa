@@ -281,8 +281,37 @@ func TestSurfaceDiscipline_AC11(t *testing.T) {
 	if !strings.Contains(sink.sent[1], "Verdict: APPROVED") {
 		t.Fatalf("outcome message = %q, want the final segment", sink.sent[1])
 	}
+	if !streamer.OutcomePosted() {
+		t.Fatal("streamer must record the outcome it posted")
+	}
 
-	srv.ensureThreadStatus(context.Background(), "discord", "chan-1", "thread-1", "acme/widget", "feat/x", "", ThreadStatusUpdate{Phase: PhaseReview})
+	prKey := "acme/widget#7"
+	srv.tasks.SetSurface(prKey, SurfaceUpdate{
+		RootMessageID: "root-1",
+		Repo:          "acme/widget",
+		PRNumber:      "7",
+		Branch:        "feat/x",
+		ThreadID:      "thread-1",
+		Phase:         string(PhaseReview),
+	})
+	ep := config.EndpointConfig{Platform: "discord", ChannelID: "chan-1", Workflow: "review"}
+	envelope := WebhookEnvelope{
+		"repository":  "acme/widget",
+		"head_branch": "feat/x",
+		"pr_number":   "7",
+		"event_type":  "pull_request",
+	}
+	workCtx := &WebhookWorkContext{
+		RootMessageID: "root-1",
+		ThreadID:      "thread-1",
+		PRKey:         prKey,
+		OutcomePosted: true,
+	}
+	srv.emitAudit(context.Background(), ep, envelope, "COMPLETED", "", "", workCtx)
+	if len(sink.sent) != 2 {
+		t.Fatalf("thread messages after the completion audit = %d, want no second outcome: %v", len(sink.sent), sink.sent)
+	}
+
 	srv.ensureThreadStatus(context.Background(), "discord", "chan-1", "thread-1", "acme/widget", "feat/x", "", ThreadStatusUpdate{Phase: PhaseFix})
 	if sends != 1 || edits != 1 {
 		t.Fatalf("status writes = %d sends + %d edits, want one status line edited once", sends, edits)
