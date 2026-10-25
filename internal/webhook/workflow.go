@@ -39,6 +39,43 @@ func prState(envelope WebhookEnvelope) string {
 	return strings.ToLower(stringValue(envelope["pr_state"]))
 }
 
+func mergeProof(envelope WebhookEnvelope) bool {
+	return boolValue(envelope["merged"]) || prState(envelope) == "merged"
+}
+
+func withMergeProof(envelope WebhookEnvelope) WebhookEnvelope {
+	out := make(WebhookEnvelope, len(envelope)+2)
+	for key, value := range envelope {
+		out[key] = value
+	}
+	out["merged"] = true
+	out["pr_state"] = "merged"
+	return out
+}
+
+func mergeContradiction(envelope WebhookEnvelope) (string, bool) {
+	if prState(envelope) == "open" {
+		return "pr_state=open", true
+	}
+	eventType := strings.ToLower(strings.TrimSpace(stringValue(envelope["event_type"])))
+	action := strings.ToLower(strings.TrimSpace(stringValue(envelope["action"])))
+	if eventType == "pull_request" && !boolValue(envelope["merged"]) {
+		switch action {
+		case "opened", "reopened", "synchronize":
+			return "pull_request." + action, true
+		}
+	}
+	return "", false
+}
+
+func isSkippedStatus(status string) bool {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "SKIP", "SKIPPED":
+		return true
+	}
+	return false
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
@@ -376,20 +413,32 @@ func timeoutSummary(budget, stallFreshness time.Duration, workCtx *WebhookWorkCo
 // emitPRAudit writes the PR surfaces: the channel parent stays one line, the
 // thread carries the state line and a single run outcome message.
 func (s *Server) emitPRAudit(ctx context.Context, ep config.EndpointConfig, envelope WebhookEnvelope, status, reason, prKey, threadID string) {
+	skip := isSkippedStatus(status)
 	phase := s.currentSurfacePhase(prKey)
+	if !skip {
+		if phase == "" || phase == PhaseQueued {
+			if admissionPhase(ep.Workflow) != "" {
+				phase = PhaseForWorkflow(ep.Workflow)
+			}
+		}
+		if strings.EqualFold(strings.TrimSpace(status), "FAILED") {
+			phase = PhaseFailed
+		}
+	}
 	if phase == "" {
-		phase = PhaseForWorkflow(ep.Workflow)
+		return
 	}
-	if strings.EqualFold(strings.TrimSpace(status), "FAILED") {
-		phase = PhaseFailed
+	if !skip {
+		s.syncPhaseParent(ctx, ep, prKey, envelope, phase)
 	}
-	s.syncPhaseParent(ctx, ep, prKey, envelope, phase)
 	if strings.TrimSpace(threadID) == "" {
 		return
 	}
 	envelope = withGateVerdict(envelope, s.gateVerdict(prKey))
 	taskRepo, branch := TaskRepoBranch(WebhookExecutionKey{}, envelope)
-	s.postPhaseBannerIfChanged(ctx, ep.Platform, ep.ChannelID, threadID, taskRepo, branch, ep.Workflow, reason)
+	if !skip {
+		s.postPhaseBannerIfChanged(ctx, ep.Platform, ep.ChannelID, threadID, taskRepo, branch, ep.Workflow, reason)
+	}
 	waiting, action := s.queueState(ctx, prKey, phase)
 	if action == "" {
 		if gateReason := waitingReasonForGate(envelope); gateReason != "" {

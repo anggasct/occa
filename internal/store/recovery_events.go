@@ -34,9 +34,11 @@ func (r *sqliteRecoveryEventRepo) Put(ctx context.Context, e RecoveryEvent) erro
 		return fmt.Errorf("store: recovery event insert: %w", err)
 	}
 
-	cutoff := time.Now().Add(-r.retentionOrDefault()).Unix()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM recovery_event WHERE created_at < ?`, cutoff); err != nil {
-		return fmt.Errorf("store: recovery event prune: %w", err)
+	if retention := r.retentionOrDefault(); retention > 0 {
+		cutoff := time.Now().Add(-retention).Unix()
+		if _, err := tx.ExecContext(ctx, `DELETE FROM recovery_event WHERE created_at < ?`, cutoff); err != nil {
+			return fmt.Errorf("store: recovery event prune: %w", err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {

@@ -87,6 +87,17 @@ func PhaseForWorkflow(workflow string) Phase {
 	}
 }
 
+func admissionPhase(workflow string) Phase {
+	switch strings.TrimSpace(strings.ToLower(workflow)) {
+	case "review", "reviewer", "fix", "pr-fix", "merge":
+		return PhaseQueued
+	case "merged":
+		return ""
+	default:
+		return PhaseForWorkflow(workflow)
+	}
+}
+
 func IsTerminalPhase(phase Phase) bool {
 	switch phase {
 	case PhaseMerged, PhaseFailed, PhaseBlocked:
