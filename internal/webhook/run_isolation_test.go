@@ -662,7 +662,7 @@ func TestTerminalPRRefusesSurfaceWrites(t *testing.T) {
 	ep := srv.endpoints["/review"]
 	ctx := context.Background()
 	prKey := "acme/widget#181"
-	envelope := surfaceEnvelope()
+	envelope := mergeSurfaceEnvelope()
 
 	srv.syncPhaseParent(ctx, ep, prKey, envelope, PhaseMerged)
 	srv.ensureThreadStatus(ctx, ep.Platform, ep.ChannelID, "thread-9", "acme/widget", "feat/x", prKey, ThreadStatusUpdate{Phase: PhaseMerged})

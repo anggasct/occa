@@ -55,7 +55,7 @@ func (s *Server) markMergeConfirmed(ctx context.Context, ep config.EndpointConfi
 	if workCtx == nil || strings.TrimSpace(workCtx.PRKey) == "" {
 		return
 	}
-	s.syncPhaseParent(ctx, ep, workCtx.PRKey, envelope, PhaseMerged)
+	s.syncPhaseParent(ctx, ep, workCtx.PRKey, withMergeProof(envelope), PhaseMerged)
 	if strings.TrimSpace(workCtx.ThreadID) == "" {
 		return
 	}
@@ -187,7 +187,7 @@ func (s *Server) markMergedTerminal(item dispatchItem, envelope WebhookEnvelope,
 	if rec, ok := s.tasks.ResolvePRThread(prKey); ok && threadID == "" {
 		threadID = strings.TrimSpace(rec.ThreadID)
 	}
-	s.syncPhaseParent(ctx, item.ep, prKey, envelope, PhaseMerged)
+	s.syncPhaseParent(ctx, item.ep, prKey, withMergeProof(envelope), PhaseMerged)
 	if threadID != "" {
 		s.ensureThreadStatus(ctx, item.ep.Platform, item.ep.ChannelID, threadID, repo, branch, prKey, ThreadStatusUpdate{Phase: PhaseMerged})
 	}

@@ -130,7 +130,7 @@ func TestParentCardFreezesOnTerminal(t *testing.T) {
 	delivery := seedRunDelivery(t, st, prKey, startedAt, now)
 	seedActiveRun(t, st, prKey, "thread-9", "parent-1", delivery.ID)
 
-	srv.syncPhaseParent(ctx, srv.endpoints["/review"], prKey, surfaceEnvelope(), PhaseMerged)
+	srv.syncPhaseParent(ctx, srv.endpoints["/review"], prKey, mergeSurfaceEnvelope(), PhaseMerged)
 	sent, edited, _, _ := rec.snapshot()
 	writes := append(sent, edited...)
 	frozen := false
@@ -459,7 +459,7 @@ func TestTerminalRateLimitRetriesParentAndThread(t *testing.T) {
 		return fmt.Errorf("%w: slow down", channel.ErrRateLimited)
 	})
 
-	srv.syncPhaseParent(ctx, srv.endpoints["/merged"], prKey, surfaceEnvelope(), PhaseMerged)
+	srv.syncPhaseParent(ctx, srv.endpoints["/merged"], prKey, mergeSurfaceEnvelope(), PhaseMerged)
 	srv.ensureThreadStatus(ctx, "discord", "chan-1", "thread-9", "acme/widget", "feat/x", prKey, ThreadStatusUpdate{Phase: PhaseMerged})
 
 	srv.SetEditorWithButtons(func(_ context.Context, _, _, msgID, text string, buttons []channel.Button) error {
@@ -601,7 +601,7 @@ func TestParentCardAgeTickRepairsTerminalPhase(t *testing.T) {
 	srv.SetEditorWithButtons(func(_ context.Context, _, _, msgID, text string, buttons []channel.Button) error {
 		if msgID == "parent-1" && !transitioned {
 			transitioned = true
-			srv.syncPhaseParent(ctx, srv.endpoints["/merged"], prKey, surfaceEnvelope(), PhaseMerged)
+			srv.syncPhaseParent(ctx, srv.endpoints["/merged"], prKey, mergeSurfaceEnvelope(), PhaseMerged)
 		}
 		rec.add(&rec.edited, surfaceMessage{messageID: msgID, text: text, buttons: buttons})
 		return nil

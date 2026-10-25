@@ -236,7 +236,7 @@ func TestParentFreezesAfterTerminalPhase(t *testing.T) {
 	ep := srv.endpoints["/review"]
 	ctx := context.Background()
 	prKey := "acme/widget#181"
-	envelope := surfaceEnvelope()
+	envelope := mergeSurfaceEnvelope()
 
 	srv.syncPhaseParent(ctx, ep, prKey, envelope, PhaseMerged)
 	_, edited, _, _ := rec.snapshot()
@@ -1068,7 +1068,11 @@ func TestPrSurfaceReusesPersistedHomeAfterRestart(t *testing.T) {
 				t.Fatalf("ensure pr: %v", err)
 			}
 
-			srv.syncPhaseParent(ctx, ep, prKey, surfaceEnvelope(), phase)
+			envelope := surfaceEnvelope()
+			if phase == PhaseMerged {
+				envelope = mergeSurfaceEnvelope()
+			}
+			srv.syncPhaseParent(ctx, ep, prKey, envelope, phase)
 
 			sent, edited, _, _ := rec.snapshot()
 			if len(sent) != 0 {

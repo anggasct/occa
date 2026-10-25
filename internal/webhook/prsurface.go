@@ -383,19 +383,37 @@ func (s *Server) syncPhaseParent(ctx context.Context, ep config.EndpointConfig, 
 		// PR already owns.
 		rootID, persistedThreadID = s.reusablePersistedParent(ctx, ep, prKey, envelope)
 	}
+	if phase == PhaseMerged && previous != PhaseMerged && !mergeProof(envelope) {
+		slog.Info("webhook: merged phase refused (no merge proof)", "pr_key", prKey, "source", ep.Name)
+		return rootID, false
+	}
+	repaired := false
 	if known {
-		if previous == phase {
-			return rootID, false
+		if previous == PhaseMerged {
+			if evidence, contradicted := mergeContradiction(envelope); contradicted {
+				s.reopenPRSurface(prKey)
+				slog.Info("webhook: surface merged repaired", "pr_key", prKey, "evidence", evidence)
+				phase = admissionPhase(ep.Workflow)
+				if phase == "" {
+					phase = PhaseQueued
+				}
+				repaired = true
+			}
 		}
-		// A blocked or failed parent stays frozen until a retry is admitted.
-		if IsTerminalPhase(previous) && !surfaceReopenedForRetry(s.tasks, prKey, previous) {
-			slog.Info("webhook: write refused, PR terminal",
-				"pr_key", prKey,
-				"surface", "parent",
-				"run", string(phase),
-				"phase", string(previous),
-			)
-			return rootID, false
+		if !repaired {
+			if previous == phase {
+				return rootID, false
+			}
+			// A blocked or failed parent stays frozen until a retry is admitted.
+			if IsTerminalPhase(previous) && !surfaceReopenedForRetry(s.tasks, prKey, previous) {
+				slog.Info("webhook: write refused, PR terminal",
+					"pr_key", prKey,
+					"surface", "parent",
+					"run", string(phase),
+					"phase", string(previous),
+				)
+				return rootID, false
+			}
 		}
 	}
 	repo, prNumber := repoAndNumber(prKey, envelope)
@@ -1101,12 +1119,13 @@ func EnvelopeString(envelope WebhookEnvelope, key string) string {
 }
 
 // markPRQueued shows a PR in the channel as soon as its first delivery is
-// accepted. Later deliveries keep the phase they already have.
+// accepted. Later deliveries keep the phase they already have, except a
+// merged surface that the delivery's evidence contradicts.
 func (s *Server) markPRQueued(prKey string, ep config.EndpointConfig, envelope WebhookEnvelope) {
 	if s == nil || s.tasks == nil || strings.TrimSpace(prKey) == "" {
 		return
 	}
-	if _, phase, _, ok := s.tasks.SurfaceState(prKey); ok && phase != "" {
+	if _, phase, _, ok := s.tasks.SurfaceState(prKey); ok && phase != "" && phase != PhaseMerged {
 		return
 	}
 	s.syncPhaseParent(context.Background(), ep, prKey, envelope, PhaseQueued)

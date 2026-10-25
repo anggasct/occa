@@ -2354,9 +2354,11 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 	ctx, cancel := context.WithTimeout(context.Background(), s.processingTimeout)
 	defer cancel()
 	if workCtx.PRKey != "" {
-		phase := PhaseForWorkflow(ep.Workflow)
-		if rootID, _ := s.syncPhaseParent(ctx, ep, workCtx.PRKey, envelope, phase); rootID != "" {
-			workCtx.RootMessageID = rootID
+		if admissionPhase(ep.Workflow) != "" {
+			phase := PhaseForWorkflow(ep.Workflow)
+			if rootID, _ := s.syncPhaseParent(ctx, ep, workCtx.PRKey, envelope, phase); rootID != "" {
+				workCtx.RootMessageID = rootID
+			}
 		}
 	}
 	if workCtx.PRKey != "" && workCtx.SessionID == "" && s.prQueues != nil {
