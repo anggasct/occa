@@ -121,18 +121,18 @@ func TestAdmissionPhaseMergedIsEmpty(t *testing.T) {
 func TestPreRunWriteSkipsMergedLane(t *testing.T) {
 	srv, st, rec := newSurfaceServer(t)
 	setPRState(srv, PRStateOpen, nil)
-	ep := srv.endpoints["/merge"]
+	ep := srv.endpoints["/merged"]
 	ep.Admit = defaultCatchAllAdmit()
-	srv.endpoints["/merge"] = ep
+	srv.endpoints["/merged"] = ep
 	body := []byte(prReviewBody(181, "feat/x", "owner", "approved", "c0ffee"))
-	deliveryID := "del-pre-run-merge"
+	deliveryID := "del-pre-run-merged"
 	receiptID := seedProcessingDelivery(t, st, ep.Name, deliveryID, "pull_request_review")
 
 	if err := srv.executeDelivery(ep, body, receiptID, deliveryID, "pull_request_review", 1, nil, func() bool { return false }, nil); err != nil {
-		t.Fatalf("execute merge lane: %v", err)
+		t.Fatalf("execute merged lane: %v", err)
 	}
-	if _, phase, _, ok := srv.prSurfaceState("acme/widget#181"); ok && phase == PhaseMerged {
-		t.Fatal("merge lane painted merged before confirmation")
+	if _, phase, _, ok := srv.prSurfaceState("acme/widget#181"); ok {
+		t.Fatalf("merged lane painted phase %q before confirmation, want no phase write", phase)
 	}
 	sent, edited, _, _ := rec.snapshot()
 	for _, msg := range append(sent, edited...) {

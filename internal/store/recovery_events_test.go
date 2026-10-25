@@ -50,6 +50,34 @@ func TestRecoveryEventPutAndList(t *testing.T) {
 	}
 }
 
+func TestRecoveryEventZeroRetentionKeepsRows(t *testing.T) {
+	dir := t.TempDir()
+	s, err := OpenWithDefaultWorkdir(filepath.Join(dir, "test.db"), "")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	repo := s.RecoveryEventRepo()
+	old := RecoveryEvent{
+		Platform: "telegram", ChannelID: "chat1", Workdir: "/repo",
+		Trigger: RecoveryTriggerProcessExit, Outcome: RecoveryOutcomeFailed,
+		CorrelationID: "zero-retention",
+		CreatedAt:     time.Now().Add(-time.Hour).Unix(),
+	}
+	if err := repo.Put(context.Background(), old); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	events, err := repo.List(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(events) != 1 || events[0].CorrelationID != "zero-retention" {
+		t.Fatalf("events = %+v, want the unpruned row", events)
+	}
+}
+
 func TestRecoveryEventPrunesOldRows(t *testing.T) {
 	dir := t.TempDir()
 	retention := 30 * 24 * time.Hour
