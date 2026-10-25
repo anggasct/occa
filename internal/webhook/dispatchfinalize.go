@@ -548,6 +548,15 @@ func (s *Server) finishDispatch(ctx context.Context, report DispatchReport, task
 			platform, channelID = s.dispatchNotifyTarget(repo)
 		}
 		if platform != "" && channelID != "" {
+			phase := PhaseFailed
+			action := "dispatch failed — " + string(result.Status)
+			prKey := ""
+			if result.Status == DispatchCompleted {
+				phase = PhaseReview
+				action = "PR #" + result.PRNumber + " open — queued for review"
+				prKey = dispatchPRKey(repo, result.PRNumber)
+			}
+			s.ensureThreadStatus(ctx, platform, channelID, threadID, repo, branch, prKey, ThreadStatusUpdate{Phase: phase, Action: action})
 			target := threadTargetFor(platform, channelID, threadID)
 			if err := s.notifyThread(ctx, platform, target, FormatDispatchFinding(repo, branch, result)); err != nil {
 				slog.Warn("webhook: dispatch finding post failed", "repo", repo, "branch", branch, "error", err)
