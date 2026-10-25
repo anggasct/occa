@@ -75,6 +75,11 @@ type InstanceProvider interface {
 	ForceStop(workdir string)
 }
 
+type DispatchLifecycle interface {
+	DispatchRunStarted(repo, branch, taskID, sessionID, workdir string)
+	DispatchRunFinished(ctx context.Context, repo, branch, taskID, sessionID, outcome string, denied bool)
+}
+
 type Router struct {
 	commands               map[string]Command
 	instances              InstanceProvider
@@ -110,6 +115,7 @@ type Router struct {
 	dispatchToken          string
 	dispatchURL            string
 	dispatchClient         *http.Client
+	dispatchLifecycle      DispatchLifecycle
 	connectDeps            *ConnectRepoDeps
 	connectConfigPath      string
 	operatorHook           func(ctx context.Context, msg channel.IncomingMessage, name, args string) (string, bool, error)
@@ -142,6 +148,10 @@ func (r *Router) SetDispatchConfig(token, url string) {
 
 func (r *Router) SetOperatorCommandHook(hook func(ctx context.Context, msg channel.IncomingMessage, name, args string) (string, bool, error)) {
 	r.operatorHook = hook
+}
+
+func (r *Router) SetDispatchLifecycle(l DispatchLifecycle) {
+	r.dispatchLifecycle = l
 }
 
 func New(instances InstanceProvider, st store.Store, defaultWorkdir string, adminID string, cfg Config) *Router {
@@ -206,8 +216,12 @@ func (r *Router) Route(ctx context.Context, msg channel.IncomingMessage) error {
 		slog.Info("thread parent resolved", "platform", msg.Platform, "thread_id", msg.ThreadID, "parent", parent, "source", source)
 	}
 	if msg.IsSelfDispatch {
-		if _, _, _, ok := channel.ParseDispatchSummary(msg.Text); !ok {
+		repo, branch, taskID, ok := channel.ParseDispatchSummary(msg.Text)
+		if !ok {
 			return nil
+		}
+		if r.dispatchLifecycle != nil {
+			r.dispatchLifecycle.DispatchRunStarted(repo, branch, taskID, "", "")
 		}
 		msg.IsMention = true
 	} else if err := r.authorize(ctx, msg); err != nil {
@@ -635,8 +649,30 @@ func (r *Router) executePassthrough(taskCtx context.Context, cancel context.Canc
 		return inst.Client().SendMessage(dispatchCtx, sessionID, text, model, attachments)
 	}
 
-	go r.runResponse(taskCtx, cancel, key, msg, inst, sessionID, events, dispatch)
+	var dispatchRun *dispatchRunReport
+	if repo, branch, taskID, ok := dispatchSummary(msg); ok {
+		dispatchRun = &dispatchRunReport{repo: repo, branch: branch, taskID: taskID, sessionID: sessionID}
+		if r.dispatchLifecycle != nil {
+			r.dispatchLifecycle.DispatchRunStarted(repo, branch, taskID, sessionID, inst.Workdir())
+		}
+	}
+
+	go r.runResponse(taskCtx, cancel, key, msg, inst, sessionID, events, dispatch, dispatchRun)
 	return nil
+}
+
+type dispatchRunReport struct {
+	repo      string
+	branch    string
+	taskID    string
+	sessionID string
+}
+
+func dispatchSummary(msg channel.IncomingMessage) (string, string, string, bool) {
+	if !msg.IsSelfDispatch {
+		return "", "", "", false
+	}
+	return channel.ParseDispatchSummary(msg.Text)
 }
 
 func (r *Router) verifyResumedSession(ctx context.Context, msg channel.IncomingMessage, inst AgentInstance, threadID, userID string, resolution relay.SessionResolution, sessionID string) string {

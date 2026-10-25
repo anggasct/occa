@@ -584,6 +584,7 @@ func main() {
 		})
 		webhookSrv.SetWorkspaceResolver(webhook.NewWorkspaceManagerWithTTL(cfg.Webhooks.Runtime.IsolatedWorkspaceTTL))
 		webhookSrv.SetSessionStore(db.SessionRepo())
+		rt.SetDispatchLifecycle(webhookSrv)
 		webhookSrv.SetOperatorAuthorizer(func(platform, userID string) bool {
 			var list []string
 			switch strings.TrimSpace(platform) {

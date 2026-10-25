@@ -692,26 +692,40 @@ func (s *Server) scheduleDispatchFallback(task DispatchTask, suppressAfter time.
 		stamp = task.CreatedAt
 	}
 	go func() {
-		select {
-		case <-time.After(after):
-		case <-s.shutdownCtx.Done():
-			return
-		}
-		select {
-		case <-s.shutdownCtx.Done():
-			return
-		default:
-		}
-		if rec, ok := s.tasks.ResolveTaskThread(task.Repo, task.Branch, "dispatch-fallback"); ok {
-			if rec.UpdatedAt.After(stamp) {
+		for {
+			select {
+			case <-time.After(after):
+			case <-s.shutdownCtx.Done():
 				return
 			}
+			select {
+			case <-s.shutdownCtx.Done():
+				return
+			default:
+			}
+			state, ok := s.dispatchRunState(task.Repo, task.Branch, task.ID)
+			if ok && state.Terminal {
+				slog.Info("webhook: fallback poll suppressed", "reason", "dispatch-run-terminal", "repo", task.Repo, "branch", task.Branch)
+				return
+			}
+			if ok && s.dispatchRunLive(state) {
+				// A live run keeps the last-resort check armed: the next tick
+				// polls once the session is gone instead of consuming it here.
+				slog.Info("webhook: fallback poll deferred", "reason", "dispatch-run-live", "repo", task.Repo, "branch", task.Branch)
+				continue
+			}
+			if rec, ok := s.tasks.ResolveTaskThread(task.Repo, task.Branch, "dispatch-fallback"); ok {
+				if rec.UpdatedAt.After(stamp) {
+					return
+				}
+			}
+			var threadID string
+			if rec, ok := s.tasks.ResolveTaskThread(task.Repo, task.Branch, "dispatch-fallback-thread"); ok {
+				threadID = rec.ThreadID
+			}
+			s.pollBranchOnce(task.Repo, task.Branch, "", "", threadID)
+			return
 		}
-		var threadID string
-		if rec, ok := s.tasks.ResolveTaskThread(task.Repo, task.Branch, "dispatch-fallback-thread"); ok {
-			threadID = rec.ThreadID
-		}
-		s.pollBranchOnce(task.Repo, task.Branch, "", "", threadID)
 	}()
 }
 

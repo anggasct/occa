@@ -29,7 +29,7 @@ func (l *WorkspaceLease) Finalize(ctx context.Context, lane, deliveryID string) 
 	if l == nil || l.manager == nil {
 		return result, nil
 	}
-	if l.Mode != config.WorkspaceModeMutable || !isFixWorkflow(lane) {
+	if l.Mode != config.WorkspaceModeMutable || !isWritableLane(lane) {
 		return result, nil
 	}
 	m := l.manager
@@ -93,6 +93,10 @@ func (m *WorkspaceManager) pushFinalizedBranch(ctx context.Context, dir, branch 
 	}
 	slog.Info("webhook: workspace branch pushed", "workspace", dir, "branch", branch)
 	return true, nil
+}
+
+func isWritableLane(lane string) bool {
+	return isFixWorkflow(lane) || strings.EqualFold(strings.TrimSpace(lane), "dispatch")
 }
 
 func countPorcelainEntries(out string) int {
