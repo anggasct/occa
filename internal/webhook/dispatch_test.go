@@ -1,9 +1,11 @@
 package webhook
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -575,10 +577,8 @@ func TestScheduleDispatchFallbackFires(t *testing.T) {
 		if !strings.Contains(text, "Fallback poll") {
 			continue
 		}
-		// The fallback finding is an operator notice, not a thread card: it
-		// belongs to the channel, never to the task thread.
-		if platforms[i] != "discord" || channels[i] != "chan-1" {
-			t.Errorf("fallback post %d target = %s/%s, want discord/chan-1", i, platforms[i], channels[i])
+		if platforms[i] != "discord" || channels[i] != "thread-456" {
+			t.Errorf("fallback post %d target = %s/%s, want discord/thread-456", i, platforms[i], channels[i])
 		}
 	}
 }
@@ -690,6 +690,111 @@ func TestPollBranchOnceDoesNotAdoptCrossRepoThread(t *testing.T) {
 		if target == "thread-1" {
 			t.Fatalf("fallback adopted another repo's thread: %v", targets)
 		}
+	}
+}
+
+func newPollServer(t *testing.T, result BranchPRResult) (*Server, *[]string) {
+	t.Helper()
+	srv := newDispatchServer(t, dispatchEndpoints("acme/widget"))
+	srv.SetBranchChecker(func(_ context.Context, _, _ string) (BranchPRResult, error) {
+		return result, nil
+	})
+	targets := make([]string, 0)
+	srv.SetNotifier(func(_ context.Context, _, target, _ string) error {
+		targets = append(targets, target)
+		return nil
+	})
+	return srv, &targets
+}
+
+func TestPollBranchThreadTargetWhenThreadKnown(t *testing.T) {
+	srv, targets := newPollServer(t, BranchPRResult{Found: true, Number: "18", State: "OPEN"})
+	srv.pollBranchOnce("acme/widget", "feat/x", "discord", "chan-1", "thread-1")
+	if len(*targets) != 1 || (*targets)[0] != "thread-1" {
+		t.Fatalf("targets = %v, want [thread-1]", *targets)
+	}
+}
+
+func TestPollBranchChannelTargetWhenNoThread(t *testing.T) {
+	srv, targets := newPollServer(t, BranchPRResult{Found: true, Number: "18", State: "OPEN"})
+	srv.pollBranchOnce("acme/widget", "feat/x", "discord", "chan-1", "")
+	if len(*targets) != 1 || (*targets)[0] != "chan-1" {
+		t.Fatalf("targets = %v, want [chan-1]", *targets)
+	}
+}
+
+func TestPollBranchSuppressedWhenNoPRAndNoThread(t *testing.T) {
+	srv, targets := newPollServer(t, BranchPRResult{})
+	srv.pollBranchOnce("acme/widget", "feat/x", "discord", "chan-1", "")
+	if len(*targets) != 0 {
+		t.Fatalf("targets = %v, want none", *targets)
+	}
+}
+
+func TestPollBranchSuppressedWhenPRBound(t *testing.T) {
+	srv, targets := newPollServer(t, BranchPRResult{Found: true, Number: "18", State: "OPEN"})
+	srv.tasks.Upsert("acme/widget", "feat/x", "root-1", "thread-1", TaskDispatched)
+	srv.tasks.SetSurface("acme/widget#18", SurfaceUpdate{Repo: "acme/widget", Branch: "feat/x", PRNumber: "18", ThreadID: "thread-1"})
+	srv.pollBranchOnce("acme/widget", "feat/x", "discord", "chan-1", "thread-1")
+	if len(*targets) != 0 {
+		t.Fatalf("targets = %v, want none for a bound PR", *targets)
+	}
+}
+
+func TestPollBranchDedupeWindow(t *testing.T) {
+	srv, targets := newPollServer(t, BranchPRResult{Found: true, Number: "18", State: "OPEN"})
+	srv.SetFallbackPollRepeatAfter(30 * time.Minute)
+	now := time.Date(2026, 10, 25, 22, 0, 0, 0, time.UTC)
+	srv.fallbackNow = func() time.Time { return now }
+	srv.pollBranchOnce("acme/widget", "feat/x", "discord", "chan-1", "thread-1")
+	now = now.Add(10 * time.Minute)
+	srv.pollBranchOnce("acme/widget", "feat/x", "discord", "chan-1", "thread-1")
+	if len(*targets) != 1 {
+		t.Fatalf("targets = %v, want one notify inside the window", *targets)
+	}
+	now = now.Add(31 * time.Minute)
+	srv.pollBranchOnce("acme/widget", "feat/x", "discord", "chan-1", "thread-1")
+	if len(*targets) != 2 {
+		t.Fatalf("targets = %v, want a second notify after the window", *targets)
+	}
+}
+
+func TestPollBranchDedupeDisabled(t *testing.T) {
+	srv, targets := newPollServer(t, BranchPRResult{Found: true, Number: "18", State: "OPEN"})
+	srv.SetFallbackPollRepeatAfter(0)
+	srv.pollBranchOnce("acme/widget", "feat/x", "discord", "chan-1", "thread-1")
+	srv.pollBranchOnce("acme/widget", "feat/x", "discord", "chan-1", "thread-1")
+	if len(*targets) != 2 {
+		t.Fatalf("targets = %v, want two notifies with dedupe disabled", *targets)
+	}
+}
+
+func TestFallbackFindingTextUnchanged(t *testing.T) {
+	found := FormatFallbackFinding("acme/widget", "feat/x", BranchPRResult{Found: true, Number: "18", State: "OPEN", URL: "https://github.com/acme/widget/pull/18"})
+	wantFound := "📨 Fallback poll: PR #18 (OPEN) for acme/widget#feat/x. [Open PR](https://github.com/acme/widget/pull/18)"
+	if found != wantFound {
+		t.Errorf("found = %q, want %q", found, wantFound)
+	}
+	missing := FormatFallbackFinding("acme/widget", "feat/x", BranchPRResult{})
+	wantMissing := "📨 Fallback poll: no open PR found for acme/widget#feat/x."
+	if missing != wantMissing {
+		t.Errorf("missing = %q, want %q", missing, wantMissing)
+	}
+}
+
+func TestPollBranchNotifierErrorLogged(t *testing.T) {
+	srv := newDispatchServer(t, dispatchEndpoints("acme/widget"))
+	srv.SetBranchChecker(func(_ context.Context, _, _ string) (BranchPRResult, error) {
+		return BranchPRResult{Found: true, Number: "18", State: "OPEN"}, nil
+	})
+	srv.SetNotifier(func(_ context.Context, _, _, _ string) error { return errors.New("boom") })
+	var buf bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	srv.pollBranchOnce("acme/widget", "feat/x", "discord", "chan-1", "thread-1")
+	if !strings.Contains(buf.String(), "fallback poll notify failed") {
+		t.Fatalf("log = %q, want notify failure", buf.String())
 	}
 }
 

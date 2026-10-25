@@ -107,6 +107,39 @@ func TestFallbackPollAfterDefaults(t *testing.T) {
 	}
 }
 
+func TestFallbackPollRepeatAfterDefaults(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "")
+	t.Setenv("OCCA_DISPATCH_TOKEN", "")
+	cfg, err := Load(writeFullConfig(t, t.TempDir(), dispatchWebhooks("")))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Webhooks.FallbackPollRepeatAfter == nil || *cfg.Webhooks.FallbackPollRepeatAfter != 30*time.Minute {
+		t.Errorf("repeat default = %v, want 30m", cfg.Webhooks.FallbackPollRepeatAfter)
+	}
+}
+
+func TestFallbackPollRepeatAfterExplicitZeroDisables(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "")
+	t.Setenv("OCCA_DISPATCH_TOKEN", "")
+	cfg, err := Load(writeFullConfig(t, t.TempDir(), dispatchWebhooks("  fallback_poll_repeat_after: 0s\n")))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Webhooks.FallbackPollRepeatAfter == nil || *cfg.Webhooks.FallbackPollRepeatAfter != 0 {
+		t.Errorf("repeat = %v, want explicit zero", cfg.Webhooks.FallbackPollRepeatAfter)
+	}
+}
+
+func TestFallbackPollRepeatAfterNegativeRejected(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "")
+	t.Setenv("OCCA_DISPATCH_TOKEN", "")
+	_, err := Load(writeFullConfig(t, t.TempDir(), dispatchWebhooks("  fallback_poll_repeat_after: -1m\n")))
+	if err == nil || !strings.Contains(err.Error(), "fallback_poll_repeat_after") {
+		t.Errorf("negative repeat must fail, got %v", err)
+	}
+}
+
 func TestStatusConfigKeysNormalized(t *testing.T) {
 	t.Setenv("OCCA_ADMIN_ID", "")
 	t.Setenv("OCCA_DISPATCH_TOKEN", "")

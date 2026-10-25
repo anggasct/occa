@@ -789,9 +789,66 @@ func (s *Server) pollBranchOnce(repo, branch, platform, channelID, threadID stri
 		slog.Info("webhook: fallback poll no PR, thread-only suppressed top-level", "repo", repo, "branch", branch)
 		return
 	}
-	// The finding belongs to the channel, not to the task thread: the thread
-	// carries the state line and one outcome line per run.
-	if err := s.notifier(context.Background(), platform, channelID, finding); err != nil {
-		slog.Warn("webhook: fallback poll notify failed", "repo", repo, "branch", branch, "error", err)
+	if result.Found && s.fallbackPRBound(repo, branch) {
+		slog.Info("webhook: fallback poll suppressed", "reason", "pr-bound", "repo", repo, "branch", branch)
+		return
 	}
+	target, targetKind := channelID, "channel"
+	if threadID != "" {
+		target, targetKind = threadID, "thread"
+	}
+	if !s.fallbackRepeatAllowed(repo, branch, finding) {
+		return
+	}
+	if err := s.notifier(context.Background(), platform, target, finding); err != nil {
+		slog.Warn("webhook: fallback poll notify failed", "repo", repo, "branch", branch, "error", err)
+		return
+	}
+	s.fallbackRecordPost(repo, branch, finding)
+	slog.Info("webhook: fallback poll posted", "target", targetKind, "repo", repo, "branch", branch)
+}
+
+func (s *Server) fallbackPRBound(repo, branch string) bool {
+	rec, ok := s.tasks.Lookup(repo, branch)
+	if !ok || isTaskTerminal(rec.Status) {
+		return false
+	}
+	return strings.TrimSpace(rec.PRNumber) != ""
+}
+
+func (s *Server) fallbackRepeatAllowed(repo, branch, finding string) bool {
+	if s.fallbackRepeatAfter <= 0 {
+		return true
+	}
+	key := normalizeRepoKey(repo) + "#" + normalizeBranchKey(branch) + "#" + finding
+	now := time.Now()
+	if s.fallbackNow != nil {
+		now = s.fallbackNow()
+	}
+	s.fallbackMu.Lock()
+	defer s.fallbackMu.Unlock()
+	if last, ok := s.fallbackLast[key]; ok {
+		if age := now.Sub(last); age < s.fallbackRepeatAfter {
+			slog.Info("webhook: fallback poll suppressed", "reason", "repeat", "age", age, "repo", repo, "branch", branch)
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) fallbackRecordPost(repo, branch, finding string) {
+	if s.fallbackRepeatAfter <= 0 {
+		return
+	}
+	key := normalizeRepoKey(repo) + "#" + normalizeBranchKey(branch) + "#" + finding
+	now := time.Now()
+	if s.fallbackNow != nil {
+		now = s.fallbackNow()
+	}
+	s.fallbackMu.Lock()
+	defer s.fallbackMu.Unlock()
+	if s.fallbackLast == nil {
+		s.fallbackLast = make(map[string]time.Time)
+	}
+	s.fallbackLast[key] = now
 }

@@ -206,8 +206,11 @@ short-lived auto-refreshed per-repo tokens. Self-hosters stay on PAT forever.
 
 No event 10 minutes after dispatch or delivery (`fallback_poll_after`,
 default `10m`) triggers exactly one `gh pr list --head <branch>` lookup for
-the branch. The finding posts to the task thread (or the log when no channel
-matches) — a task never sits silently at 👀.
+the branch. The finding posts to the task thread (or the channel when the
+branch has no thread, or the log when no channel matches) — a task never
+sits silently at 👀. A finding is dropped when the thread already has the
+PR bound, and an identical finding inside `fallback_poll_repeat_after`
+(default `30m`, `0s` disables) is suppressed.
 
 ## Webhook checklist (per repo)
 

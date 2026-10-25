@@ -54,16 +54,17 @@ type LoggingConfig struct {
 }
 
 type WebhookConfig struct {
-	Bind              string            `yaml:"bind"`
-	Policy            WebhookPolicy     `yaml:"policy"`
-	Runtime           WebhookRuntime    `yaml:"runtime"`
-	Endpoints         []EndpointConfig  `yaml:"endpoints"`
-	Defaults          WebhookDefaults   `yaml:"defaults,omitempty"`
-	Repos             []RepoConfig      `yaml:"repos,omitempty"`
-	Dispatch          DispatchConfig    `yaml:"dispatch"`
-	StatusIcons       map[string]string `yaml:"status_icons,omitempty"`
-	StatusColors      map[string]int    `yaml:"status_colors,omitempty"`
-	FallbackPollAfter time.Duration     `yaml:"fallback_poll_after,omitempty"`
+	Bind                    string            `yaml:"bind"`
+	Policy                  WebhookPolicy     `yaml:"policy"`
+	Runtime                 WebhookRuntime    `yaml:"runtime"`
+	Endpoints               []EndpointConfig  `yaml:"endpoints"`
+	Defaults                WebhookDefaults   `yaml:"defaults,omitempty"`
+	Repos                   []RepoConfig      `yaml:"repos,omitempty"`
+	Dispatch                DispatchConfig    `yaml:"dispatch"`
+	StatusIcons             map[string]string `yaml:"status_icons,omitempty"`
+	StatusColors            map[string]int    `yaml:"status_colors,omitempty"`
+	FallbackPollAfter       time.Duration     `yaml:"fallback_poll_after,omitempty"`
+	FallbackPollRepeatAfter *time.Duration    `yaml:"fallback_poll_repeat_after,omitempty"`
 }
 
 type DispatchConfig struct {
@@ -588,6 +589,12 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 				return Config{}, fmt.Errorf("config: webhooks.fallback_poll_after default: %w", err)
 			}
 			fc.Webhooks.FallbackPollAfter = fallbackDefault
+		}
+		if fc.Webhooks.FallbackPollRepeatAfter == nil {
+			repeatDefault := 30 * time.Minute
+			fc.Webhooks.FallbackPollRepeatAfter = &repeatDefault
+		} else if *fc.Webhooks.FallbackPollRepeatAfter < 0 {
+			return Config{}, fmt.Errorf("config: webhooks.fallback_poll_repeat_after must not be negative")
 		}
 		if fc.Webhooks.Dispatch.Enabled {
 			if strings.TrimSpace(fc.Webhooks.Dispatch.Path) == "" {
