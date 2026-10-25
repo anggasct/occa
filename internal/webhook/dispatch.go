@@ -795,7 +795,15 @@ func (s *Server) pollBranchOnce(repo, branch, platform, channelID, threadID stri
 	}
 	target, targetKind := channelID, "channel"
 	if threadID != "" {
-		target, targetKind = threadID, "thread"
+		switch platform {
+		case "discord":
+			target, targetKind = threadID, "thread"
+		case "telegram":
+			targetKind = "thread"
+			if !strings.Contains(channelID, ":") {
+				target = channelID + ":" + threadID
+			}
+		}
 	}
 	if !s.fallbackRepeatAllowed(repo, branch, finding) {
 		return

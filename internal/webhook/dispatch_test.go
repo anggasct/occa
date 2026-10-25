@@ -715,6 +715,34 @@ func TestPollBranchThreadTargetWhenThreadKnown(t *testing.T) {
 	}
 }
 
+func TestPollBranchTelegramThreadTarget(t *testing.T) {
+	cases := []struct {
+		name    string
+		channel string
+		want    string
+	}{
+		{name: "bare chat", channel: "-100123", want: "-100123:456"},
+		{name: "already addressed", channel: "-100123:789", want: "-100123:789"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, targets := newPollServer(t, BranchPRResult{Found: true, Number: "18", State: "OPEN"})
+			srv.pollBranchOnce("acme/widget", "feat/x", "telegram", tc.channel, "456")
+			if len(*targets) != 1 || (*targets)[0] != tc.want {
+				t.Fatalf("targets = %v, want [%s]", *targets, tc.want)
+			}
+		})
+	}
+}
+
+func TestPollBranchOtherPlatformKeepsChannel(t *testing.T) {
+	srv, targets := newPollServer(t, BranchPRResult{Found: true, Number: "18", State: "OPEN"})
+	srv.pollBranchOnce("acme/widget", "feat/x", "slack", "chan-1", "thread-1")
+	if len(*targets) != 1 || (*targets)[0] != "chan-1" {
+		t.Fatalf("targets = %v, want [chan-1]", *targets)
+	}
+}
+
 func TestPollBranchChannelTargetWhenNoThread(t *testing.T) {
 	srv, targets := newPollServer(t, BranchPRResult{Found: true, Number: "18", State: "OPEN"})
 	srv.pollBranchOnce("acme/widget", "feat/x", "discord", "chan-1", "")
@@ -735,9 +763,17 @@ func TestPollBranchSuppressedWhenPRBound(t *testing.T) {
 	srv, targets := newPollServer(t, BranchPRResult{Found: true, Number: "18", State: "OPEN"})
 	srv.tasks.Upsert("acme/widget", "feat/x", "root-1", "thread-1", TaskDispatched)
 	srv.tasks.SetSurface("acme/widget#18", SurfaceUpdate{Repo: "acme/widget", Branch: "feat/x", PRNumber: "18", ThreadID: "thread-1"})
+	var buf bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
 	srv.pollBranchOnce("acme/widget", "feat/x", "discord", "chan-1", "thread-1")
 	if len(*targets) != 0 {
 		t.Fatalf("targets = %v, want none for a bound PR", *targets)
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "fallback poll suppressed") || !strings.Contains(logged, "reason=pr-bound") {
+		t.Fatalf("log = %q, want pr-bound suppression", logged)
 	}
 }
 
