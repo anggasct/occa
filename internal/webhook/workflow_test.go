@@ -211,8 +211,15 @@ func TestWebhookAuditNotificationsHaveSeparator(t *testing.T) {
 			if !strings.HasSuffix(got, "\n"+webhookMessageSeparator) && got != webhookMessageSeparator {
 				t.Fatalf("audit notification = %q, want one trailing separator", got)
 			}
-			if !strings.Contains(got, "Status: "+status) {
-				t.Fatalf("audit notification = %q, missing status %q", got, status)
+			wantStatus := "Status: " + status
+			switch status {
+			case "COMPLETED":
+				wantStatus = "Status: ✅ COMPLETED"
+			case "FAILED":
+				wantStatus = "Status: ⚠️ FAILED"
+			}
+			if !strings.Contains(got, wantStatus) {
+				t.Fatalf("audit notification = %q, missing status %q", got, wantStatus)
 			}
 		})
 	}
@@ -256,11 +263,8 @@ func TestWebhookMergeSkipsFormalFindingsSelfReview(t *testing.T) {
 	}
 	select {
 	case summary := <-audit:
-		if !strings.Contains(summary, "Status: SKIP") || strings.Contains(summary, "Status: COMPLETED") {
-			t.Fatalf("unexpected audit summary: %q", summary)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("formal findings self-review did not emit an audit summary")
+		t.Fatalf("skipped delivery must stay silent, got %q", summary)
+	case <-time.After(300 * time.Millisecond):
 	}
 }
 
@@ -323,9 +327,14 @@ func TestWebhookAcceptedDeliveryAuditsOnceAndReplayIsSilent(t *testing.T) {
 	waitForReceipt(t, st, store.WebhookStatusCompleted)
 	select {
 	case summary := <-audit:
-		for _, want := range []string{"Repo: anggasct/occa", "PR: #123 — Webhook UX", "Status: COMPLETED", "Delivery: accepted-once"} {
+		for _, want := range []string{"Repo: anggasct/occa", "PR: #123 — Webhook UX", "Status: ✅ COMPLETED"} {
 			if !strings.Contains(summary, want) {
 				t.Fatalf("audit summary missing %q: %q", want, summary)
+			}
+		}
+		for _, banned := range []string{"Delivery:", "accepted-once", "event_type"} {
+			if strings.Contains(summary, banned) {
+				t.Fatalf("channel card must not carry %q: %q", banned, summary)
 			}
 		}
 		if strings.Contains(summary, "secret") || strings.Contains(summary, "<no value>") {
@@ -348,7 +357,7 @@ func TestWebhookAcceptedDeliveryAuditsOnceAndReplayIsSilent(t *testing.T) {
 	}
 }
 
-func TestWebhookWorkflowMismatchSkipsAndNotifiesWithoutExecutor(t *testing.T) {
+func TestWebhookWorkflowMismatchSkipsSilentlyWithoutExecutor(t *testing.T) {
 	tests := []struct {
 		workflow string
 		event    string
@@ -396,8 +405,8 @@ func TestWebhookWorkflowMismatchSkipsAndNotifiesWithoutExecutor(t *testing.T) {
 			}
 			mu.Lock()
 			defer mu.Unlock()
-			if len(notifications) != 1 || strings.Contains(notifications[0], "secret") || strings.Contains(notifications[0], "Raw") {
-				t.Fatalf("unexpected skip notifications: %#v", notifications)
+			if len(notifications) != 0 {
+				t.Fatalf("a skipped delivery must stay silent, got %#v", notifications)
 			}
 		})
 	}
@@ -507,6 +516,7 @@ func TestFormatRootCard(t *testing.T) {
 func TestEmitAuditRootCardEditing(t *testing.T) {
 	envelope := WebhookEnvelope{
 		"repository":  "anggasct/occa",
+		"head_branch": "feat/x",
 		"pr_number":   "56",
 		"title":       "feat: test",
 		"event_type":  "pull_request",
@@ -514,19 +524,18 @@ func TestEmitAuditRootCardEditing(t *testing.T) {
 	}
 	ep := config.EndpointConfig{Platform: "discord", ChannelID: "chan-1", Workflow: "github_reviewer"}
 
-	t.Run("successful root card edit avoids notifier", func(t *testing.T) {
-		var editedChannel, editedMsgID, editedContent string
-		var notifierCalled bool
+	t.Run("thread takes the audit and leaves the channel parent alone", func(t *testing.T) {
+		var editorCalled bool
+		var notifiedChannel, notifiedText string
 
 		srv := &Server{}
 		srv.SetEditor(func(ctx context.Context, platform, channelID, messageID, text string) error {
-			editedChannel = channelID
-			editedMsgID = messageID
-			editedContent = text
+			editorCalled = true
 			return nil
 		})
 		srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
-			notifierCalled = true
+			notifiedChannel = channelID
+			notifiedText = text
 			return nil
 		})
 
@@ -538,32 +547,25 @@ func TestEmitAuditRootCardEditing(t *testing.T) {
 
 		srv.emitAudit(context.Background(), ep, envelope, "COMPLETED", "", "", workCtx)
 
-		if notifierCalled {
-			t.Error("notifier was called when editor succeeded")
+		if editorCalled {
+			t.Error("channel parent must not be edited when a thread exists")
 		}
-		if editedChannel != "chan-1" || editedMsgID != "root-msg-123" {
-			t.Errorf("editedChannel=%q, editedMsgID=%q, want chan-1 / root-msg-123", editedChannel, editedMsgID)
+		if notifiedChannel != "thread-456" {
+			t.Errorf("notifiedChannel = %q, want thread-456", notifiedChannel)
 		}
-		if !strings.Contains(editedContent, "✅ COMPLETED (1m 45s)") {
-			t.Errorf("editedContent missing completed duration: %s", editedContent)
-		}
-		if !strings.Contains(editedContent, "➡️ Details in thread: <#thread-456>") {
-			t.Errorf("editedContent missing thread link: %s", editedContent)
+		if !strings.Contains(notifiedText, "PR #56") {
+			t.Errorf("thread audit missing the PR line: %s", notifiedText)
 		}
 	})
 
-	t.Run("telegram topic card omits discord thread link", func(t *testing.T) {
-		var editedChannel, editedContent string
+	t.Run("telegram topic keeps the audit in the topic", func(t *testing.T) {
+		var notifiedChannel, notifiedText string
 		tgEp := config.EndpointConfig{Platform: "telegram", ChannelID: "-10012345", Workflow: "github_reviewer"}
 
 		srv := &Server{}
-		srv.SetEditor(func(ctx context.Context, platform, channelID, messageID, text string) error {
-			editedChannel = channelID
-			editedContent = text
-			return nil
-		})
 		srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
-			t.Error("notifier should not be called when editor succeeds")
+			notifiedChannel = channelID
+			notifiedText = text
 			return nil
 		})
 
@@ -575,15 +577,15 @@ func TestEmitAuditRootCardEditing(t *testing.T) {
 
 		srv.emitAudit(context.Background(), tgEp, envelope, "COMPLETED", "", "", workCtx)
 
-		if editedChannel != "-10012345:777" {
-			t.Errorf("editedChannel = %q, want -10012345:777", editedChannel)
+		if notifiedChannel != "-10012345:777" {
+			t.Errorf("notifiedChannel = %q, want -10012345:777", notifiedChannel)
 		}
-		if strings.Contains(editedContent, "Details in thread:") || strings.Contains(editedContent, "<#") {
-			t.Errorf("telegram card must not contain discord thread link: %s", editedContent)
+		if strings.Contains(notifiedText, "Details in thread:") || strings.Contains(notifiedText, "<#") {
+			t.Errorf("telegram audit must not contain a discord thread link: %s", notifiedText)
 		}
 	})
 
-	t.Run("failed root card edit falls back to notifier", func(t *testing.T) {
+	t.Run("no thread falls back to the channel root", func(t *testing.T) {
 		var notifierContent string
 		srv := &Server{tasks: NewTaskThreadRegistry()}
 		srv.SetEditor(func(ctx context.Context, platform, channelID, messageID, text string) error {
@@ -596,7 +598,6 @@ func TestEmitAuditRootCardEditing(t *testing.T) {
 
 		workCtx := &WebhookWorkContext{
 			RootMessageID: "root-msg-123",
-			ThreadID:      "thread-456",
 			StartTime:     time.Now().Add(-30 * time.Second),
 		}
 
@@ -605,36 +606,43 @@ func TestEmitAuditRootCardEditing(t *testing.T) {
 		if notifierContent == "" {
 			t.Fatal("notifier was not called on editor failure")
 		}
-		if !strings.Contains(notifierContent, "gate checked, run failed, fix running") {
-			t.Errorf("fallback notification must state gate outcome, got: %s", notifierContent)
+		if !strings.Contains(notifierContent, "FAILED") {
+			t.Errorf("fallback notification must state the run failed, got: %s", notifierContent)
 		}
-		if strings.Contains(notifierContent, "Delivery:") || strings.Contains(notifierContent, "Model:") {
-			t.Errorf("thread fallback must not leak Delivery/Model, got: %s", notifierContent)
-		}
-		if strings.Contains(notifierContent, "━━━") {
-			t.Errorf("thread fallback must not carry a card separator, got: %s", notifierContent)
+		for _, banned := range []string{"Delivery:", "del-1", "Event:"} {
+			if strings.Contains(notifierContent, banned) {
+				t.Errorf("channel root must not carry %q, got: %s", banned, notifierContent)
+			}
 		}
 	})
 
-	t.Run("empty root message id uses notifier directly", func(t *testing.T) {
-		var editorCalled, notifierCalled bool
-		srv := &Server{}
-		srv.SetEditor(func(ctx context.Context, platform, channelID, messageID, text string) error {
-			editorCalled = true
-			return nil
+	t.Run("repeated audit posts one channel card and edits it", func(t *testing.T) {
+		var sends int
+		var editedText string
+		srv := &Server{tasks: NewTaskThreadRegistry()}
+		srv.SetSender(func(ctx context.Context, platform, channelID, text string) (string, error) {
+			sends++
+			if strings.Contains(text, "Delivery:") || strings.Contains(text, "Event:") {
+				t.Errorf("channel card leaked root-only fields: %q", text)
+			}
+			return "card-1", nil
 		})
-		srv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {
-			notifierCalled = true
+		srv.SetEditor(func(ctx context.Context, platform, channelID, messageID, text string) error {
+			if messageID != "card-1" {
+				t.Errorf("edit target = %q, want card-1", messageID)
+			}
+			editedText = text
 			return nil
 		})
 
 		srv.emitAudit(context.Background(), ep, envelope, "COMPLETED", "", "")
+		srv.emitAudit(context.Background(), ep, envelope, "COMPLETED", "", "")
 
-		if editorCalled {
-			t.Error("editor was called when RootMessageID was empty")
+		if sends != 1 {
+			t.Errorf("channel sends = %d, want 1", sends)
 		}
-		if !notifierCalled {
-			t.Error("notifier was not called when RootMessageID was empty")
+		if !strings.Contains(editedText, "COMPLETED") {
+			t.Errorf("second audit must edit the channel card, got %q", editedText)
 		}
 	})
 }
@@ -666,7 +674,7 @@ func TestEmitAuditKnownBranchThreadsDetail(t *testing.T) {
 		}
 	})
 
-	t.Run("registry lookup edits known parent without workctx ids", func(t *testing.T) {
+	t.Run("registry lookup posts into the known thread without workctx ids", func(t *testing.T) {
 		var editedID string
 		var notifiedChannel string
 		srv := &Server{tasks: NewTaskThreadRegistry()}
@@ -680,11 +688,11 @@ func TestEmitAuditKnownBranchThreadsDetail(t *testing.T) {
 			return nil
 		})
 		srv.emitAudit(context.Background(), ep, envelope, "SKIP", "duplicate", "")
-		if editedID != "root-9" {
-			t.Errorf("editedID = %q, want root-9 (known branch must edit parent)", editedID)
+		if editedID != "" {
+			t.Errorf("editedID = %q, want no parent edit when a thread exists", editedID)
 		}
 		if notifiedChannel != "thread-9" {
-			t.Errorf("notifiedChannel = %q, want thread-9 (SKIP detail into thread)", notifiedChannel)
+			t.Errorf("notifiedChannel = %q, want thread-9", notifiedChannel)
 		}
 	})
 }

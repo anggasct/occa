@@ -659,7 +659,6 @@ func (a *Adapter) SendNotificationMention(channelID, text string, mentionUserID 
 	msg, err := a.session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
 		Content: content,
 		AllowedMentions: &discordgo.MessageAllowedMentions{
-			Parse: []discordgo.AllowedMentionType{discordgo.AllowedMentionTypeUsers},
 			Users: []string{mentionUserID},
 		},
 		Flags: discordgo.MessageFlagsSuppressEmbeds,

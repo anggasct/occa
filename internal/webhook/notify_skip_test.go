@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -58,7 +59,7 @@ func TestSkippedWithOptOutStaysRecordedWithoutNotifier(t *testing.T) {
 	}
 }
 
-func TestSkippedWithoutOptOutEmitsOneCard(t *testing.T) {
+func TestSkippedDeliveryStaysSilent(t *testing.T) {
 	ep := config.EndpointConfig{
 		Name:      "github",
 		Path:      "/github",
@@ -82,8 +83,18 @@ func TestSkippedWithoutOptOutEmitsOneCard(t *testing.T) {
 	srv.markSkipped(id, ep, envelope, "admitted no rule")
 	mu.Lock()
 	defer mu.Unlock()
-	if len(texts) != 1 {
-		t.Fatalf("notifier calls = %d, want 1", len(texts))
+	if len(texts) != 0 {
+		t.Fatalf("notifier calls = %d, want 0 (a skipped delivery is silent)", len(texts))
+	}
+	receipt, err := st.WebhookDeliveryRepo().Get(context.Background(), ep.Name, "del-noisy")
+	if err != nil || receipt == nil {
+		t.Fatalf("get receipt: %v %v", receipt, err)
+	}
+	if receipt.Status != store.WebhookStatusSkipped {
+		t.Fatalf("status = %s, want skipped", receipt.Status)
+	}
+	if !strings.Contains(receipt.ErrorSummary, "admitted no rule") {
+		t.Fatalf("skip reason missing from store record: %q", receipt.ErrorSummary)
 	}
 }
 

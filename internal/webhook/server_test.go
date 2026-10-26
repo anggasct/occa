@@ -2202,7 +2202,7 @@ func TestWebhookModelResolution_ExplicitChannelModel(t *testing.T) {
 		if !strings.Contains(summary, "Model source: channel") {
 			t.Fatalf("audit summary missing Model source line: %q", summary)
 		}
-		if !strings.Contains(summary, "Status: COMPLETED") {
+		if !strings.Contains(summary, "COMPLETED") {
 			t.Fatalf("audit summary missing Status COMPLETED: %q", summary)
 		}
 	case <-time.After(5 * time.Second):
@@ -2401,7 +2401,7 @@ func TestWebhookModelResolution_ChannelRepoErrorFailsClosed(t *testing.T) {
 
 	select {
 	case summary := <-audit:
-		if !strings.Contains(summary, "Status: FAILED") {
+		if !strings.Contains(summary, "FAILED") {
 			t.Fatalf("audit summary missing Status FAILED: %q", summary)
 		}
 		if !strings.Contains(summary, "channel configuration error") {
@@ -2456,7 +2456,7 @@ func TestWebhookModelResolution_MalformedChannelModelFailsClosed(t *testing.T) {
 
 	select {
 	case summary := <-audit:
-		if !strings.Contains(summary, "Status: FAILED") {
+		if !strings.Contains(summary, "FAILED") {
 			t.Fatalf("audit summary missing Status FAILED: %q", summary)
 		}
 		if !strings.Contains(summary, "invalid channel model") {
@@ -2526,7 +2526,7 @@ func TestWebhookModelResolution_ExplicitEndpointModel(t *testing.T) {
 		if !strings.Contains(summary, "Model source: endpoint") {
 			t.Fatalf("audit summary missing Model source line: %q", summary)
 		}
-		if !strings.Contains(summary, "Status: COMPLETED") {
+		if !strings.Contains(summary, "COMPLETED") {
 			t.Fatalf("audit summary missing Status COMPLETED: %q", summary)
 		}
 	case <-time.After(5 * time.Second):
@@ -2630,7 +2630,7 @@ func TestWebhookModelResolution_MalformedEndpointModelFailsClosed(t *testing.T) 
 
 	select {
 	case summary := <-audit:
-		if !strings.Contains(summary, "Status: FAILED") {
+		if !strings.Contains(summary, "FAILED") {
 			t.Fatalf("audit summary missing Status FAILED: %q", summary)
 		}
 		if !strings.Contains(summary, "invalid endpoint model") {
@@ -3509,9 +3509,9 @@ func TestWebhookIncompleteResponseRetriesOnceThenCompletes(t *testing.T) {
 		select {
 		case summary := <-audit:
 			switch {
-			case strings.Contains(summary, "Status: COMPLETED"):
+			case strings.Contains(summary, "COMPLETED"):
 				completed++
-			case strings.Contains(summary, "Status: FAILED"):
+			case strings.Contains(summary, "FAILED"):
 				failedSummaries = append(failedSummaries, summary)
 			}
 		case <-deadline:

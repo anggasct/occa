@@ -293,7 +293,7 @@ func TestMergeGateVerdictRendersIdenticallyInEveryLane(t *testing.T) {
 				"head_branch": "feat/x",
 				"pr_state":    "open",
 			}
-			srv.emitPRAudit(ctx, ep, envelope, "COMPLETED", "", prKey, "thread-9")
+			srv.emitPRAudit(ctx, ep, envelope, "COMPLETED", "", prKey, "thread-9", false)
 
 			outcome := ""
 			for _, msg := range rec.notified {

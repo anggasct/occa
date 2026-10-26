@@ -226,9 +226,14 @@ func TestFailDeliveryLinksRootCard(t *testing.T) {
 		srv, _, st := newTestServerFull(t, []config.EndpointConfig{takeoverTestEndpoint()})
 		srv.SetSessionStore(st.SessionRepo())
 		var editedText string
+		var notifiedText string
 		srv.SetEditor(func(_ context.Context, _, _, _ string, text string) error {
 			editedText = text
 			time.Sleep(1100 * time.Millisecond)
+			return nil
+		})
+		srv.SetNotifier(func(_ context.Context, _, _, text string) error {
+			notifiedText = text
 			return nil
 		})
 		ctx := context.Background()
@@ -252,10 +257,18 @@ func TestFailDeliveryLinksRootCard(t *testing.T) {
 		if root.MessageID != "root-1" || root.Channel != "chan-1" {
 			t.Fatalf("root target = %s/%s, want root-1/chan-1", root.MessageID, root.Channel)
 		}
-		if FormatWebhookMessage(root.Card) != editedText {
-			t.Fatalf("stored card diverges from the edited message:\nstored: %q\nedited: %q", root.Card, editedText)
+		if editedText != "" {
+			t.Fatalf("thread audit must not edit the channel parent: %q", editedText)
 		}
-		for _, want := range []string{"⚠️ FAILED", "Reason: agent exploded", "Delivery: del-1", "➡️ Details in thread: <#thread-1>"} {
+		if notifiedText == "" || !strings.Contains(notifiedText, "failed") {
+			t.Fatalf("thread must receive the failed outcome, got %q", notifiedText)
+		}
+		for _, banned := range []string{"Delivery:", "del-1", "Event:"} {
+			if strings.Contains(root.Card, banned) {
+				t.Fatalf("stored root card must not carry %q: %q", banned, root.Card)
+			}
+		}
+		for _, want := range []string{"⚠️ FAILED", "Reason: agent exploded", "➡️ Details in thread: <#thread-1>"} {
 			if !strings.Contains(root.Card, want) {
 				t.Fatalf("stored card missing %q: %q", want, root.Card)
 			}
@@ -314,6 +327,7 @@ func TestExecuteDeliveryCompletedLinksRootCard(t *testing.T) {
 		time.Sleep(1100 * time.Millisecond)
 		return nil
 	})
+	srv.SetNotifier(func(_ context.Context, _, _, _ string) error { return nil })
 	if _, err := st.WebhookDeliveryRepo().Create(ctx, store.WebhookDelivery{Endpoint: "takeover-test", DeliveryID: "del-9", EventType: "pull_request_review", Status: store.WebhookStatusProcessing}); err != nil {
 		t.Fatalf("seed processing receipt: %v", err)
 	}
@@ -337,11 +351,16 @@ func TestExecuteDeliveryCompletedLinksRootCard(t *testing.T) {
 	if root.MessageID != "root-9" || root.Channel != "chan-1" {
 		t.Fatalf("root target = %s/%s, want root-9/chan-1", root.MessageID, root.Channel)
 	}
-	if FormatWebhookMessage(root.Card) != editedText {
-		t.Fatalf("stored card diverges from the edited message:\nstored: %q\nedited: %q", root.Card, editedText)
+	if editedText != "" {
+		t.Fatalf("thread audit must not edit the channel parent: %q", editedText)
 	}
-	if !strings.Contains(root.Card, "✅ COMPLETED") || !strings.Contains(root.Card, "Delivery: del-9") {
-		t.Fatalf("stored card missing terminal audit lines: %q", root.Card)
+	if !strings.Contains(root.Card, "✅ COMPLETED") {
+		t.Fatalf("stored card missing terminal audit status: %q", root.Card)
+	}
+	for _, banned := range []string{"Delivery:", "del-9", "Event:"} {
+		if strings.Contains(root.Card, banned) {
+			t.Fatalf("stored root card must not carry %q: %q", banned, root.Card)
+		}
 	}
 	if strings.Contains(root.Card, "Follow-up:") {
 		t.Fatalf("stored card must not carry a follow-up line: %q", root.Card)

@@ -8,6 +8,19 @@ import (
 	"github.com/anggasct/occa/internal/channel"
 )
 
+func TestConnectRepoSanitizedAliasRoutes(t *testing.T) {
+	r, _, reply := newTestRouter()
+	if !r.isOccaCommand("/connect_repo acme/widget") {
+		t.Fatal("sanitized connect_repo must route as an occa command")
+	}
+	if err := r.Route(context.Background(), msg("/connect_repo acme/widget", reply)); err != nil {
+		t.Fatalf("route: %v", err)
+	}
+	if len(reply.sends) == 0 || !strings.Contains(reply.sends[len(reply.sends)-1], "Connect acme/widget") {
+		t.Fatalf("connect_repo did not reach the connect-repo handler: %v", reply.sends)
+	}
+}
+
 func TestHandleConnectRepo(t *testing.T) {
 	r := &Router{commands: make(map[string]Command)}
 	if _, ok := r.commands["connect-repo"]; ok {

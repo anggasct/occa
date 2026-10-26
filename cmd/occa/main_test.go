@@ -398,10 +398,14 @@ func (i *mockAgentInstance) Workdir() string      { return "/tmp" }
 
 type mockRelayClient struct {
 	relay.Client
-	events []relay.Event
+	events     []relay.Event
+	sessionErr error
 }
 
 func (c *mockRelayClient) CreateSession(ctx context.Context) (string, error) {
+	if c.sessionErr != nil {
+		return "", c.sessionErr
+	}
 	return "session-1", nil
 }
 
@@ -531,7 +535,8 @@ func TestWebhookExecutorWithThread(t *testing.T) {
 		t.Fatalf("mainMsgs = %+v, want single RUNNING root card", mainMsgs)
 	}
 
-	var foundToolBubble, foundOutput, foundTerminalSlim, foundStatus, foundBanner bool
+	var foundToolBubble, foundOutput, foundStatus, foundBanner bool
+	var openPRPosts int
 	for _, text := range threadMsgs {
 		if strings.Contains(text, "tool calls") {
 			foundToolBubble = true
@@ -543,10 +548,9 @@ func TestWebhookExecutorWithThread(t *testing.T) {
 			foundOutput = true
 		}
 		if strings.Contains(text, "acme/widget#feat/thread") && strings.Contains(text, "[Open PR]") {
+			openPRPosts++
 			if strings.Contains(text, "Status:") || strings.Contains(text, "Delivery:") || strings.Contains(text, "Model:") || strings.Contains(text, "━━━") {
 				t.Errorf("thread slim must not leak Status/Delivery/Model/separator: %q", text)
-			} else {
-				foundTerminalSlim = true
 			}
 		}
 		if strings.HasPrefix(text, "📌 Status — ") {
@@ -563,14 +567,14 @@ func TestWebhookExecutorWithThread(t *testing.T) {
 	if !foundOutput {
 		t.Error("missing final agent output in thread")
 	}
-	if !foundTerminalSlim {
-		t.Error("missing slim terminal card with gate outcome in thread")
+	if openPRPosts != 1 {
+		t.Errorf("thread PR link posts = %d, want the opener only and no duplicate terminal slim", openPRPosts)
 	}
 	if !foundStatus {
 		t.Error("missing pinned STATUS in thread")
 	}
-	if !foundBanner {
-		t.Error("missing phase banner in thread")
+	if foundBanner {
+		t.Error("phase banner must not post as its own message")
 	}
 	for i, m := range discordCh.sentMessages {
 		if m.channelID == "thread-999" && len(discordCh.sentButtons[i]) != 0 {
@@ -601,6 +605,70 @@ func TestWebhookExecutorWithThread(t *testing.T) {
 	}
 	if !foundRollup {
 		t.Errorf("sent messages do not contain the tool summary: %+v", discordCh.sentMessages)
+	}
+}
+
+func TestWebhookExecutorTaskThreadFailurePostsSingleOutcome(t *testing.T) {
+	discordCh := &mockDiscordChannel{
+		name:         "discord",
+		nextMsgID:    "msg-root-fail",
+		nextThreadID: "thread-fail",
+	}
+	manager := &mockAgentManager{client: &mockRelayClient{sessionErr: errors.New("session boom")}}
+	reg := webhook.NewTaskThreadRegistry()
+	exec := newWebhookExecutor([]channel.Channel{discordCh}, manager, mockChannelStore{}, "/tmp", relay.Config{NoEventTimeout: 15 * time.Minute, WebhookAbortTimeout: 5 * time.Second, VerifyTimeout: 15 * time.Second}, webhook.TaskOptions{Registry: reg})
+
+	workCtx := &webhook.WebhookWorkContext{
+		Thread:     true,
+		Workflow:   "github_reviewer",
+		Envelope:   webhook.WebhookEnvelope{"repository": "acme/widget", "head_branch": "feat/fail"},
+		DeliveryID: "del-fail",
+	}
+
+	if err := exec(context.Background(), "discord", "chan-main", "prompt text", workCtx); err == nil {
+		t.Fatal("executor should surface the run failure")
+	}
+	if !workCtx.OutcomePosted {
+		t.Fatal("executor must mark the failed outcome as posted so the audit skips it")
+	}
+
+	var failedPosts int
+	for _, m := range discordCh.sentMessages {
+		if m.channelID == "thread-fail" && strings.HasPrefix(m.text, "❌") {
+			failedPosts++
+		}
+	}
+	if failedPosts != 1 {
+		t.Fatalf("failed outcome posts = %d, want exactly one", failedPosts)
+	}
+}
+
+func TestWebhookExecutorReportsAgentPIDBeforeSession(t *testing.T) {
+	discordCh := &mockDiscordChannel{
+		name:         "discord",
+		nextMsgID:    "msg-root-pid",
+		nextThreadID: "thread-pid",
+	}
+	manager := &mockAgentManager{client: &mockRelayClient{events: []relay.Event{{Type: relay.EventDelta, Delta: "run output"}}}}
+	reg := webhook.NewTaskThreadRegistry()
+	exec := newWebhookExecutor([]channel.Channel{discordCh}, manager, mockChannelStore{}, "/tmp", relay.Config{NoEventTimeout: 15 * time.Minute, WebhookAbortTimeout: 5 * time.Second, VerifyTimeout: 15 * time.Second}, webhook.TaskOptions{Registry: reg})
+
+	workCtx := &webhook.WebhookWorkContext{
+		Thread:     true,
+		Workflow:   "github_reviewer",
+		Envelope:   webhook.WebhookEnvelope{"repository": "acme/widget", "head_branch": "feat/pid"},
+		DeliveryID: "del-pid",
+	}
+	var reportedPID int
+	workCtx.ReportSession = func(string) {
+		reportedPID = workCtx.AgentPID
+	}
+
+	if err := exec(context.Background(), "discord", "chan-pid", "prompt text", workCtx); err != nil {
+		t.Fatalf("executor returned error: %v", err)
+	}
+	if reportedPID != 1234 {
+		t.Fatalf("agent PID reported at session creation = %d, want 1234 persisted before the run", reportedPID)
 	}
 }
 
@@ -851,15 +919,28 @@ func TestWebhookExecutorTelegramTopicDispatch(t *testing.T) {
 		t.Errorf("telegram topic root card must not contain discord thread link: %s", tgCh.sentMessages[0].text)
 	}
 
+	outcomePosts := 0
+	for i, m := range tgCh.sentMessages {
+		if strings.Contains(m.text, "Topic analysis done.") {
+			outcomePosts++
+		}
+		if i > 0 && strings.Contains(m.text, "PR #99") {
+			t.Errorf("duplicate terminal card after the root: %s", m.text)
+		}
+	}
+	if outcomePosts != 1 {
+		t.Errorf("topic outcome posts = %d, want exactly one", outcomePosts)
+	}
+
 	terminalMsg := tgCh.sentMessages[len(tgCh.sentMessages)-1]
 	if terminalMsg.channelID != wantTarget {
 		t.Errorf("terminalMsg channelID = %q, want %q", terminalMsg.channelID, wantTarget)
 	}
-	if !strings.Contains(terminalMsg.text, "feat/topic") || !strings.Contains(terminalMsg.text, "PR #99") {
-		t.Errorf("terminalMsg missing slim thread card, got: %s", terminalMsg.text)
+	if !strings.Contains(terminalMsg.text, "Topic analysis done.") {
+		t.Errorf("terminalMsg missing the single streamed outcome, got: %s", terminalMsg.text)
 	}
 	if strings.Contains(terminalMsg.text, "Status:") || strings.Contains(terminalMsg.text, "Delivery:") || strings.Contains(terminalMsg.text, "Model:") || strings.Contains(terminalMsg.text, "━━━") {
-		t.Errorf("thread slim must not leak Status/Delivery/Model/separator: %s", terminalMsg.text)
+		t.Errorf("thread outcome must not leak Status/Delivery/Model/separator: %s", terminalMsg.text)
 	}
 }
 

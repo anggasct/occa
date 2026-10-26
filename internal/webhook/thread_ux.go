@@ -175,14 +175,6 @@ func (s *Server) postPhaseBannerIfChanged(ctx context.Context, platform, channel
 	if !ShouldPostPhaseBanner(prev, phase) {
 		return false
 	}
-	banner := FormatPhaseBanner(workflow, detail)
-	target := threadTargetFor(platform, channelID, threadID)
-	if strings.TrimSpace(target) == "" || strings.TrimSpace(banner) == "" {
-		return false
-	}
-	if err := s.notifyThread(ctx, platform, target, banner); err != nil {
-		return false
-	}
 	s.tasks.SetPhase(repo, branch, phase)
 	return true
 }

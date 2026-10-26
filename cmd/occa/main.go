@@ -443,12 +443,11 @@ func main() {
 			WebhookAbortTimeout: cfg.Runtime.Relay.WebhookAbortTimeout,
 			VerifyTimeout:       cfg.Runtime.Relay.VerifyTimeout,
 		}, webhook.TaskOptions{
-			Registry:     taskRegistry,
-			Icons:        cfg.Webhooks.StatusIcons,
-			Colors:       cfg.Webhooks.StatusColors,
-			PRQueues:     db.PRQueueRepo(),
-			Endpoints:    cfg.Webhooks.Endpoints,
-			VerboseSteps: cfg.Webhooks.Defaults.VerboseSteps,
+			Registry:  taskRegistry,
+			Icons:     cfg.Webhooks.StatusIcons,
+			Colors:    cfg.Webhooks.StatusColors,
+			PRQueues:  db.PRQueueRepo(),
+			Endpoints: cfg.Webhooks.Endpoints,
 		})
 
 		webhookSrv = webhook.New(cfg.Webhooks, webhookExecutor, db.WebhookDeliveryRepo())
@@ -584,6 +583,8 @@ func main() {
 		})
 		webhookSrv.SetWorkspaceResolver(webhook.NewWorkspaceManagerWithTTL(cfg.Webhooks.Runtime.IsolatedWorkspaceTTL))
 		webhookSrv.SetSessionStore(db.SessionRepo())
+		webhookSrv.SetSessionRowStore(db.SessionRepo())
+		webhookSrv.SetProcessAlive(process.Alive)
 		rt.SetDispatchLifecycle(webhookSrv)
 		webhookSrv.SetOperatorAuthorizer(func(platform, userID string) bool {
 			var list []string
@@ -860,17 +861,6 @@ func refreshThreadBannerAndStatus(ch channel.Channel, taskOpts webhook.TaskOptio
 	if platform == "telegram" && !strings.Contains(channelID, ":") {
 		target = channelID + ":" + threadID
 	}
-	banner := ""
-	if rec, ok := reg.Lookup(repo, branch); ok {
-		if strings.TrimSpace(rec.Phase) != phase {
-			banner = webhook.FormatPhaseBanner(workflow, lastEvent)
-		}
-	} else {
-		banner = webhook.FormatPhaseBanner(workflow, lastEvent)
-	}
-	if strings.TrimSpace(banner) != "" {
-		_, _ = notifySend(ch, target, banner)
-	}
 	reg.SetPhase(repo, branch, phase)
 	surfacePhase := webhook.PhaseForWorkflow(workflow)
 	text := webhook.FormatThreadStatusLine(
@@ -1132,6 +1122,7 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 					return errors.New("webhook agent unavailable")
 				}
 				defer inst.End()
+				workCtx.AgentPID = inst.PID()
 
 				var streamer *relay.Streamer
 				if workCtx.RootMessageID != "" && sender != nil && editor != nil {
@@ -1145,6 +1136,7 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 					)
 					streamer = relay.NewStreamerWithSink(sink, outboundRenderer, render.PlatformFor(platform), relayCfg.NoEventTimeout)
 					streamer.SetVerboseSteps(taskOpts.VerboseSteps)
+					streamer.SetNarration(false)
 				}
 
 				turn := relay.WebhookTurn{
@@ -1179,8 +1171,8 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 				workCtx.SessionID = result.SessionID
 				workCtx.SessionAborted = result.Aborted
 				workCtx.SessionAbortOK = result.AbortOK
-				workCtx.AgentPID = inst.PID()
 				workCtx.Progress = result.Progress
+				workCtx.OutcomePosted = err == nil && streamer != nil && streamer.OutcomePosted()
 
 				elapsed := time.Duration(0)
 				if !workCtx.StartTime.IsZero() {
@@ -1193,9 +1185,11 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 							// A PR thread carries one outcome line per run,
 							// written by the PR surface path. A second card
 							// here would put the v1 card back in the thread.
-							if strings.TrimSpace(workCtx.PRKey) == "" {
+							if strings.TrimSpace(workCtx.PRKey) == "" && !workCtx.OutcomePosted {
 								slim := webhook.FormatThreadSlimCard(workCtx.Envelope, workCtx.Workflow, webhook.TaskFailed, taskOpts.Icons)
-								_, _ = notifySend(ch, targetChannelID, slim)
+								if _, sendErr := notifySend(ch, targetChannelID, slim); sendErr == nil {
+									workCtx.OutcomePosted = true
+								}
 							}
 							if taskOpts.Registry != nil {
 								if repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope); repo != "" && branch != "" {
@@ -1234,9 +1228,11 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 
 				if workCtx.RootMessageID != "" {
 					if workCtx.ThreadID != "" {
-						if strings.TrimSpace(workCtx.PRKey) == "" {
+						if strings.TrimSpace(workCtx.PRKey) == "" && !workCtx.OutcomePosted {
 							slim := webhook.FormatThreadSlimCard(workCtx.Envelope, workCtx.Workflow, taskStatus, taskOpts.Icons)
-							_, _ = notifySend(ch, targetChannelID, slim)
+							if _, sendErr := notifySend(ch, targetChannelID, slim); sendErr == nil {
+								workCtx.OutcomePosted = true
+							}
 						}
 						if taskOpts.Registry != nil {
 							if repo, branch := webhook.TaskRepoBranch(workCtx.Key, workCtx.Envelope); repo != "" && branch != "" {

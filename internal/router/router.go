@@ -274,8 +274,21 @@ func (r *Router) isOccaCommand(text string) bool {
 	trimmed := strings.TrimPrefix(text, "/")
 	parts := strings.SplitN(trimmed, " ", 2)
 	name := parts[0]
-	_, ok := r.commands[name]
+	_, ok := r.resolveCommand(name)
 	return ok
+}
+
+// resolveCommand matches a canonical alias or the sanitized form a platform
+// menu can advertise (Telegram allows only a-z, 0-9 and _ in command names).
+func (r *Router) resolveCommand(name string) (Command, bool) {
+	if cmd, ok := r.commands[name]; ok {
+		return cmd, true
+	}
+	if !strings.Contains(name, "_") {
+		return Command{}, false
+	}
+	cmd, ok := r.commands[strings.ReplaceAll(name, "_", "-")]
+	return cmd, ok
 }
 
 func (r *Router) routeInputKind(msg channel.IncomingMessage, isOcca bool) string {
@@ -384,7 +397,7 @@ func (r *Router) handleCommand(ctx context.Context, msg channel.IncomingMessage)
 		}
 	}
 
-	cmd, ok := r.commands[name]
+	cmd, ok := r.resolveCommand(name)
 	if !ok {
 		r.reply(msg, r.helpText())
 		return nil

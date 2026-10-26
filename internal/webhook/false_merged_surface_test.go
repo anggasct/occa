@@ -21,7 +21,7 @@ func TestEmitPRAuditSkipPaintsNoPhase(t *testing.T) {
 	envelope["pr_state"] = "open"
 	envelope["merged"] = false
 
-	srv.emitPRAudit(context.Background(), ep, envelope, "SKIP", "no rule for pull_request.opened", prKey, "thread-9")
+	srv.emitPRAudit(context.Background(), ep, envelope, "SKIP", "no rule for pull_request.opened", prKey, "thread-9", false)
 
 	if _, phase, _, known := srv.prSurfaceState(prKey); known {
 		t.Fatalf("SKIP wrote phase %q, want no phase write", phase)
@@ -44,7 +44,7 @@ func TestEmitPRAuditSkipKeepsExistingPhase(t *testing.T) {
 	srv.syncPhaseParent(ctx, ep, prKey, surfaceEnvelope(), PhaseReview)
 	envelope := surfaceEnvelope()
 	envelope["pr_state"] = "open"
-	srv.emitPRAudit(ctx, ep, envelope, "SKIP", "admitted no rule", prKey, "thread-9")
+	srv.emitPRAudit(ctx, ep, envelope, "SKIP", "admitted no rule", prKey, "thread-9", false)
 
 	if _, phase, _, known := srv.prSurfaceState(prKey); !known || phase != PhaseReview {
 		t.Fatalf("phase after SKIP = %q (known=%v), want review", phase, known)

@@ -858,6 +858,7 @@ func TaskCardHeaderWithButtons(envelope WebhookEnvelope, workflow string, status
 }
 
 func WithTaskHeader(card string, envelope WebhookEnvelope, workflow string, status TaskStatus, icons map[string]string) string {
+	card = stripRootOnlyFields(card, envelope)
 	if header := TaskCardHeader(envelope, workflow, status, icons); header != "" {
 		return header + "\n" + card
 	}
@@ -865,6 +866,7 @@ func WithTaskHeader(card string, envelope WebhookEnvelope, workflow string, stat
 }
 
 func WithTaskHeaderWithButtons(card string, envelope WebhookEnvelope, workflow string, status TaskStatus, icons map[string]string, platform string, buttons []channel.Button) string {
+	card = stripRootOnlyFields(card, envelope)
 	if header := TaskCardHeaderWithButtons(envelope, workflow, status, icons, platform, buttons); header != "" {
 		return header + "\n" + card
 	}

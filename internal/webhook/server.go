@@ -67,6 +67,11 @@ type TakeoverStore interface {
 	LinkThreadRoot(ctx context.Context, platform, channelID, threadID, messageID, channel, card string) error
 }
 
+type SessionRowStore interface {
+	Active(ctx context.Context, platform, channelID, threadID, userID string) (string, int, error)
+	Deactivate(ctx context.Context, platform, channelID, threadID, userID string) error
+}
+
 type Executor func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error
 
 type Notifier func(ctx context.Context, platform, channelID, text string) error
@@ -134,6 +139,8 @@ type Server struct {
 	prAuthorResolver      func(ctx context.Context, repo, number string) (string, error)
 	channels              ChannelStore
 	sessions              TakeoverStore
+	sessionRows           SessionRowStore
+	processAlive          func(pid int) bool
 	workspaceResolver     WorkspaceResolver
 	httpSrv               *http.Server
 	listener              net.Listener
@@ -360,6 +367,14 @@ func (s *Server) SetPRHeadResolver(r PRHeadResolver) {
 
 func (s *Server) SetSessionStore(st TakeoverStore) {
 	s.sessions = st
+}
+
+func (s *Server) SetSessionRowStore(st SessionRowStore) {
+	s.sessionRows = st
+}
+
+func (s *Server) SetProcessAlive(fn func(pid int) bool) {
+	s.processAlive = fn
 }
 
 func (s *Server) SetNotifier(n Notifier) {
@@ -2009,7 +2024,6 @@ func (s *Server) beginExecution(item dispatchItem) *store.WebhookDelivery {
 			return nil
 		}
 		slog.Info("webhook: delivery skipped", "endpoint", ep.Name, "delivery_id", item.deliveryID, "event_type", item.eventType)
-		s.emitAudit(ctx, ep, envelope, "SKIP", reason, "")
 		s.settleReplay(ctx, item.replayID, store.WebhookReplayReplayed)
 		return nil
 	}
@@ -2139,6 +2153,7 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 	key := ExtractExecutionKey(body)
 	envelope := normalizeWebhook(body, eventType, deliveryID, s.verdicts, false, "", ep.CommentTrigger)
 	injectTaskContext(envelope, key, s.dispatchTasks)
+	s.sweepBranchSession(context.Background(), ep.Platform, ep.ChannelID, envelope)
 
 	workCtx := &WebhookWorkContext{
 		Key:          key,
