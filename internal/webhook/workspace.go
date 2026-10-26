@@ -194,7 +194,38 @@ func (m *WorkspaceManager) ResolveWorkspace(ctx context.Context, req WorkspaceRe
 		return nil, resolveErr
 	}
 	m.logBindingMismatch(req, lease)
+	m.ensureDocsLink(root, lease.Path)
 	return lease, nil
+}
+
+// ensureDocsLink mirrors the project-docs entry from the checkout root into the
+// lease so isolated worktrees read the same documentation tree as the checkout.
+// It is best effort: a missing or broken link never blocks the lease.
+func (m *WorkspaceManager) ensureDocsLink(root, leasePath string) {
+	if root == "" || leasePath == "" || root == leasePath {
+		return
+	}
+	src := filepath.Join(root, "project-docs")
+	target, err := os.Readlink(src)
+	if err != nil {
+		if info, statErr := os.Stat(src); statErr != nil || !info.IsDir() {
+			return
+		}
+		target = src
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(root, target)
+	}
+	if info, err := os.Stat(target); err != nil || !info.IsDir() {
+		return
+	}
+	dst := filepath.Join(leasePath, "project-docs")
+	if _, err := os.Lstat(dst); err == nil {
+		return
+	}
+	if err := os.Symlink(target, dst); err != nil {
+		slog.Warn("workspace: project-docs link skipped", "lease", leasePath, "error", err)
+	}
 }
 
 func (m *WorkspaceManager) logBindingMismatch(req WorkspaceRequest, lease *WorkspaceLease) {
