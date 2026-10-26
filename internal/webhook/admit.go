@@ -61,6 +61,10 @@ func admitDelivery(ep config.EndpointConfig, policy admissionPolicy, envelope We
 	reviewVerdict := strings.ToLower(stringValue(envelope["review_verdict"]))
 	selfReview := policy.trustLogins[reviewUser] && reviewUser == prAuthor && reviewState == "commented"
 
+	if reason := ignoredAuthorReason(ep, eventType, envelope); reason != "" {
+		return false, reason
+	}
+
 	for _, rule := range ep.Admit {
 		if !strings.EqualFold(strings.TrimSpace(rule.Event), eventType) {
 			continue
@@ -111,6 +115,55 @@ func admitDelivery(ep config.EndpointConfig, policy admissionPolicy, envelope We
 		return true, ""
 	}
 	return false, fmt.Sprintf("endpoint %s admitted no rule for %s.%s", ep.Name, eventType, action)
+}
+
+func ignoredAuthorReason(ep config.EndpointConfig, eventType string, envelope WebhookEnvelope) string {
+	author := deliveryActor(eventType, envelope)
+	if !isIgnoredAuthor(ep.IgnoreAuthors, author) {
+		return ""
+	}
+	return "ignored author " + author
+}
+
+func deliveryActor(eventType string, envelope WebhookEnvelope) string {
+	reviewUser := strings.TrimSpace(stringValue(envelope["review_user"]))
+	prAuthor := strings.TrimSpace(stringValue(envelope["pr_author"]))
+	sender := strings.TrimSpace(stringValue(envelope["sender"]))
+	switch eventType {
+	case "pull_request_review", "issue_comment":
+		if reviewUser != "" {
+			return reviewUser
+		}
+		if sender != "" {
+			return sender
+		}
+		return prAuthor
+	default:
+		if prAuthor != "" {
+			return prAuthor
+		}
+		if reviewUser != "" {
+			return reviewUser
+		}
+		return sender
+	}
+}
+
+func isIgnoredAuthor(ignored []string, login string) bool {
+	if len(ignored) == 0 || strings.TrimSpace(login) == "" {
+		return false
+	}
+	target := normalizeAuthorLogin(login)
+	for _, entry := range ignored {
+		if normalizeAuthorLogin(entry) == target {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeAuthorLogin(login string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(login)), "[bot]")
 }
 
 func requireFlagsHold(require []string, envelope WebhookEnvelope, selfReview bool, reviewVerdict string) bool {

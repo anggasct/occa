@@ -33,6 +33,7 @@ func normalizeWebhook(body []byte, eventType, deliveryID string, verdicts map[st
 		"event_type":                 strings.TrimSpace(eventType),
 		"action":                     stringValue(payload["action"]),
 		"delivery_id":                deliveryID,
+		"sender":                     userName(payload["sender"]),
 		"repository":                 repoName(payload["repository"]),
 		"project":                    "",
 		"pr_number":                  "",
