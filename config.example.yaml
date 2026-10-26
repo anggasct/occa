@@ -91,6 +91,7 @@ webhooks:
       review: ['please re-review'] # default re-review phrase; override per repo
       fix: ['please fix review', 'please fix ci'] # default fix phrases; override per repo
     # comment_authors: ['owner-login'] # allowlisted commenters; required to unlock fix under review-only
+    # ignore_authors: ['dependabot[bot]', 'renovate[bot]'] # bots that never start a run (bare `dependabot` also matches `dependabot[bot]`)
     limits:
       max_runs_per_pr: 3 # comment-trigger runs allowed per PR per window
       window: 60m # sliding window for the trigger cap
@@ -117,6 +118,7 @@ webhooks:
       # refresh_interval: 30s # optional per-repo card age cadence
       # idle_after: 90s # optional per-repo idle threshold
       # comment_authors: ['owner-login'] # allowlisted commenters; required to unlock fix under review-only
+      # ignore_authors: ['dependabot[bot]', 'renovate[bot]'] # per-repo override: bots that never start a run
       # comment_trigger: # optional per-workflow phrases merged with the defaults (review and fix only)
       #   review: ['please re-review']
       # automation: # optional per-author policy (absent = review-only for everyone)

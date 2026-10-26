@@ -1468,6 +1468,18 @@ func (d *dispatcher) handle(item dispatchItem) {
 			enriched = true
 		}
 		earlyEnvelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", item.ep.CommentTrigger)
+		if reason := ignoredAuthorReason(item.ep, strings.ToLower(strings.TrimSpace(item.eventType)), earlyEnvelope); reason != "" {
+			held = false
+			s.releaseEvent()
+			slog.Info("webhook: delivery skipped before workspace",
+				"endpoint", item.ep.Name,
+				"delivery_id", item.deliveryID,
+				"event_type", item.eventType,
+				"reason", reason,
+			)
+			s.markSkipped(receipt.ID, item.ep, earlyEnvelope, reason)
+			return
+		}
 		if !s.automationAllows(item.ep, ExtractExecutionKey(item.body), earlyEnvelope) {
 			held = false
 			s.releaseEvent()

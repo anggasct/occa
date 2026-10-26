@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -38,6 +39,7 @@ type RepoConfig struct {
 	Model           string                   `yaml:"model,omitempty"`
 	CommentTrigger  map[string][]string      `yaml:"comment_trigger,omitempty"`
 	CommentAuthors  []string                 `yaml:"comment_authors,omitempty"`
+	IgnoreAuthors   []string                 `yaml:"ignore_authors,omitempty"`
 	Limits          *EndpointLimits          `yaml:"limits,omitempty"`
 	RefreshInterval time.Duration            `yaml:"refresh_interval,omitempty"`
 	IdleAfter       time.Duration            `yaml:"idle_after,omitempty"`
@@ -49,6 +51,7 @@ type RepoConfig struct {
 type WebhookDefaults struct {
 	CommentTrigger    map[string][]string `yaml:"comment_trigger,omitempty"`
 	CommentAuthors    []string            `yaml:"comment_authors,omitempty"`
+	IgnoreAuthors     []string            `yaml:"ignore_authors,omitempty"`
 	Limits            *EndpointLimits     `yaml:"limits,omitempty"`
 	Thread            *bool               `yaml:"thread,omitempty"`
 	EscalationMention string              `yaml:"escalation_mention,omitempty"`
@@ -189,6 +192,46 @@ func resolveCommentAuthors(defaults WebhookDefaults, repo RepoConfig) []string {
 	return out
 }
 
+var ignoreAuthorPattern = regexp.MustCompile(`^[A-Za-z0-9._\[\]-]+$`)
+
+func validateIgnoreAuthors(values []string, context string) error {
+	for i, login := range values {
+		trimmed := strings.TrimSpace(login)
+		if trimmed == "" {
+			return fmt.Errorf("config: %signore_authors must not contain empty entries", context)
+		}
+		if !ignoreAuthorPattern.MatchString(trimmed) {
+			return fmt.Errorf("config: %signore_authors[%d] must match [A-Za-z0-9-_.\\[\\]]+, got %q", context, i, login)
+		}
+	}
+	return nil
+}
+
+func resolveIgnoreAuthors(defaults WebhookDefaults, repo RepoConfig) []string {
+	source := repo.IgnoreAuthors
+	if len(source) == 0 {
+		source = defaults.IgnoreAuthors
+	}
+	out := make([]string, 0, len(source))
+	seen := make(map[string]bool, len(source))
+	for _, login := range source {
+		trimmed := strings.TrimSpace(login)
+		if trimmed == "" {
+			continue
+		}
+		key := strings.ToLower(trimmed)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func resolveRefreshInterval(defaults WebhookDefaults, repo RepoConfig) time.Duration {
 	if repo.RefreshInterval > 0 {
 		return repo.RefreshInterval
@@ -274,6 +317,9 @@ func expandRepos(repos []RepoConfig, defaults WebhookDefaults) ([]EndpointConfig
 			return nil, fmt.Errorf("config: webhooks.defaults.comment_authors must not contain empty entries")
 		}
 	}
+	if err := validateIgnoreAuthors(defaults.IgnoreAuthors, "webhooks.defaults."); err != nil {
+		return nil, err
+	}
 	seen := map[string]struct{}{}
 	var out []EndpointConfig
 	for i := range repos {
@@ -317,6 +363,9 @@ func expandRepos(repos []RepoConfig, defaults WebhookDefaults) ([]EndpointConfig
 				return nil, fmt.Errorf("config: %scomment_authors must not contain empty entries", context)
 			}
 		}
+		if err := validateIgnoreAuthors(repo.IgnoreAuthors, context); err != nil {
+			return nil, err
+		}
 		automation, err := normalizeAutomation(repo.Automation, context)
 		if err != nil {
 			return nil, err
@@ -347,6 +396,7 @@ func expandRepos(repos []RepoConfig, defaults WebhookDefaults) ([]EndpointConfig
 				PromptSource:    source,
 				CommentTrigger:  resolveTriggers(defaults, *repo, workflow),
 				CommentAuthors:  resolveCommentAuthors(defaults, *repo),
+				IgnoreAuthors:   resolveIgnoreAuthors(defaults, *repo),
 				Thread:          true,
 				NotifySkip:      boolPtr(false),
 				Model:           strings.TrimSpace(repo.Model),
