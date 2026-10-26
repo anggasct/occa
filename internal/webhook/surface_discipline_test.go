@@ -3,6 +3,9 @@ package webhook
 import (
 	"context"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -10,6 +13,7 @@ import (
 
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/config"
+	"github.com/anggasct/occa/internal/process"
 	"github.com/anggasct/occa/internal/relay"
 	"github.com/anggasct/occa/internal/render"
 	"github.com/anggasct/occa/internal/store"
@@ -525,6 +529,88 @@ func TestSurfaceDiscipline_AC16(t *testing.T) {
 	rows.mu.Unlock()
 	if deactivated != 1 {
 		t.Fatalf("stale session deactivations = %d, want 1", deactivated)
+	}
+	if got := srv.dispatchTasks.Count(); got != 1 {
+		t.Fatalf("dispatch tasks = %d, want the re-dispatch admitted", got)
+	}
+}
+
+func openSessionRepo(t *testing.T) *store.SQLiteStore {
+	t.Helper()
+	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "sessions.db"), "")
+	if err != nil {
+		t.Fatalf("open session store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return st
+}
+
+func TestSurfaceDiscipline_LiveSessionRepoRefusesRedispatch(t *testing.T) {
+	srv := newDispatchServer(t, dispatchEndpoints("acme/widget"))
+	srv.tasks.UpsertWithSpec("acme/widget", "feat/x", "root-1", "thread-1", TaskClaimed, "specs/orig.md")
+	st := openSessionRepo(t)
+	srv.SetSessionRowStore(st.SessionRepo())
+	srv.SetProcessAlive(process.Alive)
+
+	livePID := os.Getpid()
+	if err := st.SessionRepo().SetActive(context.Background(), "discord", "chan-1", "thread-1", "", "sess-live", livePID); err != nil {
+		t.Fatalf("persist live session: %v", err)
+	}
+	if sessionID, pid, err := st.SessionRepo().Active(context.Background(), "discord", "chan-1", "thread-1", ""); err != nil || sessionID != "sess-live" || pid != livePID {
+		t.Fatalf("persisted session = %q/%d (%v), want sess-live/%d", sessionID, pid, err, livePID)
+	}
+
+	rec := postDispatch(t, srv, "dispatch-token", dispatchJSON(t, map[string]any{
+		"repo":   "acme/widget",
+		"branch": "feat/x",
+		"brief":  "start another run",
+		"mode":   "redispatch",
+	}))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("live run dispatch status = %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "run in progress") {
+		t.Fatalf("error = %q, want run in progress", rec.Body.String())
+	}
+	if got := srv.dispatchTasks.Count(); got != 0 {
+		t.Fatalf("dispatch tasks = %d, want 0 (no run spawned)", got)
+	}
+}
+
+func TestSurfaceDiscipline_DeadSessionRepoAllowsRedispatch(t *testing.T) {
+	srv := newDispatchServer(t, dispatchEndpoints("acme/widget"))
+	srv.tasks.UpsertWithSpec("acme/widget", "feat/x", "root-1", "thread-1", TaskClaimed, "specs/orig.md")
+	st := openSessionRepo(t)
+	srv.SetSessionRowStore(st.SessionRepo())
+	srv.SetProcessAlive(process.Alive)
+	srv.SetBranchExistsChecker(func(context.Context, string, string) (bool, error) { return true, nil })
+
+	dead := exec.Command("true")
+	if err := dead.Start(); err != nil {
+		t.Fatalf("spawn dead-pid fixture: %v", err)
+	}
+	deadPID := dead.Process.Pid
+	if err := dead.Wait(); err != nil {
+		t.Fatalf("wait dead-pid fixture: %v", err)
+	}
+	if process.Alive(deadPID) {
+		t.Fatalf("fixture pid %d is still alive", deadPID)
+	}
+	if err := st.SessionRepo().SetActive(context.Background(), "discord", "chan-1", "thread-1", "", "sess-dead", deadPID); err != nil {
+		t.Fatalf("persist dead session: %v", err)
+	}
+
+	rec := postDispatch(t, srv, "dispatch-token", dispatchJSON(t, map[string]any{
+		"repo":   "acme/widget",
+		"branch": "feat/x",
+		"brief":  "start again",
+		"mode":   "redispatch",
+	}))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 after a dead session: %s", rec.Code, rec.Body.String())
+	}
+	if sessionID, _, err := st.SessionRepo().Active(context.Background(), "discord", "chan-1", "thread-1", ""); err != nil || sessionID != "" {
+		t.Fatalf("stale session row = %q (%v), want deactivated", sessionID, err)
 	}
 	if got := srv.dispatchTasks.Count(); got != 1 {
 		t.Fatalf("dispatch tasks = %d, want the re-dispatch admitted", got)

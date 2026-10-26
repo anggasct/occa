@@ -643,6 +643,35 @@ func TestWebhookExecutorTaskThreadFailurePostsSingleOutcome(t *testing.T) {
 	}
 }
 
+func TestWebhookExecutorReportsAgentPIDBeforeSession(t *testing.T) {
+	discordCh := &mockDiscordChannel{
+		name:         "discord",
+		nextMsgID:    "msg-root-pid",
+		nextThreadID: "thread-pid",
+	}
+	manager := &mockAgentManager{client: &mockRelayClient{events: []relay.Event{{Type: relay.EventDelta, Delta: "run output"}}}}
+	reg := webhook.NewTaskThreadRegistry()
+	exec := newWebhookExecutor([]channel.Channel{discordCh}, manager, mockChannelStore{}, "/tmp", relay.Config{NoEventTimeout: 15 * time.Minute, WebhookAbortTimeout: 5 * time.Second, VerifyTimeout: 15 * time.Second}, webhook.TaskOptions{Registry: reg})
+
+	workCtx := &webhook.WebhookWorkContext{
+		Thread:     true,
+		Workflow:   "github_reviewer",
+		Envelope:   webhook.WebhookEnvelope{"repository": "acme/widget", "head_branch": "feat/pid"},
+		DeliveryID: "del-pid",
+	}
+	var reportedPID int
+	workCtx.ReportSession = func(string) {
+		reportedPID = workCtx.AgentPID
+	}
+
+	if err := exec(context.Background(), "discord", "chan-pid", "prompt text", workCtx); err != nil {
+		t.Fatalf("executor returned error: %v", err)
+	}
+	if reportedPID != 1234 {
+		t.Fatalf("agent PID reported at session creation = %d, want 1234 persisted before the run", reportedPID)
+	}
+}
+
 func TestWebhookExecutorVerboseStepsReachesStreamer(t *testing.T) {
 	run := func(verbose bool) []string {
 		t.Helper()

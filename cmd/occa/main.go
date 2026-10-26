@@ -1122,6 +1122,7 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 					return errors.New("webhook agent unavailable")
 				}
 				defer inst.End()
+				workCtx.AgentPID = inst.PID()
 
 				var streamer *relay.Streamer
 				if workCtx.RootMessageID != "" && sender != nil && editor != nil {
@@ -1170,7 +1171,6 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 				workCtx.SessionID = result.SessionID
 				workCtx.SessionAborted = result.Aborted
 				workCtx.SessionAbortOK = result.AbortOK
-				workCtx.AgentPID = inst.PID()
 				workCtx.Progress = result.Progress
 				workCtx.OutcomePosted = err == nil && streamer != nil && streamer.OutcomePosted()
 
