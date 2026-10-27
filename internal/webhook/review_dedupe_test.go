@@ -17,16 +17,21 @@ import (
 
 func reviewEventBody(t *testing.T, state, body, commit string) []byte {
 	t.Helper()
+	return reviewEventBodyForRepo(t, "o/r", state, body, commit)
+}
+
+func reviewEventBodyForRepo(t *testing.T, repo, state, body, commit string) []byte {
+	t.Helper()
 	payload := map[string]any{
 		"action":     "submitted",
-		"repository": map[string]any{"full_name": "o/r"},
+		"repository": map[string]any{"full_name": repo},
 		"pull_request": map[string]any{
 			"number":   7,
 			"title":    "Fix it",
-			"html_url": "https://github.com/o/r/pull/7",
+			"html_url": "https://github.com/" + repo + "/pull/7",
 			"user":     map[string]any{"login": "someone"},
 			"head":     map[string]any{"ref": "feat/x"},
-			"base":     map[string]any{"ref": "main", "repo": map[string]any{"full_name": "o/r"}},
+			"base":     map[string]any{"ref": "main", "repo": map[string]any{"full_name": repo}},
 		},
 		"review": map[string]any{
 			"state":     state,
@@ -669,5 +674,261 @@ func TestCommentTriggerRateCap(t *testing.T) {
 	}
 	if count := exec.callCount(); count != 5 {
 		t.Fatalf("delivery after window spawned %d turns, want 5", count)
+	}
+}
+
+type fakeReviewObserver struct {
+	obs   ReviewObservation
+	err   error
+	calls int
+}
+
+func (f *fakeReviewObserver) observe(context.Context, string, string) (ReviewObservation, error) {
+	f.calls++
+	return f.obs, f.err
+}
+
+func hasReviewKey(t *testing.T, st *store.SQLiteStore, endpoint, key string) bool {
+	t.Helper()
+	prior, err := st.WebhookDeliveryRepo().FindReviewDuplicate(context.Background(), endpoint, key, 0, time.Now().Add(-time.Hour).Unix())
+	if err != nil {
+		t.Fatalf("find review duplicate %q: %v", key, err)
+	}
+	return prior != nil
+}
+
+func TestReviewDedupeCompletionKeysVerdictHead(t *testing.T) {
+	ep := reviewGuardEndpoint()
+	ep.Workflow = "review"
+	ep.CommentTrigger = []string{"please re-review"}
+	ep.Limits = &config.EndpointLimits{MaxRunsPerPR: 10, Window: time.Hour}
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{ep})
+	const admitted = "aaaaaaaaaa"
+	const judged = "bbbbbbbbbb"
+	observer := &fakeReviewObserver{obs: ReviewObservation{LiveHead: judged, VerdictHead: judged}}
+	srv.SetReviewObserver(observer.observe)
+
+	firstID := "review-admitted-a"
+	firstReceipt := seedDeliveryForEvent(t, st.WebhookDeliveryRepo(), ep.Name, firstID, "pull_request_review")
+	body := reviewEventBody(t, "commented", "**Verdict:** APPROVED", admitted)
+	if err := srv.executeDelivery(ep, body, firstReceipt, firstID, "pull_request_review", 1, nil, nil, nil); err != nil {
+		t.Fatalf("first executeDelivery: %v", err)
+	}
+	if exec.callCount() != 1 {
+		t.Fatalf("first review spawned %d turns, want 1", exec.callCount())
+	}
+	if !hasReviewKey(t, st, ep.Name, "o/r#7@"+judged) {
+		t.Fatalf("completed review did not move its key to the judged head %s", judged)
+	}
+	if hasReviewKey(t, st, ep.Name, "o/r#7@"+admitted) {
+		t.Fatalf("completed review still keys the admission head %s", admitted)
+	}
+
+	internalID := internalReviewDeliveryID("o/r#7", judged)
+	internalBody := internalReviewCommentBody("o/r", "7", "please re-review", "https://github.com/o/r/pull/7", "feat/x", judged)
+	internalReceipt := seedDeliveryForEvent(t, st.WebhookDeliveryRepo(), ep.Name, internalID, "issue_comment")
+	if err := srv.executeDelivery(ep, internalBody, internalReceipt, internalID, "issue_comment", 1, nil, nil, nil); err != nil {
+		t.Fatalf("internal executeDelivery: %v", err)
+	}
+	if exec.callCount() != 1 {
+		t.Fatalf("internal re-review for the judged head spawned a turn (total %d, want 1)", exec.callCount())
+	}
+	skipped, err := st.WebhookDeliveryRepo().Get(context.Background(), ep.Name, internalID)
+	if err != nil || skipped == nil {
+		t.Fatalf("get internal receipt: %v %v", skipped, err)
+	}
+	wantReason := "duplicate review event (same head, already handled by delivery " + firstID + ")"
+	if skipped.Status != store.WebhookStatusSkipped || !strings.Contains(skipped.ErrorSummary, wantReason) {
+		t.Fatalf("internal receipt = status %s reason %q, want skipped with %q", skipped.Status, skipped.ErrorSummary, wantReason)
+	}
+
+	const newer = "cccccccccc"
+	observer.obs = ReviewObservation{LiveHead: newer, VerdictHead: newer}
+	newerID := "comment-new-head"
+	newerBody := issueCommentEventBodyWithHead(t, 7, "please re-review", newer)
+	newerReceipt := seedDeliveryForEvent(t, st.WebhookDeliveryRepo(), ep.Name, newerID, "issue_comment")
+	if err := srv.executeDelivery(ep, newerBody, newerReceipt, newerID, "issue_comment", 1, nil, nil, nil); err != nil {
+		t.Fatalf("new head executeDelivery: %v", err)
+	}
+	if exec.callCount() != 2 {
+		t.Fatalf("new head spawned %d turns total, want 2", exec.callCount())
+	}
+	if !hasReviewKey(t, st, ep.Name, "o/r#7@"+newer) {
+		t.Fatalf("new head %s was not keyed after its review completed", newer)
+	}
+}
+
+func TestReviewDedupeMixedCaseRepositoryUsesCanonicalKey(t *testing.T) {
+	ep := reviewGuardEndpoint()
+	ep.Workflow = "review"
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{ep})
+	const head = "bbbbbbbbbb"
+	observer := &fakeReviewObserver{obs: ReviewObservation{LiveHead: head, VerdictHead: head}}
+	srv.SetReviewObserver(observer.observe)
+
+	firstID := "review-mixed-case"
+	firstReceipt := seedDeliveryForEvent(t, st.WebhookDeliveryRepo(), ep.Name, firstID, "pull_request_review")
+	firstBody := reviewEventBodyForRepo(t, "Owner/Repo", "changes_requested", "**Verdict:** REQUEST_CHANGES", head)
+	if err := srv.executeDelivery(ep, firstBody, firstReceipt, firstID, "pull_request_review", 1, nil, nil, nil); err != nil {
+		t.Fatalf("first executeDelivery: %v", err)
+	}
+	if exec.callCount() != 1 {
+		t.Fatalf("first review spawned %d turns, want 1", exec.callCount())
+	}
+	if !hasReviewKey(t, st, ep.Name, "owner/repo#7@"+head) {
+		t.Fatalf("completed review did not key the canonical repository and judged head")
+	}
+
+	secondID := "review-mixed-case-duplicate"
+	secondReceipt := seedDeliveryForEvent(t, st.WebhookDeliveryRepo(), ep.Name, secondID, "pull_request_review")
+	secondBody := reviewEventBodyForRepo(t, "Owner/Repo", "approved", "**Verdict:** APPROVED", head)
+	if err := srv.executeDelivery(ep, secondBody, secondReceipt, secondID, "pull_request_review", 1, nil, nil, nil); err != nil {
+		t.Fatalf("duplicate executeDelivery: %v", err)
+	}
+	if exec.callCount() != 1 {
+		t.Fatalf("same judged head with mixed-case repository spawned another turn (total %d, want 1)", exec.callCount())
+	}
+	second, err := st.WebhookDeliveryRepo().Get(context.Background(), ep.Name, secondID)
+	if err != nil || second == nil {
+		t.Fatalf("get duplicate receipt: %v %v", second, err)
+	}
+	if second.Status != store.WebhookStatusSkipped {
+		t.Fatalf("duplicate receipt status = %s, want skipped", second.Status)
+	}
+	if !strings.Contains(second.ErrorSummary, "delivery "+firstID) {
+		t.Fatalf("duplicate skip reason = %q, want handled by %s", second.ErrorSummary, firstID)
+	}
+}
+
+func TestReviewDedupeSupersededRunKeepsJudgedHead(t *testing.T) {
+	ep := reviewGuardEndpoint()
+	ep.Workflow = "review"
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{ep})
+	const judged = "bbbbbbbbbb"
+	const newer = "cccccccccc"
+	observer := &fakeReviewObserver{obs: ReviewObservation{LiveHead: newer, VerdictHead: judged}}
+	srv.SetReviewObserver(observer.observe)
+
+	id := "review-superseded"
+	receipt := seedDeliveryForEvent(t, st.WebhookDeliveryRepo(), ep.Name, id, "pull_request_review")
+	body := reviewEventBody(t, "commented", "**Verdict:** REQUEST_CHANGES", judged)
+	if err := srv.executeDelivery(ep, body, receipt, id, "pull_request_review", 1, nil, nil, nil); err != nil {
+		t.Fatalf("executeDelivery: %v", err)
+	}
+	if exec.callCount() != 1 {
+		t.Fatalf("superseded review spawned %d turns, want 1", exec.callCount())
+	}
+	got, err := st.WebhookDeliveryRepo().Get(context.Background(), ep.Name, id)
+	if err != nil || got == nil {
+		t.Fatalf("get receipt: %v %v", got, err)
+	}
+	if !strings.Contains(got.ErrorSummary, "superseded by head "+newer[:10]) {
+		t.Fatalf("error summary = %q, want superseded by head %s", got.ErrorSummary, newer[:10])
+	}
+	if !hasReviewKey(t, st, ep.Name, "o/r#7@"+judged) {
+		t.Fatalf("superseded review did not keep the judged head %s", judged)
+	}
+	if hasReviewKey(t, st, ep.Name, "o/r#7@"+newer) {
+		t.Fatalf("superseded review keyed the newer head %s it never judged", newer)
+	}
+}
+
+func TestReviewDedupeTwoPushesKeysVerdictHead(t *testing.T) {
+	ep := reviewGuardEndpoint()
+	ep.Workflow = "review"
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{ep})
+	const admitted = "d2137f9211"
+	const judged = "14320114aa"
+	const newer = "9f3c2a1bbb"
+	observer := &fakeReviewObserver{obs: ReviewObservation{LiveHead: newer, VerdictHead: judged}}
+	srv.SetReviewObserver(observer.observe)
+
+	id := "review-two-pushes"
+	receipt := seedDeliveryForEvent(t, st.WebhookDeliveryRepo(), ep.Name, id, "pull_request_review")
+	body := reviewEventBody(t, "commented", "**Verdict:** REQUEST_CHANGES", admitted)
+	if err := srv.executeDelivery(ep, body, receipt, id, "pull_request_review", 1, nil, nil, nil); err != nil {
+		t.Fatalf("executeDelivery: %v", err)
+	}
+	if exec.callCount() != 1 {
+		t.Fatalf("two-push review spawned %d turns, want 1", exec.callCount())
+	}
+	got, err := st.WebhookDeliveryRepo().Get(context.Background(), ep.Name, id)
+	if err != nil || got == nil {
+		t.Fatalf("get receipt: %v %v", got, err)
+	}
+	if !strings.Contains(got.ErrorSummary, "superseded by head "+newer[:10]) {
+		t.Fatalf("error summary = %q, want superseded by head %s", got.ErrorSummary, newer[:10])
+	}
+	if !hasReviewKey(t, st, ep.Name, "o/r#7@"+judged) {
+		t.Fatalf("two-push review did not key the verdict head %s", judged)
+	}
+	if hasReviewKey(t, st, ep.Name, "o/r#7@"+admitted) {
+		t.Fatalf("two-push review keyed the admission head %s it never judged", admitted)
+	}
+}
+
+func TestReviewDedupeNoVerdictKeepsAdmissionHead(t *testing.T) {
+	ep := reviewGuardEndpoint()
+	ep.Workflow = "review"
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{ep})
+	const admitted = "aaaaaaaaaa"
+	const moved = "bbbbbbbbbb"
+	observer := &fakeReviewObserver{obs: ReviewObservation{LiveHead: moved, VerdictHead: ""}}
+	srv.SetReviewObserver(observer.observe)
+
+	id := "review-no-verdict-moved"
+	receipt := seedDeliveryForEvent(t, st.WebhookDeliveryRepo(), ep.Name, id, "pull_request_review")
+	body := reviewEventBody(t, "commented", "", admitted)
+	if err := srv.executeDelivery(ep, body, receipt, id, "pull_request_review", 1, nil, nil, nil); err != nil {
+		t.Fatalf("executeDelivery: %v", err)
+	}
+	if exec.callCount() != 1 {
+		t.Fatalf("no-verdict review spawned %d turns, want 1", exec.callCount())
+	}
+	got, err := st.WebhookDeliveryRepo().Get(context.Background(), ep.Name, id)
+	if err != nil || got == nil {
+		t.Fatalf("get receipt: %v %v", got, err)
+	}
+	if !strings.Contains(got.ErrorSummary, "superseded by head "+moved[:10]) {
+		t.Fatalf("error summary = %q, want superseded by head %s", got.ErrorSummary, moved[:10])
+	}
+	if !hasReviewKey(t, st, ep.Name, "o/r#7@"+admitted) {
+		t.Fatalf("no-verdict review did not keep the admission head %s", admitted)
+	}
+	if hasReviewKey(t, st, ep.Name, "o/r#7@"+moved) {
+		t.Fatalf("no-verdict review keyed the live head %s it never judged", moved)
+	}
+
+	nextID := "review-moved-head"
+	nextReceipt := seedDeliveryForEvent(t, st.WebhookDeliveryRepo(), ep.Name, nextID, "pull_request_review")
+	nextBody := reviewEventBody(t, "commented", "**Verdict:** APPROVED", moved)
+	if err := srv.executeDelivery(ep, nextBody, nextReceipt, nextID, "pull_request_review", 1, nil, nil, nil); err != nil {
+		t.Fatalf("moved-head executeDelivery: %v", err)
+	}
+	if exec.callCount() != 2 {
+		t.Fatalf("moved-head review spawned %d turns total, want 2", exec.callCount())
+	}
+	nextGot, err := st.WebhookDeliveryRepo().Get(context.Background(), ep.Name, nextID)
+	if err != nil || nextGot == nil {
+		t.Fatalf("get moved-head receipt: %v %v", nextGot, err)
+	}
+	if nextGot.Status == store.WebhookStatusSkipped {
+		t.Fatalf("moved-head review was skipped as duplicate: %q", nextGot.ErrorSummary)
+	}
+}
+
+func TestReviewDedupePlainOpenedUnchanged(t *testing.T) {
+	ep := reviewGuardEndpoint()
+	ep.Workflow = "review"
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{ep})
+	body := []byte(`{"action":"opened","repository":{"full_name":"o/r"},"pull_request":{"number":7,"title":"Fix it","html_url":"https://github.com/o/r/pull/7","user":{"login":"someone"},"head":{"ref":"feat/x","sha":"5932515abc"},"base":{"ref":"main","repo":{"full_name":"o/r"}}}}`)
+	for _, id := range []string{"opened-1", "opened-2"} {
+		receipt := seedDeliveryForEvent(t, st.WebhookDeliveryRepo(), ep.Name, id, "pull_request")
+		if err := srv.executeDelivery(ep, body, receipt, id, "pull_request", 1, nil, nil, nil); err != nil {
+			t.Fatalf("executeDelivery %s: %v", id, err)
+		}
+	}
+	if exec.callCount() != 2 {
+		t.Fatalf("plain pull_request admissions spawned %d turns, want 2 unchanged", exec.callCount())
 	}
 }

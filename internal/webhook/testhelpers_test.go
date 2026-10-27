@@ -7,6 +7,10 @@ import (
 	"github.com/anggasct/occa/internal/config"
 )
 
+func init() {
+	defaultReviewObserver = nil
+}
+
 func testPolicy() config.WebhookPolicy {
 	return config.WebhookPolicy{
 		TrustReviewLogins: []string{"reviewbot"},

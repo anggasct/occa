@@ -127,7 +127,10 @@ func (s *Server) reconcilePR(ctx context.Context, row store.PRRun) {
 func (s *Server) reconcileFactsFor(ctx context.Context, repo, number string) (ReconcileFacts, error) {
 	resolver := s.reconcileFacts
 	if resolver == nil {
-		resolver = ghReconcileFacts
+		trustLogins := s.policy.trustLogins
+		resolver = func(ctx context.Context, repo, number string) (ReconcileFacts, error) {
+			return ghReconcileFacts(ctx, repo, number, trustLogins)
+		}
 	}
 	return resolver(ctx, repo, number)
 }
@@ -330,6 +333,7 @@ type ghCheckContext struct {
 
 type ghReconcileReview struct {
 	State       string `json:"state"`
+	Body        string `json:"body"`
 	SubmittedAt string `json:"submittedAt"`
 	Commit      struct {
 		OID string `json:"oid"`
@@ -339,7 +343,7 @@ type ghReconcileReview struct {
 	} `json:"author"`
 }
 
-func ghReconcileFacts(ctx context.Context, repo, number string) (ReconcileFacts, error) {
+func ghReconcileFacts(ctx context.Context, repo, number string, trustLogins map[string]bool) (ReconcileFacts, error) {
 	lookupCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(lookupCtx, "gh", "pr", "view", strings.TrimSpace(number), "--repo", strings.TrimSpace(repo),
@@ -383,22 +387,24 @@ func ghReconcileFacts(ctx context.Context, repo, number string) (ReconcileFacts,
 		Author:        strings.TrimSpace(raw.Author.Login),
 		HeadRepo:      strings.TrimSpace(raw.HeadRepository.NameWithOwner),
 		CIGreen:       checksGreen(raw.StatusCheckRollup),
-		ReviewVerdict: ghReviewVerdictForHead(raw.Reviews, raw.HeadRefOid),
+		ReviewVerdict: ghReviewVerdictForHead(raw.Reviews, raw.HeadRefOid, raw.Author.Login, trustLogins),
 	}
 	return facts, nil
 }
 
-func ghReviewVerdictForHead(reviews []ghReconcileReview, head string) string {
+func ghReviewVerdictForHead(reviews []ghReconcileReview, head, prAuthor string, trustLogins map[string]bool) string {
 	head = normalizeRevision(head)
 	if head == "" {
 		return ""
 	}
-	latest := make(map[string]ghReconcileReview)
+	type observed struct {
+		verdict string
+		at      string
+	}
+	latest := make(map[string]observed)
 	for index, review := range reviews {
-		state := strings.ToUpper(strings.TrimSpace(review.State))
-		switch state {
-		case "APPROVED", "CHANGES_REQUESTED", "DISMISSED":
-		default:
+		verdict := reviewVerdict(review, prAuthor, trustLogins)
+		if verdict == "" {
 			continue
 		}
 		if normalizeRevision(review.Commit.OID) != head {
@@ -408,21 +414,76 @@ func ghReviewVerdictForHead(reviews []ghReconcileReview, head string) string {
 		if key == "" {
 			key = fmt.Sprintf("review:%d", index)
 		}
-		if previous, ok := latest[key]; ok && previous.SubmittedAt > review.SubmittedAt {
+		submitted := strings.TrimSpace(review.SubmittedAt)
+		if previous, ok := latest[key]; ok && previous.at > submitted {
 			continue
 		}
-		latest[key] = review
+		latest[key] = observed{verdict: verdict, at: submitted}
 	}
-	verdict := ""
-	for _, review := range latest {
-		switch strings.ToUpper(strings.TrimSpace(review.State)) {
-		case "CHANGES_REQUESTED":
+	result := ""
+	for _, item := range latest {
+		switch item.verdict {
+		case "changes_requested":
 			return "changes_requested"
-		case "APPROVED":
-			verdict = "approved"
+		case "approved":
+			result = "approved"
+		case "spec_unclear", "blocked":
+			if result == "" {
+				result = item.verdict
+			}
 		}
 	}
-	return verdict
+	return result
+}
+
+// reviewVerdict maps a review to the verdict it expresses. GitHub's review
+// state carries it for a normal review; a self-review posts through --comment,
+// so the verdict exists only in the body there and is trusted only for an
+// allowed self-review author.
+func reviewVerdict(review ghReconcileReview, prAuthor string, trustLogins map[string]bool) string {
+	if strings.EqualFold(strings.TrimSpace(review.State), "COMMENTED") &&
+		!trustedSelfReview(review.Author.Login, prAuthor, trustLogins) {
+		return ""
+	}
+	return reviewLogicalVerdict(review)
+}
+
+func reviewLogicalVerdict(review ghReconcileReview) string {
+	switch strings.ToUpper(strings.TrimSpace(review.State)) {
+	case "APPROVED":
+		return "approved"
+	case "CHANGES_REQUESTED":
+		return "changes_requested"
+	case "DISMISSED":
+		return "dismissed"
+	case "COMMENTED":
+		return reviewBodyVerdict(review.Body)
+	}
+	return ""
+}
+
+func reviewBodyVerdict(body string) string {
+	for _, raw := range strings.Split(body, "\n") {
+		line := strings.TrimSpace(raw)
+		line = strings.TrimSpace(strings.TrimPrefix(line, "- "))
+		line = strings.Trim(line, "*_` ")
+		lower := strings.ToLower(line)
+		if !strings.HasPrefix(lower, "verdict:") {
+			continue
+		}
+		value := strings.ToUpper(strings.Trim(strings.TrimSpace(line[len("verdict:"):]), "*_` "))
+		switch value {
+		case "APPROVED":
+			return "approved"
+		case "REQUEST_CHANGES", "REQUEST CHANGES", "CHANGES_REQUESTED":
+			return "changes_requested"
+		case "SPEC_UNCLEAR", "SPEC UNCLEAR":
+			return "spec_unclear"
+		case "BLOCKED":
+			return "blocked"
+		}
+	}
+	return ""
 }
 
 func checksGreen(checks []ghCheckContext) bool {

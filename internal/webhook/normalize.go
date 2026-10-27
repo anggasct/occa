@@ -372,7 +372,7 @@ func commentTrigger(body string, triggers []string) string {
 }
 
 func reviewDedupePrefix(envelope WebhookEnvelope) string {
-	repo := strings.TrimSpace(stringValue(envelope["repository"]))
+	repo := normalizeRepoKey(stringValue(envelope["repository"]))
 	pr := strings.TrimSpace(stringValue(envelope["pr_number"]))
 	if repo == "" || pr == "" {
 		return ""
@@ -389,23 +389,30 @@ func reviewDedupeKey(envelope WebhookEnvelope) string {
 	if prefix == "" {
 		return ""
 	}
-	var head string
-	switch stringValue(envelope["event_type"]) {
-	case "pull_request_review":
-		head = normalizeRevision(stringValue(envelope["review_commit"]))
-		if head == "" {
-			head = normalizeRevision(stringValue(envelope["head_sha"]))
-		}
-	case "issue_comment":
-		if strings.TrimSpace(stringValue(envelope["comment_trigger"])) == "" {
-			return ""
-		}
-		head = normalizeRevision(stringValue(envelope["head_sha"]))
-	}
+	head := reviewDedupeHead(envelope)
 	if head == "" {
 		return ""
 	}
 	return prefix + head
+}
+
+// reviewDedupeHead names the head a review delivery would review. A review
+// event carries the commit its review judged; a comment trigger carries the
+// head the comment was posted against.
+func reviewDedupeHead(envelope WebhookEnvelope) string {
+	switch stringValue(envelope["event_type"]) {
+	case "pull_request_review":
+		if head := normalizeRevision(stringValue(envelope["review_commit"])); head != "" {
+			return head
+		}
+		return normalizeRevision(stringValue(envelope["head_sha"]))
+	case "issue_comment":
+		if strings.TrimSpace(stringValue(envelope["comment_trigger"])) == "" {
+			return ""
+		}
+		return normalizeRevision(stringValue(envelope["head_sha"]))
+	}
+	return ""
 }
 
 const (

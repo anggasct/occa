@@ -195,6 +195,7 @@ type Server struct {
 	listening             atomic.Bool
 	reviewDedupeWindow    time.Duration
 	reviewDedupeNow       func() time.Time
+	reviewObserver        ReviewObserver
 	triggerLimits         map[string]config.EndpointLimits
 	prHeadResolver        PRHeadResolver
 	tasks                 *TaskThreadRegistry
@@ -287,6 +288,7 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 		writeTimeout:          rt.HTTPWriteTimeout,
 		idleTimeout:           rt.HTTPIdleTimeout,
 		reviewDedupeWindow:    rt.ReviewDedupeWindow,
+		reviewObserver:        defaultReviewObserver,
 		triggerLimits:         triggerLimits,
 		prHeadResolver:        &ghPRHeadResolver{timeout: rt.ProcessingTimeout},
 		escalationMention:     strings.TrimSpace(cfg.Defaults.EscalationMention),
@@ -315,6 +317,12 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 	srv.branchExists = ghBranchExistsChecker
 	srv.gh = &defaultGHRunner{}
 	srv.dispatchRuns = make(map[string]dispatchRunState)
+	if srv.reviewObserver != nil {
+		trustLogins := srv.policy.trustLogins
+		srv.reviewObserver = func(ctx context.Context, repo, number string) (ReviewObservation, error) {
+			return ghReviewObserver(ctx, repo, number, trustLogins)
+		}
+	}
 	return srv
 }
 
@@ -2432,6 +2440,10 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		}
 	}
 	s.prMirrorSync(workCtx)
+	supersededSummary := ""
+	if err == nil && isReviewWorkflow(ep.Workflow) {
+		supersededSummary = s.finalizeReviewHead(ep, id, workCtx.PRKey, envelope)
+	}
 	if err == nil && fixHeadBefore != "" {
 		s.queueReviewAfterFix(workCtx.PRKey, fixHeadBefore)
 	}
@@ -2483,8 +2495,8 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 
 	switch {
 	case err == nil:
-		card := s.terminalCard(ep, envelope, "COMPLETED", "", workCtx)
-		ok, tErr := s.deliveries.Transition(context.Background(), id, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusCompleted, "")
+		card := s.terminalCard(ep, envelope, "COMPLETED", supersededSummary, workCtx)
+		ok, tErr := s.deliveries.Transition(context.Background(), id, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusCompleted, supersededSummary)
 		if tErr != nil {
 			slog.Error("webhook: completed transition failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", tErr)
 		} else if ok {
