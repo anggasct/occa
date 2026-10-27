@@ -29,7 +29,7 @@ func (s *Server) SetReviewObserver(fn ReviewObserver) {
 // GHReviewObserver resolves the live PR head and the commit the latest
 // logical verdict review was posted against.
 func GHReviewObserver(ctx context.Context, repo, number string) (ReviewObservation, error) {
-	lookupCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	lookupCtx, cancel := context.WithTimeout(ctx, prStateLookupTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(lookupCtx, "gh", "pr", "view", strings.TrimSpace(number), "--repo", strings.TrimSpace(repo),
 		"--json", "headRefOid,reviews")
@@ -101,7 +101,7 @@ func (s *Server) finalizeReviewHead(ep config.EndpointConfig, id int64, prKey st
 		return ""
 	}
 	admission := reviewDedupeHead(envelope)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), prStateLookupTimeout)
 	defer cancel()
 	obs, err := s.reviewObserver(ctx, repo, number)
 	if err != nil {
