@@ -59,6 +59,7 @@ type Adapter struct {
 	kindsMu       sync.Mutex
 	channelKind   map[string]discordgo.ChannelType
 	forumChannels map[string]struct{}
+	forumTags     map[string]string
 
 	dispatchMu       sync.Mutex
 	seenDispatchTask map[string]time.Time
@@ -413,6 +414,7 @@ func (a *Adapter) onReady(r *discordgo.Ready) {
 		a.setAppID(r.Application.ID)
 	}
 	slog.Info("discord adapter connected", "bot_id", r.User.ID)
+	a.warmForumTags()
 	a.registerCommands(r)
 }
 
@@ -1152,6 +1154,97 @@ func forumPostTitle(text string) string {
 		return clipTitle(line)
 	}
 	return "run"
+}
+
+// channelInfo resolves a channel without a REST call: the injected lookup in
+// tests, otherwise the gateway state.
+func (a *Adapter) channelInfo(channelID string) (*discordgo.Channel, bool) {
+	if a.channelLookup != nil {
+		ch, err := a.channelLookup(channelID)
+		return ch, err == nil && ch != nil
+	}
+	if a.session == nil {
+		return nil, false
+	}
+	ch, err := a.session.State.Channel(channelID)
+	return ch, err == nil && ch != nil
+}
+
+// warmForumTags reads the tags of every pinned forum so a post can carry the
+// phase tag without a lookup on the delivery path. A forum without tags, or a
+// failed read, leaves the map empty and posts simply carry no tags.
+func (a *Adapter) warmForumTags() {
+	if a.session == nil {
+		return
+	}
+	a.kindsMu.Lock()
+	forums := make([]string, 0, len(a.forumChannels))
+	for id := range a.forumChannels {
+		forums = append(forums, id)
+	}
+	a.kindsMu.Unlock()
+	tags := make(map[string]string, 8)
+	for _, forumID := range forums {
+		ch, err := a.session.Channel(forumID)
+		if err != nil || ch == nil {
+			slog.Warn("discord: forum tag read failed", "channel_id", forumID, "error", err)
+			continue
+		}
+		for _, tag := range ch.AvailableTags {
+			tags[strings.ToLower(strings.TrimSpace(tag.Name))] = tag.ID
+		}
+	}
+	if len(tags) == 0 {
+		return
+	}
+	a.kindsMu.Lock()
+	a.forumTags = tags
+	a.kindsMu.Unlock()
+}
+
+func (a *Adapter) forumTagIDs(names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	a.kindsMu.Lock()
+	defer a.kindsMu.Unlock()
+	ids := make([]string, 0, len(names))
+	for _, name := range names {
+		if id, ok := a.forumTags[strings.ToLower(strings.TrimSpace(name))]; ok {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// UpdateThreadSurface retitles a forum post and swaps its phase tag. Text
+// channel threads are left alone: their name is stable and they carry no tags.
+func (a *Adapter) UpdateThreadSurface(threadID, name string, tags []string) error {
+	if a.session == nil {
+		return errors.New("discord: session not ready")
+	}
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" {
+		return errors.New("discord: update thread surface: empty thread id")
+	}
+	ch, ok := a.channelInfo(threadID)
+	if !ok || !isThreadType(ch.Type) || !a.isForumChannel(ch.ParentID) {
+		return nil
+	}
+	edit := &discordgo.ChannelEdit{}
+	if name = clipTitle(name); name != "" {
+		edit.Name = name
+	}
+	if ids := a.forumTagIDs(tags); len(ids) > 0 {
+		edit.AppliedTags = &ids
+	}
+	if edit.Name == "" && edit.AppliedTags == nil {
+		return nil
+	}
+	if _, err := a.session.ChannelEdit(threadID, edit); err != nil {
+		return fmt.Errorf("discord: update thread surface: %w", err)
+	}
+	return nil
 }
 
 func clipTitle(value string) string {

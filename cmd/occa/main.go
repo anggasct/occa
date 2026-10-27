@@ -905,6 +905,39 @@ func refreshThreadBannerAndStatus(ch channel.Channel, taskOpts webhook.TaskOptio
 		},
 	}
 	writer.Write(target, threadID, repo, branch, prKey, text)
+	renameThreadSurface(ch, threadID, repo, workCtx, surfacePhase)
+}
+
+// renameThreadSurface keeps a forum post readable at a glance: the title names
+// the pull request and the current phase, and the phase tag follows. Threads in
+// text channels are left untouched by the adapter.
+func renameThreadSurface(ch channel.Channel, threadID, repo string, workCtx *webhook.WebhookWorkContext, phase webhook.Phase) {
+	updater, ok := ch.(channel.ThreadSurfaceUpdater)
+	if !ok || workCtx == nil {
+		return
+	}
+	name := surfaceTitle(repo, workCtx.Envelope, phase)
+	if err := updater.UpdateThreadSurface(threadID, name, []string{string(phase)}); err != nil {
+		slog.Warn("webhook: thread surface update failed", "thread_id", threadID, "phase", phase, "error", err)
+	}
+}
+
+// surfaceTitle renders "widget#217 · review" from the envelope, falling back to
+// the repository alone when the event carries no pull request number.
+func surfaceTitle(repo string, envelope webhook.WebhookEnvelope, phase webhook.Phase) string {
+	short := repo
+	if idx := strings.LastIndex(repo, "/"); idx >= 0 && idx+1 < len(repo) {
+		short = repo[idx+1:]
+	}
+	pr := strings.TrimSpace(webhook.EnvelopeString(envelope, "pr_number"))
+	title := short
+	if pr != "" {
+		title = short + "#" + pr
+	}
+	if phase != "" {
+		title += " · " + string(phase)
+	}
+	return title
 }
 
 // pinThreadStatus pins the state line of a thread so the operator finds the

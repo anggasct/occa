@@ -161,3 +161,65 @@ func TestForumPostTitle(t *testing.T) {
 		}
 	}
 }
+
+func TestUpdateThreadSurfaceRenamesAndTagsForumPost(t *testing.T) {
+	var body map[string]any
+	a := &Adapter{
+		session: fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
+			if r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/channels/post-5") {
+				raw, _ := io.ReadAll(r.Body)
+				if err := json.Unmarshal(raw, &body); err != nil {
+					t.Fatalf("decode patch body: %v", err)
+				}
+				return []byte(`{"id":"post-5"}`), http.StatusOK
+			}
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			return []byte(`{}`), http.StatusInternalServerError
+		}),
+		forumTags: map[string]string{"review": "tag-review", "merged": "tag-merged"},
+	}
+	a.channelLookup = func(channelID string) (*discordgo.Channel, error) {
+		switch channelID {
+		case "forum-1":
+			return &discordgo.Channel{ID: channelID, Type: discordgo.ChannelTypeGuildForum}, nil
+		case "post-5":
+			return &discordgo.Channel{ID: channelID, Type: discordgo.ChannelTypeGuildPublicThread, ParentID: "forum-1"}, nil
+		default:
+			return &discordgo.Channel{ID: channelID, Type: discordgo.ChannelTypeGuildText, ParentID: "chan-1"}, nil
+		}
+	}
+
+	if err := a.UpdateThreadSurface("post-5", "widget#217 · review", []string{"review"}); err != nil {
+		t.Fatalf("UpdateThreadSurface: %v", err)
+	}
+	if got, _ := body["name"].(string); got != "widget#217 · review" {
+		t.Fatalf("name = %q", got)
+	}
+	tags, _ := body["applied_tags"].([]any)
+	if len(tags) != 1 || tags[0] != "tag-review" {
+		t.Fatalf("applied_tags = %+v, want tag-review", body["applied_tags"])
+	}
+}
+
+func TestUpdateThreadSurfaceIgnoresTextChannelThread(t *testing.T) {
+	a := &Adapter{
+		session: fakeDiscordSession(t, func(r *http.Request) ([]byte, int) {
+			t.Errorf("text channel thread must not be renamed: %s %s", r.Method, r.URL.Path)
+			return []byte(`{}`), http.StatusInternalServerError
+		}),
+	}
+	a.channelLookup = func(channelID string) (*discordgo.Channel, error) {
+		return &discordgo.Channel{ID: channelID, Type: discordgo.ChannelTypeGuildPublicThread, ParentID: "chan-1"}, nil
+	}
+	if err := a.UpdateThreadSurface("thread-1", "any", []string{"review"}); err != nil {
+		t.Fatalf("UpdateThreadSurface: %v", err)
+	}
+}
+
+func TestForumTagIDsMatchNames(t *testing.T) {
+	a := &Adapter{forumTags: map[string]string{"review": "tag-review", "fix": "tag-fix"}}
+	ids := a.forumTagIDs([]string{"Review", "unknown", "fix"})
+	if len(ids) != 2 || ids[0] != "tag-review" || ids[1] != "tag-fix" {
+		t.Fatalf("tag ids = %v", ids)
+	}
+}
