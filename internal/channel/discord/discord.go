@@ -56,6 +56,9 @@ type Adapter struct {
 	threads     map[string]struct{}
 	parentCache map[string]string
 
+	kindsMu     sync.Mutex
+	channelKind map[string]discordgo.ChannelType
+
 	dispatchMu       sync.Mutex
 	seenDispatchTask map[string]time.Time
 
@@ -569,6 +572,9 @@ func (a *Adapter) SendNotification(channelID, text string) (string, error) {
 	if a.session == nil {
 		return "", errors.New("discord: session not ready")
 	}
+	if a.isForumChannel(channelID) {
+		return a.sendForumPost(channelID, text, nil, "")
+	}
 	chunks := render.Split(text, 2000)
 	if len(chunks) == 0 {
 		return "", nil
@@ -604,6 +610,7 @@ func (a *Adapter) editNotification(channelID, messageID, text string, retry bool
 	if a.session == nil {
 		return errors.New("discord: session not ready")
 	}
+	channelID, messageID = a.notificationTarget(channelID, messageID)
 	chunks := render.Split(text, 2000)
 	if len(chunks) == 0 {
 		return nil
@@ -625,6 +632,9 @@ func (a *Adapter) editNotification(channelID, messageID, text string, retry bool
 func (a *Adapter) SendNotificationWithButtons(channelID, text string, buttons []channel.Button) (string, error) {
 	if a.session == nil {
 		return "", errors.New("discord: session not ready")
+	}
+	if a.isForumChannel(channelID) {
+		return a.sendForumPost(channelID, text, buttons, "")
 	}
 	content := render.Clamp(text, render.DiscordLimit)
 	msg, err := a.session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
@@ -655,6 +665,9 @@ func (a *Adapter) SendNotificationMention(channelID, text string, mentionUserID 
 		if !strings.Contains(content, token) {
 			content = render.Clamp(text, render.DiscordLimit-utf8.RuneCountInString(token)-1) + "\n" + token
 		}
+	}
+	if a.isForumChannel(channelID) {
+		return a.sendForumPost(channelID, content, nil, mentionUserID)
 	}
 	msg, err := a.session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
 		Content: content,
@@ -727,6 +740,7 @@ func (a *Adapter) editNotificationWithButtons(channelID, messageID, text string,
 	if a.session == nil {
 		return errors.New("discord: session not ready")
 	}
+	channelID, messageID = a.notificationTarget(channelID, messageID)
 	content := render.Clamp(text, render.DiscordLimit)
 	components := componentRows(buttons)
 	_, err := a.session.ChannelMessageEditComplex(&discordgo.MessageEdit{
@@ -762,6 +776,11 @@ func (a *Adapter) ReplyNotification(channelID, replyToMessageID, text string) (s
 	if a.session == nil {
 		return "", errors.New("discord: session not ready")
 	}
+	// A reply aimed at a forum channel targets the post itself: the starter
+	// message cannot be replied to from the channel, only from inside the post.
+	if a.isForumChannel(channelID) && strings.TrimSpace(replyToMessageID) != "" {
+		return a.SendNotification(replyToMessageID, text)
+	}
 	chunks := render.Split(text, 2000)
 	if len(chunks) == 0 {
 		return "", nil
@@ -791,6 +810,14 @@ func (a *Adapter) StartThread(channelID, messageID, name string) (string, error)
 	if a.session == nil {
 		return "", errors.New("discord: session not ready")
 	}
+	if a.isForumChannel(channelID) {
+		postID := strings.TrimSpace(messageID)
+		if postID == "" {
+			return "", errors.New("discord: start thread: forum post id missing")
+		}
+		a.trackThread(postID)
+		return postID, nil
+	}
 	name = strings.TrimSpace(name)
 	if name == "" {
 		name = "thread"
@@ -818,6 +845,7 @@ func (a *Adapter) PinNotification(channelID, messageID string) error {
 	if channelID == "" || messageID == "" {
 		return errors.New("discord: pin notification: empty channel or message id")
 	}
+	channelID, messageID = a.notificationTarget(channelID, messageID)
 	if err := a.session.ChannelMessagePin(channelID, messageID); err != nil {
 		return fmt.Errorf("discord: pin notification: %w", err)
 	}
@@ -1000,6 +1028,119 @@ func isThreadType(channelType discordgo.ChannelType) bool {
 		return true
 	}
 	return false
+}
+
+// forumAutoArchiveMinutes keeps a delivery post visible for a week of
+// inactivity; Discord archives forum posts afterwards without deleting them.
+const forumAutoArchiveMinutes = 10080
+
+// isForumChannel reports whether channelID is a forum channel. The answer is
+// cached per channel; an unknown or unreachable channel reports false so every
+// notification keeps the pre-forum behaviour.
+func (a *Adapter) isForumChannel(channelID string) bool {
+	channelID = strings.TrimSpace(channelID)
+	if channelID == "" {
+		return false
+	}
+	a.kindsMu.Lock()
+	if kind, ok := a.channelKind[channelID]; ok {
+		a.kindsMu.Unlock()
+		return kind == discordgo.ChannelTypeGuildForum
+	}
+	a.kindsMu.Unlock()
+	kind, ok := a.cachedChannelType(channelID)
+	if !ok {
+		return false
+	}
+	a.kindsMu.Lock()
+	if a.channelKind == nil {
+		a.channelKind = make(map[string]discordgo.ChannelType)
+	}
+	a.channelKind[channelID] = kind
+	a.kindsMu.Unlock()
+	return kind == discordgo.ChannelTypeGuildForum
+}
+
+// cachedChannelType resolves a channel type without spending a REST call: the
+// gateway state already carries every guild channel, and an unknown channel
+// reports false so notification paths keep their pre-forum behaviour.
+func (a *Adapter) cachedChannelType(channelID string) (discordgo.ChannelType, bool) {
+	if a.channelLookup != nil {
+		ch, err := a.channelLookup(channelID)
+		if err != nil || ch == nil {
+			return 0, false
+		}
+		return ch.Type, true
+	}
+	if a.session == nil {
+		return 0, false
+	}
+	ch, err := a.session.State.Channel(channelID)
+	if err != nil || ch == nil {
+		return 0, false
+	}
+	return ch.Type, true
+}
+
+// notificationTarget maps a notification addressed at a forum channel onto the
+// post that owns it. A forum post is a thread whose id doubles as its starter
+// message id, and that starter message lives inside the post — never in the
+// forum channel itself.
+func (a *Adapter) notificationTarget(channelID, messageID string) (string, string) {
+	if strings.TrimSpace(messageID) == "" || !a.isForumChannel(channelID) {
+		return channelID, messageID
+	}
+	return messageID, messageID
+}
+
+// sendForumPost opens a forum post whose starter message carries the task
+// surface (text plus buttons) and returns the post id. Downstream code keeps
+// treating that id as both root message and thread; Discord resolves both roles
+// for a forum post.
+func (a *Adapter) sendForumPost(forumChannelID, text string, buttons []channel.Button, mentionUserID string) (string, error) {
+	content := render.Clamp(text, render.DiscordLimit)
+	allowed := &discordgo.MessageAllowedMentions{}
+	if mentionUserID = strings.TrimSpace(mentionUserID); mentionUserID != "" {
+		allowed.Users = []string{mentionUserID}
+	}
+	post, err := a.session.ForumThreadStartComplex(forumChannelID, &discordgo.ThreadStart{
+		Name:                forumPostTitle(text),
+		AutoArchiveDuration: forumAutoArchiveMinutes,
+	}, &discordgo.MessageSend{
+		Content:         content,
+		Components:      componentRows(buttons),
+		AllowedMentions: allowed,
+		Flags:           discordgo.MessageFlagsSuppressEmbeds,
+	})
+	if err != nil {
+		return "", fmt.Errorf("discord: create forum post: %w", err)
+	}
+	a.trackThread(post.ID)
+	return post.ID, nil
+}
+
+// forumPostTitle derives a post title from the notification body: the first
+// meaningful line, stripped of markdown emphasis, clipped to Discord's limit.
+func forumPostTitle(text string) string {
+	for _, raw := range strings.Split(text, "\n") {
+		line := strings.Trim(strings.TrimSpace(raw), "*_`# ")
+		if line == "" {
+			continue
+		}
+		return clipTitle(line)
+	}
+	return "run"
+}
+
+func clipTitle(value string) string {
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) > 100 {
+		runes = runes[:100]
+	}
+	if len(runes) == 0 {
+		return "run"
+	}
+	return string(runes)
 }
 
 type replyContext struct {

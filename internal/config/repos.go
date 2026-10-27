@@ -34,6 +34,7 @@ type RepoConfig struct {
 	Provider        string                   `yaml:"provider"`
 	Platform        string                   `yaml:"platform"`
 	ChannelID       string                   `yaml:"channel_id"`
+	ForumChannelID  string                   `yaml:"forum_channel_id,omitempty"`
 	Secret          string                   `yaml:"secret"`
 	Checkout        string                   `yaml:"checkout"`
 	Model           string                   `yaml:"model,omitempty"`
@@ -50,6 +51,7 @@ type RepoConfig struct {
 
 type WebhookDefaults struct {
 	CommentTrigger    map[string][]string `yaml:"comment_trigger,omitempty"`
+	ForumChannelID    string              `yaml:"forum_channel_id,omitempty"`
 	CommentAuthors    []string            `yaml:"comment_authors,omitempty"`
 	IgnoreAuthors     []string            `yaml:"ignore_authors,omitempty"`
 	Limits            *EndpointLimits     `yaml:"limits,omitempty"`
@@ -121,6 +123,20 @@ func resolveRepoPrompt(prompts map[string]RepoPromptRef, workflow string) (promp
 		return "", strings.TrimSpace(ref.PromptFile), "file"
 	}
 	return BuiltinPrompt(workflow), "", "builtin"
+}
+
+// resolveDeliveryChannel picks where a repository's webhook runs are posted.
+// A forum destination wins over the legacy per-repo channel so one forum can
+// host every project, while an unset forum keeps the pre-forum behaviour and a
+// per-repo forum_channel_id isolates a project into its own forum.
+func resolveDeliveryChannel(repo RepoConfig, defaults WebhookDefaults) string {
+	if id := strings.TrimSpace(repo.ForumChannelID); id != "" {
+		return id
+	}
+	if id := strings.TrimSpace(defaults.ForumChannelID); id != "" {
+		return id
+	}
+	return strings.TrimSpace(repo.ChannelID)
 }
 
 func resolveTriggers(defaults WebhookDefaults, repo RepoConfig, workflow string) []string {
@@ -344,8 +360,8 @@ func expandRepos(repos []RepoConfig, defaults WebhookDefaults) ([]EndpointConfig
 		if strings.TrimSpace(repo.Platform) == "" {
 			return nil, fmt.Errorf("config: %splatform must not be empty", context)
 		}
-		if strings.TrimSpace(repo.ChannelID) == "" {
-			return nil, fmt.Errorf("config: %schannel_id must not be empty", context)
+		if strings.TrimSpace(resolveDeliveryChannel(*repo, defaults)) == "" {
+			return nil, fmt.Errorf("config: %schannel_id or forum_channel_id must not be empty", context)
 		}
 		if strings.TrimSpace(repo.Secret) == "" {
 			return nil, fmt.Errorf("config: %ssecret must not be empty", context)
@@ -390,7 +406,7 @@ func expandRepos(repos []RepoConfig, defaults WebhookDefaults) ([]EndpointConfig
 				Secret:          strings.TrimSpace(repo.Secret),
 				Workflow:        workflow,
 				Platform:        strings.TrimSpace(repo.Platform),
-				ChannelID:       strings.TrimSpace(repo.ChannelID),
+				ChannelID:       resolveDeliveryChannel(*repo, defaults),
 				Prompt:          prompt,
 				PromptFile:      promptFile,
 				PromptSource:    source,
