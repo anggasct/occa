@@ -372,7 +372,7 @@ func commentTrigger(body string, triggers []string) string {
 }
 
 func reviewDedupePrefix(envelope WebhookEnvelope) string {
-	repo := strings.TrimSpace(stringValue(envelope["repository"]))
+	repo := normalizeRepoKey(stringValue(envelope["repository"]))
 	pr := strings.TrimSpace(stringValue(envelope["pr_number"]))
 	if repo == "" || pr == "" {
 		return ""

@@ -17,16 +17,21 @@ import (
 
 func reviewEventBody(t *testing.T, state, body, commit string) []byte {
 	t.Helper()
+	return reviewEventBodyForRepo(t, "o/r", state, body, commit)
+}
+
+func reviewEventBodyForRepo(t *testing.T, repo, state, body, commit string) []byte {
+	t.Helper()
 	payload := map[string]any{
 		"action":     "submitted",
-		"repository": map[string]any{"full_name": "o/r"},
+		"repository": map[string]any{"full_name": repo},
 		"pull_request": map[string]any{
 			"number":   7,
 			"title":    "Fix it",
-			"html_url": "https://github.com/o/r/pull/7",
+			"html_url": "https://github.com/" + repo + "/pull/7",
 			"user":     map[string]any{"login": "someone"},
 			"head":     map[string]any{"ref": "feat/x"},
-			"base":     map[string]any{"ref": "main", "repo": map[string]any{"full_name": "o/r"}},
+			"base":     map[string]any{"ref": "main", "repo": map[string]any{"full_name": repo}},
 		},
 		"review": map[string]any{
 			"state":     state,
@@ -750,6 +755,48 @@ func TestReviewDedupeCompletionKeysVerdictHead(t *testing.T) {
 	}
 	if !hasReviewKey(t, st, ep.Name, "o/r#7@"+newer) {
 		t.Fatalf("new head %s was not keyed after its review completed", newer)
+	}
+}
+
+func TestReviewDedupeMixedCaseRepositoryUsesCanonicalKey(t *testing.T) {
+	ep := reviewGuardEndpoint()
+	ep.Workflow = "review"
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{ep})
+	const head = "bbbbbbbbbb"
+	observer := &fakeReviewObserver{obs: ReviewObservation{LiveHead: head, VerdictHead: head}}
+	srv.SetReviewObserver(observer.observe)
+
+	firstID := "review-mixed-case"
+	firstReceipt := seedDeliveryForEvent(t, st.WebhookDeliveryRepo(), ep.Name, firstID, "pull_request_review")
+	firstBody := reviewEventBodyForRepo(t, "Owner/Repo", "changes_requested", "**Verdict:** REQUEST_CHANGES", head)
+	if err := srv.executeDelivery(ep, firstBody, firstReceipt, firstID, "pull_request_review", 1, nil, nil, nil); err != nil {
+		t.Fatalf("first executeDelivery: %v", err)
+	}
+	if exec.callCount() != 1 {
+		t.Fatalf("first review spawned %d turns, want 1", exec.callCount())
+	}
+	if !hasReviewKey(t, st, ep.Name, "owner/repo#7@"+head) {
+		t.Fatalf("completed review did not key the canonical repository and judged head")
+	}
+
+	secondID := "review-mixed-case-duplicate"
+	secondReceipt := seedDeliveryForEvent(t, st.WebhookDeliveryRepo(), ep.Name, secondID, "pull_request_review")
+	secondBody := reviewEventBodyForRepo(t, "Owner/Repo", "approved", "**Verdict:** APPROVED", head)
+	if err := srv.executeDelivery(ep, secondBody, secondReceipt, secondID, "pull_request_review", 1, nil, nil, nil); err != nil {
+		t.Fatalf("duplicate executeDelivery: %v", err)
+	}
+	if exec.callCount() != 1 {
+		t.Fatalf("same judged head with mixed-case repository spawned another turn (total %d, want 1)", exec.callCount())
+	}
+	second, err := st.WebhookDeliveryRepo().Get(context.Background(), ep.Name, secondID)
+	if err != nil || second == nil {
+		t.Fatalf("get duplicate receipt: %v %v", second, err)
+	}
+	if second.Status != store.WebhookStatusSkipped {
+		t.Fatalf("duplicate receipt status = %s, want skipped", second.Status)
+	}
+	if !strings.Contains(second.ErrorSummary, "delivery "+firstID) {
+		t.Fatalf("duplicate skip reason = %q, want handled by %s", second.ErrorSummary, firstID)
 	}
 }
 
