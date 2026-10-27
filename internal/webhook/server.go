@@ -317,6 +317,12 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 	srv.branchExists = ghBranchExistsChecker
 	srv.gh = &defaultGHRunner{}
 	srv.dispatchRuns = make(map[string]dispatchRunState)
+	if srv.reviewObserver != nil {
+		trustLogins := srv.policy.trustLogins
+		srv.reviewObserver = func(ctx context.Context, repo, number string) (ReviewObservation, error) {
+			return ghReviewObserver(ctx, repo, number, trustLogins)
+		}
+	}
 	return srv
 }
 

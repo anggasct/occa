@@ -786,6 +786,40 @@ func TestReviewDedupeSupersededRunKeepsJudgedHead(t *testing.T) {
 	}
 }
 
+func TestReviewDedupeTwoPushesKeysVerdictHead(t *testing.T) {
+	ep := reviewGuardEndpoint()
+	ep.Workflow = "review"
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{ep})
+	const admitted = "d2137f9211"
+	const judged = "14320114aa"
+	const newer = "9f3c2a1bbb"
+	observer := &fakeReviewObserver{obs: ReviewObservation{LiveHead: newer, VerdictHead: judged}}
+	srv.SetReviewObserver(observer.observe)
+
+	id := "review-two-pushes"
+	receipt := seedDeliveryForEvent(t, st.WebhookDeliveryRepo(), ep.Name, id, "pull_request_review")
+	body := reviewEventBody(t, "commented", "**Verdict:** REQUEST_CHANGES", admitted)
+	if err := srv.executeDelivery(ep, body, receipt, id, "pull_request_review", 1, nil, nil, nil); err != nil {
+		t.Fatalf("executeDelivery: %v", err)
+	}
+	if exec.callCount() != 1 {
+		t.Fatalf("two-push review spawned %d turns, want 1", exec.callCount())
+	}
+	got, err := st.WebhookDeliveryRepo().Get(context.Background(), ep.Name, id)
+	if err != nil || got == nil {
+		t.Fatalf("get receipt: %v %v", got, err)
+	}
+	if !strings.Contains(got.ErrorSummary, "superseded by head "+newer[:10]) {
+		t.Fatalf("error summary = %q, want superseded by head %s", got.ErrorSummary, newer[:10])
+	}
+	if !hasReviewKey(t, st, ep.Name, "o/r#7@"+judged) {
+		t.Fatalf("two-push review did not key the verdict head %s", judged)
+	}
+	if hasReviewKey(t, st, ep.Name, "o/r#7@"+admitted) {
+		t.Fatalf("two-push review keyed the admission head %s it never judged", admitted)
+	}
+}
+
 func TestReviewDedupePlainOpenedUnchanged(t *testing.T) {
 	ep := reviewGuardEndpoint()
 	ep.Workflow = "review"

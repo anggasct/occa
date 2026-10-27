@@ -127,7 +127,10 @@ func (s *Server) reconcilePR(ctx context.Context, row store.PRRun) {
 func (s *Server) reconcileFactsFor(ctx context.Context, repo, number string) (ReconcileFacts, error) {
 	resolver := s.reconcileFacts
 	if resolver == nil {
-		resolver = ghReconcileFacts
+		trustLogins := s.policy.trustLogins
+		resolver = func(ctx context.Context, repo, number string) (ReconcileFacts, error) {
+			return ghReconcileFacts(ctx, repo, number, trustLogins)
+		}
 	}
 	return resolver(ctx, repo, number)
 }
@@ -340,7 +343,7 @@ type ghReconcileReview struct {
 	} `json:"author"`
 }
 
-func ghReconcileFacts(ctx context.Context, repo, number string) (ReconcileFacts, error) {
+func ghReconcileFacts(ctx context.Context, repo, number string, trustLogins map[string]bool) (ReconcileFacts, error) {
 	lookupCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(lookupCtx, "gh", "pr", "view", strings.TrimSpace(number), "--repo", strings.TrimSpace(repo),
@@ -384,12 +387,12 @@ func ghReconcileFacts(ctx context.Context, repo, number string) (ReconcileFacts,
 		Author:        strings.TrimSpace(raw.Author.Login),
 		HeadRepo:      strings.TrimSpace(raw.HeadRepository.NameWithOwner),
 		CIGreen:       checksGreen(raw.StatusCheckRollup),
-		ReviewVerdict: ghReviewVerdictForHead(raw.Reviews, raw.HeadRefOid),
+		ReviewVerdict: ghReviewVerdictForHead(raw.Reviews, raw.HeadRefOid, raw.Author.Login, trustLogins),
 	}
 	return facts, nil
 }
 
-func ghReviewVerdictForHead(reviews []ghReconcileReview, head string) string {
+func ghReviewVerdictForHead(reviews []ghReconcileReview, head, prAuthor string, trustLogins map[string]bool) string {
 	head = normalizeRevision(head)
 	if head == "" {
 		return ""
@@ -400,7 +403,7 @@ func ghReviewVerdictForHead(reviews []ghReconcileReview, head string) string {
 	}
 	latest := make(map[string]observed)
 	for index, review := range reviews {
-		verdict := reviewLogicalVerdict(review)
+		verdict := reviewVerdict(review, prAuthor, trustLogins)
 		if verdict == "" {
 			continue
 		}
@@ -433,9 +436,18 @@ func ghReviewVerdictForHead(reviews []ghReconcileReview, head string) string {
 	return result
 }
 
-// reviewLogicalVerdict maps a review to the verdict it expresses. GitHub's
-// review state carries it for a normal review; a self-review posts through
-// --comment, so the verdict exists only in the body there.
+// reviewVerdict maps a review to the verdict it expresses. GitHub's review
+// state carries it for a normal review; a self-review posts through --comment,
+// so the verdict exists only in the body there and is trusted only for an
+// allowed self-review author.
+func reviewVerdict(review ghReconcileReview, prAuthor string, trustLogins map[string]bool) string {
+	if strings.EqualFold(strings.TrimSpace(review.State), "COMMENTED") &&
+		!trustedSelfReview(review.Author.Login, prAuthor, trustLogins) {
+		return ""
+	}
+	return reviewLogicalVerdict(review)
+}
+
 func reviewLogicalVerdict(review ghReconcileReview) string {
 	switch strings.ToUpper(strings.TrimSpace(review.State)) {
 	case "APPROVED":

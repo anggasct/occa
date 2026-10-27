@@ -27,12 +27,17 @@ func (s *Server) SetReviewObserver(fn ReviewObserver) {
 }
 
 // GHReviewObserver resolves the live PR head and the commit the latest
-// logical verdict review was posted against.
+// logical verdict review was posted against. Body verdicts are ignored because
+// this entry point has no trust policy; use the server's observer instead.
 func GHReviewObserver(ctx context.Context, repo, number string) (ReviewObservation, error) {
+	return ghReviewObserver(ctx, repo, number, nil)
+}
+
+func ghReviewObserver(ctx context.Context, repo, number string, trustLogins map[string]bool) (ReviewObservation, error) {
 	lookupCtx, cancel := context.WithTimeout(ctx, prStateLookupTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(lookupCtx, "gh", "pr", "view", strings.TrimSpace(number), "--repo", strings.TrimSpace(repo),
-		"--json", "headRefOid,reviews")
+		"--json", "headRefOid,reviews,author")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -46,21 +51,24 @@ func GHReviewObserver(ctx context.Context, repo, number string) (ReviewObservati
 	var raw struct {
 		HeadRefOid string              `json:"headRefOid"`
 		Reviews    []ghReconcileReview `json:"reviews"`
+		Author     struct {
+			Login string `json:"login"`
+		} `json:"author"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &raw); err != nil {
 		return ReviewObservation{}, fmt.Errorf("gh pr view decode: %w", err)
 	}
 	return ReviewObservation{
 		LiveHead:    normalizeRevision(raw.HeadRefOid),
-		VerdictHead: latestVerdictReviewHead(raw.Reviews),
+		VerdictHead: latestVerdictReviewHead(raw.Reviews, raw.Author.Login, trustLogins),
 	}, nil
 }
 
-func latestVerdictReviewHead(reviews []ghReconcileReview) string {
+func latestVerdictReviewHead(reviews []ghReconcileReview, prAuthor string, trustLogins map[string]bool) string {
 	head := ""
 	var latest time.Time
 	for _, review := range reviews {
-		if !reviewCountsAsVerdict(review) {
+		if !reviewCountsAsVerdict(review, prAuthor, trustLogins) {
 			continue
 		}
 		at, err := time.Parse(time.RFC3339, strings.TrimSpace(review.SubmittedAt))
@@ -77,12 +85,24 @@ func latestVerdictReviewHead(reviews []ghReconcileReview) string {
 	return head
 }
 
-func reviewCountsAsVerdict(review ghReconcileReview) bool {
-	switch reviewLogicalVerdict(review) {
+func reviewCountsAsVerdict(review ghReconcileReview, prAuthor string, trustLogins map[string]bool) bool {
+	switch reviewVerdict(review, prAuthor, trustLogins) {
 	case "approved", "changes_requested", "spec_unclear", "blocked":
 		return true
 	}
 	return false
+}
+
+// trustedSelfReview reports whether a review author may carry a self-review
+// verdict in the body, mirroring the admission policy: the login must be
+// trusted and must be the PR author.
+func trustedSelfReview(login, prAuthor string, trustLogins map[string]bool) bool {
+	login = strings.TrimSpace(login)
+	prAuthor = strings.TrimSpace(prAuthor)
+	if login == "" || prAuthor == "" || login != prAuthor {
+		return false
+	}
+	return trustLogins[login]
 }
 
 // finalizeReviewHead re-keys a finished review on the commit its verdict was
@@ -113,11 +133,7 @@ func (s *Server) finalizeReviewHead(ep config.EndpointConfig, id int64, prKey st
 	judged := ""
 	switch {
 	case verdict != "":
-		if verdict == admission || verdict == live {
-			judged = verdict
-		} else {
-			judged = admission
-		}
+		judged = verdict
 	case live != "":
 		judged = live
 	default:
