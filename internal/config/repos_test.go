@@ -476,6 +476,9 @@ func TestRepoWithoutChannelIDUsesForumDefault(t *testing.T) {
 	if endpoints[0].ChannelID != "forum-default" {
 		t.Fatalf("channel = %q, want forum-default", endpoints[0].ChannelID)
 	}
+	if endpoints[0].ForumChannelID != "forum-default" {
+		t.Fatalf("forum channel = %q, want forum-default", endpoints[0].ForumChannelID)
+	}
 }
 
 func TestRepoWithoutAnyChannelFails(t *testing.T) {

@@ -129,6 +129,15 @@ func resolveRepoPrompt(prompts map[string]RepoPromptRef, workflow string) (promp
 // A forum destination wins over the legacy per-repo channel so one forum can
 // host every project, while an unset forum keeps the pre-forum behaviour and a
 // per-repo forum_channel_id isolates a project into its own forum.
+// resolveForumChannel reports the forum destination of a repository, if any.
+// The adapter pins these ids so forum routing never depends on gateway state.
+func resolveForumChannel(repo RepoConfig, defaults WebhookDefaults) string {
+	if id := strings.TrimSpace(repo.ForumChannelID); id != "" {
+		return id
+	}
+	return strings.TrimSpace(defaults.ForumChannelID)
+}
+
 func resolveDeliveryChannel(repo RepoConfig, defaults WebhookDefaults) string {
 	if id := strings.TrimSpace(repo.ForumChannelID); id != "" {
 		return id
@@ -407,6 +416,7 @@ func expandRepos(repos []RepoConfig, defaults WebhookDefaults) ([]EndpointConfig
 				Workflow:        workflow,
 				Platform:        strings.TrimSpace(repo.Platform),
 				ChannelID:       resolveDeliveryChannel(*repo, defaults),
+				ForumChannelID:  resolveForumChannel(*repo, defaults),
 				Prompt:          prompt,
 				PromptFile:      promptFile,
 				PromptSource:    source,

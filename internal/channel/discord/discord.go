@@ -56,8 +56,9 @@ type Adapter struct {
 	threads     map[string]struct{}
 	parentCache map[string]string
 
-	kindsMu     sync.Mutex
-	channelKind map[string]discordgo.ChannelType
+	kindsMu       sync.Mutex
+	channelKind   map[string]discordgo.ChannelType
+	forumChannels map[string]struct{}
 
 	dispatchMu       sync.Mutex
 	seenDispatchTask map[string]time.Time
@@ -95,6 +96,21 @@ func (a *Adapter) Connected() (bool, string) {
 		return true, ""
 	}
 	return false, "gateway not connected"
+}
+
+// SetForumChannels pins the channels the config declares as forums, so routing
+// does not depend on gateway state having caught up with a channel.
+func (a *Adapter) SetForumChannels(channelIDs []string) {
+	a.kindsMu.Lock()
+	defer a.kindsMu.Unlock()
+	if a.forumChannels == nil {
+		a.forumChannels = make(map[string]struct{}, len(channelIDs))
+	}
+	for _, id := range channelIDs {
+		if id = strings.TrimSpace(id); id != "" {
+			a.forumChannels[id] = struct{}{}
+		}
+	}
 }
 
 func (a *Adapter) SetAutoThreadPolicy(policy ThreadPolicy) {
@@ -279,7 +295,9 @@ func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessag
 }
 
 func (a *Adapter) configure(s *discordgo.Session, handler func(channel.IncomingMessage)) {
-	s.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsMessageContent | discordgo.IntentsDirectMessages
+	// Guilds keeps channel/guild state warm: without it the adapter cannot tell
+	// a forum channel from a text channel and falls back to plain message sends.
+	s.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsMessageContent | discordgo.IntentsDirectMessages
 
 	s.AddHandler(func(_ *discordgo.Session, r *discordgo.Ready) {
 		a.onReady(r)
@@ -1043,6 +1061,10 @@ func (a *Adapter) isForumChannel(channelID string) bool {
 		return false
 	}
 	a.kindsMu.Lock()
+	if _, ok := a.forumChannels[channelID]; ok {
+		a.kindsMu.Unlock()
+		return true
+	}
 	if kind, ok := a.channelKind[channelID]; ok {
 		a.kindsMu.Unlock()
 		return kind == discordgo.ChannelTypeGuildForum
