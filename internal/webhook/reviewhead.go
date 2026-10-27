@@ -105,9 +105,12 @@ func trustedSelfReview(login, prAuthor string, trustLogins map[string]bool) bool
 	return trustLogins[login]
 }
 
-// finalizeReviewHead re-keys a finished review on the commit its verdict was
-// actually posted against. When the PR head has moved past that commit since,
-// the delivery is reported as superseded so the normal re-review can cover it.
+// finalizeReviewHead re-keys a finished review on the commit it actually
+// judged: the observed verdict head when one exists, otherwise the admission
+// head. The live head is only used when the delivery carried no admission head
+// (the plain pull_request.opened path). When the PR head has moved past the
+// judged commit since, the delivery is reported as superseded so the normal
+// re-review can cover it.
 func (s *Server) finalizeReviewHead(ep config.EndpointConfig, id int64, prKey string, envelope WebhookEnvelope) string {
 	if s == nil || s.deliveries == nil || s.reviewObserver == nil || id == 0 {
 		return ""
@@ -134,10 +137,10 @@ func (s *Server) finalizeReviewHead(ep config.EndpointConfig, id int64, prKey st
 	switch {
 	case verdict != "":
 		judged = verdict
-	case live != "":
-		judged = live
-	default:
+	case admission != "":
 		judged = admission
+	default:
+		judged = live
 	}
 	if judged == "" {
 		return ""

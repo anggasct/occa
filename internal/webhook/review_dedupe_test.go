@@ -820,6 +820,56 @@ func TestReviewDedupeTwoPushesKeysVerdictHead(t *testing.T) {
 	}
 }
 
+func TestReviewDedupeNoVerdictKeepsAdmissionHead(t *testing.T) {
+	ep := reviewGuardEndpoint()
+	ep.Workflow = "review"
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{ep})
+	const admitted = "aaaaaaaaaa"
+	const moved = "bbbbbbbbbb"
+	observer := &fakeReviewObserver{obs: ReviewObservation{LiveHead: moved, VerdictHead: ""}}
+	srv.SetReviewObserver(observer.observe)
+
+	id := "review-no-verdict-moved"
+	receipt := seedDeliveryForEvent(t, st.WebhookDeliveryRepo(), ep.Name, id, "pull_request_review")
+	body := reviewEventBody(t, "commented", "", admitted)
+	if err := srv.executeDelivery(ep, body, receipt, id, "pull_request_review", 1, nil, nil, nil); err != nil {
+		t.Fatalf("executeDelivery: %v", err)
+	}
+	if exec.callCount() != 1 {
+		t.Fatalf("no-verdict review spawned %d turns, want 1", exec.callCount())
+	}
+	got, err := st.WebhookDeliveryRepo().Get(context.Background(), ep.Name, id)
+	if err != nil || got == nil {
+		t.Fatalf("get receipt: %v %v", got, err)
+	}
+	if !strings.Contains(got.ErrorSummary, "superseded by head "+moved[:10]) {
+		t.Fatalf("error summary = %q, want superseded by head %s", got.ErrorSummary, moved[:10])
+	}
+	if !hasReviewKey(t, st, ep.Name, "o/r#7@"+admitted) {
+		t.Fatalf("no-verdict review did not keep the admission head %s", admitted)
+	}
+	if hasReviewKey(t, st, ep.Name, "o/r#7@"+moved) {
+		t.Fatalf("no-verdict review keyed the live head %s it never judged", moved)
+	}
+
+	nextID := "review-moved-head"
+	nextReceipt := seedDeliveryForEvent(t, st.WebhookDeliveryRepo(), ep.Name, nextID, "pull_request_review")
+	nextBody := reviewEventBody(t, "commented", "**Verdict:** APPROVED", moved)
+	if err := srv.executeDelivery(ep, nextBody, nextReceipt, nextID, "pull_request_review", 1, nil, nil, nil); err != nil {
+		t.Fatalf("moved-head executeDelivery: %v", err)
+	}
+	if exec.callCount() != 2 {
+		t.Fatalf("moved-head review spawned %d turns total, want 2", exec.callCount())
+	}
+	nextGot, err := st.WebhookDeliveryRepo().Get(context.Background(), ep.Name, nextID)
+	if err != nil || nextGot == nil {
+		t.Fatalf("get moved-head receipt: %v %v", nextGot, err)
+	}
+	if nextGot.Status == store.WebhookStatusSkipped {
+		t.Fatalf("moved-head review was skipped as duplicate: %q", nextGot.ErrorSummary)
+	}
+}
+
 func TestReviewDedupePlainOpenedUnchanged(t *testing.T) {
 	ep := reviewGuardEndpoint()
 	ep.Workflow = "review"
