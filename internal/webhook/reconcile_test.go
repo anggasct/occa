@@ -299,3 +299,81 @@ func TestReconcilePRAdmitsReviewWithCommentAuthorsAllowlist(t *testing.T) {
 	prefix := "reconcile-review-" + normalizeRevision(facts.HeadSHA) + "-"
 	waitForReconcileDelivery(t, st, "github-widget-review", prefix, 1)
 }
+
+func TestReconcileCountsBodyVerdict(t *testing.T) {
+	const head = "bbbbbbb"
+	review := func(state, body, commit string) ghReconcileReview {
+		var r ghReconcileReview
+		r.State = state
+		r.Body = body
+		r.Commit.OID = commit
+		r.SubmittedAt = "2026-10-27T10:00:00Z"
+		return r
+	}
+	cases := []struct {
+		name   string
+		review ghReconcileReview
+		want   string
+	}{
+		{"commented approved", review("COMMENTED", "**Verdict:** APPROVED\n\n## Findings\n- none", head), "approved"},
+		{"commented request changes", review("COMMENTED", "**Verdict:** REQUEST_CHANGES", head), "changes_requested"},
+		{"commented spec unclear", review("COMMENTED", "**Verdict:** SPEC_UNCLEAR", head), "spec_unclear"},
+		{"commented blocked", review("COMMENTED", "**Verdict:** BLOCKED", head), "blocked"},
+		{"commented no verdict", review("COMMENTED", "looks good to me", head), ""},
+		{"commented verdict on other head", review("COMMENTED", "**Verdict:** APPROVED", "aaaaaaa"), ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ghReviewVerdictForHead([]ghReconcileReview{tc.review}, head); got != tc.want {
+				t.Fatalf("verdict = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReconcileBodyVerdictRespectsLatestPerAuthor(t *testing.T) {
+	const head = "bbbbbbb"
+	review := func(state, body string) ghReconcileReview {
+		var r ghReconcileReview
+		r.State = state
+		r.Body = body
+		r.Commit.OID = head
+		r.Author.Login = "reviewer"
+		return r
+	}
+	approved := review("COMMENTED", "**Verdict:** APPROVED")
+	approved.SubmittedAt = "2026-10-27T10:00:00Z"
+	blocked := review("COMMENTED", "**Verdict:** BLOCKED")
+	blocked.SubmittedAt = "2026-10-27T11:00:00Z"
+	if got := ghReviewVerdictForHead([]ghReconcileReview{approved, blocked}, head); got != "blocked" {
+		t.Fatalf("latest body verdict = %q, want blocked", got)
+	}
+	dismissed := review("DISMISSED", "")
+	dismissed.SubmittedAt = "2026-10-27T12:00:00Z"
+	if got := ghReviewVerdictForHead([]ghReconcileReview{approved, dismissed}, head); got != "" {
+		t.Fatalf("dismissed verdict = %q, want empty", got)
+	}
+}
+
+func TestReviewVerdictObservationPicksLatestVerdictHead(t *testing.T) {
+	review := func(state, body, commit, submitted string) ghReconcileReview {
+		var r ghReconcileReview
+		r.State = state
+		r.Body = body
+		r.Commit.OID = commit
+		r.SubmittedAt = submitted
+		return r
+	}
+	reviews := []ghReconcileReview{
+		review("APPROVED", "", "aaaaaaa", "2026-10-27T10:00:00Z"),
+		review("COMMENTED", "**Verdict:** REQUEST_CHANGES", "bbbbbbb", "2026-10-27T11:00:00Z"),
+		review("COMMENTED", "no verdict here", "ccccccc", "2026-10-27T12:00:00Z"),
+	}
+	if got := latestVerdictReviewHead(reviews); got != "bbbbbbb" {
+		t.Fatalf("latest verdict head = %q, want bbbbbbb", got)
+	}
+	none := []ghReconcileReview{review("COMMENTED", "no verdict here", "ccccccc", "2026-10-27T12:00:00Z")}
+	if got := latestVerdictReviewHead(none); got != "" {
+		t.Fatalf("verdict head without a verdict = %q, want empty", got)
+	}
+}
