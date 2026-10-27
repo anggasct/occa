@@ -1166,7 +1166,12 @@ func (a *Adapter) channelInfo(channelID string) (*discordgo.Channel, bool) {
 	if a.session == nil {
 		return nil, false
 	}
-	ch, err := a.session.State.Channel(channelID)
+	if ch, err := a.session.State.Channel(channelID); err == nil && ch != nil {
+		return ch, true
+	}
+	// A post created moments ago is not in gateway state yet; one REST read per
+	// phase change covers that without touching the message path.
+	ch, err := a.session.Channel(channelID)
 	return ch, err == nil && ch != nil
 }
 
