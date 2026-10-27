@@ -417,3 +417,78 @@ func TestReposCustomEndpointsStillLoad(t *testing.T) {
 		t.Fatalf("custom endpoint must not carry automation: %+v", cfg.Webhooks.Endpoints[0].Automation)
 	}
 }
+
+func forumEndpoints(t *testing.T, yaml string) []EndpointConfig {
+	t.Helper()
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
+	dir := t.TempDir()
+	cfg, err := Load(writeConfig(t, dir, yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	return cfg.Webhooks.Endpoints
+}
+
+func TestRepoForumChannelWinsOverChannelID(t *testing.T) {
+	endpoints := forumEndpoints(t, repoConfigYAML(`  repos:
+    - repo: acme/widget
+      provider: github
+      platform: discord
+      channel_id: chan-1
+      forum_channel_id: forum-repo
+      secret: s3cret
+      checkout: /tmp/widget
+`))
+	for _, ep := range endpoints {
+		if ep.ChannelID != "forum-repo" {
+			t.Fatalf("%s channel = %q, want forum-repo", ep.Workflow, ep.ChannelID)
+		}
+	}
+}
+
+func TestDefaultForumChannelReplacesPerRepoChannel(t *testing.T) {
+	endpoints := forumEndpoints(t, "webhooks:\n  defaults:\n    forum_channel_id: forum-default\n"+fullRuntimeYAML()+`  repos:
+    - repo: acme/widget
+      provider: github
+      platform: discord
+      channel_id: chan-1
+      secret: s3cret
+      checkout: /tmp/widget
+`)
+	for _, ep := range endpoints {
+		if ep.ChannelID != "forum-default" {
+			t.Fatalf("%s channel = %q, want the default forum", ep.Workflow, ep.ChannelID)
+		}
+	}
+}
+
+func TestRepoWithoutChannelIDUsesForumDefault(t *testing.T) {
+	endpoints := forumEndpoints(t, "webhooks:\n  defaults:\n    forum_channel_id: forum-default\n"+fullRuntimeYAML()+`  repos:
+    - repo: acme/widget
+      provider: github
+      platform: discord
+      secret: s3cret
+      checkout: /tmp/widget
+`)
+	if len(endpoints) == 0 {
+		t.Fatal("expected endpoints")
+	}
+	if endpoints[0].ChannelID != "forum-default" {
+		t.Fatalf("channel = %q, want forum-default", endpoints[0].ChannelID)
+	}
+}
+
+func TestRepoWithoutAnyChannelFails(t *testing.T) {
+	t.Setenv("OCCA_ADMIN_ID", "admin123")
+	dir := t.TempDir()
+	path := writeConfig(t, dir, repoConfigYAML(`  repos:
+    - repo: acme/widget
+      provider: github
+      platform: discord
+      secret: s3cret
+      checkout: /tmp/widget
+`))
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "channel_id") {
+		t.Fatalf("Load error = %v, want a missing channel_id error", err)
+	}
+}

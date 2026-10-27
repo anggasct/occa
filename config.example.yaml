@@ -96,6 +96,7 @@ webhooks:
       max_runs_per_pr: 3 # comment-trigger runs allowed per PR per window
       window: 60m # sliding window for the trigger cap
     thread: true # dispatch deliveries run in the PR thread
+    # forum_channel_id: '<forum-channel-id>' # default destination: a Discord forum channel; every repo's runs become one post (tag per repo comes later)
     escalation_mention: operator # user or role mentioned when a PR queue blocks on retry exhaustion; empty disables the mention
     verbose_steps: false # per-step tool lines in the PR thread; off by default, a run posts one tool summary
     refresh_interval: 30s # how often an in-flight PR card refreshes its run age; zero falls back to 30s
@@ -112,6 +113,7 @@ webhooks:
       provider: github # only github is supported
       platform: discord # where runs and audit cards go: discord | telegram
       channel_id: '<channel-id>' # destination chat for runs and audit cards
+      # forum_channel_id: '<forum-channel-id>' # optional: post this repo's runs into a forum instead (overrides channel_id and defaults.forum_channel_id)
       secret: <your-webhook-secret> # one secret shared by the 4 hooks
       checkout: /home/operator/projects/widget # required checkout root; review snapshots and fix branch worktrees live under it
       # model: openai/gpt-4o # optional per-repo model override
