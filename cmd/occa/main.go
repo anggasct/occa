@@ -222,6 +222,7 @@ func main() {
 			DownloadTimeout: cfg.Runtime.Channels.Discord.DownloadTimeout,
 			MaxDownloadSize: int64(cfg.Runtime.Channels.Discord.MaxDownloadSize),
 		})
+		da.SetForumChannels(forumChannelIDs(cfg.Webhooks.Endpoints))
 		da.SetAutoThreadPolicy(func(channelID string) (bool, error) {
 			ch, err := db.ChannelRepo().Get(context.Background(), "discord", channelID)
 			if err != nil {
@@ -823,6 +824,25 @@ func notifyEditWithButtonsNoRetry(ch channel.Channel, channelID, messageID, text
 		}
 	}
 	return notifyEditNoRetry(ch, channelID, messageID, chunks[0])
+}
+
+// forumChannelIDs lists the forum destinations declared in the config, so the
+// Discord adapter can recognise them without waiting for gateway state.
+func forumChannelIDs(endpoints []config.EndpointConfig) []string {
+	seen := make(map[string]struct{}, len(endpoints))
+	ids := make([]string, 0, len(endpoints))
+	for _, ep := range endpoints {
+		id := strings.TrimSpace(ep.ForumChannelID)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 func guildIDForButtons(ch channel.Channel, channelID, threadID string) string {

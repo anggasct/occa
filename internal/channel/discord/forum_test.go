@@ -134,6 +134,20 @@ func TestTextChannelKeepsMessageSendPath(t *testing.T) {
 	}
 }
 
+func TestSetForumChannelsMarksDestinationWithoutLookup(t *testing.T) {
+	a := &Adapter{}
+	if a.isForumChannel("forum-1") {
+		t.Fatal("unknown channel must not be a forum before configuration")
+	}
+	a.SetForumChannels([]string{" forum-1 ", "", "forum-1"})
+	if !a.isForumChannel("forum-1") {
+		t.Fatal("configured forum channel was not recognised")
+	}
+	if a.isForumChannel("chan-1") {
+		t.Fatal("unconfigured channel must stay a text channel")
+	}
+}
+
 func TestForumPostTitle(t *testing.T) {
 	cases := map[string]string{
 		"**aura#217 · review**\nqueued: 0": "aura#217 · review",

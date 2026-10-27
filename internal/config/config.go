@@ -92,6 +92,7 @@ type EndpointConfig struct {
 	Workflow         string            `yaml:"workflow,omitempty"`
 	Platform         string            `yaml:"platform"`
 	ChannelID        string            `yaml:"channel_id"`
+	ForumChannelID   string            `yaml:"forum_channel_id,omitempty"`
 	ThreadID         string            `yaml:"thread_id,omitempty"`
 	Prompt           string            `yaml:"prompt"`
 	PromptFile       string            `yaml:"prompt_file,omitempty"`
@@ -125,6 +126,7 @@ func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
 		Workflow        string            `yaml:"workflow,omitempty"`
 		Platform        string            `yaml:"platform"`
 		ChannelID       string            `yaml:"channel_id"`
+		ForumChannelID  string            `yaml:"forum_channel_id,omitempty"`
 		ThreadID        string            `yaml:"thread_id,omitempty"`
 		Prompt          string            `yaml:"prompt"`
 		PromptFile      string            `yaml:"prompt_file,omitempty"`
@@ -157,6 +159,7 @@ func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {
 	e.Workflow = raw.Workflow
 	e.Platform = raw.Platform
 	e.ChannelID = raw.ChannelID
+	e.ForumChannelID = raw.ForumChannelID
 	e.ThreadID = raw.ThreadID
 	e.Prompt = raw.Prompt
 	e.PromptFile = raw.PromptFile
