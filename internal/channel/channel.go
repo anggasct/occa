@@ -181,6 +181,12 @@ type ThreadStarter interface {
 	StartThread(channelID, messageID, name string) (string, error)
 }
 
+// ThreadSurfaceUpdater retitles a thread and applies forum tags by name. It is
+// optional: adapters that cannot retitle simply do not implement it.
+type ThreadSurfaceUpdater interface {
+	UpdateThreadSurface(threadID, name string, tags []string) error
+}
+
 type MessageReplier interface {
 	ReplyNotification(channelID, replyToMessageID string, text string) (string, error)
 }
