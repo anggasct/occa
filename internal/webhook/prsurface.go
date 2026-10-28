@@ -405,7 +405,9 @@ func (s *Server) syncPhaseParent(ctx context.Context, ep config.EndpointConfig, 
 				return rootID, false
 			}
 			// A blocked or failed parent stays frozen until a retry is admitted.
-			if IsTerminalPhase(previous) && !surfaceReopenedForRetry(s.tasks, prKey, previous) {
+			// A merge is exempt: the operator can merge a blocked PR by hand and
+			// the surface must still report it.
+			if phase != PhaseMerged && IsTerminalPhase(previous) && !surfaceReopenedForRetry(s.tasks, prKey, previous) {
 				slog.Info("webhook: write refused, PR terminal",
 					"pr_key", prKey,
 					"surface", "parent",
@@ -683,6 +685,11 @@ func SurfaceFrozen(tasks *TaskThreadRegistry, prKey string, phase Phase) bool {
 	}
 	_, current, _, known := tasks.SurfaceState(prKey)
 	if !known || current == "" || current == phase {
+		return false
+	}
+	if phase == PhaseMerged {
+		// A merged PR is final truth: a stale blocked/failed surface must not
+		// stop the run that reports the merge.
 		return false
 	}
 	if !IsTerminalPhase(current) {
