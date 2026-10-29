@@ -810,6 +810,26 @@ func TestWebhookExecutorWithoutThread(t *testing.T) {
 	}
 }
 
+func TestWebhookExecutorCarriesAgentReply(t *testing.T) {
+	discordCh := &mockDiscordChannel{name: "discord"}
+	agentClient := &mockRelayClient{
+		events: []relay.Event{
+			{Type: relay.EventDelta, Delta: "Nothing in this branch "},
+			{Type: relay.EventDelta, Delta: "needs a change."},
+		},
+	}
+	manager := &mockAgentManager{client: agentClient}
+	exec := newWebhookExecutor([]channel.Channel{discordCh}, manager, mockChannelStore{}, "/tmp", relay.Config{NoEventTimeout: 15 * time.Minute, WebhookAbortTimeout: 5 * time.Second, VerifyTimeout: 15 * time.Second})
+
+	workCtx := &webhook.WebhookWorkContext{Workflow: "github_fix", DeliveryID: "del-reply"}
+	if err := exec(context.Background(), "discord", "chan-main", "prompt", workCtx); err != nil {
+		t.Fatalf("executor returned error: %v", err)
+	}
+	if workCtx.AgentReply != "Nothing in this branch needs a change." {
+		t.Fatalf("AgentReply = %q", workCtx.AgentReply)
+	}
+}
+
 func TestWebhookExecutorTelegramProgressCard(t *testing.T) {
 	tgCh := &mockTelegramChannel{
 		nextMsgID: "tg-root-42",

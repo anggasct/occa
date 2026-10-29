@@ -43,6 +43,7 @@ type WebhookWorkContext struct {
 	Model          *relay.ModelRef
 	ModelSource    string
 	Progress       relay.TurnProgress
+	AgentReply     string
 	Thread         bool
 	ProgressCard   bool
 	Workflow       string
