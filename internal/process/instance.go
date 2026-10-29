@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -34,15 +35,16 @@ type Config struct {
 type instanceFactory func(ctx context.Context, workdir string, port int) (*Instance, error)
 
 type Instance struct {
-	workdir  string
-	addr     string
-	port     int
-	pid      int
-	client   relay.Client
-	lastUsed atomic.Int64
-	inflight atomic.Int32
-	dead     atomic.Bool
-	stop     func()
+	workdir    string
+	addr       string
+	port       int
+	pid        int
+	client     relay.Client
+	lastUsed   atomic.Int64
+	inflight   atomic.Int32
+	dead       atomic.Bool
+	stopReason atomic.Value
+	stop       func()
 }
 
 func (i *Instance) Client() relay.Client { return i.client }
@@ -54,7 +56,29 @@ func (i *Instance) Touch() { i.lastUsed.Store(time.Now().Unix()) }
 
 func (i *Instance) End() { i.inflight.Add(-1) }
 
-func (i *Instance) begin()       { i.inflight.Add(1); i.Touch() }
+func (i *Instance) begin() { i.inflight.Add(1); i.Touch() }
+
+func (i *Instance) stopFor(reason string) {
+	i.stopReason.Store(reason)
+	i.stop()
+}
+
+func (i *Instance) requestedStop() (string, bool) {
+	reason, ok := i.stopReason.Load().(string)
+	return reason, ok && reason != ""
+}
+
+func logInstanceExit(inst *Instance, waitErr error) {
+	exit := "ok"
+	if waitErr != nil {
+		exit = waitErr.Error()
+	}
+	if reason, requested := inst.requestedStop(); requested {
+		slog.Info("process: agent instance stopped", "pid", inst.pid, "workdir", inst.workdir, "reason", reason, "exit", exit)
+		return
+	}
+	slog.Warn("process: agent instance exited unexpectedly", "pid", inst.pid, "workdir", inst.workdir, "exit", exit)
+}
 func (i *Instance) isIdle() bool { return i.inflight.Load() == 0 }
 
 func productionFactory(binary string, cfg Config) instanceFactory {
@@ -97,13 +121,14 @@ func productionFactory(binary string, cfg Config) instanceFactory {
 			},
 		}
 		go func() {
-			cmd.Wait()
+			waitErr := cmd.Wait()
 			inst.dead.Store(true)
+			logInstanceExit(inst, waitErr)
 			close(waitDone)
 		}()
 
 		if err := waitReady(ctx, addr, readinessTimeout, controlTimeout); err != nil {
-			inst.stop()
+			inst.stopFor("readiness failed")
 			return nil, fmt.Errorf("process: readiness for %q: %w", workdir, err)
 		}
 		inst.Touch()
