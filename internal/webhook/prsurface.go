@@ -459,6 +459,11 @@ func (s *Server) syncPhaseParent(ctx context.Context, ep config.EndpointConfig, 
 			return "", false
 		}
 		rootID = strings.TrimSpace(id)
+		if threadID == "" && rootID != "" && deliversToForum(ep) {
+			threadID = rootID
+			s.persistPRBinding(ctx, prKey, TaskThreadRecord{Repo: repo, Branch: branch, RootMessageID: rootID, ThreadID: rootID, PRNumber: prNumber})
+			slog.Info("webhook: forum parent bound as PR thread", "pr_key", prKey, "thread_id", rootID)
+		}
 	} else if err := s.editPhaseParent(ctx, ep.Platform, ep.ChannelID, rootID, text, buttons); err != nil {
 		slog.Warn("webhook: phase parent edit failed", "pr_key", prKey, "phase", string(phase), "error", err)
 		if errors.Is(err, channel.ErrRateLimited) {
@@ -488,6 +493,13 @@ func (s *Server) syncPhaseParent(ctx context.Context, ep config.EndpointConfig, 
 	s.rememberParentAge(prKey, base, text, phase)
 	slog.Info("webhook: phase parent updated", "pr_key", prKey, "from_phase", string(previous), "to_phase", string(phase))
 	return rootID, true
+}
+
+// deliversToForum reports whether the endpoint posts into a forum, where a new
+// post is a thread whose id equals its starter message id.
+func deliversToForum(ep config.EndpointConfig) bool {
+	forum := strings.TrimSpace(ep.ForumChannelID)
+	return forum != "" && strings.TrimSpace(ep.ChannelID) == forum
 }
 
 // reusableTaskParent returns the channel parent of the task that owns a PR,
