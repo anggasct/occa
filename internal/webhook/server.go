@@ -804,6 +804,7 @@ func (s *Server) Stop(ctx context.Context) error {
 	if s.httpSrv != nil {
 		err = s.httpSrv.Shutdown(ctx)
 	}
+	s.recordActiveReplays()
 	s.shutdownCancel()
 	done := make(chan struct{})
 	go func() {
@@ -816,6 +817,20 @@ func (s *Server) Stop(ctx context.Context) error {
 		slog.Warn("webhook: shutdown drain timed out", "error", ctx.Err())
 	}
 	return err
+}
+
+func (s *Server) recordActiveReplays() {
+	s.dispatchMu.Lock()
+	var active []dispatchItem
+	for _, d := range s.dispatchers {
+		if snap := d.snapshot(); snap.hasActive {
+			active = append(active, snap.active)
+		}
+	}
+	s.dispatchMu.Unlock()
+	for _, item := range active {
+		s.recordInterruptedReplay(item)
+	}
 }
 
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
@@ -1007,12 +1022,14 @@ func (s *Server) enqueue(ep config.EndpointConfig, key WebhookExecutionKey, item
 		s.mirrorDelete(decision.replaced.queueID)
 		if decision.replaced.deliveryID != item.deliveryID {
 			s.recordSuperseded(*decision.replaced, "coalesced by a newer state event")
+			s.closeSupersededReceipt(*decision.replaced, "coalesced by a newer state event")
 		}
 	}
 	if decision.evicted != nil {
 		slog.Info("webhook: evicted", "endpoint", ep.Name, "delivery_id", item.deliveryID, "evicted_delivery_id", decision.evicted.deliveryID, "pr_key", item.prKey, "lane", item.lane)
 		s.mirrorDelete(decision.evicted.queueID)
 		s.recordSuperseded(*decision.evicted, "evicted for a higher-priority delivery")
+		s.closeSupersededReceipt(*decision.evicted, "evicted for a higher-priority delivery")
 	}
 	if item.prKey != "" {
 		item.queueID = s.mirrorEnqueue(item.prKey, ep.Name, item.eventType, 0, lanePriority(item.lane))
@@ -1460,6 +1477,7 @@ func (d *dispatcher) handle(item dispatchItem) {
 	enriched := false
 	for attempt := 0; ; attempt++ {
 		if !s.acquireEvent(s.shutdownCtx) {
+			s.recordInterruptedReplay(item)
 			s.failAbandonedReceipt(receipt, "shutting down")
 			return
 		}
@@ -1576,6 +1594,7 @@ func (d *dispatcher) handle(item dispatchItem) {
 					s.markSkipped(receipt.ID, item.ep, earlyEnvelope, "cancelled by operator")
 					return
 				default:
+					s.recordInterruptedReplay(item)
 					s.failAbandonedReceipt(receipt, "shutting down")
 					return
 				}
@@ -1609,6 +1628,7 @@ func (d *dispatcher) handle(item dispatchItem) {
 				"error", werr,
 			)
 			if !s.workspaceRetrySleep(s.shutdownCtx, s.workspaceRetryBackoff[attempt]) {
+				s.recordInterruptedReplay(item)
 				s.failAbandonedReceipt(receipt, "shutting down")
 				return
 			}
@@ -1642,6 +1662,7 @@ func (d *dispatcher) handle(item dispatchItem) {
 				s.markSkipped(receipt.ID, item.ep, earlyEnvelope, "cancelled by operator")
 				return
 			default:
+				s.recordInterruptedReplay(item)
 				s.failAbandonedReceipt(receipt, "shutting down")
 				return
 			}
@@ -2092,6 +2113,9 @@ func (s *Server) abandon(item dispatchItem, reason string) {
 		defer s.repairPRQueueInvariants(ctx, item.prKey)
 	}
 	s.mirrorDelete(item.queueID)
+	if reason == "shutting down" {
+		s.recordInterruptedReplay(item)
+	}
 	_, err := s.deliveries.Create(ctx, store.WebhookDelivery{
 		Endpoint:    item.ep.Name,
 		DeliveryID:  item.deliveryID,

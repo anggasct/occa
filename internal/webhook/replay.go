@@ -104,6 +104,71 @@ func (s *Server) recordSuperseded(item dispatchItem, reason string) {
 	}
 }
 
+func (s *Server) recordInterruptedReplay(item dispatchItem) {
+	if s.replays == nil || len(item.body) == 0 {
+		return
+	}
+	ctx := context.Background()
+	now := time.Now().Unix()
+	next := now + int64(s.replayBackoffFor(0)/time.Second)
+	if item.replayID != 0 {
+		if err := s.replays.Mark(ctx, item.replayID, store.WebhookReplayPending, next); err != nil {
+			slog.Warn("webhook: shutdown replay re-arm failed", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "error", err)
+			return
+		}
+		slog.Info("webhook: replay scheduled after shutdown", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "next_attempt_at", next)
+		return
+	}
+	_, created, err := s.replays.Create(ctx, store.WebhookReplay{
+		Endpoint:      item.ep.Name,
+		DeliveryID:    item.deliveryID,
+		EventType:     item.eventType,
+		PRKey:         item.prKey,
+		Body:          item.body,
+		Reason:        "interrupted by shutdown",
+		NextAttemptAt: next,
+		ExpiresAt:     now + int64(s.replayTTL/time.Second),
+		Status:        store.WebhookReplayPending,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	})
+	if err != nil {
+		slog.Warn("webhook: shutdown replay record failed", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "error", err)
+		return
+	}
+	if created {
+		slog.Info("webhook: replay scheduled after shutdown", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "next_attempt_at", next)
+	}
+}
+
+func (s *Server) closeSupersededReceipt(item dispatchItem, reason string) {
+	if s.deliveries == nil {
+		return
+	}
+	ctx := context.Background()
+	receipt, err := s.deliveries.Get(ctx, item.ep.Name, item.deliveryID)
+	if err != nil || receipt == nil {
+		return
+	}
+	if _, err := s.deliveries.Transition(ctx, receipt.ID, []store.WebhookStatus{store.WebhookStatusReceived, store.WebhookStatusAccepted}, store.WebhookStatusSkipped, "superseded: "+reason); err != nil {
+		slog.Warn("webhook: superseded receipt transition failed", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "error", err)
+	}
+}
+
+func (s *Server) mergedReplayChecker(ctx context.Context, row store.WebhookReplay) (replayDecision, error) {
+	if !strings.EqualFold(strings.TrimSpace(row.EventType), "pull_request") || strings.TrimSpace(row.PRKey) == "" {
+		return replayUndecidable, nil
+	}
+	state, err := s.resolveLivePRState(ctx, row.PRKey)
+	if err != nil {
+		return replayUndecidable, err
+	}
+	if state == PRStateMerged {
+		return replayGo, nil
+	}
+	return replaySuperseded, nil
+}
+
 func (s *Server) notifyRejection(ep config.EndpointConfig, item dispatchItem, reason string) {
 	if s.notifier == nil {
 		return
@@ -210,6 +275,9 @@ func (s *Server) replayOne(ctx context.Context, row store.WebhookReplay) {
 	checker := s.replayChecker
 	if checker == nil {
 		checker = defaultReplayChecker
+		if strings.EqualFold(strings.TrimSpace(ep.Workflow), "merged") {
+			checker = s.mergedReplayChecker
+		}
 	}
 	decision, err := checker(ctx, row)
 	if err != nil {
