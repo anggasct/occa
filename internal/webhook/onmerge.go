@@ -320,6 +320,10 @@ func (s *Server) runMergedDocsUpdate(ctx context.Context, ep config.EndpointConf
 		StartTime:     time.Now(),
 		ThreadID:      threadID,
 		RootMessageID: rootID,
+		Worktree:      s.checkoutForRepo(stringValue(envelope["repository"])),
+	}
+	if workCtx.Worktree != "" {
+		slog.Info("webhook: merged lane workdir resolved", "endpoint", ep.Name, "delivery_id", item.deliveryID, "path", workCtx.Worktree)
 	}
 	if prompt := strings.TrimSpace(ep.Prompt); prompt != "" {
 		rendered, err := renderTemplate(prompt, tmplData)

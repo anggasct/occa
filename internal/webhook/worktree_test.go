@@ -436,41 +436,6 @@ func TestWorkspaceMutableLeaseExcludesConcurrentDelivery(t *testing.T) {
 	}
 }
 
-func TestWorkspaceMutableDirtyIsRetryable(t *testing.T) {
-	root := t.TempDir()
-	initTestGitRepo(t, root)
-	m := NewWorkspaceManager()
-	key := WebhookExecutionKey{Repository: "testowner/myrepo", Branch: "main"}
-
-	req := gitEndpointRequest(key, config.WorkspaceModeMutable)
-	req.Path = root
-	lease, err := m.ResolveWorkspace(context.Background(), req)
-	if err != nil {
-		t.Fatalf("ResolveWorkspace: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(lease.Path, "README.md"), []byte("# Test Repo\nuser work\n"), 0644); err != nil {
-		t.Fatalf("write dirty file: %v", err)
-	}
-	if err := lease.Release(context.Background()); err != nil {
-		t.Fatalf("Release: %v", err)
-	}
-
-	_, err = m.ResolveWorkspace(context.Background(), req)
-	if !errors.Is(err, ErrWorkspaceDirty) {
-		t.Fatalf("expected ErrWorkspaceDirty, got %v", err)
-	}
-	if !IsWorkspaceRetryable(err) {
-		t.Fatal("dirty workspace must be retryable")
-	}
-	data, rErr := os.ReadFile(filepath.Join(lease.Path, "README.md"))
-	if rErr != nil {
-		t.Fatalf("dirty workspace content must be preserved: %v", rErr)
-	}
-	if !strings.Contains(string(data), "user work") {
-		t.Fatalf("tracked dirty content lost: %q", string(data))
-	}
-}
-
 func TestWorkspaceMutableIdentityMismatchIsTerminal(t *testing.T) {
 	root := t.TempDir()
 	initTestGitRepo(t, root)

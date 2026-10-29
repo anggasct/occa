@@ -644,7 +644,7 @@ func (a *Adapter) editNotification(channelID, messageID, text string, retry bool
 		Flags:           discordgo.MessageFlagsSuppressEmbeds,
 	}, discordgo.WithRetryOnRatelimit(retry))
 	if err != nil {
-		return discordRateLimit(fmt.Errorf("discord: edit notification: %w", err))
+		return discordEditError(fmt.Errorf("discord: edit notification: %w", err))
 	}
 	return nil
 }
@@ -772,9 +772,17 @@ func (a *Adapter) editNotificationWithButtons(channelID, messageID, text string,
 		Flags:           discordgo.MessageFlagsSuppressEmbeds,
 	}, discordgo.WithRetryOnRatelimit(retry))
 	if err != nil {
-		return discordRateLimit(fmt.Errorf("discord: edit notification with buttons: %w", err))
+		return discordEditError(fmt.Errorf("discord: edit notification with buttons: %w", err))
 	}
 	return nil
+}
+
+func discordEditError(err error) error {
+	var restErr *discordgo.RESTError
+	if errors.As(err, &restErr) && restErr.Response != nil && restErr.Response.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("%w: %v", channel.ErrMessageNotFound, err)
+	}
+	return discordRateLimit(err)
 }
 
 func discordRateLimit(err error) error {

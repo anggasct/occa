@@ -495,3 +495,35 @@ func TestRepoWithoutAnyChannelFails(t *testing.T) {
 		t.Fatalf("Load error = %v, want a missing channel_id error", err)
 	}
 }
+
+func TestForumRoutingKeepsLegacyChannel(t *testing.T) {
+	endpoints := forumEndpoints(t, "webhooks:\n  defaults:\n    forum_channel_id: forum-default\n"+fullRuntimeYAML()+`  repos:
+    - repo: acme/widget
+      provider: github
+      platform: discord
+      channel_id: chan-1
+      secret: s3cret
+      checkout: /tmp/widget
+`)
+	for _, ep := range endpoints {
+		if ep.ChannelID != "forum-default" || ep.LegacyChannelID != "chan-1" {
+			t.Fatalf("%s channel = %q legacy = %q, want forum-default and chan-1", ep.Workflow, ep.ChannelID, ep.LegacyChannelID)
+		}
+	}
+}
+
+func TestTextChannelRoutingHasNoLegacyChannel(t *testing.T) {
+	endpoints := forumEndpoints(t, repoConfigYAML(`  repos:
+    - repo: acme/widget
+      provider: github
+      platform: discord
+      channel_id: chan-1
+      secret: s3cret
+      checkout: /tmp/widget
+`))
+	for _, ep := range endpoints {
+		if ep.ChannelID != "chan-1" || ep.LegacyChannelID != "" {
+			t.Fatalf("%s channel = %q legacy = %q, want chan-1 and no legacy", ep.Workflow, ep.ChannelID, ep.LegacyChannelID)
+		}
+	}
+}

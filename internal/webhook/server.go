@@ -147,6 +147,10 @@ type Server struct {
 	eventSlots            chan struct{}
 	dispatchMu            sync.Mutex
 	dispatchers           map[string]*dispatcher
+	surfaceHealMu         sync.Mutex
+	parentChannels        map[string]string
+	parentLosses          map[string]parentLoss
+	surfaceNotices        map[string]time.Time
 	dispatchWG            sync.WaitGroup
 	dispatchCreateMu      sync.Mutex
 	shutdownCtx           context.Context
@@ -730,7 +734,7 @@ func (s *Server) repairPRQueueInvariants(ctx context.Context, prKey string) {
 		return
 	}
 	for _, key := range repaired {
-		slog.Warn("webhook: pr queue invariant repaired", "pr_key", key, "status", "drained")
+		slog.Debug("webhook: pr queue invariant repaired", "pr_key", key, "status", "drained")
 	}
 }
 
@@ -804,6 +808,7 @@ func (s *Server) Stop(ctx context.Context) error {
 	if s.httpSrv != nil {
 		err = s.httpSrv.Shutdown(ctx)
 	}
+	s.recordActiveReplays()
 	s.shutdownCancel()
 	done := make(chan struct{})
 	go func() {
@@ -816,6 +821,20 @@ func (s *Server) Stop(ctx context.Context) error {
 		slog.Warn("webhook: shutdown drain timed out", "error", ctx.Err())
 	}
 	return err
+}
+
+func (s *Server) recordActiveReplays() {
+	s.dispatchMu.Lock()
+	var active []dispatchItem
+	for _, d := range s.dispatchers {
+		if snap := d.snapshot(); snap.hasActive {
+			active = append(active, snap.active)
+		}
+	}
+	s.dispatchMu.Unlock()
+	for _, item := range active {
+		s.recordInterruptedReplay(item)
+	}
 }
 
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
@@ -1007,12 +1026,14 @@ func (s *Server) enqueue(ep config.EndpointConfig, key WebhookExecutionKey, item
 		s.mirrorDelete(decision.replaced.queueID)
 		if decision.replaced.deliveryID != item.deliveryID {
 			s.recordSuperseded(*decision.replaced, "coalesced by a newer state event")
+			s.closeSupersededReceipt(*decision.replaced, "coalesced by a newer state event")
 		}
 	}
 	if decision.evicted != nil {
 		slog.Info("webhook: evicted", "endpoint", ep.Name, "delivery_id", item.deliveryID, "evicted_delivery_id", decision.evicted.deliveryID, "pr_key", item.prKey, "lane", item.lane)
 		s.mirrorDelete(decision.evicted.queueID)
 		s.recordSuperseded(*decision.evicted, "evicted for a higher-priority delivery")
+		s.closeSupersededReceipt(*decision.evicted, "evicted for a higher-priority delivery")
 	}
 	if item.prKey != "" {
 		item.queueID = s.mirrorEnqueue(item.prKey, ep.Name, item.eventType, 0, lanePriority(item.lane))
@@ -1460,6 +1481,7 @@ func (d *dispatcher) handle(item dispatchItem) {
 	enriched := false
 	for attempt := 0; ; attempt++ {
 		if !s.acquireEvent(s.shutdownCtx) {
+			s.recordInterruptedReplay(item)
 			s.failAbandonedReceipt(receipt, "shutting down")
 			return
 		}
@@ -1576,6 +1598,7 @@ func (d *dispatcher) handle(item dispatchItem) {
 					s.markSkipped(receipt.ID, item.ep, earlyEnvelope, "cancelled by operator")
 					return
 				default:
+					s.recordInterruptedReplay(item)
 					s.failAbandonedReceipt(receipt, "shutting down")
 					return
 				}
@@ -1609,6 +1632,7 @@ func (d *dispatcher) handle(item dispatchItem) {
 				"error", werr,
 			)
 			if !s.workspaceRetrySleep(s.shutdownCtx, s.workspaceRetryBackoff[attempt]) {
+				s.recordInterruptedReplay(item)
 				s.failAbandonedReceipt(receipt, "shutting down")
 				return
 			}
@@ -1642,6 +1666,7 @@ func (d *dispatcher) handle(item dispatchItem) {
 				s.markSkipped(receipt.ID, item.ep, earlyEnvelope, "cancelled by operator")
 				return
 			default:
+				s.recordInterruptedReplay(item)
 				s.failAbandonedReceipt(receipt, "shutting down")
 				return
 			}
@@ -2092,6 +2117,9 @@ func (s *Server) abandon(item dispatchItem, reason string) {
 		defer s.repairPRQueueInvariants(ctx, item.prKey)
 	}
 	s.mirrorDelete(item.queueID)
+	if reason == "shutting down" {
+		s.recordInterruptedReplay(item)
+	}
 	_, err := s.deliveries.Create(ctx, store.WebhookDelivery{
 		Endpoint:    item.ep.Name,
 		DeliveryID:  item.deliveryID,
@@ -2464,7 +2492,8 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 	}
 
 	if err == nil && strings.EqualFold(strings.TrimSpace(ep.Workflow), "merge") && strings.TrimSpace(workCtx.PRKey) != "" {
-		if state, lookupErr := s.resolveLivePRState(ctx, workCtx.PRKey); lookupErr != nil || state != PRStateMerged {
+		state, lookupErr := s.resolveLivePRState(ctx, workCtx.PRKey)
+		if lookupErr != nil || state != PRStateMerged {
 			slog.Warn("webhook: merge not confirmed",
 				"endpoint", ep.Name,
 				"delivery_id", deliveryID,
@@ -2472,9 +2501,14 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 				"state", state,
 				"error", lookupErr,
 			)
-		} else {
-			s.markMergeConfirmed(ctx, ep, envelope, workCtx)
+			reason := "merge not confirmed: PR is " + state
+			if lookupErr != nil {
+				reason = "merge not confirmed: live state lookup failed"
+			}
+			s.markSkipped(id, ep, envelope, reason)
+			return nil
 		}
+		s.markMergeConfirmed(ctx, ep, envelope, workCtx)
 	}
 
 	if itemPRKey := strings.TrimSpace(workCtx.PRKey); err != nil && itemPRKey != "" && !errors.Is(err, relay.ErrWebhookResponseIncomplete) {

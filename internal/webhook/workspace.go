@@ -79,6 +79,8 @@ type WorkspaceLease struct {
 	Mode          string
 	Branch        string
 	StartRevision string
+	Holder        string
+	grantedClean  bool
 	mu            sync.Mutex
 	released      bool
 }
@@ -96,10 +98,75 @@ func (l *WorkspaceLease) Release(ctx context.Context) error {
 	if l.manager == nil {
 		return nil
 	}
+	var saveErr error
+	if l.grantedClean && strings.TrimSpace(l.Path) != "" {
+		saveErr = l.manager.saveUnfinishedChanges(ctx, l)
+	}
 	// Isolated checkouts live for their TTL so a re-review of the same head
 	// reuses the checkout instead of paying for a fresh one.
 	l.manager.leases.Delete(l.Path)
+	return saveErr
+}
+
+// saveUnfinishedChanges moves the edits a run left behind onto a private ref
+// and cleans the tree. It runs only for leases granted on a clean tree, so any
+// tracked change present at release was made under this lease. The shared
+// stash is avoided on purpose: it is visible to, and poppable from, every
+// worktree of the repository.
+func (m *WorkspaceManager) saveUnfinishedChanges(ctx context.Context, l *WorkspaceLease) error {
+	dirty, err := m.isWorktreeDirty(ctx, l.Path)
+	if err != nil {
+		return fmt.Errorf("check unfinished changes: %w", err)
+	}
+	if !dirty {
+		return nil
+	}
+	stamp := m.now().UTC().Format("20060102T150405Z")
+	ref := "refs/occa/unfinished/" + stamp + "-" + refSafe(l.Holder)
+	message := "occa: unfinished run " + strings.TrimSpace(l.Holder) + " " + stamp
+	if _, err := m.runner.Run(ctx, l.Path, "add", "-A"); err != nil {
+		return fmt.Errorf("save unfinished changes: %w", err)
+	}
+	tree, err := m.runner.Run(ctx, l.Path, "write-tree")
+	if err != nil {
+		return fmt.Errorf("save unfinished changes: %w", err)
+	}
+	commit, err := m.runner.Run(ctx, l.Path, "commit-tree", strings.TrimSpace(tree), "-p", "HEAD", "-m", message)
+	if err != nil {
+		return fmt.Errorf("save unfinished changes: %w", err)
+	}
+	if _, err := m.runner.Run(ctx, l.Path, "update-ref", ref, strings.TrimSpace(commit)); err != nil {
+		return fmt.Errorf("save unfinished changes: %w", err)
+	}
+	if _, err := m.runner.Run(ctx, l.Path, "reset", "--hard", "HEAD"); err != nil {
+		return fmt.Errorf("clean unfinished changes: %w", err)
+	}
+	if _, err := m.runner.Run(ctx, l.Path, "clean", "-fd"); err != nil {
+		return fmt.Errorf("clean unfinished changes: %w", err)
+	}
+	slog.Warn("webhook: unfinished run changes saved",
+		"workspace", l.Path,
+		"branch", l.Branch,
+		"ref", ref,
+		"commit", strings.TrimSpace(commit),
+	)
 	return nil
+}
+
+func refSafe(value string) string {
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(value) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	if b.Len() == 0 {
+		return "unknown"
+	}
+	return b.String()
 }
 
 type workspaceLeaseEntry struct {
@@ -236,7 +303,7 @@ func (m *WorkspaceManager) logBindingMismatch(req WorkspaceRequest, lease *Works
 	if filepath.Clean(binding) == filepath.Clean(lease.Path) {
 		return
 	}
-	slog.Warn("webhook: workspace binding mismatch",
+	slog.Debug("webhook: workspace binding mismatch",
 		"lane", req.Lane,
 		"lease", lease.Path,
 		"binding", binding,
@@ -511,7 +578,7 @@ func (m *WorkspaceManager) resolveMutable(ctx context.Context, root string, req 
 		return nil, fmt.Errorf("%w: mutable workspace %s is held by another delivery", ErrWorkspaceLeased, target)
 	}
 
-	lease := &WorkspaceLease{manager: m, Path: "", Mode: config.WorkspaceModeMutable, Branch: req.Key.Branch}
+	lease := &WorkspaceLease{manager: m, Path: "", Mode: config.WorkspaceModeMutable, Branch: req.Key.Branch, Holder: req.DeliveryID, grantedClean: true}
 	path, err := m.attachMutable(ctx, root, req, target)
 	if err != nil {
 		m.leases.Delete(target)

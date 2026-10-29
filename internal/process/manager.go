@@ -136,7 +136,7 @@ func (m *Manager) Instance(ctx context.Context, workdir string) (*Instance, erro
 		}
 		if m.closed.Load() {
 			// In-flight spawn handling under closed manager (race prevention)
-			inst.stop()
+			inst.stopFor("shutdown")
 			m.ports.Release(port)
 			delete(m.pool, workdir)
 			e.err = errClosed
@@ -154,7 +154,7 @@ func (m *Manager) Instance(ctx context.Context, workdir string) (*Instance, erro
 
 func (m *Manager) discardLocked(workdir string, e *entry) {
 	if e.inst != nil {
-		e.inst.stop()
+		e.inst.stopFor("discarded")
 		m.ports.Release(e.inst.port)
 	}
 	delete(m.pool, workdir)
@@ -215,7 +215,7 @@ func (m *Manager) ForceStop(workdir string) {
 	select {
 	case <-e.ready:
 		if e.inst != nil {
-			e.inst.stop()
+			e.inst.stopFor("forced")
 			m.ports.Release(e.inst.port)
 		}
 		delete(m.pool, workdir)
@@ -244,7 +244,7 @@ func (m *Manager) evictLRULocked() bool {
 		return false
 	}
 	e := m.pool[oldestKey]
-	e.inst.stop()
+	e.inst.stopFor("evicted")
 	m.ports.Release(e.inst.port)
 	delete(m.pool, oldestKey)
 	return true
@@ -258,7 +258,7 @@ func (m *Manager) reapOnce(now time.Time) {
 		select {
 		case <-e.ready:
 			if e.err == nil && e.inst != nil && e.inst.isIdle() && e.inst.lastUsed.Load() < cutoff {
-				e.inst.stop()
+				e.inst.stopFor("idle")
 				m.ports.Release(e.inst.port)
 				delete(m.pool, k)
 			}
@@ -296,7 +296,7 @@ func (m *Manager) Close() error {
 		select {
 		case <-e.ready:
 			if e.inst != nil {
-				e.inst.stop()
+				e.inst.stopFor("shutdown")
 				m.ports.Release(e.inst.port)
 			}
 		default:
