@@ -53,7 +53,7 @@ func TestSkippedDeliveryLeavesNoActiveQueueRow(t *testing.T) {
 
 	var logs lockedLogBuffer
 	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 
 	mux := http.NewServeMux()

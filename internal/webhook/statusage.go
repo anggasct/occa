@@ -484,9 +484,11 @@ func (s *Server) editParentAge(ctx context.Context, ep config.EndpointConfig, pr
 	for attempt := 0; ; attempt++ {
 		text := appendStatusSegment(base, segmentFor(phase))
 		buttons := s.phaseParentButtons(ep, prKey, repo, branch, prURL, threadID)
-		if err := s.editAgePhaseParent(ctx, ep.Platform, ep.ChannelID, rootID, text, buttons); err != nil {
+		healedRoot, err := s.editPRParent(ctx, ep, prKey, rootID, text, buttons, true)
+		if err != nil {
 			return err
 		}
+		rootID = healedRoot
 		s.ageState.mu.Lock()
 		currentGen := state.parentGen
 		currentBase := state.parentBase
@@ -543,9 +545,11 @@ func (s *Server) editThreadAge(ctx context.Context, platform, target, messageID,
 func (s *Server) editPendingParent(ctx context.Context, ep config.EndpointConfig, prKey, repo, rootID, branch, prURL, threadID, text string, gen uint64, state *runAgeCardState) error {
 	for attempt := 0; ; attempt++ {
 		buttons := s.phaseParentButtons(ep, prKey, repo, branch, prURL, threadID)
-		if err := s.editAgePhaseParent(ctx, ep.Platform, ep.ChannelID, rootID, text, buttons); err != nil {
+		healedRoot, err := s.editPRParent(ctx, ep, prKey, rootID, text, buttons, true)
+		if err != nil {
 			return err
 		}
+		rootID = healedRoot
 		s.ageState.mu.Lock()
 		if state.parentGen == gen {
 			state.parentText = text

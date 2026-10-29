@@ -303,7 +303,7 @@ func (m *WorkspaceManager) logBindingMismatch(req WorkspaceRequest, lease *Works
 	if filepath.Clean(binding) == filepath.Clean(lease.Path) {
 		return
 	}
-	slog.Warn("webhook: workspace binding mismatch",
+	slog.Debug("webhook: workspace binding mismatch",
 		"lane", req.Lane,
 		"lease", lease.Path,
 		"binding", binding,

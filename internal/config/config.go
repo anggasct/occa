@@ -93,6 +93,7 @@ type EndpointConfig struct {
 	Platform         string            `yaml:"platform"`
 	ChannelID        string            `yaml:"channel_id"`
 	ForumChannelID   string            `yaml:"forum_channel_id,omitempty"`
+	LegacyChannelID  string            `yaml:"-"`
 	ThreadID         string            `yaml:"thread_id,omitempty"`
 	Prompt           string            `yaml:"prompt"`
 	PromptFile       string            `yaml:"prompt_file,omitempty"`

@@ -578,7 +578,7 @@ func OpenWithRetention(path, defaultWorkdir string, usage UsageRetention, recove
 		slog.Warn("store: pr queue invariant check failed", "error", err)
 	} else {
 		for _, key := range repaired {
-			slog.Warn("store: pr queue invariant repaired", "pr_key", key, "status", "drained")
+			slog.Debug("store: pr queue invariant repaired", "pr_key", key, "status", "drained")
 		}
 	}
 	return s, nil

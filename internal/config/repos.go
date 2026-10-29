@@ -138,6 +138,14 @@ func resolveForumChannel(repo RepoConfig, defaults WebhookDefaults) string {
 	return strings.TrimSpace(defaults.ForumChannelID)
 }
 
+func resolveLegacyChannel(repo RepoConfig, defaults WebhookDefaults) string {
+	legacy := strings.TrimSpace(repo.ChannelID)
+	if legacy == resolveDeliveryChannel(repo, defaults) {
+		return ""
+	}
+	return legacy
+}
+
 func resolveDeliveryChannel(repo RepoConfig, defaults WebhookDefaults) string {
 	if id := strings.TrimSpace(repo.ForumChannelID); id != "" {
 		return id
@@ -417,6 +425,7 @@ func expandRepos(repos []RepoConfig, defaults WebhookDefaults) ([]EndpointConfig
 				Platform:        strings.TrimSpace(repo.Platform),
 				ChannelID:       resolveDeliveryChannel(*repo, defaults),
 				ForumChannelID:  resolveForumChannel(*repo, defaults),
+				LegacyChannelID: resolveLegacyChannel(*repo, defaults),
 				Prompt:          prompt,
 				PromptFile:      promptFile,
 				PromptSource:    source,

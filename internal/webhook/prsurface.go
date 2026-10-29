@@ -390,7 +390,11 @@ func (s *Server) syncPhaseParent(ctx context.Context, ep config.EndpointConfig, 
 	repaired := false
 	if known {
 		if previous == PhaseMerged {
-			if evidence, contradicted := mergeContradiction(envelope); contradicted {
+			if envelopeEvidence, contradicted := mergeContradiction(envelope); contradicted {
+				evidence, allowed := s.mergedRepairAllowed(ctx, prKey, envelopeEvidence)
+				if !allowed {
+					return rootID, false
+				}
 				s.reopenPRSurface(prKey)
 				slog.Info("webhook: surface merged repaired", "pr_key", prKey, "evidence", evidence)
 				phase = admissionPhase(ep.Workflow)
@@ -464,7 +468,7 @@ func (s *Server) syncPhaseParent(ctx context.Context, ep config.EndpointConfig, 
 			s.persistPRBinding(ctx, prKey, TaskThreadRecord{Repo: repo, Branch: branch, RootMessageID: rootID, ThreadID: rootID, PRNumber: prNumber})
 			slog.Info("webhook: forum parent bound as PR thread", "pr_key", prKey, "thread_id", rootID)
 		}
-	} else if err := s.editPhaseParent(ctx, ep.Platform, ep.ChannelID, rootID, text, buttons); err != nil {
+	} else if healedRoot, err := s.editPRParent(ctx, ep, prKey, rootID, text, buttons, false); err != nil {
 		slog.Warn("webhook: phase parent edit failed", "pr_key", prKey, "phase", string(phase), "error", err)
 		if errors.Is(err, channel.ErrRateLimited) {
 			s.tasks.SetSurface(prKey, SurfaceUpdate{
@@ -479,6 +483,11 @@ func (s *Server) syncPhaseParent(ctx context.Context, ep config.EndpointConfig, 
 			s.rememberParentBase(prKey, base, text, phase)
 		}
 		return rootID, false
+	} else if healedRoot != rootID {
+		rootID = healedRoot
+		if deliversToForum(ep) {
+			threadID = healedRoot
+		}
 	}
 	s.tasks.SetSurface(prKey, SurfaceUpdate{
 		RootMessageID: rootID,
@@ -607,10 +616,12 @@ func (s *Server) refreshPhaseParentButtons(ctx context.Context, ep config.Endpoi
 	base := FormatPhaseParent(repo, prNumber, phase, s.statusIcons)
 	text := appendStatusSegment(base, s.runAgeSegment(ctx, prKey, phase))
 	buttons := s.phaseParentButtons(ep, prKey, repo, branch, prURL, threadID)
-	if err := s.editPhaseParent(ctx, ep.Platform, ep.ChannelID, rootID, text, buttons); err != nil {
+	healedRoot, err := s.editPRParent(ctx, ep, prKey, rootID, text, buttons, false)
+	if err != nil {
 		slog.Warn("webhook: phase parent button refresh failed", "pr_key", prKey, "phase", string(phase), "error", err)
 		return
 	}
+	rootID = healedRoot
 	s.tasks.SetSurface(prKey, SurfaceUpdate{
 		RootMessageID: rootID,
 		Repo:          repo,

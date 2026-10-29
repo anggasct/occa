@@ -147,6 +147,10 @@ type Server struct {
 	eventSlots            chan struct{}
 	dispatchMu            sync.Mutex
 	dispatchers           map[string]*dispatcher
+	surfaceHealMu         sync.Mutex
+	parentChannels        map[string]string
+	parentLosses          map[string]parentLoss
+	surfaceNotices        map[string]time.Time
 	dispatchWG            sync.WaitGroup
 	dispatchCreateMu      sync.Mutex
 	shutdownCtx           context.Context
@@ -730,7 +734,7 @@ func (s *Server) repairPRQueueInvariants(ctx context.Context, prKey string) {
 		return
 	}
 	for _, key := range repaired {
-		slog.Warn("webhook: pr queue invariant repaired", "pr_key", key, "status", "drained")
+		slog.Debug("webhook: pr queue invariant repaired", "pr_key", key, "status", "drained")
 	}
 }
 
@@ -2488,7 +2492,8 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 	}
 
 	if err == nil && strings.EqualFold(strings.TrimSpace(ep.Workflow), "merge") && strings.TrimSpace(workCtx.PRKey) != "" {
-		if state, lookupErr := s.resolveLivePRState(ctx, workCtx.PRKey); lookupErr != nil || state != PRStateMerged {
+		state, lookupErr := s.resolveLivePRState(ctx, workCtx.PRKey)
+		if lookupErr != nil || state != PRStateMerged {
 			slog.Warn("webhook: merge not confirmed",
 				"endpoint", ep.Name,
 				"delivery_id", deliveryID,
@@ -2496,9 +2501,14 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 				"state", state,
 				"error", lookupErr,
 			)
-		} else {
-			s.markMergeConfirmed(ctx, ep, envelope, workCtx)
+			reason := "merge not confirmed: PR is " + state
+			if lookupErr != nil {
+				reason = "merge not confirmed: live state lookup failed"
+			}
+			s.markSkipped(id, ep, envelope, reason)
+			return nil
 		}
+		s.markMergeConfirmed(ctx, ep, envelope, workCtx)
 	}
 
 	if itemPRKey := strings.TrimSpace(workCtx.PRKey); err != nil && itemPRKey != "" && !errors.Is(err, relay.ErrWebhookResponseIncomplete) {
