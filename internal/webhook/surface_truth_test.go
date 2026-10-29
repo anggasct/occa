@@ -148,6 +148,12 @@ func TestSurfaceHealReanchorsLostParentOnce(t *testing.T) {
 	if len(rec.sent) != 1 {
 		t.Fatalf("parent sends after a second loss = %d, want still one", len(rec.sent))
 	}
+	if warns := logs.all("webhook: phase parent edit failed"); len(warns) != 0 {
+		t.Fatalf("cooldown-suppressed phase write logged WARN: %+v", warns)
+	}
+	if debug := logs.all("webhook: parent surface lost again, re-anchor cooling down"); len(debug) != 1 {
+		t.Fatalf("cooldown DEBUG lines = %d, want exactly one", len(debug))
+	}
 	edits.take()
 	srv.refreshRunAges(ctx, now.Add(2*time.Minute))
 	for _, call := range edits.take() {

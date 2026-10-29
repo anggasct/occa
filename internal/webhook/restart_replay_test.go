@@ -3,6 +3,10 @@ package webhook
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -67,6 +71,80 @@ func TestRestartReplayRecordsActiveAndQueuedItems(t *testing.T) {
 	rows := pendingReplays(t, st)
 	if len(rows) != 3 {
 		t.Fatalf("pending replays = %d (%v), want 3", len(rows), rows)
+	}
+	for _, id := range []string{"del-active", "del-queued-1", "del-queued-2"} {
+		row, ok := rows[id]
+		if !ok {
+			t.Fatalf("replay for %s missing", id)
+		}
+		if row.Reason != "interrupted by shutdown" || len(row.Body) == 0 {
+			t.Fatalf("replay %s = reason %q body %d bytes, want interrupted by shutdown with body", id, row.Reason, len(row.Body))
+		}
+	}
+}
+
+func TestRestartReplayStopRecordsActiveAndQueued(t *testing.T) {
+	started := make(chan struct{})
+	released := make(chan struct{})
+	var once sync.Once
+	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+		once.Do(func() { close(started) })
+		select {
+		case <-released:
+		case <-ctx.Done():
+		}
+		return nil
+	}
+
+	cfg := config.WebhookConfig{
+		Bind:    "127.0.0.1:0",
+		Policy:  testPolicy(),
+		Runtime: testRuntime(),
+		Endpoints: withAdmitDefaults([]config.EndpointConfig{
+			{Name: "github", Path: "/github", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "Analyze"},
+		}),
+	}
+	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "webhook.db"), "")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	srv := New(cfg, exec, st.WebhookDeliveryRepo())
+	srv.SetWebhookReplayRepo(st.WebhookReplayRepo())
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.handleRequest)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	if resp := post(t, ts.URL+"/github?secret=s3cret", "del-active", "pull_request", `{}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("active delivery expected 200, got %d", resp.StatusCode)
+	}
+	<-started
+	for _, id := range []string{"del-queued-1", "del-queued-2"} {
+		if resp := post(t, ts.URL+"/github?secret=s3cret", id, "pull_request", `{}`); resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s expected 200, got %d", id, resp.StatusCode)
+		}
+	}
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- srv.Stop(context.Background()) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for srv.shutdownCtx.Err() == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("shutdown context was never cancelled")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(released)
+	if err := <-stopDone; err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	rows := pendingReplays(t, st)
+	if len(rows) != 3 {
+		t.Fatalf("pending replays after Stop = %d (%v), want 3", len(rows), rows)
 	}
 	for _, id := range []string{"del-active", "del-queued-1", "del-queued-2"} {
 		row, ok := rows[id]

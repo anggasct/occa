@@ -85,10 +85,10 @@ func (s *Server) editPRParent(ctx context.Context, ep config.EndpointConfig, prK
 			return rootID, legacyErr
 		}
 	}
-	return s.reanchorParent(ctx, ep, prKey, rootID, text, buttons, err)
+	return s.reanchorParent(ctx, ep, prKey, rootID, text, buttons)
 }
 
-func (s *Server) reanchorParent(ctx context.Context, ep config.EndpointConfig, prKey, oldRoot, text string, buttons []channel.Button, cause error) (string, error) {
+func (s *Server) reanchorParent(ctx context.Context, ep config.EndpointConfig, prKey, oldRoot, text string, buttons []channel.Button) (string, error) {
 	s.surfaceHealMu.Lock()
 	loss := s.parentLosses[prKey]
 	if !loss.reanchoredAt.IsZero() && time.Since(loss.reanchoredAt) < surfaceHealWindow {
@@ -99,7 +99,9 @@ func (s *Server) reanchorParent(ctx context.Context, ep config.EndpointConfig, p
 		if first {
 			slog.Debug("webhook: parent surface lost again, re-anchor cooling down", "pr_key", prKey, "root_id", oldRoot)
 		}
-		return oldRoot, cause
+		// A suppressed loss inside the window is a non-failure: the caller must
+		// not log a WARN on every phase write while the re-anchor cooldown holds.
+		return oldRoot, nil
 	}
 	s.surfaceHealMu.Unlock()
 
