@@ -195,16 +195,48 @@ func (t WebhookTurn) denyUnhandledPermission(ctx context.Context, ev Event) {
 		return
 	}
 	requestID := strings.TrimSpace(ev.Permission.ID)
-	tool := strings.TrimSpace(ev.Permission.Tool)
+	attrs := []any{
+		"tool", strings.TrimSpace(ev.Permission.Tool),
+		"permission", strings.TrimSpace(ev.Permission.Permission),
+		"patterns", permissionScope(ev.Permission.Patterns),
+		"delivery_id", t.DeliveryID,
+	}
 	if requestID == "" {
-		slog.Warn("webhook: permission denied, no handler", "tool", tool, "reason", "no request id")
+		slog.Warn("webhook: permission denied, no handler", append(attrs, "reason", "no request id")...)
 		return
 	}
+	attrs = append(attrs, "request_id", requestID)
 	if err := replyPermission(ctx, t.Client, requestID, PermissionReject); err != nil {
-		slog.Error("webhook: permission denied, no handler", "tool", tool, "request_id", requestID, "error", err)
+		slog.Error("webhook: permission denied, no handler", append(attrs, "error", err)...)
 		return
 	}
-	slog.Warn("webhook: permission denied, no handler", "tool", tool, "request_id", requestID)
+	slog.Warn("webhook: permission denied, no handler", attrs...)
+}
+
+const (
+	permissionScopeEntries = 5
+	permissionScopeRunes   = 120
+)
+
+// permissionScope renders what a denied request asked for, bounded: a bash
+// pattern is a whole command line.
+func permissionScope(patterns []string) string {
+	shown := make([]string, 0, permissionScopeEntries)
+	for i, pattern := range patterns {
+		if i == permissionScopeEntries {
+			break
+		}
+		pattern = strings.Join(strings.Fields(pattern), " ")
+		if runes := []rune(pattern); len(runes) > permissionScopeRunes {
+			pattern = string(runes[:permissionScopeRunes]) + "…"
+		}
+		shown = append(shown, pattern)
+	}
+	scope := "[" + strings.Join(shown, " ") + "]"
+	if extra := len(patterns) - len(shown); extra > 0 {
+		scope += fmt.Sprintf(" +%d more", extra)
+	}
+	return scope
 }
 
 // replyPermission answers a permission request without taking the turn down
