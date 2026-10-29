@@ -265,22 +265,93 @@ func (s *Server) escalateBlocked(ep config.EndpointConfig, prKey string, row *st
 }
 
 func (s *Server) escalateBlockedReason(ep config.EndpointConfig, prKey string, row *store.PRRun, class failureClass, used, max int, reason, why string) {
-	kind := strings.TrimSpace(row.ActiveKind)
-	if kind == "" {
-		kind = "run"
-	}
+	kind := runKind(row)
 	if reason == "" {
 		reason = escalateReason(kind, class, used, max)
 	}
-	if row.Status == store.PRStatusBlocked {
+	if why == "" {
+		why = class.label()
+	}
+	what := fmt.Sprintf("%s run failed %d/%d times", kind, used, max)
+	if !s.escalateBlock(ep, prKey, row, reason, what, why) {
 		return
+	}
+	slog.Error("webhook: PR blocked after retry exhaustion",
+		"endpoint", ep.Name,
+		"pr_key", prKey,
+		"kind", kind,
+		"retries", fmt.Sprintf("%d/%d", used, max),
+		"class", class.label(),
+	)
+}
+
+// handOffNoChange blocks a PR whose run finished without changing anything.
+// Asking again on the same head and review gets the same answer, so the
+// operator gets the agent's own explanation instead of two more turns.
+func (s *Server) handOffNoChange(ep config.EndpointConfig, prKey string, row *store.PRRun, workCtx *WebhookWorkContext) {
+	kind := runKind(row)
+	reply := ""
+	if workCtx != nil {
+		reply = replyExcerpt(workCtx.AgentReply, ep.Secret)
+	}
+	reason := kind + " made no change — operator action required"
+	why := failureNoWork.label()
+	if reply != "" {
+		reason += ": " + reply
+		why = reply
+	}
+	if !s.escalateBlock(ep, prKey, row, reason, kind+" run made no change", why) {
+		return
+	}
+	slog.Warn("webhook: PR handed off, run made no change",
+		"endpoint", ep.Name,
+		"pr_key", prKey,
+		"kind", kind,
+		"reply", reply,
+	)
+}
+
+func runKind(row *store.PRRun) string {
+	if kind := strings.TrimSpace(row.ActiveKind); kind != "" {
+		return kind
+	}
+	return "run"
+}
+
+const noChangeReplyRunes = 300
+
+// replyExcerpt keeps the first paragraph of an agent reply, where the agent
+// states its conclusion, bounded for a card line and a log attribute.
+func replyExcerpt(text, secret string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	for _, paragraph := range strings.Split(text, "\n\n") {
+		if secret != "" {
+			paragraph = strings.ReplaceAll(paragraph, secret, "[redacted]")
+		}
+		paragraph = strings.Join(strings.Fields(paragraph), " ")
+		if paragraph == "" {
+			continue
+		}
+		if runes := []rune(paragraph); len(runes) > noChangeReplyRunes {
+			paragraph = string(runes[:noChangeReplyRunes]) + "…"
+		}
+		return paragraph
+	}
+	return ""
+}
+
+// escalateBlock marks the PR blocked and tells the operator once per blocking
+// episode. It reports whether this call started the episode.
+func (s *Server) escalateBlock(ep config.EndpointConfig, prKey string, row *store.PRRun, reason, what, why string) bool {
+	if row.Status == store.PRStatusBlocked {
+		return false
 	}
 	if err := s.prQueues.SetBlocked(context.Background(), prKey, reason); err != nil {
 		slog.Warn("webhook: block mark failed", "pr_key", prKey, "error", err)
-		return
+		return false
 	}
 	if !s.markEscalated(prKey) {
-		return
+		return false
 	}
 	// A new blocking episode freezes the parent again: the operator has to
 	// act before the parent leaves the blocked phase.
@@ -293,10 +364,6 @@ func (s *Server) escalateBlockedReason(ep config.EndpointConfig, prKey string, r
 		}
 	}
 	ctx := context.Background()
-	what := fmt.Sprintf("%s run failed %d/%d times", kind, used, max)
-	if why == "" {
-		why = class.label()
-	}
 	envelope := WebhookEnvelope{"repository": repo, "pr_number": prNumber}
 	if rec, ok := s.tasks.ResolvePRThread(prKey); ok {
 		if strings.TrimSpace(rec.Branch) != "" {
@@ -316,13 +383,7 @@ func (s *Server) escalateBlockedReason(ep config.EndpointConfig, prKey string, r
 		}
 	}
 	s.escalateToChannel(ctx, ep, repo, prNumber, PhaseBlocked, what, why)
-	slog.Error("webhook: PR blocked after retry exhaustion",
-		"endpoint", ep.Name,
-		"pr_key", prKey,
-		"kind", kind,
-		"retries", fmt.Sprintf("%d/%d", used, max),
-		"class", class.label(),
-	)
+	return true
 }
 
 // planRetry classifies an executor failure for a PR run. It returns true when
@@ -374,6 +435,10 @@ func (s *Server) planRetry(ep config.EndpointConfig, prKey string, receiptID int
 			"pr_key", prKey,
 			"pr_state", state,
 		)
+		return false
+	}
+	if class == failureNoWork {
+		s.handOffNoChange(ep, prKey, row, workCtx)
 		return false
 	}
 	if row.RetryCount >= max {

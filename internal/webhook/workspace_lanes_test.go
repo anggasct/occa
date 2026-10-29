@@ -12,6 +12,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -482,19 +484,38 @@ func fixLaneReviewBody(repo, branch string) string {
 		branch, repo, repo, repo)
 }
 
-func TestNoWorkLeaseRetriesTwiceThenBlocks(t *testing.T) {
+type noWorkLaneRun struct {
+	mu    sync.Mutex
+	calls int
+	store *store.SQLiteStore
+	logs  *lockedBuffer
+}
+
+func (r *noWorkLaneRun) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
+}
+
+func runNoWorkFixLane(t *testing.T, reply string, mergedDuringRun bool) *noWorkLaneRun {
+	t.Helper()
 	root, _ := initRepoWithBareRemote(t, "fix/test-lane")
 	ep := prTestEndpoint("fix", "/fix", config.AutomationFull)
 	ep.Name = "github-widget-pr-fix"
 	ep.Repository = testBinding
 	ep.Workspace = config.EndpointWorkspace{Type: config.WorkspaceTypeGit, Path: root, Mode: config.WorkspaceModeMutable}
 
-	var calls int
+	run := &noWorkLaneRun{logs: &lockedBuffer{}}
+	var merged atomic.Bool
 	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
-		calls++
+		run.mu.Lock()
+		run.calls++
+		run.mu.Unlock()
+		merged.Store(mergedDuringRun)
 		if workCtx.ThreadID == "" {
 			workCtx.ThreadID = "thread-pr"
 		}
+		workCtx.AgentReply = reply
 		return nil
 	}
 	cfg := config.WebhookConfig{
@@ -508,14 +529,23 @@ func TestNoWorkLeaseRetriesTwiceThenBlocks(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
+	run.store = st
 	srv := New(cfg, exec, st.WebhookDeliveryRepo())
 	srv.SetChannelStore(st.ChannelRepo())
 	srv.SetPRQueueRepo(st.PRQueueRepo())
 	srv.SetWorkspaceResolver(NewWorkspaceManager())
-	setOpenPRState(srv)
+	srv.SetPRStateResolver(func(ctx context.Context, repo, number string) (string, error) {
+		if merged.Load() {
+			return PRStateMerged, nil
+		}
+		return PRStateOpen, nil
+	})
 	srv.retryBackoffs = map[failureClass][]time.Duration{
 		failureNoWork: {10 * time.Millisecond, 10 * time.Millisecond},
 	}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(run.logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleRequest)
 	ts := httptest.NewServer(mux)
@@ -524,18 +554,74 @@ func TestNoWorkLeaseRetriesTwiceThenBlocks(t *testing.T) {
 	if resp := post(t, ts.URL+"/fix?secret=s3cret", "del-nowork", "pull_request_review", fixLaneReviewBody("testowner/myrepo", "fix/test-lane")); resp.StatusCode != http.StatusOK {
 		t.Fatalf("post: status %d", resp.StatusCode)
 	}
-	waitForDeliveryStatus(t, st, ep.Name, "del-nowork", store.WebhookStatusFailed)
-	if calls != 3 {
-		t.Fatalf("executor calls = %d, want 1 + 2 no-work retries", calls)
+	terminal := store.WebhookStatusFailed
+	if mergedDuringRun {
+		terminal = store.WebhookStatusSkipped
 	}
-	run, err := st.PRQueueRepo().Get(context.Background(), "testowner/myrepo#7")
-	if err != nil || run == nil {
-		t.Fatalf("pr row: %+v %v", run, err)
+	waitForDeliveryStatus(t, st, ep.Name, "del-nowork", terminal)
+	return run
+}
+
+func (r *noWorkLaneRun) row(t *testing.T) *store.PRRun {
+	t.Helper()
+	row, err := r.store.PRQueueRepo().Get(context.Background(), "testowner/myrepo#7")
+	if err != nil || row == nil {
+		t.Fatalf("pr row: %+v %v", row, err)
 	}
-	if run.Status != store.PRStatusBlocked || run.RetryCount != 2 {
-		t.Fatalf("pr row = %+v, want blocked after 2 retries", run)
+	return row
+}
+
+func TestNoWorkLeaseHandsOffWithoutRetry(t *testing.T) {
+	reply := "F-003 asks for a vault contract change;\n nothing in this branch to edit.\n\nDetails follow."
+	run := runNoWorkFixLane(t, reply, false)
+	if calls := run.callCount(); calls != 1 {
+		t.Fatalf("executor calls = %d, want 1 (no retry for a no-change run)", calls)
 	}
-	if !strings.Contains(run.BlockedReason, "no work in lease") {
-		t.Fatalf("blocked reason = %q, want no work in lease", run.BlockedReason)
+	row := run.row(t)
+	if row.Status != store.PRStatusBlocked || row.RetryCount != 0 {
+		t.Fatalf("pr row = %+v, want blocked with no retry spent", row)
+	}
+	excerpt := "F-003 asks for a vault contract change; nothing in this branch to edit."
+	if want := "fix made no change — operator action required: " + excerpt; row.BlockedReason != want {
+		t.Fatalf("blocked reason = %q, want %q", row.BlockedReason, want)
+	}
+	logs := run.logs.String()
+	if !strings.Contains(logs, "PR handed off, run made no change") || !strings.Contains(logs, "level=WARN") {
+		t.Fatalf("hand-off not logged at WARN: %s", logs)
+	}
+	if strings.Contains(logs, "retry exhaustion") || strings.Contains(logs, "retry scheduled") {
+		t.Fatalf("no-change run went through the retry budget: %s", logs)
+	}
+}
+
+func TestNoWorkLeaseHandOffWithoutReply(t *testing.T) {
+	run := runNoWorkFixLane(t, "  \n\n ", false)
+	if row := run.row(t); row.BlockedReason != "fix made no change — operator action required" {
+		t.Fatalf("blocked reason = %q", row.BlockedReason)
+	}
+}
+
+func TestNoWorkLeaseOnMergedPRIsRefusedNotBlocked(t *testing.T) {
+	run := runNoWorkFixLane(t, "nothing to do", true)
+	if row := run.row(t); row.Status == store.PRStatusBlocked {
+		t.Fatalf("pr row = %+v, a merged PR must not be blocked", row)
+	}
+	if strings.Contains(run.logs.String(), "PR handed off") {
+		t.Fatalf("merged PR handed off: %s", run.logs.String())
+	}
+}
+
+func TestReplyExcerpt(t *testing.T) {
+	cases := map[string]struct{ in, secret, want string }{
+		"first paragraph": {in: "\n\nfirst  line\r\nsame paragraph\r\n\r\nsecond", want: "first line same paragraph"},
+		"empty":           {in: " \n \n", want: ""},
+		"redacted":        {in: "token s3cret leaked", secret: "s3cret", want: "token [redacted] leaked"},
+		"clamped":         {in: strings.Repeat("é", 301), want: strings.Repeat("é", 300) + "…"},
+		"exact":           {in: strings.Repeat("a", 300), want: strings.Repeat("a", 300)},
+	}
+	for name, tc := range cases {
+		if got := replyExcerpt(tc.in, tc.secret); got != tc.want {
+			t.Errorf("%s: replyExcerpt = %q, want %q", name, got, tc.want)
+		}
 	}
 }
