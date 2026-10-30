@@ -148,3 +148,76 @@ func TestPermissionDenialFieldsOnEveryBranch(t *testing.T) {
 		})
 	}
 }
+
+func runDeniedTurn(t *testing.T, tail ...Event) (WebhookTurnResult, error) {
+	t.Helper()
+	events := make(chan Event, 4+len(tail))
+	events <- Event{Type: "permission_asked", Permission: &PermissionRequest{ID: "perm-1", Tool: "bash", Permission: "external_directory", Patterns: []string{"/home/ubuntu/bin/*"}}}
+	for _, ev := range tail {
+		events <- ev
+	}
+	close(events)
+	turn := WebhookTurn{
+		Prompt:        "merge",
+		DeliveryID:    "del-1",
+		AbortTimeout:  time.Second,
+		VerifyTimeout: 5 * time.Second,
+	}
+	turn.Client = &fakeWebhookTurnClient{Client: &permissionDenyClient{}, newEvents: func() <-chan Event { return events }}
+	return turn.Run(context.Background())
+}
+
+func TestWebhookTurnEndedByDenialReportsThePermission(t *testing.T) {
+	res, err := runDeniedTurn(t, Event{Type: "done"})
+	if !errors.Is(err, ErrWebhookPermissionDenied) {
+		t.Fatalf("err = %v, want ErrWebhookPermissionDenied", err)
+	}
+	if errors.Is(err, ErrWebhookResponseIncomplete) {
+		t.Fatalf("err = %v, a denied turn must not read as an incomplete response", err)
+	}
+	for _, want := range []string{"external_directory [/home/ubuntu/bin/*]", "empty output buffer"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err = %q, want it to contain %q", err.Error(), want)
+		}
+	}
+	if len(res.Denied) != 1 || res.Denied[0] != "external_directory [/home/ubuntu/bin/*]" {
+		t.Fatalf("denied = %+v", res.Denied)
+	}
+}
+
+func TestWebhookTurnWithResultAfterDenialSucceeds(t *testing.T) {
+	res, err := runDeniedTurn(t, Event{Type: "delta", Delta: "merged without the helper"}, Event{Type: "done"})
+	if err != nil {
+		t.Fatalf("turn.Run: %v", err)
+	}
+	if len(res.Denied) != 1 {
+		t.Fatalf("denied = %+v, want the refusal recorded", res.Denied)
+	}
+}
+
+func TestWebhookTurnEmptyWithoutDenialStaysIncomplete(t *testing.T) {
+	events := make(chan Event, 1)
+	events <- Event{Type: "done"}
+	close(events)
+	turn := WebhookTurn{Prompt: "merge", AbortTimeout: time.Second, VerifyTimeout: 5 * time.Second}
+	turn.Client = &fakeWebhookTurnClient{Client: &permissionDenyClient{}, newEvents: func() <-chan Event { return events }}
+	_, err := turn.Run(context.Background())
+	if !errors.Is(err, ErrWebhookResponseIncomplete) || errors.Is(err, ErrWebhookPermissionDenied) {
+		t.Fatalf("err = %v, want only ErrWebhookResponseIncomplete", err)
+	}
+}
+
+func TestWebhookTurnKeepsFirstDeniedScopes(t *testing.T) {
+	events := make(chan Event, 6)
+	for i := range 5 {
+		events <- Event{Type: "permission_asked", Permission: &PermissionRequest{ID: fmt.Sprintf("perm-%d", i), Permission: "read", Patterns: []string{fmt.Sprintf("/p%d", i)}}}
+	}
+	events <- Event{Type: "done"}
+	close(events)
+	turn := WebhookTurn{Prompt: "x", AbortTimeout: time.Second, VerifyTimeout: 5 * time.Second}
+	turn.Client = &fakeWebhookTurnClient{Client: &permissionDenyClient{}, newEvents: func() <-chan Event { return events }}
+	res, _ := turn.Run(context.Background())
+	if len(res.Denied) != 3 || res.Denied[0] != "read [/p0]" || res.Denied[2] != "read [/p2]" {
+		t.Fatalf("denied = %+v, want the first three scopes", res.Denied)
+	}
+}

@@ -353,3 +353,62 @@ func TestNoisyLinesStayBelowInfo(t *testing.T) {
 		t.Fatalf("INFO capture = %q, want the mismatch line at DEBUG", out.String())
 	}
 }
+
+type mergeLaneTurn struct {
+	worktree string
+	prompt   string
+}
+
+func runMergeLaneWith(t *testing.T, checkout, reply, deliveryID string) (*store.SQLiteStore, mergeLaneTurn) {
+	t.Helper()
+	srv, st, _ := newSurfaceServer(t)
+	setPRState(srv, PRStateOpen, nil)
+	if checkout != "" {
+		for path, ep := range srv.endpoints {
+			ep.Workspace = config.EndpointWorkspace{Type: config.WorkspaceTypeGit, Path: checkout, Mode: config.WorkspaceModeMutable}
+			srv.endpoints[path] = ep
+		}
+	}
+	var seen mergeLaneTurn
+	srv.executor = func(_ context.Context, _, _ string, prompt string, workCtx *WebhookWorkContext) error {
+		seen = mergeLaneTurn{worktree: workCtx.Worktree, prompt: prompt}
+		workCtx.AgentReply = reply
+		return nil
+	}
+	ep := srv.endpoints["/merge"]
+	ep.Admit = defaultCatchAllAdmit()
+	ep.Prompt = "worktree=[{{.worktree}}]"
+	srv.endpoints["/merge"] = ep
+	body := []byte(prReviewBody(181, "feat/x", "owner", "approved", "c0ffee"))
+	receiptID := seedProcessingDelivery(t, st, ep.Name, deliveryID, "pull_request_review")
+	if execErr := srv.executeDelivery(ep, body, receiptID, deliveryID, "pull_request_review", 1, nil, func() bool { return false }, nil); execErr != nil {
+		t.Fatalf("execute merge lane: %v", execErr)
+	}
+	return st, seen
+}
+
+func TestMergeLaneRunsInRepoCheckout(t *testing.T) {
+	_, seen := runMergeLaneWith(t, "/srv/checkouts/widget", "", "del-merge-workdir")
+	if seen.worktree != "/srv/checkouts/widget" {
+		t.Fatalf("merge lane workdir = %q, want the repo checkout", seen.worktree)
+	}
+	if !strings.Contains(seen.prompt, "worktree=[]") {
+		t.Fatalf("prompt = %q, want {{.worktree}} left empty for the merge lane", seen.prompt)
+	}
+}
+
+func TestMergeLaneWithoutCheckoutKeepsFallback(t *testing.T) {
+	_, seen := runMergeLaneWith(t, "", "", "del-merge-nocheckout")
+	if seen.worktree != "" {
+		t.Fatalf("merge lane workdir = %q, want empty without a git workspace", seen.worktree)
+	}
+}
+
+func TestMergeTruthUnconfirmedMergeCarriesAgentReason(t *testing.T) {
+	st, _ := runMergeLaneWith(t, "", "CI check build is still pending;\nnot merging yet.\n\nDetails follow.", "del-merge-reason")
+	receipt, _ := st.WebhookDeliveryRepo().Get(context.Background(), "github-widget-merge", "del-merge-reason")
+	want := "merge not confirmed: PR is open — CI check build is still pending; not merging yet."
+	if receipt == nil || receipt.Status != store.WebhookStatusSkipped || !strings.Contains(receipt.ErrorSummary, want) {
+		t.Fatalf("receipt = %+v, want skipped with %q", receipt, want)
+	}
+}

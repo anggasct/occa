@@ -44,6 +44,7 @@ type WebhookWorkContext struct {
 	ModelSource    string
 	Progress       relay.TurnProgress
 	AgentReply     string
+	Denied         []string
 	Thread         bool
 	ProgressCard   bool
 	Workflow       string

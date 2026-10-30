@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/anggasct/occa/internal/config"
+	"github.com/anggasct/occa/internal/relay"
 	"github.com/anggasct/occa/internal/store"
 )
 
@@ -499,6 +500,14 @@ func (r *noWorkLaneRun) callCount() int {
 
 func runNoWorkFixLane(t *testing.T, reply string, mergedDuringRun bool) *noWorkLaneRun {
 	t.Helper()
+	return runFixLane(t, mergedDuringRun, func(workCtx *WebhookWorkContext) error {
+		workCtx.AgentReply = reply
+		return nil
+	})
+}
+
+func runFixLane(t *testing.T, mergedDuringRun bool, act func(workCtx *WebhookWorkContext) error) *noWorkLaneRun {
+	t.Helper()
 	root, _ := initRepoWithBareRemote(t, "fix/test-lane")
 	ep := prTestEndpoint("fix", "/fix", config.AutomationFull)
 	ep.Name = "github-widget-pr-fix"
@@ -515,8 +524,7 @@ func runNoWorkFixLane(t *testing.T, reply string, mergedDuringRun bool) *noWorkL
 		if workCtx.ThreadID == "" {
 			workCtx.ThreadID = "thread-pr"
 		}
-		workCtx.AgentReply = reply
-		return nil
+		return act(workCtx)
 	}
 	cfg := config.WebhookConfig{
 		Bind:      "127.0.0.1:0",
@@ -541,7 +549,8 @@ func runNoWorkFixLane(t *testing.T, reply string, mergedDuringRun bool) *noWorkL
 		return PRStateOpen, nil
 	})
 	srv.retryBackoffs = map[failureClass][]time.Duration{
-		failureNoWork: {10 * time.Millisecond, 10 * time.Millisecond},
+		failureNoWork:     {10 * time.Millisecond, 10 * time.Millisecond},
+		failurePermission: {10 * time.Millisecond, 10 * time.Millisecond},
 	}
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(run.logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
@@ -623,5 +632,62 @@ func TestReplyExcerpt(t *testing.T) {
 		if got := replyExcerpt(tc.in, tc.secret); got != tc.want {
 			t.Errorf("%s: replyExcerpt = %q, want %q", name, got, tc.want)
 		}
+	}
+}
+
+func runDeniedFixLane(t *testing.T, denied []string, mergedDuringRun bool) *noWorkLaneRun {
+	t.Helper()
+	return runFixLane(t, mergedDuringRun, func(workCtx *WebhookWorkContext) error {
+		workCtx.Denied = denied
+		return fmt.Errorf("%w: %s; turn ended without a result (%v)", relay.ErrWebhookPermissionDenied, strings.Join(denied, "; "), relay.ErrWebhookResponseIncomplete)
+	})
+}
+
+func TestPermissionDeniedRunHandsOffWithoutRetry(t *testing.T) {
+	run := runDeniedFixLane(t, []string{"external_directory [/home/ubuntu/bin/*]"}, false)
+	if calls := run.callCount(); calls != 1 {
+		t.Fatalf("executor calls = %d, want 1 (no retry, no incomplete self-heal)", calls)
+	}
+	row := run.row(t)
+	if row.Status != store.PRStatusBlocked || row.RetryCount != 0 {
+		t.Fatalf("pr row = %+v, want blocked with no retry spent", row)
+	}
+	if want := "fix stopped on a denied permission — operator action required: external_directory [/home/ubuntu/bin/*]"; row.BlockedReason != want {
+		t.Fatalf("blocked reason = %q, want %q", row.BlockedReason, want)
+	}
+	receipt, err := run.store.WebhookDeliveryRepo().Get(context.Background(), "github-widget-pr-fix", "del-nowork")
+	if err != nil || receipt == nil || !strings.HasPrefix(receipt.ErrorSummary, "webhook permission denied") {
+		t.Fatalf("receipt = %+v %v, want a failure naming the denied permission", receipt, err)
+	}
+	logs := run.logs.String()
+	if !strings.Contains(logs, "PR handed off, permission denied") || !strings.Contains(logs, "level=WARN") {
+		t.Fatalf("hand-off not logged at WARN: %s", logs)
+	}
+	if strings.Contains(logs, "retry scheduled") || strings.Contains(logs, "retrying once") {
+		t.Fatalf("denied run was retried: %s", logs)
+	}
+}
+
+func TestPermissionDeniedRunWithoutScope(t *testing.T) {
+	run := runDeniedFixLane(t, nil, false)
+	if row := run.row(t); row.BlockedReason != "fix stopped on a denied permission — operator action required" {
+		t.Fatalf("blocked reason = %q", row.BlockedReason)
+	}
+}
+
+func TestPermissionDeniedOnMergedPRIsRefusedNotBlocked(t *testing.T) {
+	run := runDeniedFixLane(t, []string{"external_directory [/home/ubuntu/bin/*]"}, true)
+	if row := run.row(t); row.Status == store.PRStatusBlocked {
+		t.Fatalf("pr row = %+v, a merged PR must not be blocked", row)
+	}
+	if strings.Contains(run.logs.String(), "PR handed off") {
+		t.Fatalf("merged PR handed off: %s", run.logs.String())
+	}
+}
+
+func TestClassifyPermissionDenied(t *testing.T) {
+	err := fmt.Errorf("%w: external_directory [/x/*]", relay.ErrWebhookPermissionDenied)
+	if got := classifyFailure(err, nil, 0, false); got != failurePermission {
+		t.Fatalf("class = %v, want permission denied", got.label())
 	}
 }
