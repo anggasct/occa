@@ -16,7 +16,10 @@ var (
 	ErrWebhookPrompt             = errors.New("webhook session prompt failed")
 	ErrWebhookAgentResponse      = errors.New("webhook agent response failed")
 	ErrWebhookResponseIncomplete = errors.New("webhook response incomplete")
+	ErrWebhookPermissionDenied   = errors.New("webhook permission denied")
 )
+
+const deniedScopesKept = 3
 
 type WebhookTurn struct {
 	Client        Client
@@ -40,6 +43,7 @@ type WebhookTurnResult struct {
 	Aborted   bool
 	AbortOK   bool
 	Progress  TurnProgress
+	Denied    []string
 }
 
 func (t WebhookTurn) Run(ctx context.Context) (res WebhookTurnResult, err error) {
@@ -134,7 +138,9 @@ func (t WebhookTurn) Run(ctx context.Context) (res WebhookTurnResult, err error)
 				res.Progress.DeltaCount++
 				buf.WriteString(ev.Delta)
 			case "permission_asked":
-				t.denyUnhandledPermission(ctx, ev)
+				if scope := t.denyUnhandledPermission(ctx, ev); scope != "" && len(res.Denied) < deniedScopesKept {
+					res.Denied = append(res.Denied, scope)
+				}
 			case "question_asked":
 				t.rejectUnhandledQuestion(ctx, ev)
 			case "done":
@@ -143,7 +149,13 @@ func (t WebhookTurn) Run(ctx context.Context) (res WebhookTurnResult, err error)
 				if err := t.verify(res.SessionID, res.Output); err != nil {
 					// completed stays false: the failed gate is not a
 					// finished turn, so the deferred cleanup aborts the
-					// session exactly once.
+					// session exactly once. A turn that ends empty after a
+					// refused permission stopped on the refusal; asking
+					// again is refused the same way, so it is not reported
+					// as an incomplete response.
+					if len(res.Denied) > 0 {
+						return res, fmt.Errorf("%w: %s; turn ended without a result (%v)", ErrWebhookPermissionDenied, strings.Join(res.Denied, "; "), err)
+					}
 					return res, err
 				}
 				completed = true
@@ -189,28 +201,32 @@ func (t WebhookTurn) verify(sessionID, output string) error {
 // answer. The webhook lane has no permission-prompt handler, so an unanswered
 // request leaves the tool call running forever: the agent freezes, the
 // delivery stays in processing and the PR lock stays held. A denial is a
-// result the agent reports and the run ends.
-func (t WebhookTurn) denyUnhandledPermission(ctx context.Context, ev Event) {
+// result the agent reports and the run ends. It returns the refused scope
+// when the rejection was delivered.
+func (t WebhookTurn) denyUnhandledPermission(ctx context.Context, ev Event) string {
 	if ev.Permission == nil {
-		return
+		return ""
 	}
 	requestID := strings.TrimSpace(ev.Permission.ID)
+	permission := strings.TrimSpace(ev.Permission.Permission)
+	patterns := permissionScope(ev.Permission.Patterns)
 	attrs := []any{
 		"tool", strings.TrimSpace(ev.Permission.Tool),
-		"permission", strings.TrimSpace(ev.Permission.Permission),
-		"patterns", permissionScope(ev.Permission.Patterns),
+		"permission", permission,
+		"patterns", patterns,
 		"delivery_id", t.DeliveryID,
 	}
 	if requestID == "" {
 		slog.Warn("webhook: permission denied, no handler", append(attrs, "reason", "no request id")...)
-		return
+		return ""
 	}
 	attrs = append(attrs, "request_id", requestID)
 	if err := replyPermission(ctx, t.Client, requestID, PermissionReject); err != nil {
 		slog.Error("webhook: permission denied, no handler", append(attrs, "error", err)...)
-		return
+		return ""
 	}
 	slog.Warn("webhook: permission denied, no handler", attrs...)
+	return strings.TrimSpace(permission + " " + patterns)
 }
 
 const (

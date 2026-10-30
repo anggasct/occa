@@ -79,6 +79,9 @@ func classifyFailure(execErr error, workCtx *WebhookWorkContext, stallFreshness 
 	if errors.Is(execErr, errNoWorkInLease) {
 		return failureNoWork
 	}
+	if errors.Is(execErr, relay.ErrWebhookPermissionDenied) {
+		return failurePermission
+	}
 	if errors.Is(execErr, ErrRevisionMissing) {
 		return failureBuild
 	}
@@ -311,6 +314,32 @@ func (s *Server) handOffNoChange(ep config.EndpointConfig, prKey string, row *st
 	)
 }
 
+// handOffPermissionDenied blocks a PR whose run stopped on a permission the
+// headless lane refused. The same prompt asks for the same scope again, so the
+// operator gets the refused scope instead of more turns.
+func (s *Server) handOffPermissionDenied(ep config.EndpointConfig, prKey string, row *store.PRRun, workCtx *WebhookWorkContext) {
+	kind := runKind(row)
+	scope := ""
+	if workCtx != nil {
+		scope = replyExcerpt(strings.Join(workCtx.Denied, "; "), ep.Secret)
+	}
+	reason := kind + " stopped on a denied permission — operator action required"
+	why := failurePermission.label()
+	if scope != "" {
+		reason += ": " + scope
+		why = scope
+	}
+	if !s.escalateBlock(ep, prKey, row, reason, kind+" run stopped on a denied permission", why) {
+		return
+	}
+	slog.Warn("webhook: PR handed off, permission denied",
+		"endpoint", ep.Name,
+		"pr_key", prKey,
+		"kind", kind,
+		"scope", scope,
+	)
+}
+
 func runKind(row *store.PRRun) string {
 	if kind := strings.TrimSpace(row.ActiveKind); kind != "" {
 		return kind
@@ -439,6 +468,10 @@ func (s *Server) planRetry(ep config.EndpointConfig, prKey string, receiptID int
 	}
 	if class == failureNoWork {
 		s.handOffNoChange(ep, prKey, row, workCtx)
+		return false
+	}
+	if class == failurePermission {
+		s.handOffPermissionDenied(ep, prKey, row, workCtx)
 		return false
 	}
 	if row.RetryCount >= max {

@@ -830,6 +830,32 @@ func TestWebhookExecutorCarriesAgentReply(t *testing.T) {
 	}
 }
 
+type permissionRejectingClient struct{ *mockRelayClient }
+
+func (permissionRejectingClient) ReplyPermission(context.Context, string, relay.PermissionReply) error {
+	return nil
+}
+
+func TestWebhookExecutorCarriesDeniedPermission(t *testing.T) {
+	discordCh := &mockDiscordChannel{name: "discord"}
+	agentClient := permissionRejectingClient{&mockRelayClient{
+		events: []relay.Event{
+			{Type: "permission_asked", Permission: &relay.PermissionRequest{ID: "perm-1", Permission: "external_directory", Patterns: []string{"/home/ubuntu/bin/*"}}},
+		},
+	}}
+	manager := &mockAgentManager{client: agentClient}
+	exec := newWebhookExecutor([]channel.Channel{discordCh}, manager, mockChannelStore{}, "/tmp", relay.Config{NoEventTimeout: 15 * time.Minute, WebhookAbortTimeout: 5 * time.Second, VerifyTimeout: 15 * time.Second})
+
+	workCtx := &webhook.WebhookWorkContext{Workflow: "github_merge", DeliveryID: "del-denied"}
+	err := exec(context.Background(), "discord", "chan-main", "prompt", workCtx)
+	if !errors.Is(err, relay.ErrWebhookPermissionDenied) {
+		t.Fatalf("executor error = %v, want ErrWebhookPermissionDenied", err)
+	}
+	if len(workCtx.Denied) != 1 || workCtx.Denied[0] != "external_directory [/home/ubuntu/bin/*]" {
+		t.Fatalf("Denied = %+v", workCtx.Denied)
+	}
+}
+
 func TestWebhookExecutorTelegramProgressCard(t *testing.T) {
 	tgCh := &mockTelegramChannel{
 		nextMsgID: "tg-root-42",
