@@ -2436,6 +2436,13 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 		return nil
 	}
 
+	if lease == nil && strings.EqualFold(strings.TrimSpace(ep.Workflow), "merge") {
+		if checkout := s.checkoutForRepo(stringValue(envelope["repository"])); checkout != "" {
+			workCtx.Worktree = checkout
+			slog.Info("webhook: merge lane workdir resolved", "endpoint", ep.Name, "delivery_id", deliveryID, "path", checkout)
+		}
+	}
+
 	rendered = strings.ReplaceAll(rendered, "</untrusted_payload>", "&lt;/untrusted_payload&gt;")
 	wrapped := fmt.Sprintf("<untrusted_payload>\n%s\n</untrusted_payload>", rendered)
 
