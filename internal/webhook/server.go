@@ -2501,16 +2501,21 @@ func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64
 	if err == nil && strings.EqualFold(strings.TrimSpace(ep.Workflow), "merge") && strings.TrimSpace(workCtx.PRKey) != "" {
 		state, lookupErr := s.resolveLivePRState(ctx, workCtx.PRKey)
 		if lookupErr != nil || state != PRStateMerged {
+			reply := replyExcerpt(workCtx.AgentReply, ep.Secret)
 			slog.Warn("webhook: merge not confirmed",
 				"endpoint", ep.Name,
 				"delivery_id", deliveryID,
 				"pr_key", workCtx.PRKey,
 				"state", state,
 				"error", lookupErr,
+				"reply", reply,
 			)
 			reason := "merge not confirmed: PR is " + state
 			if lookupErr != nil {
 				reason = "merge not confirmed: live state lookup failed"
+			}
+			if reply != "" {
+				reason += " — " + reply
 			}
 			s.markSkipped(id, ep, envelope, reason)
 			return nil
