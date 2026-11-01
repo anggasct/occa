@@ -721,6 +721,18 @@ func TestDecodePrLiveStateRollup(t *testing.T) {
 			t.Fatal("checksDone = true, want false for QUEUED entry")
 		}
 	})
+	t.Run("requested check run is not done", func(t *testing.T) {
+		st, err := decodePrLiveState(rollupPayload(`{"__typename":"CheckRun","name":"check","status":"REQUESTED","conclusion":""}`))
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if st.checksDone {
+			t.Fatal("checksDone = true, want false for REQUESTED entry")
+		}
+		if st.checksRed {
+			t.Fatal("checksRed = true, want false for REQUESTED entry")
+		}
+	})
 	t.Run("completed failure check run is red", func(t *testing.T) {
 		st, err := decodePrLiveState(rollupPayload(`{"__typename":"CheckRun","name":"check","status":"COMPLETED","conclusion":"FAILURE"}`))
 		if err != nil {

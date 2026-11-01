@@ -79,6 +79,10 @@ func TestWorkspaceDirtyHandsOffAsBlocked(t *testing.T) {
 
 // AC-02: a worktree conflict blocks on the first attempt.
 func TestWorktreeConflictHandsOffAsBlocked(t *testing.T) {
+	// F-007: captureServerLogs swaps the process-global logger, so this
+	// test must observe its own hand-off WARN before ending; a WARN left
+	// pending by the dispatcher bleeds into the next test's capture.
+	logs := captureServerLogs(t)
 	c := newHandoffServer(t, fmt.Errorf("%w: branch feat/x attached at /projects/widget/.worktree/y belongs to a different execution key", ErrWorktreeConflict), PRStateOpen)
 	c.srv.workspaceRetryBackoff = []time.Duration{time.Hour}
 	c.post(t, "del-conflict-1")
@@ -86,6 +90,7 @@ func TestWorktreeConflictHandsOffAsBlocked(t *testing.T) {
 	if !strings.Contains(row.BlockedReason, "worktree conflict: branch feat/x attached at") {
 		t.Fatalf("blocked reason = %q", row.BlockedReason)
 	}
+	waitForLog(t, logs, "webhook: PR handed off, workspace not usable")
 }
 
 // AC-03: merged, closed or unknown PR state → no block.
@@ -155,10 +160,13 @@ func TestWorkspaceHandOffReasonBoundedAndRedacted(t *testing.T) {
 // the blocked state (buildRetryBody needs the live PR, which is not stubbed
 // here, so the assertion stops at the kind the retry would re-run).
 func TestWorkspaceHandOffIsResumableWithRetry(t *testing.T) {
+	// F-007: wait for the hand-off WARN instead of a blind sleep so the
+	// log lands in this test's capture window, never the next one's.
+	logs := captureServerLogs(t)
 	c := newHandoffServer(t, fmt.Errorf("%w: dirty", ErrWorkspaceDirty), PRStateOpen)
 	c.post(t, "del-retry-1")
 	waitForBlocked(t, c.st, "acme/widget#7")
-	time.Sleep(100 * time.Millisecond)
+	waitForLog(t, logs, "webhook: PR handed off, workspace not usable")
 	row, _ := c.st.PRQueueRepo().Get(context.Background(), "acme/widget#7")
 	if kind := c.srv.inferRetryKind(context.Background(), row); kind != "fix" {
 		t.Fatalf("retry kind = %q, want fix", kind)

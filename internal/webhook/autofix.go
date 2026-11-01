@@ -204,7 +204,11 @@ func decodePrLiveState(raw []byte) (prLiveState, error) {
 		// entries use "state". Both must read as pending until completed.
 		state := strings.ToUpper(strings.TrimSpace(check.State))
 		switch strings.ToUpper(strings.TrimSpace(check.Status)) {
-		case "QUEUED", "IN_PROGRESS", "WAITING", "PENDING":
+		case "", "COMPLETED":
+			// StatusContext entry or finished CheckRun: decide below.
+		default:
+			// QUEUED, IN_PROGRESS, WAITING, PENDING, REQUESTED and any
+			// other non-empty status: still in flight, read as pending.
 			sawPending = true
 			continue
 		}
