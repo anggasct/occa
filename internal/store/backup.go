@@ -427,6 +427,9 @@ func requiredTablesForVersion(version int) []string {
 	if version >= 19 {
 		tables = append(tables, "pr_queue", "pr_queue_items")
 	}
+	if version >= 25 {
+		tables = append(tables, "session_skill")
+	}
 	return tables
 }
 
@@ -485,6 +488,9 @@ func requiredColumnsForVersion(version int) map[string][]string {
 	}
 	if version >= 23 {
 		columns["pr_queue"] = append(columns["pr_queue"], "thread_status_base", "thread_status_msg_id")
+	}
+	if version >= 25 {
+		columns["session_skill"] = []string{"agent_session_id", "skill_name", "scope", "trigger_kind", "skill_digest", "runes", "applied_at"}
 	}
 	return columns
 }

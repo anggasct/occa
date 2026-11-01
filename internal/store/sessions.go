@@ -257,9 +257,23 @@ func (r *sqliteSessionRepo) ThreadChannel(ctx context.Context, platform, threadI
 }
 
 func (r *sqliteSessionRepo) Delete(ctx context.Context, id int64) error {
-	_, err := r.db.ExecContext(ctx, `DELETE FROM session WHERE id = ?`, id)
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
+		return fmt.Errorf("store: session delete begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	// The injected-skill record goes with the last session row that names
+	// its agent session.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM session_skill WHERE agent_session_id = (SELECT agent_session_id FROM session WHERE id = ?)
+		 AND NOT EXISTS (SELECT 1 FROM session o WHERE o.agent_session_id = session_skill.agent_session_id AND o.id <> ?)`, id, id); err != nil {
+		return fmt.Errorf("store: session skill prune: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM session WHERE id = ?`, id); err != nil {
 		return fmt.Errorf("store: session delete: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: session delete commit: %w", err)
 	}
 	return nil
 }

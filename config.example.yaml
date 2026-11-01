@@ -226,3 +226,9 @@ runtime:
     usage_retention: 2160h # prune usage snapshots older than this
     usage_max_rows: 100000 # most usage projection rows retained
     recovery_event_retention: 720h # prune recovery events older than this
+skills: # optional — per-repo SKILL.md packs injected once per session; absent block = these defaults
+  enabled: true # false resolves nothing and leaves every prompt unchanged
+  repo_dir: .occa/skills # relative to the run's workdir; absolute or ".." refuses startup
+  global_dir: ~/.occa/skills # cross-repo skills; "" disables the global scope
+  context_max_runes: 8000 # cap on the whole injected block
+  skill_max_runes: 4000 # cap on one skill body; must not exceed context_max_runes

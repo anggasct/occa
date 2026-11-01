@@ -158,6 +158,8 @@ func main() {
 	cleared, sweepErr := db.SessionRepo().SweepActive(ctx, process.Alive)
 	slog.Info("session active sweep complete", "cleared", cleared, "error", sweepErr)
 
+	skillInjector := newSkillInjector(cfg.Skills, db.SessionSkillRepo())
+
 	rt := router.NewWithAllowlists(managerProvider{manager}, db, cfg.Agent.DefaultWorkdir, cfg.AdminID, cfg.Discord.AllowedSenderIDs, cfg.Telegram.AllowedSenderIDs, router.Config{
 		ContextStaleAfter:      cfg.Runtime.Router.ContextStaleAfter,
 		ProgressQuietThreshold: cfg.Runtime.Router.ProgressQuietThreshold,
@@ -410,6 +412,7 @@ func main() {
 	defer mcpSrv.Stop()
 
 	rt.SetScheduler(sched)
+	rt.SetSkills(skillInjector)
 	rt.SetAttributionStore(attrib)
 
 	registerMCP(ctx, manager, mcpSrv, cfg.Agent.DefaultWorkdir)
@@ -452,6 +455,7 @@ func main() {
 			Colors:    cfg.Webhooks.StatusColors,
 			PRQueues:  db.PRQueueRepo(),
 			Endpoints: cfg.Webhooks.Endpoints,
+			Skills:    skillInjector,
 		})
 
 		webhookSrv = webhook.New(cfg.Webhooks, webhookExecutor, db.WebhookDeliveryRepo())
@@ -1195,9 +1199,11 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 					streamer.SetNarration(false)
 				}
 
+				skillPlan := taskOpts.Skills.ForNewSession(workdir, webhookSkillInput(workCtx.Envelope))
+
 				turn := relay.WebhookTurn{
 					Client:        inst.Client(),
-					Prompt:        prompt,
+					Prompt:        skillPlan.Prefix(prompt),
 					Model:         workCtx.Model,
 					Platform:      platform,
 					ChannelID:     channelID,
@@ -1223,6 +1229,9 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 					},
 				}
 				result, err := turn.Run(ctx)
+				if !result.Progress.PromptSentAt.IsZero() {
+					taskOpts.Skills.Commit(ctx, result.SessionID, skillPlan)
+				}
 
 				workCtx.SessionID = result.SessionID
 				workCtx.SessionAborted = result.Aborted

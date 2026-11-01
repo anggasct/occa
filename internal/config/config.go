@@ -26,6 +26,7 @@ type Config struct {
 	Logging  LoggingConfig  `yaml:"logging"`
 	Runtime  RuntimeConfig  `yaml:"runtime"`
 	Webhooks WebhookConfig  `yaml:"webhooks"`
+	Skills   SkillsConfig   `yaml:"-"`
 }
 
 type AgentConfig struct {
@@ -289,6 +290,7 @@ type fileConfig struct {
 	} `yaml:"logging"`
 	Runtime  RuntimeConfig `yaml:"runtime"`
 	Webhooks WebhookConfig `yaml:"webhooks"`
+	Skills   fileSkills    `yaml:"skills"`
 }
 
 const defaultConfigTemplate = `agent:
@@ -550,6 +552,11 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 	}
 	fc.Runtime = runtimeCfg
 
+	skillsCfg, err := buildSkillsConfig(fc.Skills)
+	if err != nil {
+		return Config{}, err
+	}
+
 	if err := validateTaskStatusConfig(fc.Webhooks.StatusIcons, fc.Webhooks.StatusColors); err != nil {
 		return Config{}, err
 	}
@@ -717,6 +724,7 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 		Logging:  LoggingConfig{Format: fc.Logging.Format},
 		Runtime:  fc.Runtime,
 		Webhooks: fc.Webhooks,
+		Skills:   skillsCfg,
 	}, nil
 }
 
