@@ -296,15 +296,38 @@ func TestWatchdogKeepsLiveRunAlive(t *testing.T) {
 	}
 }
 
+// sessionSignal lets a test wait until its executor reported the agent
+// session: the receipt is processing before the executor runs, so a watchdog
+// sweep in that gap finds no session to abort.
+type sessionSignal struct {
+	once sync.Once
+	ch   chan struct{}
+}
+
+func newSessionSignal() *sessionSignal { return &sessionSignal{ch: make(chan struct{})} }
+
+func (s *sessionSignal) reported() { s.once.Do(func() { close(s.ch) }) }
+
+func (s *sessionSignal) wait(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.ch:
+	case <-time.After(5 * time.Second):
+		t.Fatal("executor never reported its session")
+	}
+}
+
 func TestWatchdogAbortedDeliveryIsFailedAndNotRerun(t *testing.T) {
 	logs := captureServerLogs(t)
 	var calls int64
 	release := make(chan struct{})
+	session := newSessionSignal()
 	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		atomic.AddInt64(&calls, 1)
 		if workCtx.ReportSession != nil {
 			workCtx.ReportSession("ses-watchdog-4")
 		}
+		session.reported()
 		select {
 		case <-release:
 		case <-ctx.Done():
@@ -327,6 +350,7 @@ func TestWatchdogAbortedDeliveryIsFailedAndNotRerun(t *testing.T) {
 		t.Fatalf("post: status %d", resp.StatusCode)
 	}
 	waitForDeliveryStatus(t, st, "github-widget-fix", "del-stuck-4", store.WebhookStatusProcessing)
+	session.wait(t)
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if n := srv.sweepStuckDispatchers(time.Now()); n == 1 {
@@ -703,6 +727,7 @@ func TestPR199IncidentShape(t *testing.T) {
 	var mu sync.Mutex
 	turns := map[string]int{}
 	release := make(chan struct{})
+	session := newSessionSignal()
 	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		atomic.AddInt64(&calls, 1)
 		mu.Lock()
@@ -711,6 +736,7 @@ func TestPR199IncidentShape(t *testing.T) {
 		if workCtx.ReportSession != nil {
 			workCtx.ReportSession("ses-incident-199")
 		}
+		session.reported()
 		select {
 		case <-release:
 		case <-ctx.Done():
@@ -742,6 +768,7 @@ func TestPR199IncidentShape(t *testing.T) {
 		t.Fatalf("post fix: status %d", resp.StatusCode)
 	}
 	waitForDeliveryStatus(t, st, "github-widget-fix", "del-incident-199", store.WebhookStatusProcessing)
+	session.wait(t)
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
