@@ -60,6 +60,8 @@ func (r *Router) MenuCommands() []channel.MenuCommand {
 		{Alias: "retry", Description: "Re-run the PR task (in a PR thread)", HasArgs: true},
 		{Alias: "skip", Description: "Skip the active PR run (in a PR thread)", HasArgs: true},
 		{Alias: "cancel", Description: "Cancel the PR queue (in a PR thread)", HasArgs: true},
+		{Alias: "inbox", Description: "List the PRs that wait on you"},
+		{Alias: "digest", Description: "Show the last 24h summary"},
 		{Alias: "webhooks", Description: "Recent webhook delivery diagnostics"},
 		{Alias: "connect-repo", Description: "Show the 4-hook wiring checklist for owner/repo", HasArgs: true},
 	}
@@ -121,6 +123,10 @@ type Router struct {
 	connectDeps            *ConnectRepoDeps
 	connectConfigPath      string
 	operatorHook           func(ctx context.Context, msg channel.IncomingMessage, name, args string) (string, bool, error)
+	taskActionHook         func(ctx context.Context, msg channel.IncomingMessage, action, repo, branch string) error
+	taskRefResolver        func(id string) (string, string, bool)
+	inboxHook              func(ctx context.Context, msg channel.IncomingMessage) (string, []channel.Button, error)
+	digestHook             func(ctx context.Context, msg channel.IncomingMessage) (string, error)
 	skills                 *skills.Injector
 }
 
@@ -147,6 +153,27 @@ func (r *Router) SetDispatchConfig(token, url string) {
 	if r.dispatchClient == nil {
 		r.dispatchClient = &http.Client{Timeout: dispatchHTTPTimeout}
 	}
+}
+
+// SetTaskActionHook wires the PR action buttons (review, retry, cancel). The
+// hook replies in the PR thread itself; the router never edits the card.
+func (r *Router) SetTaskActionHook(hook func(ctx context.Context, msg channel.IncomingMessage, action, repo, branch string) error) {
+	r.taskActionHook = hook
+}
+
+// SetTaskRefResolver resolves the id of a compact ta:<action>:<id> callback.
+func (r *Router) SetTaskRefResolver(resolve func(id string) (string, string, bool)) {
+	r.taskRefResolver = resolve
+}
+
+// SetInboxHook wires /inbox: the PRs that wait on the operator, with buttons.
+func (r *Router) SetInboxHook(hook func(ctx context.Context, msg channel.IncomingMessage) (string, []channel.Button, error)) {
+	r.inboxHook = hook
+}
+
+// SetDigestHook wires /digest: the daily digest, on demand.
+func (r *Router) SetDigestHook(hook func(ctx context.Context, msg channel.IncomingMessage) (string, error)) {
+	r.digestHook = hook
 }
 
 func (r *Router) SetOperatorCommandHook(hook func(ctx context.Context, msg channel.IncomingMessage, name, args string) (string, bool, error)) {
@@ -828,6 +855,14 @@ func (r *Router) registerDefaults() {
 		Name:    "connect-repo",
 		Handler: r.handleConnectRepo,
 	}
+	r.commands["inbox"] = Command{
+		Name:    "inbox",
+		Handler: r.handleInbox,
+	}
+	r.commands["digest"] = Command{
+		Name:    "digest",
+		Handler: r.handleDigest,
+	}
 	for _, name := range []string{"queue", "retry", "skip", "cancel"} {
 		name := name
 		r.commands[name] = Command{
@@ -898,6 +933,8 @@ func (r *Router) helpText() string {
 		"• /loop every <dur> x<n>|for <dur> <prompt> — repeat a prompt on an interval\n" +
 		"• /loops — list active loops in this conversation\n" +
 		"• /skills — list the skills this workdir loads\n" +
+		"• /inbox — list the PRs that wait on you, with buttons\n" +
+		"• /digest — summary of the last 24h (merged, runs, blocked)\n" +
 		"• /reset — clear current session and start fresh\n\n" +
 		"All other messages and /commands are forwarded to the agent."
 }

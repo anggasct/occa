@@ -38,6 +38,11 @@ provider state.
   `occa skills lint --workdir <dir>` checks the files in CI and
   `occa skills explain` shows why a skill would fire. The optional `skills:`
   block in the config tunes or disables it.
+- **PR actions from chat** — each PR card carries Merge, Review and
+  Re-dispatch; a blocked PR says in plain words what happened and offers
+  Retry, Merge and Cancel. `/inbox` lists every PR that waits on you, with the
+  same buttons (they work on Telegram too), and the optional `webhooks.digest`
+  block posts a once-a-day summary (`/digest` shows it on demand).
 - **OpenCode process management** — lazy-spawns one agent instance per working
   directory, idles them out, caps capacity, and shuts down gracefully
   (optional auto-install when the `opencode` binary is missing).

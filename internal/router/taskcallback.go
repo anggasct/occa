@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -28,6 +29,9 @@ func parseTaskCallback(data string) (string, string, string, bool) {
 	} else if strings.HasPrefix(rest, "redispatch:") {
 		action = "redispatch"
 		rest = strings.TrimPrefix(rest, "redispatch:")
+	} else if strings.HasPrefix(rest, "review:") {
+		action = "review"
+		rest = strings.TrimPrefix(rest, "review:")
 	} else {
 		return "", "", "", false
 	}
@@ -46,6 +50,11 @@ func (r *Router) handleTaskCallback(ctx context.Context, msg channel.IncomingMes
 	if !ok {
 		return nil
 	}
+	return r.dispatchTaskAction(ctx, msg, action, repo, branch)
+}
+
+// dispatchTaskAction posts a Merge or Re-dispatch press to the dispatch API.
+func (r *Router) dispatchTaskAction(ctx context.Context, msg channel.IncomingMessage, action, repo, branch string) error {
 	if r.dispatchToken == "" || r.dispatchURL == "" {
 		r.editCallback(msg, "⚠️ Dispatch is not configured (missing token or URL).")
 		return nil
@@ -108,6 +117,72 @@ func (r *Router) handleTaskCallback(ctx context.Context, msg channel.IncomingMes
 	}
 	r.editCallback(msg, text)
 	return nil
+}
+
+// handleTaskReviewCallback hands a Review press to the webhook server. The
+// card is left as it is: the adapter already acknowledged the press, and the
+// outcome is posted in the PR thread.
+func (r *Router) handleTaskReviewCallback(ctx context.Context, msg channel.IncomingMessage) error {
+	action, repo, branch, ok := parseTaskCallback(msg.CallbackData)
+	if !ok || action != "review" {
+		return nil
+	}
+	return r.runTaskAction(ctx, msg, action, repo, branch)
+}
+
+// handleShortTaskCallback runs a compact ta:<action>:<id> press. Merge keeps
+// the dispatch path of the card's Merge button; the other actions go to the
+// webhook server.
+func (r *Router) handleShortTaskCallback(ctx context.Context, msg channel.IncomingMessage) error {
+	action, id, ok := parseShortTaskCallback(msg.CallbackData)
+	if !ok {
+		return nil
+	}
+	repo, branch, found := "", "", false
+	if r.taskRefResolver != nil {
+		repo, branch, found = r.taskRefResolver(id)
+	}
+	if !found {
+		r.editCallback(msg, "⚠️ This button is out of date — open the PR thread.")
+		return nil
+	}
+	if action == "merge" {
+		return r.dispatchTaskAction(ctx, msg, action, repo, branch)
+	}
+	return r.runTaskAction(ctx, msg, action, repo, branch)
+}
+
+func (r *Router) runTaskAction(ctx context.Context, msg channel.IncomingMessage, action, repo, branch string) error {
+	if r.taskActionHook == nil {
+		slog.Warn("router: task action pressed with no action hook", "action", action, "repo", repo, "branch", branch)
+		return nil
+	}
+	if err := r.taskActionHook(ctx, msg, action, repo, branch); err != nil {
+		slog.Warn("router: task action failed", "action", action, "repo", repo, "branch", branch, "error", err)
+	}
+	return nil
+}
+
+// parseShortTaskCallback splits ta:<action>:<id>.
+func parseShortTaskCallback(data string) (string, string, bool) {
+	trimmed := strings.TrimSpace(data)
+	if !strings.HasPrefix(trimmed, "ta:") {
+		return "", "", false
+	}
+	action, id, ok := strings.Cut(strings.TrimPrefix(trimmed, "ta:"), ":")
+	if !ok {
+		return "", "", false
+	}
+	switch action {
+	case "review", "retry", "cancel", "merge":
+	default:
+		return "", "", false
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", "", false
+	}
+	return action, id, true
 }
 
 func (r *Router) editCallback(msg channel.IncomingMessage, text string) {

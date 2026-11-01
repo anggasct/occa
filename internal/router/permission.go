@@ -12,6 +12,12 @@ func (r *Router) processQuestionCallback(ctx context.Context, msg channel.Incomi
 }
 
 func (r *Router) handleCallback(ctx context.Context, msg channel.IncomingMessage) error {
+	if strings.HasPrefix(msg.CallbackData, "task:review:") {
+		return r.handleTaskReviewCallback(ctx, msg)
+	}
+	if strings.HasPrefix(msg.CallbackData, "ta:") {
+		return r.handleShortTaskCallback(ctx, msg)
+	}
 	if strings.HasPrefix(msg.CallbackData, "task:merge:") || strings.HasPrefix(msg.CallbackData, "task:redispatch:") {
 		return r.handleTaskCallback(ctx, msg)
 	}

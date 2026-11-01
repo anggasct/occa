@@ -19,8 +19,6 @@ const threadStatusPrefix = "📌 Status — "
 
 const escalationActionLine = "Action: /retry · /skip · /cancel"
 
-const blockedQueueCommand = "run /retry, /skip or /cancel"
-
 type ThreadStatusUpdate struct {
 	Phase   Phase
 	Waiting string
@@ -347,6 +345,38 @@ func MergeGateAllows(queues store.PRQueueRepo, endpoints []config.EndpointConfig
 	return registry.GateAllows(prKey)
 }
 
+// phaseParentBase is the parent line before its run age: icon, PR, phase and
+// how many agent runs and retries the PR took.
+func (s *Server) phaseParentBase(ctx context.Context, repo, prNumber, prKey string, phase Phase) string {
+	base := FormatPhaseParent(repo, prNumber, phase, s.statusIcons)
+	if s.deliveries == nil || strings.TrimSpace(prKey) == "" {
+		return base
+	}
+	runs, retries, err := s.deliveries.RunStatsForPR(ctx, prKey)
+	if err != nil {
+		slog.Warn("webhook: pr run stats failed", "pr_key", prKey, "error", err)
+		return base
+	}
+	return base + FormatRunCounters(runs, retries)
+}
+
+// FormatRunCounters renders " · N runs · M retries"; nothing without runs,
+// and the retry part only when there was a retry.
+func FormatRunCounters(runs, retries int) string {
+	if runs <= 0 {
+		return ""
+	}
+	out := fmt.Sprintf(" · %d run%s", runs, plural(runs))
+	if retries > 0 {
+		word := "retries"
+		if retries == 1 {
+			word = "retry"
+		}
+		out += fmt.Sprintf(" · %d %s", retries, word)
+	}
+	return out
+}
+
 func (s *Server) phaseParentButtons(ep config.EndpointConfig, prKey, repo, branch, prURL, threadID string) []channel.Button {
 	mergeEnabled := s.mergeGateAllows(context.Background(), prKey)
 	return PhaseParentButtons(ep.Platform, s.guildIDFor(ep.Platform, ep.ChannelID, threadID), prURL, threadID, repo, branch, mergeEnabled)
@@ -354,7 +384,7 @@ func (s *Server) phaseParentButtons(ep config.EndpointConfig, prKey, repo, branc
 
 func PhaseParentButtons(platform, guildID, prURL, threadID, repo, branch string, mergeEnabled bool) []channel.Button {
 	buttons := TaskLinkButtons(platform, guildID, prURL, threadID)
-	buttons = append(buttons, TaskActionButtonsWithMerge(repo, branch, mergeEnabled)...)
+	buttons = append(buttons, TaskPRActionButtons(repo, branch, mergeEnabled)...)
 	return buttons
 }
 
@@ -453,7 +483,7 @@ func (s *Server) syncPhaseParent(ctx context.Context, ep config.EndpointConfig, 
 			}
 		}
 	}
-	base := FormatPhaseParent(repo, prNumber, phase, s.statusIcons)
+	base := s.phaseParentBase(ctx, repo, prNumber, prKey, phase)
 	text := appendStatusSegment(base, s.runAgeSegment(ctx, prKey, phase))
 	buttons := s.phaseParentButtons(ep, prKey, repo, branch, prURL, threadID)
 	if rootID == "" {
@@ -613,7 +643,7 @@ func (s *Server) refreshPhaseParentButtons(ctx context.Context, ep config.Endpoi
 	if prURL == "" {
 		prURL = strings.TrimSpace(detail.PRURL)
 	}
-	base := FormatPhaseParent(repo, prNumber, phase, s.statusIcons)
+	base := s.phaseParentBase(ctx, repo, prNumber, prKey, phase)
 	text := appendStatusSegment(base, s.runAgeSegment(ctx, prKey, phase))
 	buttons := s.phaseParentButtons(ep, prKey, repo, branch, prURL, threadID)
 	healedRoot, err := s.editPRParent(ctx, ep, prKey, rootID, text, buttons, false)
@@ -731,8 +761,7 @@ func surfaceReopenedForRetry(tasks *TaskThreadRegistry, prKey string, phase Phas
 	return tasks.SurfaceReopened(prKey)
 }
 
-func (s *Server) escalateToChannel(ctx context.Context, ep config.EndpointConfig, repo, prNumber string, phase Phase, what, why string) {
-	text := FormatEscalationCopy(repo, prNumber, phase, what, why, s.statusIcons)
+func (s *Server) escalateToChannel(ctx context.Context, ep config.EndpointConfig, text string) {
 	mention := strings.TrimSpace(s.escalationMention)
 	userID := ""
 	if mention != "" {
@@ -1093,7 +1122,7 @@ func (s *Server) queueState(ctx context.Context, prKey string, phase Phase) (str
 		return "", ""
 	}
 	if row.Status == store.PRStatusBlocked {
-		return "", blockedQueueText(prKey, row.BlockedReason, blockedQueueCommand)
+		return "", describeBlock(row.BlockedReason).statusAction()
 	}
 	kind := strings.TrimSpace(strings.ToLower(row.ActiveKind))
 	if kind == "" || kind == string(phase) {

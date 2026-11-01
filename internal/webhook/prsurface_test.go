@@ -150,7 +150,9 @@ func surfaceEnvelope() WebhookEnvelope {
 	}
 }
 
-var phaseParentPattern = regexp.MustCompile(`^(\S+) ([^#\s]+/[^#\s]+)#(\d+) — (queued|dispatch|review|fix|merge|merged|blocked|failed)( · ⏱️ \d+m( · idle \d+m)?| · \d+m total)?$`)
+// The parent stays one line: icon, PR, phase, then the run counters
+// (IMP-112) and the run age (IMP-085).
+var phaseParentPattern = regexp.MustCompile(`^(\S+) ([^#\s]+/[^#\s]+)#(\d+) — (queued|dispatch|review|fix|merge|merged|blocked|failed)( · \d+ runs?( · \d+ retry| · \d+ retries)?)?( · ⏱️ \d+m( · idle \d+m)?| · \d+m total)?$`)
 
 func TestPhaseParentIsOneLineForEveryPhase(t *testing.T) {
 	for _, phase := range KnownPhases {
@@ -251,7 +253,7 @@ func TestParentFreezesAfterTerminalPhase(t *testing.T) {
 	}
 }
 
-func TestParentCarriesExactlyFourButtons(t *testing.T) {
+func TestParentCarriesExactlyFiveButtons(t *testing.T) {
 	srv, st, rec := newSurfaceServer(t)
 	ep := srv.endpoints["/review"]
 	ctx := context.Background()
@@ -272,7 +274,7 @@ func TestParentCarriesExactlyFourButtons(t *testing.T) {
 		t.Fatalf("expected one parent write, got %d sent and %d edited", len(sent), len(edited))
 	}
 	labels := buttonLabels(parent.buttons)
-	want := []string{"Open PR", "Open thread", "Merge", "Re-dispatch"}
+	want := []string{"Open PR", "Open thread", "Merge", "Review", "Re-dispatch"}
 	if len(labels) != len(want) {
 		t.Fatalf("parent buttons = %v, want %v", labels, want)
 	}
@@ -427,7 +429,7 @@ func TestEscalationPostsOneChannelMessageWithMention(t *testing.T) {
 	if mentions[0].channelID != "chan-1" {
 		t.Errorf("escalation must be posted in the channel, got %q", mentions[0].channelID)
 	}
-	for _, want := range []string{"🔴 acme/widget#181 — blocked needs you", "Action: /retry · /skip · /cancel"} {
+	for _, want := range []string{"🔴 acme/widget#181 needs you — blocked", "build or tests failed", "Open the PR thread to act."} {
 		if !strings.Contains(mentions[0].text, want) {
 			t.Errorf("escalation copy %q must contain %q", mentions[0].text, want)
 		}
@@ -614,7 +616,7 @@ func TestMergeButtonFollowsApprovalAndCIState(t *testing.T) {
 	}
 }
 
-func TestPRParentCarriesFourButtonsAfterFirstPhase(t *testing.T) {
+func TestPRParentCarriesFiveButtonsAfterFirstPhase(t *testing.T) {
 	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		workCtx.ThreadID = "thread-7"
 		return nil
@@ -656,7 +658,7 @@ func TestPRParentCarriesFourButtonsAfterFirstPhase(t *testing.T) {
 	}
 	last := parentWrites[len(parentWrites)-1]
 	labels := buttonLabels(last.buttons)
-	want := []string{"Open PR", "Open thread", "Merge", "Re-dispatch"}
+	want := []string{"Open PR", "Open thread", "Merge", "Review", "Re-dispatch"}
 	if len(labels) != len(want) {
 		t.Fatalf("parent buttons = %v, want %v", labels, want)
 	}

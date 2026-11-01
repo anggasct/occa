@@ -125,7 +125,7 @@ func TestBlockedQueueSkipNamesPRAndBlockReason(t *testing.T) {
 		t.Fatal("the blocked PR must carry a state line")
 	}
 	status := states[len(states)-1]
-	for _, want := range []string{"acme/widget#7", reason, "ACTION:"} {
+	for _, want := range []string{describeBlock(reason).Headline, "use the buttons below", "ACTION:"} {
 		if !strings.Contains(status, want) {
 			t.Errorf("state line %q must carry %q", status, want)
 		}
