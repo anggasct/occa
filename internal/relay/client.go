@@ -263,6 +263,14 @@ const (
 	PermissionReject PermissionReply = "reject"
 )
 
+// PermissionFeedbackReplier answers a permission request with a message the
+// model receives as the tool error. A rejection that carries a message lets
+// the agent continue without the refused scope; a plain rejection ends the
+// step.
+type PermissionFeedbackReplier interface {
+	ReplyPermissionWithMessage(ctx context.Context, requestID string, reply PermissionReply, message string) error
+}
+
 type MessageInfo struct {
 	ID        string
 	Role      string
@@ -778,7 +786,14 @@ func (c *HTTPClient) RunCommand(ctx context.Context, sessionID, command string) 
 }
 
 func (c *HTTPClient) ReplyPermission(ctx context.Context, requestID string, reply PermissionReply) error {
-	payload := map[string]string{"reply": string(reply)}
+	return c.replyPermission(ctx, requestID, map[string]string{"reply": string(reply)})
+}
+
+func (c *HTTPClient) ReplyPermissionWithMessage(ctx context.Context, requestID string, reply PermissionReply, message string) error {
+	return c.replyPermission(ctx, requestID, map[string]string{"reply": string(reply), "message": message})
+}
+
+func (c *HTTPClient) replyPermission(ctx context.Context, requestID string, payload map[string]string) error {
 	resp, err := c.post(ctx, "/permission/"+requestID+"/reply", payload)
 	if err != nil {
 		return err

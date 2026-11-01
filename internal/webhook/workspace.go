@@ -68,6 +68,7 @@ type WorkspaceManager struct {
 	leases       sync.Map
 	roots        sync.Map
 	repoLocks    sync.Map
+	excluded     sync.Map
 	Now          func() time.Time
 	IsolatedTTL  time.Duration
 	FetchTimeout time.Duration
@@ -432,6 +433,9 @@ func (m *WorkspaceManager) resolveIsolated(ctx context.Context, root string, req
 
 	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 		return nil, fmt.Errorf("%w: create isolated workspace parent: %v", ErrWorkspaceUnavailable, err)
+	}
+	if err := m.ensureWorkspaceExcluded(ctx, root); err != nil {
+		slog.Warn("webhook: workspace exclude failed", "root", root, "error", err)
 	}
 	if _, err := m.runner.Run(ctx, root, "worktree", "add", "--detach", target, req.Key.HeadRevision); err != nil {
 		if lease, rerr := m.reuseIsolated(ctx, root, target, req, ttl); rerr == nil && lease != nil {
@@ -906,4 +910,59 @@ func (m *WorkspaceManager) ReapExpiredWorkspaces(ctx context.Context) int {
 		return true
 	})
 	return reaped
+}
+
+const workspaceExcludeLine = "/.occa-workspaces/"
+
+// ensureWorkspaceExcluded keeps occa's isolated workspace directory out of
+// the repository's status: it adds the directory to the local, untracked
+// <git-common-dir>/info/exclude once per repository. The tracked .gitignore
+// is never edited.
+func (m *WorkspaceManager) ensureWorkspaceExcluded(ctx context.Context, root string) error {
+	if _, done := m.excluded.Load(root); done {
+		return nil
+	}
+	out, err := m.runner.Run(ctx, root, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return err
+	}
+	common := strings.TrimSpace(out)
+	if common == "" {
+		return fmt.Errorf("git common dir empty for %s", root)
+	}
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(root, common)
+	}
+	path := filepath.Join(common, "info", "exclude")
+	existing, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	for _, line := range strings.Split(string(existing), "\n") {
+		switch strings.TrimSpace(line) {
+		case "/.occa-workspaces/", ".occa-workspaces/", "/.occa-workspaces", ".occa-workspaces":
+			m.excluded.Store(root, struct{}{})
+			return nil
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	block := "# occa isolated review workspaces\n" + workspaceExcludeLine + "\n"
+	if len(existing) > 0 && !strings.HasSuffix(string(existing), "\n") {
+		block = "\n" + block
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(block); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	m.excluded.Store(root, struct{}{})
+	return nil
 }

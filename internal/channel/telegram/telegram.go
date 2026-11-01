@@ -25,6 +25,7 @@ type Adapter struct {
 	menu            []channel.MenuCommand
 	downloadClient  *http.Client
 	connected       atomic.Bool
+	pollConflict    atomic.Bool
 	maxDownloadSize int64
 	initTimeout     time.Duration
 	initAttempts    int
@@ -75,10 +76,13 @@ func initBotWithRetry(token, apiEndpoint string, client *http.Client, attemptDel
 func (a *Adapter) Name() string { return "telegram" }
 
 func (a *Adapter) Connected() (bool, string) {
-	if a.connected.Load() {
-		return true, ""
+	if !a.connected.Load() {
+		return false, "bot not initialized"
 	}
-	return false, "bot not initialized"
+	if a.pollConflict.Load() {
+		return false, pollConflictReason
+	}
+	return true, ""
 }
 
 func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessage)) error {
@@ -97,6 +101,7 @@ func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessag
 	// forum topics and drops message_thread_id when parsing updates, so the
 	// raw payload is read in parallel to capture the topic id.
 	offset := 0
+	health := &pollHealth{botName: bot.Self.UserName}
 	for {
 		select {
 		case <-ctx.Done():
@@ -110,10 +115,16 @@ func (a *Adapter) Start(ctx context.Context, handler func(channel.IncomingMessag
 			"offset":  strconv.Itoa(offset),
 		})
 		if err != nil {
-			slog.Warn("telegram: getUpdates failed, retrying", "error", err)
-			time.Sleep(3 * time.Second)
+			delay := health.fail(err, time.Now())
+			a.pollConflict.Store(health.inConflict())
+			if !waitOrDone(ctx, delay) {
+				a.connected.Store(false)
+				return nil
+			}
 			continue
 		}
+		health.recover(time.Now())
+		a.pollConflict.Store(false)
 
 		var updates []tgbotapi.Update
 		if err := json.Unmarshal(resp.Result, &updates); err != nil {
