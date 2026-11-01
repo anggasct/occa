@@ -10,6 +10,8 @@ type TurnProgress struct {
 	FirstDeltaAt time.Time
 	LastDeltaAt  time.Time
 	DeltaCount   int
+	// Retry is the agent's last reported retry of the model call, if any.
+	Retry *RetryStatus
 }
 
 // ClassifyTimeoutFailure turns observed turn progress into the reason suffix
@@ -24,6 +26,8 @@ func ClassifyTimeoutFailure(progress TurnProgress, budget time.Duration, model s
 	}
 
 	switch {
+	case progress.Retry != nil:
+		return fmt.Sprintf("provider kept retrying (attempt %d): %s", progress.Retry.Attempt, progress.Retry.String())
 	case progress.DeltaCount == 0:
 		return fmt.Sprintf("provider stall before first token (%s, model %s)", elapsedSince(progress.PromptSentAt), modelString(model))
 	case time.Since(progress.LastDeltaAt) >= stallFreshness:

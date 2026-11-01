@@ -132,18 +132,17 @@ webhooks:
       #   default: review-only # full | review-only
       #   authors:
       #     owner-login: full
-      # prompts: # optional per-workflow prompt override (absent = built-in default; file missing = startup error)
+      # prompts: # optional per-workflow prompt override (absent = built-in default; file missing = startup error); merge has no prompt — occa merges in code
       #   review: { prompt_file: webhooks/saya-review.md }  # or { prompt: "short instruction" }
       #   fix: { prompt_file: webhooks/saya-fix.md }
-      #   merge: { prompt: "merge when green" }
       #   merged: { prompt_file: webhooks/saya-merged.md }
       # auto_fix: # optional automatic fix triggers (absent = both off)
       #   ci: false # enqueue fix on red check_suite (needs full automation for the PR author)
-      #   conflict: false # merge dirty-tree reason into fix at dequeue (same policy gate)
-      # merge: # optional merge lane policy
-      #   mode: auto # auto (default): occa merges in code with the built-in merge prompt, the agent with prompts.merge; code | agent force one
+      #   conflict: false # a conflicting approved PR starts a conflict fix; the dirty-tree reason joins a queued fix (same policy gate)
+      # merge: # optional merge lane policy (occa always merges in code: approved on the head, checks green, GitHub mergeable)
       #   method: "" # merge | squash | rebase; empty = the repository's allowed method (merge > squash > rebase)
       #   delete_branch: false # pass --delete-branch to gh pr merge
+      #   stale_approval_paths: [] # e.g. [".github/**", "*.md", "docs/**"]: an approval on an older commit still merges when every file changed since matches ("dir/**" = under dir/, no "/" = base name)
       # on_merged: [] # optional post-merge extras (default: just close the PR thread)
       # - prompt_file: "merged-vault.md" # one agent turn with your prompt file (stays in ~/.occa/webhooks, never in this repo)
       # - run: "make changelog" # one command, run with the repo checkout as cwd

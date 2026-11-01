@@ -59,11 +59,40 @@ func conflictCheckout(t *testing.T, conflicting bool) (string, *WorkspaceLease) 
 
 func conflictPrep(t *testing.T, lease *WorkspaceLease, base string) (bool, WebhookEnvelope, *WebhookWorkContext) {
 	t.Helper()
+	return conflictPrepKind(t, lease, base, fixKindConflict, `["conflict"]`)
+}
+
+// conflictPrepKind runs the lane context of a fix delivery of the given kind.
+func conflictPrepKind(t *testing.T, lease *WorkspaceLease, base, kind, reasons string) (bool, WebhookEnvelope, *WebhookWorkContext) {
+	t.Helper()
 	srv, _, _ := operatorTestServer(t, nil)
-	envelope := WebhookEnvelope{"base_branch": base, "conflict_files": ""}
+	srv.ciFailures = func(ctx context.Context, repo, number string) (string, error) { return "", nil }
+	envelope := WebhookEnvelope{"base_branch": base, "conflict_files": "", "fix_kind": kind, "fix_reasons": reasons}
 	work := &WebhookWorkContext{PRKey: "acme/widget#7"}
-	ok := srv.prepareConflict(context.Background(), srv.endpointsByName["github-widget-fix"], envelope, work, lease)
-	return ok, envelope, work
+	skip := srv.prepareLaneContext(context.Background(), srv.endpointsByName["github-widget-fix"], envelope, work, lease)
+	return skip, envelope, work
+}
+
+// IMP-114 AC-06: a mixed fix carrying a conflict gets the base merged, but
+// the agent still runs for the other reasons; a mixed fix without a conflict
+// is left alone.
+func TestConflictPrepMixedFix(t *testing.T) {
+	clone, lease := conflictCheckout(t, false)
+	skip, _, work := conflictPrepKind(t, lease, "main", fixKindMixed, `["ci","conflict"]`)
+	if skip || work.AgentReply != "" {
+		t.Fatalf("mixed prep = %v %q, want the agent to run", skip, work.AgentReply)
+	}
+	if parents := strings.Fields(runGit(t, clone, "log", "-1", "--format=%P")); len(parents) != 2 {
+		t.Fatalf("the base must be merged for a mixed conflict fix, parents = %v", parents)
+	}
+	clone2, lease2 := conflictCheckout(t, false)
+	before := runGit(t, clone2, "rev-parse", "HEAD")
+	if skip, _, _ := conflictPrepKind(t, lease2, "main", fixKindMixed, `["ci","review"]`); skip {
+		t.Fatal("a mixed fix without a conflict must not skip the agent")
+	}
+	if after := runGit(t, clone2, "rev-parse", "HEAD"); after != before {
+		t.Fatalf("a mixed fix without a conflict must not merge: %s → %s", before, after)
+	}
 }
 
 // IMP-113 AC-09: a clean base merge needs no agent and finalizes as a push.

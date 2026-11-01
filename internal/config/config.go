@@ -663,7 +663,9 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 			if strings.TrimSpace(endpoint.Prompt) != "" && strings.TrimSpace(endpoint.PromptFile) != "" {
 				return Config{}, fmt.Errorf("config: webhooks.endpoints[%d] must not define both prompt and prompt_file", i)
 			}
-			if strings.TrimSpace(endpoint.PromptFile) != "" {
+			// A lane occa runs in code (merge) has no prompt.
+			needsPrompt := endpoint.PromptSource != PromptSourceCode
+			if needsPrompt && strings.TrimSpace(endpoint.PromptFile) != "" {
 				prompt, err := loadPromptFile(configDir, endpoint.PromptFile)
 				if err != nil {
 					return Config{}, fmt.Errorf("config: webhooks.endpoints[%d].prompt_file: %w", i, err)
@@ -672,11 +674,11 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 				if endpoint.PromptSource == "" {
 					endpoint.PromptSource = "file"
 				}
-			} else if strings.TrimSpace(endpoint.Prompt) != "" {
+			} else if needsPrompt && strings.TrimSpace(endpoint.Prompt) != "" {
 				if endpoint.PromptSource == "" {
 					endpoint.PromptSource = "inline"
 				}
-			} else {
+			} else if needsPrompt {
 				return Config{}, fmt.Errorf("config: webhooks.endpoints[%d] must define exactly one of prompt, prompt_file", i)
 			}
 			if strings.TrimSpace(endpoint.Model) != "" {

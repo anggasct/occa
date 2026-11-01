@@ -43,13 +43,18 @@ provider state.
   Retry, Merge and Cancel. `/inbox` lists every PR that waits on you, with the
   same buttons (they work on Telegram too), and the optional `webhooks.digest`
   block posts a once-a-day summary (`/digest` shows it on demand).
-- **Deterministic lane steps** — with the built-in prompts occa merges in
-  code (approved on the head, checks green, GitHub mergeable; one
-  `gh pr merge --match-head-commit`, no agent turn), writes the post-merge
-  summary itself, hands the agent earlier reviews and failing check logs in
-  the prompt, and merges the base branch before a conflict fix so the agent
-  only resolves the files that actually conflict. `repos[].merge` picks the
-  method or keeps the agent.
+- **Deterministic lane steps** — occa merges in code (approved on the head,
+  checks green, GitHub mergeable; one `gh pr merge --match-head-commit`, no
+  agent turn; there is no merge prompt), writes the post-merge summary itself
+  with the built-in merged prompt, hands the agent earlier reviews and failing
+  check logs in the prompt, and merges the base branch before a conflict fix
+  so the agent only resolves the files that actually conflict.
+  `repos[].merge` picks the method, branch deletion, and the paths an older
+  approval may carry over (`stale_approval_paths`); with `auto_fix.conflict` a
+  conflicting approved PR starts the conflict fix.
+- **Provider limits fail fast** — when the agent reports it will retry the
+  model only after the run's deadline (a quota or rate limit), the run stops at
+  once and the PR blocks with the provider's own message and a Retry button.
 - **OpenCode process management** — lazy-spawns one agent instance per working
   directory, idles them out, caps capacity, and shuts down gracefully
   (optional auto-install when the `opencode` binary is missing).

@@ -25,6 +25,10 @@ type mergeFacts struct {
 	HeadVerdict string
 	// Checks is none, pending, red or green.
 	Checks string
+	// ApprovedCommit is the commit of the newest approval when every
+	// reviewer's latest verdict, on any commit, is an approval; it lets an
+	// approval carry over a delta of stale_approval_paths files only.
+	ApprovedCommit string
 }
 
 const (
@@ -37,10 +41,17 @@ const (
 type mergeFactsFunc func(ctx context.Context, repo, number string) (mergeFacts, error)
 type prMergeFunc func(ctx context.Context, repo, number, method, head string, deleteBranch bool) error
 type mergeMethodsFunc func(ctx context.Context, repo string) ([]string, error)
+type compareFilesFunc func(ctx context.Context, repo, base, head string) ([]string, error)
 
-// codeMergeFor reports whether occa merges this endpoint's PRs in code.
+const compareFilesCap = 300
+
+const refusalNoHeadApproval = "no approval on the current head"
+const refusalConflicts = "conflicts with the base branch"
+
+// codeMergeFor reports whether this endpoint is a merge lane; occa merges
+// every PR in code.
 func codeMergeFor(ep config.EndpointConfig) bool {
-	return ep.Merge.Code && strings.EqualFold(strings.TrimSpace(ep.Workflow), "merge")
+	return strings.EqualFold(strings.TrimSpace(ep.Workflow), "merge")
 }
 
 // runCodeMerge is the merge lane without an agent turn. It returns a skip
@@ -63,8 +74,18 @@ func (s *Server) runCodeMerge(ctx context.Context, ep config.EndpointConfig, wor
 	if err != nil {
 		return "", fmt.Errorf("code merge: read PR: %w", err)
 	}
-	if reason := mergeGateRefusal(facts); reason != "" {
+	reason := mergeGateRefusal(facts)
+	if reason == refusalNoHeadApproval && s.approvalCarriesOver(ctx, ep, repo, facts) {
+		facts.HeadVerdict = "approved"
+		reason = mergeGateRefusal(facts)
+	}
+	if reason != "" {
 		slog.Info("webhook: code merge refused", "endpoint", ep.Name, "pr_key", workCtx.PRKey, "reason", reason, "head", shortRevision(facts.HeadSHA))
+		if reason == refusalConflicts && ep.AutoFix.Conflict {
+			if err := s.enqueueAutoFixCI(ctx, repo, number, facts.HeadSHA, []string{fixKindConflict}); err != nil {
+				slog.Info("webhook: conflict auto-fix not enqueued", "endpoint", ep.Name, "pr_key", workCtx.PRKey, "error", err)
+			}
+		}
 		return reason, nil
 	}
 	method := ep.Merge.Method
@@ -86,6 +107,83 @@ func (s *Server) runCodeMerge(ctx context.Context, ep config.EndpointConfig, wor
 	return "", nil
 }
 
+// approvalCarriesOver reports whether an approval on an older commit still
+// holds because every file changed since matches stale_approval_paths.
+func (s *Server) approvalCarriesOver(ctx context.Context, ep config.EndpointConfig, repo string, facts mergeFacts) bool {
+	patterns := ep.Merge.StaleApprovalPaths
+	approved := normalizeRevision(facts.ApprovedCommit)
+	if len(patterns) == 0 || approved == "" || facts.HeadSHA == "" || approved == normalizeRevision(facts.HeadSHA) {
+		return false
+	}
+	compare := s.compareFiles
+	if compare == nil {
+		compare = ghCompareFiles
+	}
+	files, err := compare(ctx, repo, approved, facts.HeadSHA)
+	if err != nil {
+		slog.Warn("webhook: code merge compare failed", "endpoint", ep.Name, "repo", repo, "approved", shortRevision(approved), "head", shortRevision(facts.HeadSHA), "error", err)
+		return false
+	}
+	if !allFilesMatch(files, patterns) {
+		return false
+	}
+	slog.Info("webhook: code merge approval carried over", "endpoint", ep.Name, "repo", repo, "approved", shortRevision(approved), "head", shortRevision(facts.HeadSHA), "files", len(files))
+	return true
+}
+
+func allFilesMatch(files, patterns []string) bool {
+	if len(files) == 0 {
+		return false
+	}
+	for _, file := range files {
+		matched := false
+		for _, pattern := range patterns {
+			if config.MatchesApprovalPath(pattern, file) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+// carriedApprovalCommit returns the commit of the newest approval when every
+// reviewer's latest verdict on the PR is an approval, else "".
+func carriedApprovalCommit(reviews []ghReconcileReview, prAuthor string, trustLogins map[string]bool) string {
+	type observed struct {
+		verdict, at, commit string
+	}
+	latest := make(map[string]observed)
+	for index, review := range reviews {
+		verdict := reviewVerdict(review, prAuthor, trustLogins)
+		if verdict == "" {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(review.Author.Login))
+		if key == "" {
+			key = fmt.Sprintf("review:%d", index)
+		}
+		submitted := strings.TrimSpace(review.SubmittedAt)
+		if previous, ok := latest[key]; ok && previous.at > submitted {
+			continue
+		}
+		latest[key] = observed{verdict: verdict, at: submitted, commit: normalizeRevision(review.Commit.OID)}
+	}
+	newest := observed{}
+	for _, item := range latest {
+		if item.verdict != "approved" {
+			return ""
+		}
+		if item.at >= newest.at {
+			newest = item
+		}
+	}
+	return newest.commit
+}
+
 // mergeGateRefusal names the first gate a PR fails, or "" when it may merge.
 func mergeGateRefusal(f mergeFacts) string {
 	if state := strings.ToUpper(strings.TrimSpace(f.State)); state != "OPEN" {
@@ -95,7 +193,7 @@ func mergeGateRefusal(f mergeFacts) string {
 		return "PR is a draft"
 	}
 	if f.HeadVerdict != "approved" && !strings.EqualFold(strings.TrimSpace(f.ReviewDecision), "APPROVED") {
-		return "no approval on the current head"
+		return refusalNoHeadApproval
 	}
 	switch f.Checks {
 	case checkStatePending:
@@ -107,7 +205,7 @@ func mergeGateRefusal(f mergeFacts) string {
 	case "CLEAN", "UNSTABLE", "HAS_HOOKS":
 		return ""
 	case "DIRTY":
-		return "conflicts with the base branch"
+		return refusalConflicts
 	case "BEHIND":
 		return "branch is behind the base branch"
 	case "BLOCKED":
@@ -228,7 +326,37 @@ func ghMergeFacts(ctx context.Context, repo, number string, trustLogins map[stri
 		ReviewDecision: raw.ReviewDecision,
 		HeadVerdict:    ghReviewVerdictForHead(raw.Reviews, raw.HeadRefOid, raw.Author.Login, trustLogins),
 		Checks:         checksState(raw.StatusCheckRollup),
+		ApprovedCommit: carriedApprovalCommit(raw.Reviews, raw.Author.Login, trustLogins),
 	}, nil
+}
+
+// ghCompareFiles lists the files changed between two commits.
+func ghCompareFiles(ctx context.Context, repo, base, head string) ([]string, error) {
+	out, err := runGH(ctx, "api", "repos/"+strings.TrimSpace(repo)+"/compare/"+strings.TrimSpace(base)+"..."+strings.TrimSpace(head))
+	if err != nil {
+		return nil, err
+	}
+	var raw struct {
+		Files []struct {
+			Filename         string `json:"filename"`
+			PreviousFilename string `json:"previous_filename"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, fmt.Errorf("gh api compare decode: %w", err)
+	}
+	if len(raw.Files) >= compareFilesCap {
+		// GitHub lists at most 300 files; the rest of the delta is unseen.
+		return nil, fmt.Errorf("compare lists %d files, the delta may be truncated", len(raw.Files))
+	}
+	files := make([]string, 0, len(raw.Files))
+	for _, f := range raw.Files {
+		files = append(files, f.Filename)
+		if f.PreviousFilename != "" {
+			files = append(files, f.PreviousFilename)
+		}
+	}
+	return files, nil
 }
 
 func ghRepoMergeMethods(ctx context.Context, repo string) ([]string, error) {

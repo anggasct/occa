@@ -125,8 +125,11 @@ func lockedAdmitRules(workflow string) []AdmitRule {
 
 func validateRepoPrompts(prompts map[string]RepoPromptRef, context string) error {
 	for workflow, ref := range prompts {
-		if workflow != "review" && workflow != "fix" && workflow != "merge" && workflow != "merged" {
-			return fmt.Errorf("config: %sprompts supports only review, fix, merge and merged workflows, got %q", context, workflow)
+		if workflow == "merge" {
+			return fmt.Errorf("config: %sprompts.merge is not supported — occa merges in code; configure merge.method, merge.delete_branch, merge.stale_approval_paths", context)
+		}
+		if workflow != "review" && workflow != "fix" && workflow != "merged" {
+			return fmt.Errorf("config: %sprompts supports only review, fix and merged workflows, got %q", context, workflow)
 		}
 		hasPrompt := strings.TrimSpace(ref.Prompt) != ""
 		hasFile := strings.TrimSpace(ref.PromptFile) != ""
@@ -138,6 +141,9 @@ func validateRepoPrompts(prompts map[string]RepoPromptRef, context string) error
 }
 
 func resolveRepoPrompt(prompts map[string]RepoPromptRef, workflow string) (prompt, promptFile, source string) {
+	if workflow == "merge" {
+		return "", "", PromptSourceCode
+	}
 	if ref, ok := prompts[workflow]; ok {
 		if strings.TrimSpace(ref.Prompt) != "" {
 			return ref.Prompt, "", "inline"
@@ -477,7 +483,7 @@ func expandRepos(repos []RepoConfig, defaults WebhookDefaults) ([]EndpointConfig
 				ep.OnMerged = append([]MergedAction(nil), repo.OnMerged...)
 			}
 			if workflow == "merge" {
-				policy, err := ResolveMergePolicy(repo.Merge, source, context)
+				policy, err := ResolveMergePolicy(repo.Merge, context)
 				if err != nil {
 					return nil, err
 				}

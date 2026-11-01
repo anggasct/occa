@@ -101,6 +101,7 @@ func newSurfaceServerOn(t *testing.T, st *store.SQLiteStore) (*Server, *surfaceR
 	srv.SetChannelStore(st.ChannelRepo())
 	srv.SetPRQueueRepo(st.PRQueueRepo())
 	setOpenPRState(srv)
+	mergeThroughExecutor(srv)
 	rec := &surfaceRecorder{}
 	srv.SetSenderWithButtons(func(_ context.Context, _, channelID, text string, buttons []channel.Button) (string, error) {
 		rec.add(&rec.sent, surfaceMessage{channelID: channelID, messageID: "parent-1", text: text, buttons: buttons})

@@ -77,6 +77,13 @@ func runWebhooksCheckConfig(args []string) int {
 		if ep.PromptSource != "" {
 			fmt.Printf(" prompt source=%s", ep.PromptSource)
 		}
+		if ep.Workflow == "merge" {
+			method := ep.Merge.Method
+			if method == "" {
+				method = "repo default"
+			}
+			fmt.Printf(" merge=%s delete_branch=%s stale_approval_paths=%d", method, onOff(ep.Merge.DeleteBranch), len(ep.Merge.StaleApprovalPaths))
+		}
 		fmt.Println()
 		for i, rule := range ep.Admit {
 			fmt.Printf("  [%d] event=%s actions=[%s]\n", i, rule.Event, strings.Join(rule.Actions, ","))

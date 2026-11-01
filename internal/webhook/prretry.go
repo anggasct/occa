@@ -23,6 +23,7 @@ const (
 	failurePermission
 	failurePush
 	failurePRCreate
+	failureProviderLimit
 )
 
 func (c failureClass) label() string {
@@ -39,6 +40,8 @@ func (c failureClass) label() string {
 		return "push failed"
 	case failurePRCreate:
 		return "pr create failed"
+	case failureProviderLimit:
+		return "provider limit"
 	default:
 		return "model error"
 	}
@@ -81,6 +84,9 @@ func classifyFailure(execErr error, workCtx *WebhookWorkContext, stallFreshness 
 	}
 	if errors.Is(execErr, relay.ErrWebhookPermissionDenied) {
 		return failurePermission
+	}
+	if errors.Is(execErr, relay.ErrWebhookProviderLimit) {
+		return failureProviderLimit
 	}
 	if errors.Is(execErr, ErrRevisionMissing) {
 		return failureBuild
@@ -340,6 +346,35 @@ func (s *Server) handOffPermissionDenied(ep config.EndpointConfig, prKey string,
 	)
 }
 
+// handOffProviderLimit blocks a PR whose run stopped because the model
+// provider will not answer before the run's deadline (quota or rate limit).
+// Retrying cannot help until the operator restores the quota or switches the
+// model, so the PR blocks at once with the provider's own message.
+func (s *Server) handOffProviderLimit(ep config.EndpointConfig, prKey string, row *store.PRRun, execErr error) {
+	kind := runKind(row)
+	detail := ""
+	if execErr != nil {
+		if _, after, ok := strings.Cut(execErr.Error(), relay.ErrWebhookProviderLimit.Error()+": "); ok {
+			detail = replyExcerpt(after, ep.Secret)
+		}
+	}
+	reason := kind + " stopped on a provider limit — operator action required"
+	why := failureProviderLimit.label()
+	if detail != "" {
+		reason += ": " + detail
+		why = detail
+	}
+	if !s.escalateBlock(ep, prKey, row, reason, kind+" run stopped on a provider limit", why) {
+		return
+	}
+	slog.Warn("webhook: PR handed off, provider limit",
+		"endpoint", ep.Name,
+		"pr_key", prKey,
+		"kind", kind,
+		"detail", detail,
+	)
+}
+
 // handOffWorkspace blocks a PR whose run could not get its worktree because
 // the tree is dirty with changes occa did not make, or is attached to another
 // execution. Waiting does not clean it, so the operator gets the path and the
@@ -508,6 +543,10 @@ func (s *Server) planRetry(ep config.EndpointConfig, prKey string, receiptID int
 	}
 	if class == failurePermission {
 		s.handOffPermissionDenied(ep, prKey, row, workCtx)
+		return false
+	}
+	if class == failureProviderLimit {
+		s.handOffProviderLimit(ep, prKey, row, execErr)
 		return false
 	}
 	if row.RetryCount >= max {

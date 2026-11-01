@@ -17,6 +17,9 @@ var (
 	ErrWebhookAgentResponse      = errors.New("webhook agent response failed")
 	ErrWebhookResponseIncomplete = errors.New("webhook response incomplete")
 	ErrWebhookPermissionDenied   = errors.New("webhook permission denied")
+	// ErrWebhookProviderLimit: the agent will not retry the model before the
+	// turn's deadline (quota or rate limit), so the turn stopped.
+	ErrWebhookProviderLimit = errors.New("webhook provider limit")
 )
 
 const deniedScopesKept = 3
@@ -136,6 +139,8 @@ func (t WebhookTurn) Run(ctx context.Context) (res WebhookTurnResult, err error)
 				}
 				res.Progress.LastDeltaAt = now
 				res.Progress.DeltaCount++
+				// Output after a retry means the retry worked.
+				res.Progress.Retry = nil
 				buf.WriteString(ev.Delta)
 			case "permission_asked":
 				if scope := t.denyUnhandledPermission(ctx, ev); scope != "" && len(res.Denied) < deniedScopesKept {
@@ -160,6 +165,17 @@ func (t WebhookTurn) Run(ctx context.Context) (res WebhookTurnResult, err error)
 				}
 				completed = true
 				return res, nil
+			case EventRetry:
+				if ev.Retry == nil {
+					continue
+				}
+				res.Progress.Retry = ev.Retry
+				deadline, hasDeadline := ctx.Deadline()
+				if retryOutlivesTurn(ev.Retry, deadline, hasDeadline) {
+					closeStreamer()
+					slog.Warn("relay: webhook turn stopped, provider retries after the deadline", append(t.attrs(res.SessionID), "attempt", ev.Retry.Attempt, "reason", ev.Retry.Reason, "provider", ev.Retry.Provider, "next", ev.Retry.Next.UTC().Format(time.RFC3339))...)
+					return res, providerLimitError(ev.Retry)
+				}
 			case "stream_error":
 				closeStreamer()
 				return res, fmt.Errorf("%w: %v", ErrWebhookEventStream, ev.Err)

@@ -165,11 +165,21 @@ func newPRTestServer(t *testing.T, rec *prRecorder, endpoints []config.EndpointC
 	srv.SetChannelStore(st.ChannelRepo())
 	srv.SetPRQueueRepo(st.PRQueueRepo())
 	setOpenPRState(srv)
+	mergeThroughExecutor(srv)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleRequest)
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 	return srv, st, ts.URL
+}
+
+// mergeThroughExecutor makes the code merge of lane tests run the test
+// executor, so queue, surface and truth tests keep observing the merge run;
+// codemerge_test.go covers the merge itself.
+func mergeThroughExecutor(srv *Server) {
+	srv.codeMerge = func(ctx context.Context, ep config.EndpointConfig, workCtx *WebhookWorkContext) (string, error) {
+		return "", srv.executor(ctx, ep.Platform, ep.ChannelID, "", workCtx)
+	}
 }
 
 func waitForCalls(t *testing.T, rec *prRecorder, n int) {

@@ -41,8 +41,8 @@ func TestRepoPromptsResolve(t *testing.T) {
 	if byWorkflow["fix"].Prompt != "inline fix" || byWorkflow["fix"].PromptSource != "inline" {
 		t.Fatalf("fix should use inline: prompt=%q source=%q", byWorkflow["fix"].Prompt, byWorkflow["fix"].PromptSource)
 	}
-	if byWorkflow["merge"].Prompt != BuiltinPrompt("merge") || byWorkflow["merge"].PromptSource != "builtin" {
-		t.Fatalf("merge should fall back to builtin: source=%q", byWorkflow["merge"].PromptSource)
+	if byWorkflow["merge"].Prompt != "" || byWorkflow["merge"].PromptSource != PromptSourceCode {
+		t.Fatalf("merge runs in code: prompt=%q source=%q", byWorkflow["merge"].Prompt, byWorkflow["merge"].PromptSource)
 	}
 	if byWorkflow["merged"].Prompt != BuiltinPrompt("merged") || byWorkflow["merged"].PromptSource != "builtin" {
 		t.Fatalf("merged should fall back to builtin: source=%q", byWorkflow["merged"].PromptSource)
@@ -61,7 +61,7 @@ func TestRepoPromptsValidation(t *testing.T) {
 			prompts: `      prompts:
         deploy: { prompt: "x" }
 `,
-			want: "supports only review, fix, merge and merged",
+			want: "supports only review, fix and merged",
 		},
 		{
 			name: "both prompt and file",
@@ -118,12 +118,14 @@ func TestCustomEndpointRequiresPrompt(t *testing.T) {
 }
 
 func TestBuiltinPromptKnownWorkflows(t *testing.T) {
-	for _, workflow := range []string{"review", "fix", "merge", "merged"} {
+	for _, workflow := range []string{"review", "fix", "merged"} {
 		if got := BuiltinPrompt(workflow); strings.TrimSpace(got) == "" {
 			t.Fatalf("BuiltinPrompt(%q) is empty", workflow)
 		}
 	}
-	if got := BuiltinPrompt("custom"); got != "" {
-		t.Fatalf("BuiltinPrompt(custom) = %q, want empty", got)
+	for _, workflow := range []string{"merge", "custom"} {
+		if got := BuiltinPrompt(workflow); got != "" {
+			t.Fatalf("BuiltinPrompt(%s) = %q, want empty", workflow, got)
+		}
 	}
 }
