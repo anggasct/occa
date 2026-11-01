@@ -251,6 +251,9 @@ type WebhookDeliveryRepo interface {
 	Reopen(ctx context.Context, id int64, from []WebhookStatus) (bool, error)
 	// LatestForPR returns the newest delivery stamped with prKey, or nil.
 	LatestForPR(ctx context.Context, prKey string) (*WebhookDelivery, error)
+	// LatestSettledForPR returns the newest completed or failed delivery
+	// stamped with prKey, or nil.
+	LatestSettledForPR(ctx context.Context, prKey string) (*WebhookDelivery, error)
 	// LatestByDeliveryPrefix returns the newest delivery for an endpoint whose
 	// delivery ID starts with prefix, or nil.
 	LatestByDeliveryPrefix(ctx context.Context, endpoint, prefix string) (*WebhookDelivery, error)

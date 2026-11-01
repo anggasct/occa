@@ -265,6 +265,21 @@ func (r *sqliteWebhookDeliveryRepo) Reopen(ctx context.Context, id int64, from [
 	return n > 0, nil
 }
 
+func (r *sqliteWebhookDeliveryRepo) LatestSettledForPR(ctx context.Context, prKey string) (*WebhookDelivery, error) {
+	row := r.db.QueryRowContext(ctx,
+		`SELECT `+deliveryColumns+` FROM webhook_delivery WHERE pr_key = ? AND status IN (?, ?) ORDER BY id DESC LIMIT 1`,
+		prKey, string(WebhookStatusCompleted), string(WebhookStatusFailed),
+	)
+	d, err := scanWebhookDelivery(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: webhook delivery latest settled for pr: %w", err)
+	}
+	return d, nil
+}
+
 func (r *sqliteWebhookDeliveryRepo) LatestForPR(ctx context.Context, prKey string) (*WebhookDelivery, error) {
 	row := r.db.QueryRowContext(ctx,
 		`SELECT `+deliveryColumns+` FROM webhook_delivery WHERE pr_key = ? ORDER BY id DESC LIMIT 1`,

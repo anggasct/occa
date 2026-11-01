@@ -1180,14 +1180,16 @@ func EnvelopeString(envelope WebhookEnvelope, key string) string {
 // markPRQueued shows a PR in the channel as soon as its first delivery is
 // accepted. Later deliveries keep the phase they already have, except a
 // merged surface that the delivery's evidence contradicts.
-func (s *Server) markPRQueued(prKey string, ep config.EndpointConfig, envelope WebhookEnvelope) {
+func (s *Server) markPRQueued(prKey string, ep config.EndpointConfig, deliveryID string, envelope WebhookEnvelope) {
 	if s == nil || s.tasks == nil || strings.TrimSpace(prKey) == "" {
 		return
 	}
-	if _, phase, _, ok := s.tasks.SurfaceState(prKey); ok && phase != "" && phase != PhaseMerged {
+	_, phase, _, ok := s.tasks.SurfaceState(prKey)
+	if ok && phase != "" && phase != PhaseMerged {
 		return
 	}
 	s.syncPhaseParent(context.Background(), ep, prKey, envelope, PhaseQueued)
+	s.rememberQueuedBy(strings.TrimSpace(prKey), ep.Name, deliveryID, phase)
 }
 
 // sendPhaseParent posts the channel parent. The parent carries no card

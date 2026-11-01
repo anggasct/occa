@@ -24,6 +24,7 @@ const (
 	failurePush
 	failurePRCreate
 	failureProviderLimit
+	failureReviewNotPosted
 )
 
 func (c failureClass) label() string {
@@ -42,6 +43,8 @@ func (c failureClass) label() string {
 		return "pr create failed"
 	case failureProviderLimit:
 		return "provider limit"
+	case failureReviewNotPosted:
+		return "review not posted"
 	default:
 		return "model error"
 	}
@@ -49,7 +52,7 @@ func (c failureClass) label() string {
 
 func retryPolicyFor(class failureClass) (int, []time.Duration) {
 	switch class {
-	case failureStall:
+	case failureStall, failureReviewNotPosted:
 		return 1, []time.Duration{0}
 	case failureBuild, failureNoWork, failurePermission, failurePush, failurePRCreate:
 		return 2, []time.Duration{60 * time.Second, 5 * time.Minute}
@@ -87,6 +90,9 @@ func classifyFailure(execErr error, workCtx *WebhookWorkContext, stallFreshness 
 	}
 	if errors.Is(execErr, relay.ErrWebhookProviderLimit) {
 		return failureProviderLimit
+	}
+	if errors.Is(execErr, errReviewNotPosted) {
+		return failureReviewNotPosted
 	}
 	if errors.Is(execErr, ErrRevisionMissing) {
 		return failureBuild

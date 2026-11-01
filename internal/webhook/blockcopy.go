@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -38,6 +39,8 @@ func plainFailureClass(label string) string {
 		return "opening the PR failed"
 	case "model error":
 		return "the model returned an error"
+	case "review not posted":
+		return "the review was not posted on GitHub"
 	case "provider limit":
 		return "the model provider refused the run (limit reached)"
 	}
@@ -113,7 +116,7 @@ func describeBlock(reason string) blockCopy {
 	}
 	if m := reasonRetriesRe.FindStringSubmatch(reason); m != nil {
 		return blockCopy{
-			Headline: "The " + kind + " run failed " + m[1] + " times in a row: " + plainFailureClass(m[2]) + ".",
+			Headline: "The " + kind + " run failed " + m[1] + " time" + pluralOf(m[1]) + " in a row: " + plainFailureClass(m[2]) + ".",
 			Next:     "Read the last run above, then press Retry.",
 		}
 	}
@@ -150,4 +153,13 @@ func formatBlockedCopy(repo, prNumber string, c blockCopy, icons map[string]stri
 		lines = append(lines, "Open the PR thread to act.")
 	}
 	return strings.Join(lines, "\n")
+}
+
+// pluralOf is plural for a count written as text.
+func pluralOf(count string) string {
+	n, err := strconv.Atoi(strings.TrimSpace(count))
+	if err != nil {
+		return "s"
+	}
+	return plural(n)
 }
