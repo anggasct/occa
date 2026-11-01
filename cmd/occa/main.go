@@ -656,6 +656,10 @@ func main() {
 		rt.SetOperatorCommandHook(func(ctx context.Context, msg channel.IncomingMessage, name, args string) (string, bool, error) {
 			return webhookSrv.HandleOperatorCommand(ctx, msg, name, args)
 		})
+		rt.SetTaskActionHook(webhookSrv.HandleTaskAction)
+		rt.SetTaskRefResolver(taskRegistry.TaskForShortID)
+		rt.SetInboxHook(webhookSrv.Inbox)
+		rt.SetDigestHook(webhookSrv.DigestNow)
 		if err := webhookSrv.Start(ctx); err != nil {
 			slog.Error("failed to start webhook server", "error", err)
 		}

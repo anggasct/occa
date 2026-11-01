@@ -392,7 +392,7 @@ func (s *Server) refreshRunAges(ctx context.Context, now time.Time) int {
 		repo, prNumber, _ := splitPRKey(row.PRKey)
 		rootID, threadID, prURL, branch := s.runAgeSurface(row)
 		if parentBase == "" {
-			parentBase = FormatPhaseParent(repo, prNumber, phase, s.statusIcons)
+			parentBase = s.phaseParentBase(ctx, repo, prNumber, row.PRKey, phase)
 		}
 		if threadBase == "" {
 			threadBase = strings.TrimSpace(row.ThreadStatusBase)

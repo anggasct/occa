@@ -353,3 +353,39 @@ func (r *sqliteWebhookDeliveryRepo) CountReviewDeliveries(ctx context.Context, e
 }
 
 var _ WebhookDeliveryRepo = (*sqliteWebhookDeliveryRepo)(nil)
+
+func (r *sqliteWebhookDeliveryRepo) RunStatsForPR(ctx context.Context, prKey string) (int, int, error) {
+	var runs, retries int
+	err := r.db.QueryRowContext(ctx,
+		`SELECT COUNT(*), COALESCE(SUM(CASE WHEN attempt > 1 THEN attempt - 1 ELSE 0 END), 0)
+		 FROM webhook_delivery WHERE pr_key = ? AND started_at > 0`,
+		prKey,
+	).Scan(&runs, &retries)
+	if err != nil {
+		return 0, 0, fmt.Errorf("store: webhook delivery run stats: %w", err)
+	}
+	return runs, retries, nil
+}
+
+func (r *sqliteWebhookDeliveryRepo) ListUpdatedSince(ctx context.Context, since int64) ([]WebhookDelivery, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT `+deliveryColumns+` FROM webhook_delivery WHERE updated_at >= ? ORDER BY updated_at ASC, id ASC`,
+		since,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: webhook delivery list since: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []WebhookDelivery
+	for rows.Next() {
+		d, err := scanWebhookDelivery(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: webhook delivery list since scan: %w", err)
+		}
+		out = append(out, *d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: webhook delivery list since rows: %w", err)
+	}
+	return out, nil
+}

@@ -398,7 +398,7 @@ func TestSurfaceDiscipline_AC12(t *testing.T) {
 		return nil
 	})
 	ep := config.EndpointConfig{Platform: "discord", ChannelID: "chan-1"}
-	srv.escalateToChannel(context.Background(), ep, "acme/widget", "7", PhaseBlocked, "fix run failed", "retry exhausted")
+	srv.escalateToChannel(context.Background(), ep, formatBlockedCopy("acme/widget", "7", describeBlock("fix exhausted after 2/2 retries (build/test failure) — operator action required"), nil, true))
 	if channelTarget != "chan-1" || mentionUser != "user-42" {
 		t.Fatalf("escalation target/mention = %q/%q, want chan-1/user-42", channelTarget, mentionUser)
 	}

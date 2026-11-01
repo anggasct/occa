@@ -1077,6 +1077,20 @@ func TaskActionButtonsWithMerge(repo, branch string, mergeEnabled bool) []channe
 	}
 }
 
+// TaskPRActionButtons are the actions of a PR phase card: Merge, Review and
+// Re-dispatch. A dispatch card with no PR yet keeps TaskActionButtons.
+func TaskPRActionButtons(repo, branch string, mergeEnabled bool) []channel.Button {
+	buttons := TaskActionButtonsWithMerge(repo, branch, mergeEnabled)
+	if len(buttons) != 2 {
+		return buttons
+	}
+	reviewID := "task:review:" + TaskThreadKey(strings.TrimSpace(repo), strings.TrimSpace(branch))
+	if utf8.RuneCountInString(reviewID) > taskCallbackLimit {
+		return buttons
+	}
+	return []channel.Button{buttons[0], {Label: "Review", Value: reviewID, Row: 1}, buttons[1]}
+}
+
 func TaskParentButtons(platform, guildID string, envelope WebhookEnvelope, repo, branch, threadID string) []channel.Button {
 	if repo == "" || branch == "" {
 		repo = strings.TrimSpace(stringValue(envelope["repository"]))
@@ -1104,6 +1118,9 @@ func ParseTaskCallback(data string) (string, string, string, bool) {
 	} else if strings.HasPrefix(rest, "redispatch:") {
 		action = "redispatch"
 		rest = strings.TrimPrefix(rest, "redispatch:")
+	} else if strings.HasPrefix(rest, "review:") {
+		action = "review"
+		rest = strings.TrimPrefix(rest, "review:")
 	} else {
 		return "", "", "", false
 	}

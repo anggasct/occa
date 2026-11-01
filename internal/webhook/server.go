@@ -53,6 +53,8 @@ type DeliveryStore interface {
 	LatestByDeliveryPrefix(ctx context.Context, endpoint, prefix string) (*store.WebhookDelivery, error)
 	FindReviewDuplicate(ctx context.Context, endpoint, reviewKey string, excludeID, cutoff int64) (*store.WebhookDelivery, error)
 	CountReviewDeliveries(ctx context.Context, endpoint, reviewKeyPrefix string, cutoff int64) (int, error)
+	RunStatsForPR(ctx context.Context, prKey string) (runs, retries int, err error)
+	ListUpdatedSince(ctx context.Context, since int64) ([]store.WebhookDelivery, error)
 }
 
 type ChannelStore interface {
@@ -226,8 +228,13 @@ type Server struct {
 	mentionNotifier       MentionNotifier
 	mergeGate             MergeGateChecker
 	escalationMu          sync.Mutex
-	escalated             map[string]bool
-	ageState              *runAgeState
+	// reviewButtonMu serializes Review presses from check to enqueue.
+	reviewButtonMu sync.Mutex
+	// digest is the optional daily digest; digestClock overrides now in tests.
+	digest      *config.DigestConfig
+	digestClock func() time.Time
+	escalated   map[string]bool
+	ageState    *runAgeState
 }
 
 func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) *Server {
@@ -301,6 +308,10 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 	}
 	srv.eventSlots = make(chan struct{}, rt.MaxConcurrentEvents)
 	srv.tasks = NewTaskThreadRegistry()
+	if cfg.Digest != nil {
+		digest := *cfg.Digest
+		srv.digest = &digest
+	}
 	srv.tasks.SetStatusConfig(cfg.StatusIcons, cfg.StatusColors)
 	srv.statusIcons = cfg.StatusIcons
 	srv.statusColors = cfg.StatusColors
@@ -807,6 +818,10 @@ func (s *Server) Start(ctx context.Context) error {
 	go s.reconcileLoop(s.shutdownCtx)
 	s.dispatchWG.Add(1)
 	go s.runAgeLoop()
+	if s.digest != nil {
+		s.dispatchWG.Add(1)
+		go s.digestLoop(*s.digest)
+	}
 
 	slog.Info("webhook server started", "bind", s.bind, "endpoints", len(s.endpoints))
 	for _, ep := range s.endpoints {

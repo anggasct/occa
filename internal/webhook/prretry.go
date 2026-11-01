@@ -426,24 +426,28 @@ func (s *Server) escalateBlock(ep config.EndpointConfig, prKey string, row *stor
 	}
 	ctx := context.Background()
 	envelope := WebhookEnvelope{"repository": repo, "pr_number": prNumber}
+	taskRepo, taskBranch := "", ""
 	if rec, ok := s.tasks.ResolvePRThread(prKey); ok {
 		if strings.TrimSpace(rec.Branch) != "" {
 			envelope["head_branch"] = rec.Branch
 		}
+		taskRepo, taskBranch = rec.Repo, rec.Branch
 	}
 	s.syncPhaseParent(ctx, ep, prKey, envelope, PhaseBlocked)
+	copyText := describeBlock(reason)
 	if threadID != "" {
 		s.ensureThreadStatus(ctx, ep.Platform, ep.ChannelID, threadID, repo, "", prKey, ThreadStatusUpdate{
 			Phase:  PhaseBlocked,
-			Action: blockedQueueText(prKey, reason, blockedQueueCommand),
+			Action: copyText.statusAction(),
 		})
-		threadLine := FormatEscalationCopy(repo, prNumber, PhaseBlocked, what, why, s.statusIcons)
+		threadLine := formatBlockedCopy(repo, prNumber, copyText, s.statusIcons, false)
 		target := threadTargetFor(ep.Platform, ep.ChannelID, threadID)
-		if err := s.notifyThread(ctx, ep.Platform, target, threadLine); err != nil {
+		if _, err := s.sendPhaseParent(ctx, ep.Platform, target, threadLine, blockedActionButtons(taskRepo, taskBranch, "", 1)); err != nil {
 			slog.Warn("webhook: escalation thread line failed", "endpoint", ep.Name, "pr_key", prKey, "error", err)
 		}
 	}
-	s.escalateToChannel(ctx, ep, repo, prNumber, PhaseBlocked, what, why)
+	slog.Info("webhook: blocked notice", "pr_key", prKey, "what", what, "why", why)
+	s.escalateToChannel(ctx, ep, formatBlockedCopy(repo, prNumber, copyText, s.statusIcons, true))
 	return true
 }
 

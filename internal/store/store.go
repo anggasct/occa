@@ -262,6 +262,11 @@ type WebhookDeliveryRepo interface {
 	CountReviewDeliveries(ctx context.Context, endpoint, reviewKeyPrefix string, cutoff int64) (int, error)
 	// SetPRKey stamps the owning PR identity on a delivery.
 	SetPRKey(ctx context.Context, id int64, prKey string) error
+	// RunStatsForPR counts the agent runs of a PR (deliveries that started)
+	// and the retries they took (attempts beyond the first).
+	RunStatsForPR(ctx context.Context, prKey string) (runs, retries int, err error)
+	// ListUpdatedSince returns deliveries updated at/after since, oldest first.
+	ListUpdatedSince(ctx context.Context, since int64) ([]WebhookDelivery, error)
 }
 
 type RecoveryEventRepo interface {

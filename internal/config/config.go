@@ -66,6 +66,7 @@ type WebhookConfig struct {
 	StatusColors            map[string]int    `yaml:"status_colors,omitempty"`
 	FallbackPollAfter       time.Duration     `yaml:"fallback_poll_after,omitempty"`
 	FallbackPollRepeatAfter *time.Duration    `yaml:"fallback_poll_repeat_after,omitempty"`
+	Digest                  *DigestConfig     `yaml:"digest,omitempty"`
 }
 
 func DefaultFallbackPollRepeatAfter() time.Duration {
@@ -557,6 +558,9 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 		return Config{}, err
 	}
 
+	if err := validateDigest(fc.Webhooks.Digest); err != nil {
+		return Config{}, err
+	}
 	if err := validateTaskStatusConfig(fc.Webhooks.StatusIcons, fc.Webhooks.StatusColors); err != nil {
 		return Config{}, err
 	}

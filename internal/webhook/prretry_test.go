@@ -144,7 +144,7 @@ func TestRetryModelErrorThreeTimesThenBlocked(t *testing.T) {
 	if !strings.HasPrefix(mentionCalls[0], "chat1|user-42|") {
 		t.Fatalf("mention notification = %q, want the channel and the resolved user id", mentionCalls[0])
 	}
-	for _, want := range []string{"needs you", "Action: /retry · /skip · /cancel"} {
+	for _, want := range []string{"needs you", "the model returned an error", "Next: ", "Open the PR thread to act."} {
 		if !strings.Contains(mentionCalls[0], want) {
 			t.Errorf("escalation copy %q must contain %q", mentionCalls[0], want)
 		}
