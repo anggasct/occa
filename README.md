@@ -30,6 +30,14 @@ provider state.
   runs it on a cron schedule, pushing each result back to the chat.
 - **Webhook ingestion** — HTTP endpoints with per-endpoint secrets that feed
   prompts into a channel for agent analysis.
+- **Repo skill packs** — a repo carries its own working rules as
+  `.occa/skills/<name>/SKILL.md` (plus cross-repo rules in `~/.occa/skills/`).
+  Each run resolves them by trigger (`always`, `keyword`, or `paths` against
+  the dispatched scope) and injects the selected set once, at the top of the
+  session's first prompt. `/skills` lists what a workdir loads;
+  `occa skills lint --workdir <dir>` checks the files in CI and
+  `occa skills explain` shows why a skill would fire. The optional `skills:`
+  block in the config tunes or disables it.
 - **OpenCode process management** — lazy-spawns one agent instance per working
   directory, idles them out, caps capacity, and shuts down gracefully
   (optional auto-install when the `opencode` binary is missing).

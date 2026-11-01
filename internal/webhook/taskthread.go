@@ -14,6 +14,7 @@ import (
 
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/config"
+	"github.com/anggasct/occa/internal/skills"
 	"github.com/anggasct/occa/internal/store"
 )
 
@@ -880,6 +881,9 @@ type TaskOptions struct {
 	PRQueues     store.PRQueueRepo
 	Endpoints    []config.EndpointConfig
 	VerboseSteps bool
+	// Skills injects per-repo skill packs at the top of each run's prompt;
+	// nil leaves every prompt unchanged.
+	Skills *skills.Injector
 }
 
 func (s *Server) recordTaskThread(ep config.EndpointConfig, envelope WebhookEnvelope, workCtx *WebhookWorkContext, status TaskStatus) {

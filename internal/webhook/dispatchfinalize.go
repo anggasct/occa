@@ -725,3 +725,16 @@ func dispatchPRKey(repo, number string) string {
 	}
 	return repo + "#" + number
 }
+
+// DispatchTaskContext gives the run a dispatch starts the task's brief and
+// declared scope; skill triggers match against them.
+func (s *Server) DispatchTaskContext(taskID string) (string, string, bool) {
+	if s == nil || s.dispatchTasks == nil {
+		return "", "", false
+	}
+	task, ok := s.dispatchTasks.Get(strings.TrimSpace(taskID))
+	if !ok {
+		return "", "", false
+	}
+	return task.Brief, task.Scope, true
+}

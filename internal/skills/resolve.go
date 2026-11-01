@@ -137,3 +137,24 @@ func runesEqual(a, b []rune) bool {
 }
 
 func isWordRune(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }
+
+// SplitScope turns a run's free-text scope ("internal/store/*.go, cmd/occa")
+// into the file list paths triggers match against. Entries are separated by
+// commas, semicolons or whitespace; a trailing "/" names a directory and is
+// kept, so "internal/store/" matches a "internal/store/**" pattern.
+func SplitScope(scope string) []string {
+	fields := strings.FieldsFunc(scope, func(r rune) bool {
+		return r == ',' || r == ';' || unicode.IsSpace(r)
+	})
+	out := make([]string, 0, len(fields))
+	seen := map[string]bool{}
+	for _, f := range fields {
+		f = strings.Trim(f, "`'\"()[]")
+		if f == "" || seen[f] {
+			continue
+		}
+		seen[f] = true
+		out = append(out, f)
+	}
+	return out
+}

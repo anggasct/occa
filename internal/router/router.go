@@ -17,6 +17,7 @@ import (
 	"github.com/anggasct/occa/internal/process"
 	"github.com/anggasct/occa/internal/relay"
 	"github.com/anggasct/occa/internal/render"
+	"github.com/anggasct/occa/internal/skills"
 	"github.com/anggasct/occa/internal/store"
 )
 
@@ -54,6 +55,7 @@ func (r *Router) MenuCommands() []channel.MenuCommand {
 		{Alias: "schedules", Description: "View or delete scheduled tasks", HasArgs: true},
 		{Alias: "loop", Description: "Repeat a prompt on an interval", HasArgs: true},
 		{Alias: "loops", Description: "List active loops in this conversation"},
+		{Alias: "skills", Description: "List the skills this workdir loads"},
 		{Alias: "queue", Description: "Show the PR queue (in a PR thread)", HasArgs: true},
 		{Alias: "retry", Description: "Re-run the PR task (in a PR thread)", HasArgs: true},
 		{Alias: "skip", Description: "Skip the active PR run (in a PR thread)", HasArgs: true},
@@ -119,6 +121,7 @@ type Router struct {
 	connectDeps            *ConnectRepoDeps
 	connectConfigPath      string
 	operatorHook           func(ctx context.Context, msg channel.IncomingMessage, name, args string) (string, bool, error)
+	skills                 *skills.Injector
 }
 
 type ScheduleStore interface {
@@ -655,11 +658,23 @@ func (r *Router) executePassthrough(taskCtx context.Context, cancel context.Canc
 		return nil
 	}
 
+	var skillPlan skills.Plan
+	if !strings.HasPrefix(msg.Text, "/") {
+		skillPlan = r.planSkills(ctx, msg, inst, sessionID, text, !resolution.Resumed)
+		if skillPlan.Notice != "" {
+			r.reply(msg, skillPlan.Notice)
+		}
+	}
+
 	dispatch := func(dispatchCtx context.Context) error {
 		if strings.HasPrefix(msg.Text, "/") {
 			return inst.Client().RunCommand(dispatchCtx, sessionID, msg.Text)
 		}
-		return inst.Client().SendMessage(dispatchCtx, sessionID, text, model, attachments)
+		if err := inst.Client().SendMessage(dispatchCtx, sessionID, skillPlan.Prefix(text), model, attachments); err != nil {
+			return err
+		}
+		r.skills.Commit(dispatchCtx, sessionID, skillPlan)
+		return nil
 	}
 
 	var dispatchRun *dispatchRunReport
@@ -801,6 +816,10 @@ func (r *Router) registerDefaults() {
 		Name:    "loops",
 		Handler: r.handleLoops,
 	}
+	r.commands["skills"] = Command{
+		Name:    "skills",
+		Handler: r.handleSkills,
+	}
 	r.commands["webhooks"] = Command{
 		Name:    "webhooks",
 		Handler: r.handleWebhooks,
@@ -878,6 +897,7 @@ func (r *Router) helpText() string {
 		"• /schedules [delete <id>] — view or delete scheduled tasks\n" +
 		"• /loop every <dur> x<n>|for <dur> <prompt> — repeat a prompt on an interval\n" +
 		"• /loops — list active loops in this conversation\n" +
+		"• /skills — list the skills this workdir loads\n" +
 		"• /reset — clear current session and start fresh\n\n" +
 		"All other messages and /commands are forwarded to the agent."
 }
