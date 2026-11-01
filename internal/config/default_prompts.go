@@ -19,7 +19,7 @@ Read live state with gh pr view {{.webhook.pr_number}} --json reviews,commits,ch
 {{if .webhook.comment_trigger}}This is a re-review requested by operator comment ("{{.webhook.comment_body}}") — focus on what the comment asks, then verify against live state.{{end}}
 {{with index .webhook "prior_reviews"}}Earlier reviews on this PR (oldest first), fetched by occa — carry their findings forward and do not repeat ones the new commits fixed:
 {{.}}
-{{end}}If no actionable change is requested, output SKIP with skipped: no action.
+{{end}}Post the review on GitHub with gh pr review {{.webhook.pr_number}} --repo {{.webhook.repository}}: --approve, --request-changes, or --comment with the verdict in the body when the authenticated account is the PR author. A run that posts no review is not a review: if there is nothing to review, output SKIP with skipped: no action.
 Task brief:
 {{.webhook.task_brief}}
 Verify: {{.webhook.task_verify}}.

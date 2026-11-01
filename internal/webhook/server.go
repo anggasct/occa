@@ -50,6 +50,7 @@ type DeliveryStore interface {
 	SetPRKey(ctx context.Context, id int64, prKey string) error
 	Reopen(ctx context.Context, id int64, from []store.WebhookStatus) (bool, error)
 	LatestForPR(ctx context.Context, prKey string) (*store.WebhookDelivery, error)
+	LatestSettledForPR(ctx context.Context, prKey string) (*store.WebhookDelivery, error)
 	LatestByDeliveryPrefix(ctx context.Context, endpoint, prefix string) (*store.WebhookDelivery, error)
 	FindReviewDuplicate(ctx context.Context, endpoint, reviewKey string, excludeID, cutoff int64) (*store.WebhookDelivery, error)
 	CountReviewDeliveries(ctx context.Context, endpoint, reviewKeyPrefix string, cutoff int64) (int, error)
@@ -238,6 +239,14 @@ type Server struct {
 	prMerger     prMergeFunc
 	mergeMethods mergeMethodsFunc
 	compareFiles compareFilesFunc
+	reviewPosted reviewPostedFunc
+	// queuedMarks: which delivery moved a PR card to queued (settled when
+	// that delivery is skipped before it runs).
+	queuedMarksMu sync.Mutex
+	queuedMarks   map[string]queuedMark
+	// ghLoginCached is the account occa runs gh as (review posted check).
+	ghLoginMu     sync.Mutex
+	ghLoginCached string
 	// codeMerge replaces the whole code merge in lane tests; nil runs
 	// runCodeMerge.
 	codeMerge          func(ctx context.Context, ep config.EndpointConfig, workCtx *WebhookWorkContext) (string, error)
@@ -1625,7 +1634,7 @@ func (d *dispatcher) handle(item dispatchItem) {
 			return
 		}
 		if item.prKey != "" {
-			s.markPRQueued(item.prKey, item.ep, earlyEnvelope)
+			s.markPRQueued(item.prKey, item.ep, item.deliveryID, earlyEnvelope)
 			if item.ep.Workflow != "merged" {
 				if state := strings.TrimSpace(stringValue(earlyEnvelope["pr_state"])); state == "merged" || state == "closed" {
 					held = false
@@ -1988,7 +1997,9 @@ func (s *Server) enrichCommentBody(item dispatchItem) ([]byte, error) {
 		)
 		return item.body, nil
 	}
-	if ExtractExecutionKey(item.body).Branch != "" {
+	// A body with a branch but no head (the Review button resolves the head
+	// at run time) still needs the live head for an exact workspace.
+	if key := ExtractExecutionKey(item.body); key.Branch != "" && normalizeRevision(key.HeadRevision) != "" {
 		slog.Info("webhook: comment enrichment skipped",
 			"endpoint", ep.Name,
 			"delivery_id", item.deliveryID,
@@ -2478,7 +2489,7 @@ func (s *Server) executeDeliveryWithFix(ep config.EndpointConfig, body []byte, i
 		}
 	}
 	if allowed, reason := admitDelivery(ep, s.policy, envelope); !allowed {
-		s.markSkipped(id, ep, envelope, reason)
+		s.skipBeforeRun(id, ep, envelope, workCtx.PRKey, deliveryID, reason)
 		return nil
 	}
 
@@ -2497,7 +2508,7 @@ func (s *Server) executeDeliveryWithFix(ep config.EndpointConfig, body []byte, i
 			slog.Warn("webhook: review duplicate lookup failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
 		} else if prior != nil {
 			slog.Info("webhook: duplicate review event skipped", "endpoint", ep.Name, "delivery_id", deliveryID, "review_key", reviewKey, "handled_by", prior.DeliveryID)
-			s.markSkipped(id, ep, envelope, "duplicate review event (same head, already handled by delivery "+prior.DeliveryID+")")
+			s.skipBeforeRun(id, ep, envelope, workCtx.PRKey, deliveryID, "duplicate review event (same head, already handled by delivery "+prior.DeliveryID+")")
 			return nil
 		}
 	}
@@ -2506,7 +2517,7 @@ func (s *Server) executeDeliveryWithFix(ep config.EndpointConfig, body []byte, i
 		limit, ok := s.triggerLimits[ep.Name]
 		if !ok {
 			slog.Error("webhook: comment trigger without configured limits", "endpoint", ep.Name, "delivery_id", deliveryID)
-			s.markSkipped(id, ep, envelope, "trigger rate cap")
+			s.skipBeforeRun(id, ep, envelope, workCtx.PRKey, deliveryID, "trigger rate cap")
 			return nil
 		}
 		windowCutoff := time.Now().Add(-limit.Window).Unix()
@@ -2515,7 +2526,7 @@ func (s *Server) executeDeliveryWithFix(ep config.EndpointConfig, body []byte, i
 			slog.Warn("webhook: review trigger count lookup failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
 		} else if count >= limit.MaxRunsPerPR {
 			slog.Info("webhook: review delivery trigger rate cap reached", "endpoint", ep.Name, "delivery_id", deliveryID, "trigger_prefix", triggerPrefix, "count", count)
-			s.markSkipped(id, ep, envelope, "trigger rate cap")
+			s.skipBeforeRun(id, ep, envelope, workCtx.PRKey, deliveryID, "trigger rate cap")
 			return nil
 		}
 	}
@@ -2592,6 +2603,7 @@ func (s *Server) executeDeliveryWithFix(ep config.EndpointConfig, body []byte, i
 	defer cancel()
 	if workCtx.PRKey != "" {
 		if admissionPhase(ep.Workflow) != "" {
+			s.reopenFailedSurfaceForRun(workCtx.PRKey)
 			phase := PhaseForWorkflow(ep.Workflow)
 			if rootID, _ := s.syncPhaseParent(ctx, ep, workCtx.PRKey, envelope, phase); rootID != "" {
 				workCtx.RootMessageID = rootID
@@ -2607,6 +2619,7 @@ func (s *Server) executeDeliveryWithFix(ep config.EndpointConfig, body []byte, i
 	if isFixWorkflow(ep.Workflow) && strings.TrimSpace(workCtx.PRKey) != "" {
 		fixHeadBefore = normalizeRevision(stringValue(envelope["head_sha"]))
 	}
+	runStart := time.Now()
 	if skipAgent {
 		// The harness already did the whole job (a conflict merge that left
 		// nothing to resolve); finalize pushes it.
@@ -2632,6 +2645,9 @@ func (s *Server) executeDeliveryWithFix(ep config.EndpointConfig, body []byte, i
 		if ferr != nil {
 			err = ferr
 		}
+	}
+	if err == nil && isReviewWorkflow(ep.Workflow) && strings.TrimSpace(workCtx.PRKey) != "" {
+		err = s.verifyReviewPosted(ctx, ep, workCtx, runStart)
 	}
 	s.prMirrorSync(workCtx)
 	supersededSummary := ""

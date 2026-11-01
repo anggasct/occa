@@ -52,6 +52,10 @@ provider state.
   `repos[].merge` picks the method, branch deletion, and the paths an older
   approval may carry over (`stale_approval_paths`); with `auto_fix.conflict` a
   conflicting approved PR starts the conflict fix.
+- **A review is a posted review** — a review run that ends without a review on
+  GitHub from occa's account (and without answering `SKIP`) fails, is retried
+  once with a fresh session, then blocks the PR; it does not count as a review
+  of the head, so a re-review of that head runs.
 - **Provider limits fail fast** — when the agent reports it will retry the
   model only after the run's deadline (a quota or rate limit), the run stops at
   once and the PR blocks with the provider's own message and a Retry button.
