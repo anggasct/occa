@@ -80,6 +80,46 @@ func TestSkillsExplain(t *testing.T) {
 	}
 }
 
+// F-001: lint fails closed when the repo skills directory exists but
+// cannot be read (a regular file in its place gives ENOTDIR), and list
+// surfaces it instead of claiming an empty workdir.
+func TestSkillsUnreadableRepoDir(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".occa"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".occa", "skills"), []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, out, _ := runSkills("lint", "--workdir", root)
+	if code != 1 {
+		t.Fatalf("lint exit = %d, want 1; out=%s", code, out)
+	}
+	if !strings.Contains(out, filepath.Join(".occa", "skills")+":1: unreadable: ") {
+		t.Fatalf("lint line = %q, want path:1: unreadable", out)
+	}
+	code, out, _ = runSkills("list", "--workdir", root, "--global-dir", "")
+	if code != 0 || !strings.Contains(out, "skipped ") || strings.Contains(out, "no skills in this workdir") {
+		t.Fatalf("list exit=%d out=%q", code, out)
+	}
+}
+
+// F-003: explain rejects absolute --scope-file values instead of silently
+// stripping the leading slash and matching the wrong tree.
+func TestSkillsExplainRejectsInvalidScopeFile(t *testing.T) {
+	code, out, errOut := runSkills("explain", "--workdir", skillsFixtureRepo, "--global-dir", skillsFixtureGlobal,
+		"--text", "migrate", "--scope-file", "/internal/store/x.go")
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2; stderr=%s", code, errOut)
+	}
+	if !strings.Contains(errOut, `invalid --scope-file "/internal/store/x.go"`) {
+		t.Fatalf("stderr = %q", errOut)
+	}
+	if strings.Contains(out, "selected store-contract") {
+		t.Fatalf("mangled absolute scope must not select: %s", out)
+	}
+}
+
 func TestSkillsListAndUsage(t *testing.T) {
 	code, out, _ := runSkills("list", "--workdir", skillsFixtureRepo, "--global-dir", skillsFixtureGlobal)
 	if code != 0 || !strings.Contains(out, "occa-global · global · always · 15 runes · shadowed") || !strings.Contains(out, "skipped ") {

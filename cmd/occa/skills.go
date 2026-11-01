@@ -124,6 +124,12 @@ func runSkillsExplain(args []string, stdout, stderr io.Writer) int {
 	opts := skillsOptions(*workdir, *global)
 	set := skills.Load(opts)
 	sel := skills.Select(set, skills.Input{Text: *text, Scope: scope}, opts.ContextMaxRunes)
+	for _, p := range sel.InvalidScope {
+		_, _ = fmt.Fprintf(stderr, "occa skills explain: invalid --scope-file %q: must be relative to the workdir (no leading / or ..)\n", p)
+	}
+	if len(sel.InvalidScope) > 0 {
+		return 2
+	}
 	if len(sel.Applied) == 0 && len(sel.Dropped) == 0 {
 		_, _ = fmt.Fprintln(stdout, "selected: none")
 	}

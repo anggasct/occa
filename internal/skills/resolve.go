@@ -25,6 +25,9 @@ type Selection struct {
 	Applied []Applied
 	// Dropped were triggered but cut by the context budget.
 	Dropped []Applied
+	// InvalidScope are declared scope entries rejected as absolute or
+	// ..-escaping; they never match a paths trigger.
+	InvalidScope []string
 	// Runes counts the rendered block.
 	Runes int
 }
@@ -36,11 +39,17 @@ func Select(set Set, in Input, maxRunes int) Selection {
 	if maxRunes <= 0 {
 		maxRunes = DefaultContextMaxRunes
 	}
+	var sel Selection
 	scope := make([]string, 0, len(in.Scope))
 	for _, p := range in.Scope {
-		if n := normalizePath(p); n != "" {
-			scope = append(scope, n)
+		n, ok := normalizePath(p)
+		if !ok {
+			if strings.TrimSpace(p) != "" {
+				sel.InvalidScope = append(sel.InvalidScope, p)
+			}
+			continue
 		}
+		scope = append(scope, n)
 	}
 	var picked []Applied
 	for _, sk := range set.Skills {
@@ -66,7 +75,10 @@ func Select(set Set, in Input, maxRunes int) Selection {
 		dropped = append(dropped, picked[victim])
 		picked = append(picked[:victim:victim], picked[victim+1:]...)
 	}
-	return Selection{Applied: picked, Dropped: dropped, Runes: utf8.RuneCountInString(Render(picked))}
+	sel.Applied = picked
+	sel.Dropped = dropped
+	sel.Runes = utf8.RuneCountInString(Render(picked))
+	return sel
 }
 
 func triggered(sk Skill, text string, scope []string) (string, bool) {

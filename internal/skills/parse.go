@@ -52,11 +52,15 @@ func failAt(line int, format string, args ...any) error {
 }
 
 // Load reads both scopes and applies repo-over-global precedence. It never
-// fails as a whole: a bad file becomes a LoadError and is left out.
+// fails as a whole: a bad file, or a repo skills directory that exists but
+// cannot be read, becomes a LoadError and is left out.
 func Load(opts Options) Set {
 	opts = opts.withDefaults()
 	var set Set
-	repo, repoErrs, _ := loadScope(opts.repoPath(), ScopeRepo, opts.SkillMaxRunes)
+	repo, repoErrs, rErr := loadScope(opts.repoPath(), ScopeRepo, opts.SkillMaxRunes)
+	if rErr != nil {
+		repoErrs = append(repoErrs, unreadableScope(opts.repoPath(), rErr))
+	}
 	set.Errors = append(set.Errors, repoErrs...)
 	global, globalErrs, gErr := loadScope(opts.globalPath(), ScopeGlobal, opts.SkillMaxRunes)
 	set.Errors = append(set.Errors, globalErrs...)
@@ -77,11 +81,23 @@ func Load(opts Options) Set {
 	return set
 }
 
-// LoadRepo reads only the repo scope, for lint.
+// LoadRepo reads only the repo scope, for lint. A repo skills directory
+// that exists but cannot be read is a LoadError: lint is the enforcement
+// point and must not pass a tree it could not read.
 func LoadRepo(opts Options) ([]Skill, []LoadError) {
 	opts = opts.withDefaults()
-	skills, errs, _ := loadScope(opts.repoPath(), ScopeRepo, opts.SkillMaxRunes)
+	skills, errs, err := loadScope(opts.repoPath(), ScopeRepo, opts.SkillMaxRunes)
+	if err != nil {
+		errs = append(errs, unreadableScope(opts.repoPath(), err))
+	}
 	return skills, errs
+}
+
+// unreadableScope reports a scope directory that exists but could not be
+// listed, at line 1 of the directory path.
+func unreadableScope(dir string, err error) LoadError {
+	abs, _ := filepath.Abs(dir)
+	return LoadError{Path: abs, Line: 1, Reason: "unreadable: " + err.Error()}
 }
 
 // loadScope reads <dir>/<name>/SKILL.md one level deep, sorted by directory

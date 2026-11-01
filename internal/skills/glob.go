@@ -16,14 +16,23 @@ func normalizePattern(p string) string {
 }
 
 // normalizePath turns a declared scope entry into a workdir-relative,
-// slash-separated path.
-func normalizePath(p string) string {
+// slash-separated path. It reports ok=false for absolute or ..-escaping
+// entries: the declared scope is workdir-relative by contract, and a
+// stripped or cleaned absolute path would match the wrong files or none,
+// with no diagnostic.
+func normalizePath(p string) (string, bool) {
 	p = normalizePattern(p)
-	p = strings.TrimPrefix(p, "/")
 	if p == "" {
-		return ""
+		return "", false
 	}
-	return path.Clean(p)
+	if strings.HasPrefix(p, "/") {
+		return "", false
+	}
+	clean := path.Clean(p)
+	if clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", false
+	}
+	return clean, true
 }
 
 // validatePattern rejects patterns path.Match would fail on, segment by

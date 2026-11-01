@@ -260,3 +260,101 @@ func TestLoadEdgeCases(t *testing.T) {
 		t.Fatalf("skills = %s", got)
 	}
 }
+
+// F-001: a repo skills directory that exists but cannot be listed is an
+// error, not a clean empty tree. A regular file in its place gives ENOTDIR.
+func TestRepoDirUnreadable(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".occa"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, DefaultRepoDir), []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	set := Load(Options{Workdir: root})
+	if len(set.Skills) != 0 {
+		t.Fatalf("skills = %v, want none", names(set.Skills))
+	}
+	if len(set.Errors) != 1 || !strings.HasSuffix(set.Errors[0].Path, filepath.FromSlash(DefaultRepoDir)) ||
+		!strings.Contains(set.Errors[0].Reason, "unreadable") {
+		t.Fatalf("errors = %+v", set.Errors)
+	}
+	if set.Errors[0].Line != 1 {
+		t.Fatalf("line = %d, want 1", set.Errors[0].Line)
+	}
+	if _, errs := LoadRepo(Options{Workdir: root}); len(errs) != 1 || !strings.Contains(errs[0].Reason, "unreadable") {
+		t.Fatalf("LoadRepo errors = %+v", errs)
+	}
+}
+
+// Spec validation table: a global dir that cannot be listed contributes
+// zero global skills and is reported once via GlobalUnreadable.
+func TestGlobalDirUnreadable(t *testing.T) {
+	root := t.TempDir()
+	global := filepath.Join(root, "global-skills")
+	if err := os.WriteFile(global, []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeSkill(t, root, "repo-only", "---\nname: repo-only\ndescription: d\ntrigger: always\n---\nok")
+	set := Load(Options{Workdir: root, GlobalDir: global})
+	if set.GlobalUnreadable == nil {
+		t.Fatal("GlobalUnreadable must be set when the global dir cannot be listed")
+	}
+	if got := strings.Join(names(set.Skills), ","); got != "repo:repo-only" {
+		t.Fatalf("skills = %s, want the repo scope only", got)
+	}
+}
+
+// F-003: declared scope entries are workdir-relative; absolute or
+// ..-escaping entries are rejected, not silently mangled into a match.
+func TestNormalizePathRejectsEscape(t *testing.T) {
+	for _, p := range []string{
+		"/internal/store/x.go",
+		"/home/op/repo/internal/store/x.go",
+		"..",
+		"../outside.go",
+		"internal/../../escape.go",
+	} {
+		if n, ok := normalizePath(p); ok {
+			t.Errorf("normalizePath(%q) = %q, want rejection", p, n)
+		}
+	}
+	for _, p := range []string{"internal/store/x.go", "./internal/a.go", "a/../b.go"} {
+		n, ok := normalizePath(p)
+		if !ok {
+			t.Errorf("normalizePath(%q) rejected, want accepted", p)
+			continue
+		}
+		if n == "" || n == ".." || strings.HasPrefix(n, "/") || strings.HasPrefix(n, "../") {
+			t.Errorf("normalizePath(%q) = %q, want workdir-relative", p, n)
+		}
+	}
+}
+
+// F-003: Select excludes rejected scope entries from matching and reports
+// them, so an absolute --scope-file cannot half-match or silently miss.
+func TestSelectRejectsInvalidScope(t *testing.T) {
+	set := Load(fixtureOptions(t))
+	sel := Select(set, Input{Scope: []string{"/internal/store/x.go", "internal/store/sqlite.go"}}, DefaultContextMaxRunes)
+	if len(sel.InvalidScope) != 1 || sel.InvalidScope[0] != "/internal/store/x.go" {
+		t.Fatalf("invalid scope = %v", sel.InvalidScope)
+	}
+	found := false
+	for _, a := range sel.Applied {
+		if a.Skill.Name == "store-contract" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("valid scope entry must still fire store-contract")
+	}
+	sel = Select(set, Input{Scope: []string{"/home/op/repo/internal/store/x.go"}}, DefaultContextMaxRunes)
+	if len(sel.InvalidScope) != 1 {
+		t.Fatalf("invalid scope = %v", sel.InvalidScope)
+	}
+	for _, a := range sel.Applied {
+		if a.Skill.Name == "store-contract" {
+			t.Fatal("absolute scope entry must not fire the paths skill")
+		}
+	}
+}
