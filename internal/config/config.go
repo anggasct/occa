@@ -119,6 +119,7 @@ type EndpointConfig struct {
 	Automation       *RepoAutomation   `yaml:"-"`
 	PromptSource     string            `yaml:"-"`
 	AutoFix          RepoAutoFix       `yaml:"-"`
+	Merge            MergePolicy       `yaml:"-"`
 }
 
 func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {

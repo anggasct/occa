@@ -346,7 +346,11 @@ func (s *Server) runMergedDocsUpdate(ctx context.Context, ep config.EndpointConf
 	if workCtx.Worktree != "" {
 		slog.Info("webhook: merged lane workdir resolved", "endpoint", ep.Name, "delivery_id", item.deliveryID, "path", workCtx.Worktree)
 	}
-	if prompt := strings.TrimSpace(ep.Prompt); prompt != "" {
+	if ep.PromptSource == "builtin" {
+		// The built-in merged prompt only summarizes the merge: occa writes
+		// that line itself instead of starting an agent session.
+		s.postMergedSummary(ctx, ep, envelope, workCtx)
+	} else if prompt := strings.TrimSpace(ep.Prompt); prompt != "" {
 		rendered, err := renderTemplate(prompt, tmplData)
 		if err != nil {
 			slog.Error("webhook: merged prompt render failed", "endpoint", ep.Name, "error", err)

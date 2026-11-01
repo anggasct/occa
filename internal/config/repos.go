@@ -53,6 +53,7 @@ type RepoConfig struct {
 	OnMerged        []MergedAction           `yaml:"on_merged,omitempty"`
 	Prompts         map[string]RepoPromptRef `yaml:"prompts,omitempty"`
 	AutoFix         map[string]bool          `yaml:"auto_fix,omitempty"`
+	Merge           *RepoMerge               `yaml:"merge,omitempty"`
 }
 
 func ResolveRepoAutoFix(autoFix map[string]bool, context string) (RepoAutoFix, error) {
@@ -474,6 +475,13 @@ func expandRepos(repos []RepoConfig, defaults WebhookDefaults) ([]EndpointConfig
 			}
 			if workflow == "merged" {
 				ep.OnMerged = append([]MergedAction(nil), repo.OnMerged...)
+			}
+			if workflow == "merge" {
+				policy, err := ResolveMergePolicy(repo.Merge, source, context)
+				if err != nil {
+					return nil, err
+				}
+				ep.Merge = policy
 			}
 			switch workflow {
 			case "review":

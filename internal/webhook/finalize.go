@@ -40,8 +40,18 @@ func (l *WorkspaceLease) Finalize(ctx context.Context, lane, deliveryID string) 
 	}
 	result.Files = countPorcelainEntries(status)
 	if result.Files > 0 {
+		// A merge the run left unresolved must not be committed: staging
+		// would mark the conflicted files resolved, markers and all.
+		if unmerged, err := m.runner.Run(ctx, l.Path, "diff", "--name-only", "--diff-filter=U"); err == nil && strings.TrimSpace(unmerged) != "" {
+			return result, fmt.Errorf("finalize: unresolved merge conflicts in %s", strings.Join(strings.Fields(unmerged), ", "))
+		}
 		if _, err := m.runner.Run(ctx, l.Path, "add", "-A"); err != nil {
 			return result, fmt.Errorf("finalize: stage workspace changes: %w", err)
+		}
+		if staged, err := m.runner.Run(ctx, l.Path, "diff", "--cached", "-U0"); err == nil {
+			if files := conflictMarkerFiles(staged); len(files) > 0 {
+				return result, fmt.Errorf("finalize: unresolved merge conflicts in %s", strings.Join(files, ", "))
+			}
 		}
 		message := fmt.Sprintf("%s: %d file(s) (delivery %s)", strings.ToLower(strings.TrimSpace(lane)), result.Files, deliveryID)
 		if _, err := m.runner.Run(ctx, l.Path, "commit", "-m", message); err != nil {
@@ -107,4 +117,25 @@ func countPorcelainEntries(out string) int {
 		}
 	}
 	return count
+}
+
+// conflictMarkerFiles lists the files whose added lines carry a merge
+// conflict marker, from a unified diff.
+func conflictMarkerFiles(diff string) []string {
+	var files []string
+	seen := map[string]bool{}
+	current := ""
+	for _, line := range strings.Split(diff, "\n") {
+		if strings.HasPrefix(line, "+++ b/") {
+			current = strings.TrimPrefix(line, "+++ b/")
+			continue
+		}
+		if strings.HasPrefix(line, "+<<<<<<< ") || strings.HasPrefix(line, "+>>>>>>> ") {
+			if current != "" && !seen[current] {
+				seen[current] = true
+				files = append(files, current)
+			}
+		}
+	}
+	return files
 }

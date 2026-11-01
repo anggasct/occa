@@ -233,8 +233,15 @@ type Server struct {
 	// digest is the optional daily digest; digestClock overrides now in tests.
 	digest      *config.DigestConfig
 	digestClock func() time.Time
-	escalated   map[string]bool
-	ageState    *runAgeState
+	// Code merge seams; nil uses gh.
+	mergeFacts         mergeFactsFunc
+	prMerger           prMergeFunc
+	mergeMethods       mergeMethodsFunc
+	mergedSummaryFacts mergedSummaryFunc
+	priorReviews       priorReviewsFunc
+	ciFailures         ciFailuresFunc
+	escalated          map[string]bool
+	ageState           *runAgeState
 }
 
 func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) *Server {
@@ -2563,6 +2570,10 @@ func (s *Server) executeDeliveryWithFix(ep config.EndpointConfig, body []byte, i
 		envelope["model_source"] = "fallback"
 	}
 
+	prepCtx, prepCancel := context.WithTimeout(context.Background(), s.processingTimeout)
+	skipAgent := s.prepareLaneContext(prepCtx, ep, envelope, workCtx, lease)
+	prepCancel()
+
 	_, rendered, err := renderDeliveryPrompt(ep, body, workCtx)
 	if err != nil {
 		slog.Error("webhook: template render failed", "endpoint", ep.Name, "delivery_id", deliveryID, "payload_bytes", len(body), "error", err)
@@ -2599,7 +2610,20 @@ func (s *Server) executeDeliveryWithFix(ep config.EndpointConfig, body []byte, i
 	if isFixWorkflow(ep.Workflow) && strings.TrimSpace(workCtx.PRKey) != "" {
 		fixHeadBefore = normalizeRevision(stringValue(envelope["head_sha"]))
 	}
-	err = s.executor(ctx, ep.Platform, ep.ChannelID, wrapped, workCtx)
+	if skipAgent {
+		// The harness already did the whole job (a conflict merge that left
+		// nothing to resolve); finalize pushes it.
+		err = nil
+	} else if codeMergeFor(ep) && strings.TrimSpace(workCtx.PRKey) != "" {
+		reason, merr := s.runCodeMerge(ctx, ep, workCtx)
+		if merr == nil && reason != "" {
+			s.markSkipped(id, ep, envelope, "merge skipped: "+reason)
+			return nil
+		}
+		err = merr
+	} else {
+		err = s.executor(ctx, ep.Platform, ep.ChannelID, wrapped, workCtx)
+	}
 	if err == nil {
 		fctx, fcancel := context.WithTimeout(context.Background(), harnessFinalizeTimeout)
 		_, ferr := lease.Finalize(fctx, ep.Workflow, deliveryID)
