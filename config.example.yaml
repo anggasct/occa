@@ -140,6 +140,10 @@ webhooks:
       # auto_fix: # optional automatic fix triggers (absent = both off)
       #   ci: false # enqueue fix on red check_suite (needs full automation for the PR author)
       #   conflict: false # merge dirty-tree reason into fix at dequeue (same policy gate)
+      # merge: # optional merge lane policy
+      #   mode: auto # auto (default): occa merges in code with the built-in merge prompt, the agent with prompts.merge; code | agent force one
+      #   method: "" # merge | squash | rebase; empty = the repository's allowed method (merge > squash > rebase)
+      #   delete_branch: false # pass --delete-branch to gh pr merge
       # on_merged: [] # optional post-merge extras (default: just close the PR thread)
       # - prompt_file: "merged-vault.md" # one agent turn with your prompt file (stays in ~/.occa/webhooks, never in this repo)
       # - run: "make changelog" # one command, run with the repo checkout as cwd
