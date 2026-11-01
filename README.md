@@ -56,6 +56,11 @@ provider state.
   GitHub from occa's account (and without answering `SKIP`) fails, is retried
   once with a fresh session, then blocks the PR; it does not count as a review
   of the head, so a re-review of that head runs.
+- **Blocked PRs talk back** — a push to a blocked PR unblocks it (except the
+  auto-fix storm cap) and says so in the thread; a re-review request on a
+  blocked PR gets one line naming the block and the buttons. PR threads,
+  their commands and buttons keep working after a restart (the registry is
+  filled from the PR queue at start).
 - **Provider limits fail fast** — when the agent reports it will retry the
   model only after the run's deadline (a quota or rate limit), the run stops at
   once and the PR blocks with the provider's own message and a Retry button.

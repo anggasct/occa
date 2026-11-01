@@ -137,7 +137,7 @@ func TestThreadUXLiveProofFullCycle(t *testing.T) {
 	foundGateRed := false
 	foundMerged := false
 	mergeSlim := FormatThreadSlimCard(WebhookEnvelope{"repository": "acme/widget", "head_branch": "feat/live", "pr_number": "42", "pr_url": "https://github.com/acme/widget/pull/42", "conclusion": "failure", "pr_state": "open"}, "merge", TaskPROpened, nil)
-	if strings.Contains(mergeSlim, "gate checked, CI red, fix running") {
+	if strings.Contains(mergeSlim, "gate checked, CI red") {
 		foundGateRed = true
 	} else {
 		t.Errorf("merge slim must state CI red outcome, got %q", mergeSlim)

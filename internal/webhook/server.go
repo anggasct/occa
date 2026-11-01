@@ -788,6 +788,7 @@ func (s *Server) repairPRQueueInvariants(ctx context.Context, prKey string) {
 }
 
 func (s *Server) Start(ctx context.Context) error {
+	s.hydrateTaskThreads(ctx)
 	s.recoverStale(ctx)
 	slog.Info("webhook: " + s.RecoverPRQueue())
 	s.repairPRQueueInvariants(ctx, "")
@@ -1562,8 +1563,12 @@ func (d *dispatcher) handle(item dispatchItem) {
 	}
 	if item.prKey != "" {
 		if row, _ := s.blockedQueueRow(context.Background(), item.prKey); row != nil {
-			s.markSkipped(receipt.ID, item.ep, normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", item.ep.CommentTrigger), blockedQueueSkipReason(item.prKey, row.BlockedReason, row.ActiveKind))
-			return
+			blockedEnvelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", item.ep.CommentTrigger)
+			if !s.unblockOnNewHead(item, row, blockedEnvelope) {
+				s.markSkipped(receipt.ID, item.ep, blockedEnvelope, blockedQueueSkipReason(item.prKey, row.BlockedReason, row.ActiveKind))
+				s.noteBlockedSkip(item, row, blockedEnvelope)
+				return
+			}
 		}
 		if err := s.deliveries.SetPRKey(context.Background(), receipt.ID, item.prKey); err != nil {
 			slog.Warn("webhook: pr key stamp failed", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "error", err)
