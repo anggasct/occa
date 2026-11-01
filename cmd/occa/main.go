@@ -88,6 +88,9 @@ func main() {
 	if len(os.Args) >= 2 && os.Args[1] == "db" {
 		os.Exit(runDBCommand(os.Args[2:]))
 	}
+	if len(os.Args) >= 2 && os.Args[1] == "skills" {
+		os.Exit(runSkillsCommand(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	if len(os.Args) >= 3 && os.Args[1] == "webhooks" && os.Args[2] == "check-config" {
 		os.Exit(runWebhooksCheckConfig(os.Args[3:]))
 	}
