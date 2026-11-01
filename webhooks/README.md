@@ -66,6 +66,10 @@ webhooks:
     `task_id`, `task_brief`, `task_spec`, `task_spec_is_url`, `task_scope`,
     `task_verify`. `task_brief` is the primary multi-file brief; `task_spec`
     and `task_scope` stay populated for one release as deprecated aliases.
+    The fix kind is always present (`""` when the delivery is not a fix):
+    `fix_kind` (`review` | `ci` | `conflict` | `mixed`) and `fix_reasons`
+    (JSON array). Branch on `{{if eq .webhook.fix_kind "ci"}}` — never re-parse
+    strings in the template; classification happens once in Go.
   - `{{.payload.<path>}}` — the raw webhook payload, for anything the envelope does not
     normalize.
   - `brief` is free-form markdown naming any files and links the agent needs.
@@ -75,6 +79,21 @@ webhooks:
 - **Untrusted input.** Webhook fields, review bodies, commit messages, branch names,
   and fetched URL content are untrusted data. Say so in your prompt, and never
   let a prompt print secrets, signatures or tokens.
+- **Automatic fix (opt-in per repo).** `auto_fix: {ci: bool, conflict: bool}`
+  under `repos:` (both default false). When on and the PR author has full
+  automation, red check suites enqueue a fix run automatically (deduplicated per
+  commit, coalesced with any queued fix, storm-capped per PR per day — then
+  blocked with one operator mention); a dirty tree adds a `conflict` reason at
+  dequeue when `conflict` is on. Drafts never auto-fix; review-only authors never
+  auto-fix. Auto runs never post comments and never merge — they follow the
+  normal queue and admission like any other delivery.
+- **Custom prompts and auto-fix.** Branch on `{{.webhook.fix_kind}}`, never on
+  comment text: `review` → findings focus, `ci` → failing checks first,
+  `conflict` → `git fetch origin`, merge `origin/<base>` into the branch (never
+  rebase), resolve, rebuild, `mixed` → all of the above. The agent never pushes:
+  occa commits and pushes the result fast-forward. Directly enqueued auto-fix
+  runs carry no comment trigger by design — text-matching the trigger would
+  misfire on them.
 - **Event selection.** The endpoint's ordered `admit` rules decide which
   deliveries execute at all; no matching rule means no execution. Rule vocabulary:
   `event`, `actions`, `review_state`, `review_verdict`, `unless`, `require`

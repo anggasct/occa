@@ -24,6 +24,8 @@ func TestBuiltinRendersAcrossTriggerEvents(t *testing.T) {
 	for _, tc := range cases {
 		envelope := normalizeWebhook([]byte(tc.body), tc.eventType, "del-x", testVerdicts(), false, "", tc.triggers)
 		injectTaskContext(envelope, ExtractExecutionKey([]byte(tc.body)), NewDispatchStore())
+		reasons := fixReasonsFromEnvelope(envelope)
+		injectFixContext(envelope, fixKindOf(reasons), encodeFixReasons(reasons))
 		rendered, err := renderTemplate(config.BuiltinPrompt(tc.workflow), map[string]any{"webhook": envelope})
 		if err != nil {
 			t.Fatalf("%s/%s without task: %v", tc.workflow, tc.eventType, err)
@@ -50,6 +52,8 @@ func TestBuiltinRendersWithTaskAcrossEvents(t *testing.T) {
 		envelope := normalizeWebhook([]byte(tc.body), tc.eventType, "del-x", testVerdicts(), false, "", tc.triggers)
 		key := ExtractExecutionKey([]byte(tc.body))
 		injectTaskContext(envelope, key, store)
+		reasons := fixReasonsFromEnvelope(envelope)
+		injectFixContext(envelope, fixKindOf(reasons), encodeFixReasons(reasons))
 		for _, workflow := range []string{"review", "fix", "merge", "merged"} {
 			if _, err := renderTemplate(config.BuiltinPrompt(workflow), map[string]any{"webhook": envelope}); err != nil {
 				t.Fatalf("%s/%s with task: %v", workflow, tc.eventType, err)

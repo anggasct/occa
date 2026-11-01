@@ -20,6 +20,8 @@ func minimalEnvelope() WebhookEnvelope {
 		"review_verdict":  "approved",
 		"comment_trigger": "",
 		"comment_body":    "",
+		"fix_kind":        "",
+		"fix_reasons":     "[]",
 	}
 }
 

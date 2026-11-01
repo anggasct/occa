@@ -84,7 +84,21 @@ func runWebhooksCheckConfig(args []string) int {
 	}
 	fmt.Printf("OK: %d endpoint(s)\n", len(cfg.Webhooks.Endpoints))
 	fmt.Printf("repos: %d dispatch repo(s)\n", len(cfg.Webhooks.Repos))
+	for _, repo := range cfg.Webhooks.Repos {
+		autoFix, err := config.ResolveRepoAutoFix(repo.AutoFix, "")
+		if err != nil {
+			autoFix = config.RepoAutoFix{}
+		}
+		fmt.Printf("repo %s auto_fix ci=%s conflict=%s\n", repo.Repo, onOff(autoFix.CI), onOff(autoFix.Conflict))
+	}
 	return 0
+}
+
+func onOff(v bool) string {
+	if v {
+		return "on"
+	}
+	return "off"
 }
 
 func joinDurations(durations []time.Duration) string {

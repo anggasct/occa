@@ -136,6 +136,8 @@ type Server struct {
 	promptDir             string
 	retryBackoffs         map[failureClass][]time.Duration
 	retryBodyBuilder      func(ctx context.Context, repo, number, kind string) (body []byte, eventType string, err error)
+	autoFixBodyBuilder    func(ctx context.Context, repo, number string) (body []byte, eventType, author string, err error)
+	mergeableChecker      func(ctx context.Context, repo, number string) (prLiveState, error)
 	prAuthorResolver      func(ctx context.Context, repo, number string) (string, error)
 	channels              ChannelStore
 	sessions              TakeoverStore
@@ -327,6 +329,7 @@ func New(cfg config.WebhookConfig, executor Executor, deliveries DeliveryStore) 
 			return ghReviewObserver(ctx, repo, number, trustLogins)
 		}
 	}
+	srv.mergeableChecker = ghPrLiveState
 	return srv
 }
 
@@ -502,6 +505,21 @@ func (s *Server) SetOperatorAuthorizer(fn func(platform, userID string) bool) {
 
 func (s *Server) SetPromptDir(dir string) {
 	s.promptDir = dir
+}
+
+func (s *Server) SetAutoFixBodyBuilder(fn func(ctx context.Context, repo, number string) (body []byte, eventType, author string, err error)) {
+	s.autoFixBodyBuilder = fn
+}
+
+func (s *Server) SetMergeableChecker(fn func(ctx context.Context, repo, number string) (prLiveState, error)) {
+	s.mergeableChecker = fn
+}
+
+func (s *Server) checkMergeable(ctx context.Context, repo, number string) (prLiveState, error) {
+	if s.mergeableChecker != nil {
+		return s.mergeableChecker(ctx, repo, number)
+	}
+	return ghPrLiveState(ctx, repo, number)
 }
 
 func (s *Server) SetRetryBodyBuilder(fn func(ctx context.Context, repo, number, kind string) (body []byte, eventType string, err error)) {
@@ -1215,6 +1233,8 @@ type dispatchItem struct {
 	replayID    int64
 	requeues    int
 	mergedRetry int
+	fixKind     string
+	fixReasons  []string
 }
 
 type dispatcher struct {
@@ -1476,6 +1496,13 @@ func (d *dispatcher) handle(item dispatchItem) {
 	}
 	if item.prKey != "" && strings.EqualFold(strings.TrimSpace(item.ep.Workflow), "merge") {
 		envelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", item.ep.CommentTrigger)
+		// A red suite may start an auto-fix whatever the merge gates decide
+		// next: the fix needs no approval, the merge does.
+		if strings.EqualFold(strings.TrimSpace(item.eventType), "check_suite") {
+			if allowed, _ := admitDelivery(item.ep, s.policy, envelope); allowed {
+				s.maybeAutoFixCI(context.Background(), item.ep, envelope, ExtractExecutionKey(item.body), item.prKey)
+			}
+		}
 		s.recordMergeGate(item.prKey, envelope)
 		if verdict, blocked := s.mergeGateBlocked(item.prKey); blocked {
 			commit := s.mergeGateCommit(item.prKey)
@@ -1589,6 +1616,15 @@ func (d *dispatcher) handle(item dispatchItem) {
 					return
 				}
 			}
+			if item.ep.Workflow == "fix" {
+				if skip, why := s.revalidateFixItem(&item, earlyEnvelope); skip {
+					held = false
+					s.releaseEvent()
+					slog.Info("webhook: fix skipped at dequeue", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "pr_key", item.prKey, "reason", why)
+					s.markSkipped(receipt.ID, item.ep, earlyEnvelope, why)
+					return
+				}
+			}
 			if item.ep.Workflow == "merge" && d.hasQueuedHigher() {
 				if item.requeues >= 3 {
 					held = false
@@ -1608,7 +1644,7 @@ func (d *dispatcher) handle(item dispatchItem) {
 		lease, werr := s.resolveWorkspace(item)
 		if werr == nil {
 			allowRetry := func() bool { return !incompleteRetried }
-			execErr := s.executeDelivery(item.ep, item.body, receipt.ID, item.deliveryID, item.eventType, receipt.Attempt, lease, allowRetry, d.touch)
+			execErr := s.executeDeliveryWithFix(item.ep, item.body, receipt.ID, item.deliveryID, item.eventType, receipt.Attempt, lease, allowRetry, d.touch, item.fixKind, encodeFixReasons(item.fixReasons))
 			held = false
 			s.releaseEvent()
 			s.pruneIfDue()
@@ -2272,9 +2308,18 @@ func (s *Server) ensureReviewDedupeHead(envelope WebhookEnvelope) {
 }
 
 func (s *Server) executeDelivery(ep config.EndpointConfig, body []byte, id int64, deliveryID, eventType string, attempt int, lease *WorkspaceLease, allowRetryIncomplete func() bool, heartbeat func()) error {
+	return s.executeDeliveryWithFix(ep, body, id, deliveryID, eventType, attempt, lease, allowRetryIncomplete, heartbeat, "", "")
+}
+
+func (s *Server) executeDeliveryWithFix(ep config.EndpointConfig, body []byte, id int64, deliveryID, eventType string, attempt int, lease *WorkspaceLease, allowRetryIncomplete func() bool, heartbeat func(), fixKind, fixReasons string) error {
 	key := ExtractExecutionKey(body)
 	envelope := normalizeWebhook(body, eventType, deliveryID, s.verdicts, false, "", ep.CommentTrigger)
 	injectTaskContext(envelope, key, s.dispatchTasks)
+	if k := strings.TrimSpace(strings.ToLower(fixKind)); k != fixKindReview && k != fixKindCI && k != fixKindConflict && k != fixKindMixed {
+		reasons := fixReasonsFromEnvelope(envelope)
+		fixKind, fixReasons = fixKindOf(reasons), encodeFixReasons(reasons)
+	}
+	injectFixContext(envelope, fixKind, fixReasons)
 	s.sweepBranchSession(context.Background(), ep.Platform, ep.ChannelID, envelope)
 
 	workCtx := &WebhookWorkContext{
