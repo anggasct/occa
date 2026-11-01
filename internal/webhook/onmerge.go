@@ -149,6 +149,7 @@ func (s *Server) handleMergedDelivery(item dispatchItem, receipt *store.WebhookD
 		dropped = s.drainPRQueue(d, prKey)
 	}
 	s.abortPRSession(ctx, prKey, repo)
+	s.closeBlockedOnMerge(ctx, prKey)
 	s.prMirrorClearActive(prKey)
 	s.markMergedTerminal(item, envelope, prKey, repo, prNumber)
 	ok, err := s.deliveries.Transition(ctx, receipt.ID, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusCompleted, "merged — queue drained")
@@ -163,6 +164,26 @@ func (s *Server) handleMergedDelivery(item dispatchItem, receipt *store.WebhookD
 		)
 	}
 	s.scheduleMergedDocsUpdate(item, envelope, prKey)
+}
+
+// closeBlockedOnMerge lifts the block of a PR whose merge is confirmed, so the
+// clear that follows drains the row. ClearActive keeps a blocked row blocked
+// on purpose — right for an open PR waiting on the operator, wrong for a
+// merged one, whose row would otherwise stay blocked and never be pruned.
+func (s *Server) closeBlockedOnMerge(ctx context.Context, prKey string) {
+	if s.prQueues == nil || strings.TrimSpace(prKey) == "" {
+		return
+	}
+	row, err := s.prQueues.Get(ctx, prKey)
+	if err != nil || row == nil || row.Status != store.PRStatusBlocked {
+		return
+	}
+	if err := s.prQueues.Unblock(ctx, prKey); err != nil {
+		slog.Warn("webhook: merged unblock failed", "pr_key", prKey, "error", err)
+		return
+	}
+	s.clearEscalated(prKey)
+	slog.Info("webhook: merged PR closed its blocked row", "pr_key", prKey, "blocked_reason", row.BlockedReason)
 }
 
 // markMergedTerminal moves the PR surface to its terminal phase: the parent

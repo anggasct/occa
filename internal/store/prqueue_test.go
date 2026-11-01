@@ -201,6 +201,42 @@ func TestPRQueueBlocked(t *testing.T) {
 	}
 }
 
+// A run that ends on a blocked, still-open PR must not lift the block; only a
+// confirmed merge (Unblock, then ClearActive) drains the row.
+func TestPRQueueClearActiveKeepsBlockedUntilUnblocked(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+	repo := s.PRQueueRepo()
+	const key = "acme/widget#12"
+
+	if _, err := repo.EnsurePR(ctx, key, "", ""); err != nil {
+		t.Fatalf("EnsurePR: %v", err)
+	}
+	if err := repo.SetActive(ctx, key, "fix", "session-12", 21); err != nil {
+		t.Fatalf("SetActive: %v", err)
+	}
+	if err := repo.SetBlocked(ctx, key, "fix run made no change"); err != nil {
+		t.Fatalf("SetBlocked: %v", err)
+	}
+	if err := repo.ClearActive(ctx, key); err != nil {
+		t.Fatalf("ClearActive: %v", err)
+	}
+	run, _ := repo.Get(ctx, key)
+	if run.Status != PRStatusBlocked || run.BlockedReason != "fix run made no change" {
+		t.Fatalf("ClearActive must keep a blocked row blocked: %+v", run)
+	}
+	if err := repo.Unblock(ctx, key); err != nil {
+		t.Fatalf("Unblock: %v", err)
+	}
+	if err := repo.ClearActive(ctx, key); err != nil {
+		t.Fatalf("ClearActive: %v", err)
+	}
+	run, _ = repo.Get(ctx, key)
+	if run.Status != PRStatusDrained || run.BlockedReason != "" || run.ActiveSession != "" || run.RetryCount != 0 {
+		t.Fatalf("Unblock then ClearActive must drain the row: %+v", run)
+	}
+}
+
 func TestPRQueueListAndPrune(t *testing.T) {
 	s := tempStore(t)
 	ctx := context.Background()
