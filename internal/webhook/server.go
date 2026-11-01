@@ -1427,6 +1427,40 @@ func (d *dispatcher) retire(reason string) {
 	}
 }
 
+// mergeLacksLiveApproval reports whether the live PR is open with no review
+// the merge turn could accept as an approval, so the turn would only
+// rediscover that. A lookup failure or a non-open PR lets the turn decide.
+func (s *Server) mergeLacksLiveApproval(item dispatchItem) bool {
+	repo, number, ok := splitPRKey(item.prKey)
+	if !ok {
+		return false
+	}
+	facts, err := s.reconcileFactsFor(context.Background(), repo, number)
+	if err != nil {
+		slog.Info("webhook: merge pre-gate lookup failed",
+			"endpoint", item.ep.Name,
+			"delivery_id", item.deliveryID,
+			"pr_key", item.prKey,
+			"error", err,
+		)
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(facts.State), "OPEN") || facts.ApprovalCandidate {
+		return false
+	}
+	head := facts.HeadSHA
+	if len(head) > 10 {
+		head = head[:10]
+	}
+	slog.Info("webhook: merge refused, no approval on live PR",
+		"endpoint", item.ep.Name,
+		"delivery_id", item.deliveryID,
+		"pr_key", item.prKey,
+		"head", head,
+	)
+	return true
+}
+
 func (d *dispatcher) handle(item dispatchItem) {
 	s := d.server
 	if item.prKey != "" {
@@ -1457,6 +1491,10 @@ func (d *dispatcher) handle(item dispatchItem) {
 				reason += " recorded for " + commit
 			}
 			s.markSkipped(receipt.ID, item.ep, envelope, reason)
+			return
+		}
+		if s.mergeLacksLiveApproval(item) {
+			s.markSkipped(receipt.ID, item.ep, envelope, "merge skipped: no valid approval on live PR")
 			return
 		}
 	}
@@ -1614,8 +1652,22 @@ func (d *dispatcher) handle(item dispatchItem) {
 			}
 			if execErr != nil && errors.Is(execErr, relay.ErrWebhookResponseIncomplete) && !incompleteRetried {
 				incompleteRetried = true
+				// The watchdog already settled this delivery and handed the
+				// key to a fresh dispatcher: re-running it here would start a
+				// second turn beside the new owner.
+				if d.watchdogTookOver() {
+					slog.Error("webhook: self-heal dropped, run taken over by watchdog",
+						"endpoint", item.ep.Name,
+						"delivery_id", item.deliveryID,
+						"pr_key", item.prKey,
+					)
+					return
+				}
+				// A re-run needs a processing row behind it; without one the
+				// delivery belongs to someone else.
 				if tErr := s.deliveries.BumpAttempt(context.Background(), receipt.ID); tErr != nil {
 					slog.Error("webhook: self-heal retry bump failed", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "error", tErr)
+					return
 				}
 				receipt.Attempt++
 				continue
@@ -1802,6 +1854,9 @@ func (s *Server) failWorkspace(item dispatchItem, receipt *store.WebhookDelivery
 		summary = clipRunes(combined, maxErrorSummaryRunes)
 	}
 	s.failDelivery(item.ep, receipt.ID, item.deliveryID, item.eventType, envelope, summary, workCtx)
+	if item.prKey != "" && (errors.Is(err, ErrWorkspaceDirty) || errors.Is(err, ErrWorktreeConflict)) {
+		s.handOffUnusableWorkspace(item, err)
+	}
 	threadID := workCtx.ThreadID
 	if threadID == "" {
 		if _, _, rec, ok := s.tasks.ResolveForDelivery(WebhookExecutionKey{}, envelope, "workspace-fail-envelope"); ok {
@@ -1830,6 +1885,25 @@ func (s *Server) failWorkspace(item dispatchItem, receipt *store.WebhookDelivery
 		slog.Warn("webhook: workspace failure thread card failed", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "thread_id", threadID, "error", nErr)
 	}
 	return false
+}
+
+// handOffUnusableWorkspace blocks an open PR whose worktree cannot be used.
+// A merged, closed or unknown PR is left as the failed delivery already
+// recorded.
+func (s *Server) handOffUnusableWorkspace(item dispatchItem, werr error) {
+	if s.prQueues == nil {
+		return
+	}
+	ctx := context.Background()
+	row, err := s.prQueues.Get(ctx, item.prKey)
+	if err != nil || row == nil {
+		return
+	}
+	state, sErr := s.newPRStateDecision(item.prKey).resolve(ctx)
+	if sErr != nil || state != PRStateOpen {
+		return
+	}
+	s.handOffWorkspace(item.ep, item.prKey, row, werr)
 }
 
 func (s *Server) enrichCommentBody(item dispatchItem) ([]byte, error) {

@@ -26,6 +26,9 @@ type ReconcileFacts struct {
 	HeadRepo      string
 	CIGreen       bool
 	ReviewVerdict string
+	// ApprovalCandidate reports whether any reviewer's latest verdict, on any
+	// commit, is an approval the merge lane could accept.
+	ApprovalCandidate bool
 }
 
 type ReconcileFactsResolver func(ctx context.Context, repo, number string) (ReconcileFacts, error)
@@ -388,6 +391,8 @@ func ghReconcileFacts(ctx context.Context, repo, number string, trustLogins map[
 		HeadRepo:      strings.TrimSpace(raw.HeadRepository.NameWithOwner),
 		CIGreen:       checksGreen(raw.StatusCheckRollup),
 		ReviewVerdict: ghReviewVerdictForHead(raw.Reviews, raw.HeadRefOid, raw.Author.Login, trustLogins),
+
+		ApprovalCandidate: hasApprovalCandidate(raw.Reviews, raw.Author.Login, trustLogins),
 	}
 	return facts, nil
 }
@@ -434,6 +439,39 @@ func ghReviewVerdictForHead(reviews []ghReconcileReview, head, prAuthor string, 
 		}
 	}
 	return result
+}
+
+// hasApprovalCandidate reports whether any reviewer's latest verdict on the
+// PR — on any commit — is an approval the merge prompt could accept. The head
+// is not consulted: an approval on an older commit can still merge a
+// docs-only delta, and the merge turn owns that call.
+func hasApprovalCandidate(reviews []ghReconcileReview, prAuthor string, trustLogins map[string]bool) bool {
+	type observed struct {
+		verdict string
+		at      string
+	}
+	latest := make(map[string]observed)
+	for index, review := range reviews {
+		verdict := reviewVerdict(review, prAuthor, trustLogins)
+		if verdict == "" {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(review.Author.Login))
+		if key == "" {
+			key = fmt.Sprintf("review:%d", index)
+		}
+		submitted := strings.TrimSpace(review.SubmittedAt)
+		if previous, ok := latest[key]; ok && previous.at > submitted {
+			continue
+		}
+		latest[key] = observed{verdict: verdict, at: submitted}
+	}
+	for _, item := range latest {
+		if item.verdict == "approved" {
+			return true
+		}
+	}
+	return false
 }
 
 // reviewVerdict maps a review to the verdict it expresses. GitHub's review

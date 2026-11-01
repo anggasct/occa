@@ -340,6 +340,38 @@ func (s *Server) handOffPermissionDenied(ep config.EndpointConfig, prKey string,
 	)
 }
 
+// handOffWorkspace blocks a PR whose run could not get its worktree because
+// the tree is dirty with changes occa did not make, or is attached to another
+// execution. Waiting does not clean it, so the operator gets the path and the
+// PR stays resumable with retry once the tree is fixed.
+func (s *Server) handOffWorkspace(ep config.EndpointConfig, prKey string, row *store.PRRun, werr error) {
+	kind := runKind(row)
+	if kind == "run" {
+		if lane := strings.TrimSpace(s.queueKind(ep.Name)); lane != "" {
+			kind = lane
+		}
+	}
+	detail := ""
+	if werr != nil {
+		detail = replyExcerpt(werr.Error(), ep.Secret)
+	}
+	reason := kind + " could not get its worktree — operator action required"
+	why := "workspace not usable"
+	if detail != "" {
+		reason += ": " + detail
+		why = detail
+	}
+	if !s.escalateBlock(ep, prKey, row, reason, kind+" run could not start", why) {
+		return
+	}
+	slog.Warn("webhook: PR handed off, workspace not usable",
+		"endpoint", ep.Name,
+		"pr_key", prKey,
+		"kind", kind,
+		"error", detail,
+	)
+}
+
 func runKind(row *store.PRRun) string {
 	if kind := strings.TrimSpace(row.ActiveKind); kind != "" {
 		return kind

@@ -221,12 +221,36 @@ func (t WebhookTurn) denyUnhandledPermission(ctx context.Context, ev Event) stri
 		return ""
 	}
 	attrs = append(attrs, "request_id", requestID)
-	if err := replyPermission(ctx, t.Client, requestID, PermissionReject); err != nil {
+	feedback, err := rejectPermission(ctx, t.Client, requestID, deniedPermissionMessage(permission, patterns))
+	attrs = append(attrs, "feedback", feedback)
+	if err != nil {
 		slog.Error("webhook: permission denied, no handler", append(attrs, "error", err)...)
 		return ""
 	}
 	slog.Warn("webhook: permission denied, no handler", attrs...)
 	return strings.TrimSpace(permission + " " + patterns)
+}
+
+// deniedPermissionMessage is what the model reads as the tool error when a
+// webhook lane refuses a permission.
+func deniedPermissionMessage(permission, scope string) string {
+	asked := strings.TrimSpace(permission + " " + scope)
+	return "occa: this automated run is not allowed " + asked + ". Do not ask for it again. Continue the task without it; if the task cannot be finished without it, say so in one line of your final reply."
+}
+
+// rejectPermission refuses a request with feedback when the client can carry
+// it, so the agent keeps working, and with a plain rejection otherwise. It
+// reports whether the feedback form was used.
+func rejectPermission(ctx context.Context, client Client, requestID, message string) (feedback bool, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("relay: reply permission: %v", r)
+		}
+	}()
+	if replier, ok := client.(PermissionFeedbackReplier); ok {
+		return true, replier.ReplyPermissionWithMessage(ctx, requestID, PermissionReject, message)
+	}
+	return false, replyPermission(ctx, client, requestID, PermissionReject)
 }
 
 const (
