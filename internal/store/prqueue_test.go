@@ -13,8 +13,8 @@ func TestPRQueueSchemaVersion(t *testing.T) {
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatalf("read schema version: %v", err)
 	}
-	if version != 23 {
-		t.Fatalf("schema version = %d, want 23", version)
+	if version != 24 {
+		t.Fatalf("schema version = %d, want 24", version)
 	}
 }
 
@@ -395,5 +395,61 @@ func TestRepairInvariantsScopedToPRKey(t *testing.T) {
 	}
 	if missing.Status != PRStatusDrained {
 		t.Fatalf("missing-delivery phantom not repaired: %+v", missing)
+	}
+}
+
+func TestPRQueueEnqueueFixRoundTrip(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+	repo := s.PRQueueRepo()
+	const key = "acme/widget#7"
+
+	id, err := repo.EnqueueFix(ctx, key, "github-acme-fix", "check_suite", 11, 3, "ci", `["ci"]`)
+	if err != nil {
+		t.Fatalf("EnqueueFix: %v", err)
+	}
+	if id == 0 {
+		t.Fatal("EnqueueFix returned zero id")
+	}
+	items, err := repo.ListItems(ctx, key)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("ListItems: %v (n=%d)", err, len(items))
+	}
+	if items[0].FixKind != "ci" || items[0].FixReasons != `["ci"]` {
+		t.Fatalf("fix fields not persisted: %+v", items[0])
+	}
+	if err := repo.SetItemFixReasons(ctx, id, "mixed", `["ci","review"]`); err != nil {
+		t.Fatalf("SetItemFixReasons: %v", err)
+	}
+	got, err := repo.DequeueNext(ctx, key)
+	if err != nil || got == nil {
+		t.Fatalf("DequeueNext: %v %+v", err, got)
+	}
+	if got.FixKind != "mixed" || got.FixReasons != `["ci","review"]` {
+		t.Fatalf("merged reasons not visible at dequeue: %+v", got)
+	}
+}
+
+func TestPRQueueAutoFixState(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+	repo := s.PRQueueRepo()
+	const key = "acme/widget#8"
+
+	if _, err := repo.EnsurePR(ctx, key, "thread-1", "root-1"); err != nil {
+		t.Fatalf("EnsurePR: %v", err)
+	}
+	if err := repo.SetAutoFixState(ctx, key, 2, 1700000001, "abc1234"); err != nil {
+		t.Fatalf("SetAutoFixState: %v", err)
+	}
+	run, err := repo.Get(ctx, key)
+	if err != nil || run == nil {
+		t.Fatalf("Get: %v %+v", err, run)
+	}
+	if run.AutoFixCount != 2 || run.AutoFixWindowStart != 1700000001 || run.AutoFixSHA != "abc1234" {
+		t.Fatalf("auto fix state not persisted: %+v", run)
+	}
+	if err := repo.SetAutoFixState(ctx, "acme/widget#missing", 1, 1, "x"); err == nil {
+		t.Fatal("expected unknown pr_key error")
 	}
 }

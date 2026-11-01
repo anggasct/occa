@@ -29,6 +29,11 @@ type RepoPromptRef struct {
 	PromptFile string `yaml:"prompt_file,omitempty"`
 }
 
+type RepoAutoFix struct {
+	CI       bool
+	Conflict bool
+}
+
 type RepoConfig struct {
 	Repo            string                   `yaml:"repo"`
 	Provider        string                   `yaml:"provider"`
@@ -47,6 +52,22 @@ type RepoConfig struct {
 	Automation      RepoAutomation           `yaml:"automation,omitempty"`
 	OnMerged        []MergedAction           `yaml:"on_merged,omitempty"`
 	Prompts         map[string]RepoPromptRef `yaml:"prompts,omitempty"`
+	AutoFix         map[string]bool          `yaml:"auto_fix,omitempty"`
+}
+
+func ResolveRepoAutoFix(autoFix map[string]bool, context string) (RepoAutoFix, error) {
+	out := RepoAutoFix{}
+	for key, val := range autoFix {
+		switch strings.TrimSpace(strings.ToLower(key)) {
+		case "ci":
+			out.CI = val
+		case "conflict":
+			out.Conflict = val
+		default:
+			return RepoAutoFix{}, fmt.Errorf("config: %sauto_fix supports only ci and conflict workflows, got %q", context, key)
+		}
+	}
+	return out, nil
 }
 
 type WebhookDefaults struct {
@@ -409,6 +430,10 @@ func expandRepos(repos []RepoConfig, defaults WebhookDefaults) ([]EndpointConfig
 		if err := validateRepoPrompts(repo.Prompts, context); err != nil {
 			return nil, err
 		}
+		autoFix, err := ResolveRepoAutoFix(repo.AutoFix, context)
+		if err != nil {
+			return nil, err
+		}
 		automationCopy := automation
 		for _, workflow := range []string{"review", "fix", "merge", "merged"} {
 			suffix := workflow
@@ -442,6 +467,7 @@ func expandRepos(repos []RepoConfig, defaults WebhookDefaults) ([]EndpointConfig
 				IdleAfter:       resolveIdleAfter(defaults, *repo),
 				Automation:      &automationCopy,
 				VerifyEndpoint:  "",
+				AutoFix:         autoFix,
 			}
 			if len(ep.CommentTrigger) > 0 {
 				slog.Info("config: effective comment triggers", "endpoint", ep.Name, "workflow", workflow, "triggers", strings.Join(ep.CommentTrigger, ", "))

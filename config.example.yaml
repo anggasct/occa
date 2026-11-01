@@ -128,10 +128,13 @@ webhooks:
       #   authors:
       #     owner-login: full
       # prompts: # optional per-workflow prompt override (absent = built-in default; file missing = startup error)
-      #   review: { prompt_file: webhooks/saya-review.md } # or { prompt: "short instruction" }
+      #   review: { prompt_file: webhooks/saya-review.md }  # or { prompt: "short instruction" }
       #   fix: { prompt_file: webhooks/saya-fix.md }
       #   merge: { prompt: "merge when green" }
       #   merged: { prompt_file: webhooks/saya-merged.md }
+      # auto_fix: # optional automatic fix triggers (absent = both off)
+      #   ci: false # enqueue fix on red check_suite (needs full automation for the PR author)
+      #   conflict: false # merge dirty-tree reason into fix at dequeue (same policy gate)
       # on_merged: [] # optional post-merge extras (default: just close the PR thread)
       # - prompt_file: "merged-vault.md" # one agent turn with your prompt file (stays in ~/.occa/webhooks, never in this repo)
       # - run: "make changelog" # one command, run with the repo checkout as cwd

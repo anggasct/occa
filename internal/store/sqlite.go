@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	schemaVersion    = 23
+	schemaVersion    = 24
 	SchemaVersion    = schemaVersion
 	busyTimeoutMilli = 5000
 )
@@ -52,6 +52,22 @@ var migrations = []func(s *SQLiteStore, tx *sql.Tx) error{
 	addWebhookReplay,
 	addPRQueueMeta,
 	addPRQueueThreadStatus,
+	addPRQueueAutoFix,
+}
+
+func addPRQueueAutoFix(_ *SQLiteStore, tx *sql.Tx) error {
+	for _, ddl := range []string{
+		`ALTER TABLE pr_queue ADD COLUMN auto_fix_count INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE pr_queue ADD COLUMN auto_fix_window_start INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE pr_queue ADD COLUMN auto_fix_sha TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE pr_queue_items ADD COLUMN fix_kind TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE pr_queue_items ADD COLUMN fix_reasons TEXT NOT NULL DEFAULT '';`,
+	} {
+		if _, err := tx.Exec(ddl); err != nil {
+			return fmt.Errorf("store: migrate pr queue auto fix: %w", err)
+		}
+	}
+	return nil
 }
 
 func addPRQueueMeta(_ *SQLiteStore, tx *sql.Tx) error {

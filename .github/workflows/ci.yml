@@ -47,8 +47,9 @@ jobs:
           out=$(grep -rnE '[0-9]+ \* time\.(Milli)?[Ss]econd|[0-9]+ \* time\.Minute|[0-9]+ \* time\.Hour' --include='*.go' internal/ cmd/ | grep -v _test.go || true)
           echo "$out"
           count=$(printf '%s\n' "$out" | grep -c . || true)
-          test "$count" -eq 38 || (echo "expected 38 mechanism lines, got $count"; exit 1)
+          test "$count" -eq 39 || (echo "expected 39 mechanism lines, got $count"; exit 1)
           printf '%s\n' "$out" | grep -q 'internal/webhook/prbinding.go:.*prBindingLookupTimeout = 15 \* time.Second' || (echo "missing PR binding lookup timeout"; exit 1)
+          printf '%s\n' "$out" | grep -q 'internal/webhook/autofix.go:.*autoFixStormWindow[[:space:]]*=[[:space:]]*24 \* time.Hour' || (echo "missing auto-fix storm window"; exit 1)
           printf '%s\n' "$out" | grep -q 'internal/webhook/workspace_lanes.go:.*reviewWorkspaceTTL = 2 \* time.Hour' || (echo "missing review workspace TTL"; exit 1)
           printf '%s\n' "$out" | grep -q 'internal/webhook/finalize.go:.*harnessFinalizeTimeout = 2 \* time.Minute' || (echo "missing harness finalize timeout"; exit 1)
           printf '%s\n' "$out" | grep -q 'internal/webhook/workspace.go:.*workspaceFetchTimeout = 30 \* time.Second' || (echo "missing workspace revision fetch timeout"; exit 1)

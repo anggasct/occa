@@ -116,6 +116,7 @@ type EndpointConfig struct {
 	OnMerged         []MergedAction    `yaml:"on_merged,omitempty"`
 	Automation       *RepoAutomation   `yaml:"-"`
 	PromptSource     string            `yaml:"-"`
+	AutoFix          RepoAutoFix       `yaml:"-"`
 }
 
 func (e *EndpointConfig) UnmarshalYAML(node *yaml.Node) error {

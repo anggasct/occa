@@ -17,23 +17,26 @@ const (
 )
 
 type PRRun struct {
-	PRKey             string
-	ThreadID          string
-	RootMsgID         string
-	Branch            string
-	PRURL             string
-	ThreadStatusBase  string
-	ThreadStatusMsgID string
-	Status            PRStatus
-	ActiveKind        string
-	ActiveSession     string
-	ActiveDelivery    int64
-	ActiveSince       int64
-	RetryCount        int
-	NextRetryAt       int64
-	BlockedReason     string
-	CreatedAt         int64
-	UpdatedAt         int64
+	PRKey              string
+	ThreadID           string
+	RootMsgID          string
+	Branch             string
+	PRURL              string
+	ThreadStatusBase   string
+	ThreadStatusMsgID  string
+	Status             PRStatus
+	ActiveKind         string
+	ActiveSession      string
+	ActiveDelivery     int64
+	ActiveSince        int64
+	RetryCount         int
+	NextRetryAt        int64
+	BlockedReason      string
+	AutoFixCount       int
+	AutoFixWindowStart int64
+	AutoFixSHA         string
+	CreatedAt          int64
+	UpdatedAt          int64
 }
 
 type PRQueueItem struct {
@@ -44,6 +47,8 @@ type PRQueueItem struct {
 	DeliveryID int64
 	Priority   int
 	EnqueuedAt int64
+	FixKind    string
+	FixReasons string
 }
 
 type PRQueueRepo interface {
@@ -67,19 +72,23 @@ type PRQueueRepo interface {
 	ClearQueue(ctx context.Context, prKey string) (int, error)
 	DeleteItem(ctx context.Context, id int64) error
 	RepairInvariants(ctx context.Context, prKey string) ([]string, error)
+	EnqueueFix(ctx context.Context, prKey, endpoint, eventType string, deliveryID int64, priority int, fixKind, fixReasons string) (int64, error)
+	SetItemFixReasons(ctx context.Context, id int64, fixKind, fixReasons string) error
+	SetAutoFixState(ctx context.Context, prKey string, count int, windowStart int64, sha string) error
 }
 
 type sqlitePRQueueRepo struct {
 	db *sql.DB
 }
 
-const prRunColumns = `pr_key, thread_id, root_msg_id, branch, pr_url, thread_status_base, thread_status_msg_id, status, active_kind, active_session, active_delivery, active_since, retry_count, next_retry_at, blocked_reason, created_at, updated_at`
+const prRunColumns = `pr_key, thread_id, root_msg_id, branch, pr_url, thread_status_base, thread_status_msg_id, status, active_kind, active_session, active_delivery, active_since, retry_count, next_retry_at, blocked_reason, auto_fix_count, auto_fix_window_start, auto_fix_sha, created_at, updated_at`
 
 func scanPRRun(row interface{ Scan(...any) error }) (*PRRun, error) {
 	var r PRRun
 	var status, kind, session, reason string
 	err := row.Scan(&r.PRKey, &r.ThreadID, &r.RootMsgID, &r.Branch, &r.PRURL, &r.ThreadStatusBase, &r.ThreadStatusMsgID, &status, &kind, &session,
 		&r.ActiveDelivery, &r.ActiveSince, &r.RetryCount, &r.NextRetryAt, &reason,
+		&r.AutoFixCount, &r.AutoFixWindowStart, &r.AutoFixSHA,
 		&r.CreatedAt, &r.UpdatedAt)
 	if err != nil {
 		return nil, err
@@ -170,10 +179,10 @@ func (r *sqlitePRQueueRepo) DequeueNext(ctx context.Context, prKey string) (*PRQ
 	}()
 	var item PRQueueItem
 	err = tx.QueryRowContext(ctx,
-		`SELECT id, pr_key, endpoint, event_type, delivery_id, priority, enqueued_at
+		`SELECT id, pr_key, endpoint, event_type, delivery_id, priority, enqueued_at, fix_kind, fix_reasons
 		 FROM pr_queue_items WHERE pr_key = ? ORDER BY priority ASC, id ASC LIMIT 1`,
 		prKey,
-	).Scan(&item.ID, &item.PRKey, &item.Endpoint, &item.EventType, &item.DeliveryID, &item.Priority, &item.EnqueuedAt)
+	).Scan(&item.ID, &item.PRKey, &item.Endpoint, &item.EventType, &item.DeliveryID, &item.Priority, &item.EnqueuedAt, &item.FixKind, &item.FixReasons)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -286,7 +295,7 @@ func (r *sqlitePRQueueRepo) SetBlocked(ctx context.Context, prKey, reason string
 
 func (r *sqlitePRQueueRepo) ListItems(ctx context.Context, prKey string) ([]PRQueueItem, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, pr_key, endpoint, event_type, delivery_id, priority, enqueued_at
+		`SELECT id, pr_key, endpoint, event_type, delivery_id, priority, enqueued_at, fix_kind, fix_reasons
 		 FROM pr_queue_items WHERE pr_key = ? ORDER BY priority ASC, id ASC`,
 		prKey,
 	)
@@ -297,7 +306,7 @@ func (r *sqlitePRQueueRepo) ListItems(ctx context.Context, prKey string) ([]PRQu
 	var out []PRQueueItem
 	for rows.Next() {
 		var item PRQueueItem
-		if err := rows.Scan(&item.ID, &item.PRKey, &item.Endpoint, &item.EventType, &item.DeliveryID, &item.Priority, &item.EnqueuedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.PRKey, &item.Endpoint, &item.EventType, &item.DeliveryID, &item.Priority, &item.EnqueuedAt, &item.FixKind, &item.FixReasons); err != nil {
 			return nil, fmt.Errorf("store: pr queue list scan: %w", err)
 		}
 		out = append(out, item)
@@ -468,6 +477,71 @@ func (r *sqlitePRQueueRepo) Unblock(ctx context.Context, prKey string) error {
 func (r *sqlitePRQueueRepo) DeleteItem(ctx context.Context, id int64) error {
 	if _, err := r.db.ExecContext(ctx, `DELETE FROM pr_queue_items WHERE id = ?`, id); err != nil {
 		return fmt.Errorf("store: pr queue delete item: %w", err)
+	}
+	return nil
+}
+
+func (r *sqlitePRQueueRepo) EnqueueFix(ctx context.Context, prKey, endpoint, eventType string, deliveryID int64, priority int, fixKind, fixReasons string) (int64, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("store: pr queue enqueue fix begin: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	now := time.Now().Unix()
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO pr_queue (pr_key, thread_id, root_msg_id, status, created_at, updated_at)
+		 VALUES (?, '', '', ?, ?, ?)
+		 ON CONFLICT(pr_key) DO NOTHING`,
+		prKey, string(PRStatusActive), now, now,
+	); err != nil {
+		return 0, fmt.Errorf("store: pr queue enqueue fix ensure: %w", err)
+	}
+	var id int64
+	if err := tx.QueryRowContext(ctx,
+		`INSERT INTO pr_queue_items (pr_key, endpoint, event_type, delivery_id, priority, enqueued_at, fix_kind, fix_reasons)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+		prKey, endpoint, eventType, deliveryID, priority, now, fixKind, fixReasons,
+	).Scan(&id); err != nil {
+		return 0, fmt.Errorf("store: pr queue enqueue fix insert: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE pr_queue SET updated_at = ? WHERE pr_key = ?`, now, prKey); err != nil {
+		return 0, fmt.Errorf("store: pr queue enqueue fix touch: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("store: pr queue enqueue fix commit: %w", err)
+	}
+	committed = true
+	return id, nil
+}
+
+func (r *sqlitePRQueueRepo) SetItemFixReasons(ctx context.Context, id int64, fixKind, fixReasons string) error {
+	if _, err := r.db.ExecContext(ctx,
+		`UPDATE pr_queue_items SET fix_kind = ?, fix_reasons = ? WHERE id = ?`,
+		fixKind, fixReasons, id,
+	); err != nil {
+		return fmt.Errorf("store: pr queue set fix reasons: %w", err)
+	}
+	return nil
+}
+
+func (r *sqlitePRQueueRepo) SetAutoFixState(ctx context.Context, prKey string, count int, windowStart int64, sha string) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE pr_queue SET auto_fix_count = ?, auto_fix_window_start = ?, auto_fix_sha = ?, updated_at = ? WHERE pr_key = ?`,
+		count, windowStart, sha, time.Now().Unix(), prKey,
+	)
+	if err != nil {
+		return fmt.Errorf("store: pr queue set auto fix state: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("store: pr queue set auto fix state rows: %w", err)
+	} else if n == 0 {
+		return fmt.Errorf("store: pr queue set auto fix state: unknown pr_key %q", prKey)
 	}
 	return nil
 }
