@@ -3,6 +3,7 @@ package webhook
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -160,15 +161,23 @@ type prLiveState struct {
 }
 
 func ghPrLiveState(ctx context.Context, repo, number string) (prLiveState, error) {
-	var st prLiveState
 	timeoutCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(timeoutCtx, "gh", "pr", "view", number, "--repo", repo,
 		"--json", "mergeable,mergeStateStatus,isDraft,headRefOid,statusCheckRollup")
 	raw, err := cmd.Output()
 	if err != nil {
-		return st, fmt.Errorf("lookup PR live state %s#%s: %w", repo, number, err)
+		return prLiveState{}, fmt.Errorf("lookup PR live state %s#%s: %w", repo, number, err)
 	}
+	st, err := decodePrLiveState(raw)
+	if err != nil {
+		return prLiveState{}, fmt.Errorf("decode PR live state %s#%s: %w", repo, number, err)
+	}
+	return st, nil
+}
+
+func decodePrLiveState(raw []byte) (prLiveState, error) {
+	var st prLiveState
 	var decoded struct {
 		Mergeable         string `json:"mergeable"`
 		MergeStateStatus  string `json:"mergeStateStatus"`
@@ -177,10 +186,11 @@ func ghPrLiveState(ctx context.Context, repo, number string) (prLiveState, error
 		StatusCheckRollup []struct {
 			Conclusion string `json:"conclusion"`
 			State      string `json:"state"`
+			Status     string `json:"status"`
 		} `json:"statusCheckRollup"`
 	}
 	if err := json.Unmarshal(raw, &decoded); err != nil {
-		return st, fmt.Errorf("decode PR live state %s#%s: %w", repo, number, err)
+		return st, fmt.Errorf("decode: %w", err)
 	}
 	st.mergeable = strings.EqualFold(strings.TrimSpace(decoded.MergeStateStatus), "CLEAN") ||
 		strings.EqualFold(strings.TrimSpace(decoded.Mergeable), "MERGEABLE")
@@ -190,7 +200,14 @@ func ghPrLiveState(ctx context.Context, repo, number string) (prLiveState, error
 	st.headSHA = strings.TrimSpace(decoded.HeadRefOid)
 	sawPending := false
 	for _, check := range decoded.StatusCheckRollup {
+		// CheckRun entries key their lifecycle by "status"; StatusContext
+		// entries use "state". Both must read as pending until completed.
 		state := strings.ToUpper(strings.TrimSpace(check.State))
+		switch strings.ToUpper(strings.TrimSpace(check.Status)) {
+		case "QUEUED", "IN_PROGRESS", "WAITING", "PENDING":
+			sawPending = true
+			continue
+		}
 		if state == "EXPECTED" || state == "PENDING" {
 			sawPending = true
 			continue
@@ -260,17 +277,9 @@ func (s *Server) enqueueAutoFixCI(ctx context.Context, repo, number, headSHA str
 	if row != nil && row.Status == store.PRStatusBlocked {
 		return fmt.Errorf("pr queue blocked")
 	}
-	body, eventType, author, err := s.buildAutoFixBody(ctx, repo, number)
-	if err != nil {
-		return err
-	}
 	fixEp, found := s.fixEndpointForRepo(repo)
 	if !found {
 		return fmt.Errorf("no fix endpoint for repo %s", repo)
-	}
-	author = strings.TrimSpace(author)
-	if author == "" || automationMode(fixEp, author) != config.AutomationFull {
-		return fmt.Errorf("author policy forbids auto-fix")
 	}
 	var rowCount int
 	var rowWindow int64
@@ -290,8 +299,27 @@ func (s *Server) enqueueAutoFixCI(ctx context.Context, repo, number, headSHA str
 		s.escalateAutoFixBlocked(fixEp, prKey, fullRow)
 		return fmt.Errorf("auto-fix storm cap reached")
 	}
+	// Every gate above is store-local; the live lookup only runs for a
+	// candidate that passed dedupe, the storm window, and the blocked check.
+	body, eventType, author, err := s.buildAutoFixBody(ctx, repo, number)
+	if err != nil {
+		return err
+	}
+	author = strings.TrimSpace(author)
+	if author == "" || automationMode(fixEp, author) != config.AutomationFull {
+		return fmt.Errorf("author policy forbids auto-fix")
+	}
 	inserted, err := s.enqueueAutoFix(ctx, fixEp, body, eventType, prKey, reasons)
 	if err != nil {
+		var full *autoFixQueueFullError
+		if errors.As(err, &full) {
+			slog.Warn("webhook: auto-fix dropped, pr queue full",
+				"pr_key", prKey,
+				"queue_len", full.queueLen,
+				"capacity", full.capacity,
+				"auto_fix_count", count,
+				"auto_fix_window_start", windowStart)
+		}
 		return err
 	}
 	if inserted {
@@ -303,6 +331,15 @@ func (s *Server) enqueueAutoFixCI(ctx context.Context, repo, number, headSHA str
 	return nil
 }
 
+type autoFixQueueFullError struct {
+	queueLen int
+	capacity int
+}
+
+func (e *autoFixQueueFullError) Error() string {
+	return fmt.Sprintf("pr queue full for auto-fix (queue %d, capacity %d)", e.queueLen, e.capacity)
+}
+
 func (s *Server) enqueueAutoFix(ctx context.Context, fixEp config.EndpointConfig, body []byte, eventType, prKey string, reasons []string) (bool, error) {
 	kind := fixKindOf(reasons)
 	encoded := encodeFixReasons(reasons)
@@ -310,9 +347,11 @@ func (s *Server) enqueueAutoFix(ctx context.Context, fixEp config.EndpointConfig
 		for _, item := range existing {
 			if item.Priority == lanePriority(laneOfWorkflow("fix")) {
 				merged := mergeFixReasons(decodeFixReasons(item.FixReasons), reasons)
-				if err := s.prQueues.SetItemFixReasons(ctx, item.ID, fixKindOf(merged), encodeFixReasons(merged)); err != nil {
+				kind := fixKindOf(merged)
+				if err := s.prQueues.SetItemFixReasons(ctx, item.ID, kind, encodeFixReasons(merged)); err != nil {
 					return false, err
 				}
+				s.refreshQueuedFixItem(prKey, item.ID, kind, merged)
 				slog.Info("webhook: auto-fix coalesced", "endpoint", fixEp.Name, "pr_key", prKey, "reasons", encodeFixReasons(merged))
 				return false, nil
 			}
@@ -329,10 +368,10 @@ func (s *Server) enqueueAutoFix(ctx context.Context, fixEp config.EndpointConfig
 		go d.run(s.shutdownCtx)
 	}
 	if s.maxQueuedPerKey > autoFixReserveSlots && d.queueLen() >= s.maxQueuedPerKey-autoFixReserveSlots {
-		return false, fmt.Errorf("pr queue full for auto-fix")
+		return false, &autoFixQueueFullError{queueLen: d.queueLen(), capacity: s.maxQueuedPerKey - autoFixReserveSlots}
 	}
 	if s.maxQueuedPerKey <= autoFixReserveSlots && d.queueLen() >= s.maxQueuedPerKey {
-		return false, fmt.Errorf("pr queue full for auto-fix")
+		return false, &autoFixQueueFullError{queueLen: d.queueLen(), capacity: s.maxQueuedPerKey}
 	}
 	item := dispatchItem{
 		ep:         fixEp,
@@ -350,9 +389,22 @@ func (s *Server) enqueueAutoFix(ctx context.Context, fixEp config.EndpointConfig
 	}
 	if !d.push(item) {
 		s.mirrorDelete(item.queueID)
-		return false, fmt.Errorf("pr queue full for auto-fix")
+		return false, &autoFixQueueFullError{queueLen: d.queueLen(), capacity: s.maxQueuedPerKey}
 	}
 	return true, nil
+}
+
+func (s *Server) refreshQueuedFixItem(prKey string, queueID int64, kind string, reasons []string) {
+	s.dispatchMu.Lock()
+	d, ok := s.dispatchers["pr:"+prKey]
+	s.dispatchMu.Unlock()
+	if !ok || d == nil {
+		return
+	}
+	d.refreshFixItem(queueID, func(item *dispatchItem) {
+		item.fixKind = kind
+		item.fixReasons = mergeFixReasons(item.fixReasons, reasons)
+	})
 }
 
 func (s *Server) buildAutoFixBody(ctx context.Context, repo, number string) ([]byte, string, string, error) {

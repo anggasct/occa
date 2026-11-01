@@ -1,7 +1,9 @@
 package webhook
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -688,5 +690,220 @@ func TestAutoFixKeepsOneSlotForManualRetry(t *testing.T) {
 	}
 	if d.queueLen() >= srv.maxQueuedPerKey {
 		t.Fatalf("queue len %d leaves no slot for a manual retry (max %d)", d.queueLen(), srv.maxQueuedPerKey)
+	}
+}
+
+func rollupPayload(rollup string) []byte {
+	return []byte(`{"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","isDraft":false,"headRefOid":"abc1234","statusCheckRollup":[` + rollup + `]}`)
+}
+
+// F-002: gh emits "status" (not "state") for CheckRun rollup entries; live
+// in-flight checks must decode as not-done and completed failures as red.
+func TestDecodePrLiveStateRollup(t *testing.T) {
+	t.Run("in progress check run is not done", func(t *testing.T) {
+		st, err := decodePrLiveState(rollupPayload(`{"__typename":"CheckRun","name":"check","status":"IN_PROGRESS","conclusion":""}`))
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if st.checksDone {
+			t.Fatal("checksDone = true, want false for IN_PROGRESS entry")
+		}
+		if st.checksRed {
+			t.Fatal("checksRed = true, want false for IN_PROGRESS entry")
+		}
+	})
+	t.Run("queued check run is not done", func(t *testing.T) {
+		st, err := decodePrLiveState(rollupPayload(`{"__typename":"CheckRun","name":"check","status":"QUEUED","conclusion":""}`))
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if st.checksDone {
+			t.Fatal("checksDone = true, want false for QUEUED entry")
+		}
+	})
+	t.Run("completed failure check run is red", func(t *testing.T) {
+		st, err := decodePrLiveState(rollupPayload(`{"__typename":"CheckRun","name":"check","status":"COMPLETED","conclusion":"FAILURE"}`))
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if !st.checksDone || !st.checksRed {
+			t.Fatalf("done=%v red=%v, want done and red for COMPLETED/FAILURE", st.checksDone, st.checksRed)
+		}
+	})
+	t.Run("pending status context is not done", func(t *testing.T) {
+		st, err := decodePrLiveState(rollupPayload(`{"__typename":"StatusContext","context":"ci","state":"PENDING"}`))
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if st.checksDone {
+			t.Fatal("checksDone = true, want false for PENDING status context")
+		}
+	})
+	t.Run("success status context is done and green", func(t *testing.T) {
+		st, err := decodePrLiveState(rollupPayload(`{"__typename":"StatusContext","context":"ci","state":"SUCCESS"}`))
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if !st.checksDone || st.checksRed {
+			t.Fatalf("done=%v red=%v, want done and green", st.checksDone, st.checksRed)
+		}
+	})
+}
+
+// F-004: store-local gates (dedupe, storm window) run before any live lookup,
+// so duplicates and capped PRs cost no gh call.
+func TestAutoFixCIGatesRunBeforeLiveLookup(t *testing.T) {
+	build := func(t *testing.T) (*Server, *int) {
+		t.Helper()
+		rec := newPRRecorder("thread-pr", nil)
+		srv, _, _ := newPRTestServer(t, rec, autoFixTestEndpoints(config.AutomationFull,
+			config.RepoAutoFix{CI: true}, []string{"please fix ci"}))
+		calls := 0
+		srv.SetAutoFixBodyBuilder(func(ctx context.Context, repo, number string) ([]byte, string, string, error) {
+			calls++
+			return []byte(`{}`), "issue_comment", "owner", nil
+		})
+		if _, err := srv.prQueues.EnsurePR(context.Background(), "acme/widget#7", "thread-1", "root-1"); err != nil {
+			t.Fatalf("EnsurePR: %v", err)
+		}
+		return srv, &calls
+	}
+	t.Run("duplicate head sha skips live lookup", func(t *testing.T) {
+		srv, calls := build(t)
+		env := redSuiteEnvelope()
+		srv.maybeAutoFixCI(context.Background(), srv.endpoints["/webhooks/github-widget-merge"], env, WebhookExecutionKey{}, "acme/widget#7")
+		srv.maybeAutoFixCI(context.Background(), srv.endpoints["/webhooks/github-widget-merge"], env, WebhookExecutionKey{}, "acme/widget#7")
+		if *calls != 1 {
+			t.Fatalf("live lookups = %d, want 1 (duplicate must not re-lookup)", *calls)
+		}
+	})
+	t.Run("storm capped skips live lookup", func(t *testing.T) {
+		srv, calls := build(t)
+		if err := srv.prQueues.SetAutoFixState(context.Background(), "acme/widget#7", 3, time.Now().Unix(), "oldsha"); err != nil {
+			t.Fatalf("SetAutoFixState: %v", err)
+		}
+		env := redSuiteEnvelope()
+		env["head_sha"] = "newsha"
+		srv.maybeAutoFixCI(context.Background(), srv.endpoints["/webhooks/github-widget-merge"], env, WebhookExecutionKey{}, "acme/widget#7")
+		if *calls != 0 {
+			t.Fatalf("live lookups = %d, want 0 for capped PR", *calls)
+		}
+	})
+}
+
+// F-006: the overflow drop emits one WARN with queue and storm counters and
+// never notifies chat.
+func TestAutoFixOverflowDropsWithWarn(t *testing.T) {
+	rec := newPRRecorder("thread-pr", nil)
+	srv, st, _ := newPRTestServer(t, rec, autoFixTestEndpoints(config.AutomationFull,
+		config.RepoAutoFix{CI: true}, []string{"please fix ci"}))
+	srv.SetAutoFixBodyBuilder(func(ctx context.Context, repo, number string) ([]byte, string, string, error) {
+		return []byte(`{}`), "issue_comment", "owner", nil
+	})
+	var mentioned []string
+	srv.notifier = func(ctx context.Context, platform, target, text string) error {
+		mentioned = append(mentioned, text)
+		return nil
+	}
+	srv.maxQueuedPerKey = 2
+	var buf bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	ctx := context.Background()
+	if _, err := st.PRQueueRepo().EnsurePR(ctx, "acme/widget#7", "thread-1", "root-1"); err != nil {
+		t.Fatalf("EnsurePR: %v", err)
+	}
+	d := newDispatcher(srv, "pr:acme/widget#7")
+	srv.dispatchMu.Lock()
+	srv.dispatchers["pr:acme/widget#7"] = d
+	srv.dispatchMu.Unlock()
+	d.push(dispatchItem{ep: srv.endpoints["/webhooks/github-widget-review"], prKey: "acme/widget#7", lane: laneOfWorkflow("review")})
+
+	if err := srv.enqueueAutoFixCI(ctx, "acme/widget", "7", "abc1234", []string{fixKindCI}); err == nil || !strings.Contains(err.Error(), "pr queue full") {
+		t.Fatalf("enqueueAutoFixCI err = %v, want pr queue full", err)
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "level=WARN") || !strings.Contains(logged, "auto-fix dropped") {
+		t.Fatalf("log = %q, want overflow WARN", logged)
+	}
+	for _, want := range []string{"pr_key=acme/widget#7", "queue_len=1", "auto_fix_count=0"} {
+		if !strings.Contains(logged, want) {
+			t.Fatalf("log = %q, want %s", logged, want)
+		}
+	}
+	if len(mentioned) != 0 {
+		t.Fatalf("overflow must not notify chat, got %v", mentioned)
+	}
+}
+
+// F-003: a red suite coalescing into an already-queued review fix must reach
+// the executed prompt (dequeue re-reads the store row).
+func TestCoalescedAutoFixReachesQueuedRun(t *testing.T) {
+	rec := newPRRecorder("thread-pr", nil)
+	eps := autoFixTestEndpoints(config.AutomationFull, config.RepoAutoFix{CI: true}, []string{"please fix review", "please fix ci"})
+	for i, ep := range eps {
+		if ep.Workflow == "fix" {
+			ep.Prompt = "kind={{.webhook.fix_kind}} reasons={{.webhook.fix_reasons}}"
+			eps[i] = ep
+		}
+	}
+	srv, st, _ := newPRTestServer(t, rec, eps)
+	srv.SetAutoFixBodyBuilder(func(ctx context.Context, repo, number string) ([]byte, string, string, error) {
+		return syntheticFixBody("please fix ci"), "issue_comment", "owner", nil
+	})
+	srv.SetMergeableChecker(func(ctx context.Context, repo, number string) (prLiveState, error) {
+		return prLiveState{mergeable: true, checksDone: true, checksRed: true}, nil
+	})
+	var mu sync.Mutex
+	var prompts []string
+	srv.executor = func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+		mu.Lock()
+		prompts = append(prompts, prompt)
+		mu.Unlock()
+		return rec.exec(ctx, platform, channelID, prompt, workCtx)
+	}
+	ctx := context.Background()
+	if _, err := st.PRQueueRepo().EnsurePR(ctx, "acme/widget#7", "thread-1", "root-1"); err != nil {
+		t.Fatalf("EnsurePR: %v", err)
+	}
+	fixEp, _ := srv.fixEndpointForRepo("acme/widget")
+	// A pending manual review fix holds the fix lane; its dispatcher is not
+	// running yet, so the queue keeps the item.
+	d := newDispatcher(srv, "pr:acme/widget#7")
+	srv.dispatchMu.Lock()
+	srv.dispatchers["pr:acme/widget#7"] = d
+	srv.dispatchMu.Unlock()
+	lane := laneOfWorkflow("fix")
+	id, err := st.PRQueueRepo().Enqueue(ctx, "acme/widget#7", fixEp.Name, "issue_comment", 0, lanePriority(lane))
+	if err != nil || id == 0 {
+		t.Fatalf("Enqueue: %v %d", err, id)
+	}
+	d.push(dispatchItem{
+		ep:         fixEp,
+		body:       syntheticFixBody("please fix review"),
+		deliveryID: "op-manual-fix-1",
+		eventType:  "issue_comment",
+		prKey:      "acme/widget#7",
+		lane:       lane,
+		queueID:    id,
+	})
+	// The red suite coalesces into the pending review fix.
+	if err := srv.enqueueAutoFixCI(ctx, "acme/widget", "7", "abc1234", []string{fixKindCI}); err != nil {
+		t.Fatalf("enqueueAutoFixCI: %v", err)
+	}
+	items, err := st.PRQueueRepo().ListItems(ctx, "acme/widget#7")
+	if err != nil || len(items) != 1 || items[0].FixReasons != `["ci"]` {
+		t.Fatalf("coalesced row wrong: %v (n=%d)", err, len(items))
+	}
+	go d.run(srv.shutdownCtx)
+	waitForCalls(t, rec, 1)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(prompts) != 1 {
+		t.Fatalf("prompts = %d, want 1", len(prompts))
+	}
+	if !strings.Contains(prompts[0], "kind=mixed") || !strings.Contains(prompts[0], `["ci","review"]`) {
+		t.Fatalf("prompt = %q, want mixed kind with ci+review reasons", prompts[0])
 	}
 }

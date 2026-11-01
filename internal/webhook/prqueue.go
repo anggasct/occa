@@ -160,6 +160,18 @@ func (l *prLane) removeMatching(match func(dispatchItem) bool) (dispatchItem, bo
 	return dispatchItem{}, false
 }
 
+func (l *prLane) updateMatching(match func(dispatchItem) bool, apply func(*dispatchItem)) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for i := range l.items {
+		if match(l.items[i]) {
+			apply(&l.items[i])
+			return true
+		}
+	}
+	return false
+}
+
 func (l *prLane) removeOldest() (dispatchItem, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -315,6 +327,20 @@ func (d *dispatcher) drain() []dispatchItem {
 		}
 		out = append(out, item)
 	}
+}
+
+// refreshFixItem merges updated reasons into a still-queued item so the
+// dequeued run executes the coalesced prompt instead of the pre-coalesce one.
+func (d *dispatcher) refreshFixItem(queueID int64, apply func(*dispatchItem)) bool {
+	if queueID == 0 {
+		return false
+	}
+	for i := range d.lanes {
+		if d.lanes[i].updateMatching(func(queued dispatchItem) bool { return queued.queueID == queueID }, apply) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) mirrorEnqueue(prKey, endpoint, eventType string, deliveryID int64, priority int) int64 {
