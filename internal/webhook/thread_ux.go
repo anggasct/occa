@@ -73,16 +73,16 @@ func FormatGateOutcome(envelope WebhookEnvelope, workflow, deliveryStatus string
 		return "gate checked, merged"
 	}
 	if status == "FAILED" {
-		return "gate checked, run failed, fix running"
+		return "gate checked, run failed"
 	}
 	if conclusion == "failure" || conclusion == "failed" {
-		return "gate checked, CI red, fix running"
+		return "gate checked, CI red"
 	}
 	if verdict == "REQUEST_CHANGES" || verdict == "REQUESTED_CHANGES" || verdict == "CHANGES_REQUESTED" {
-		return "gate checked, review changes requested, fix running"
+		return "gate checked, review changes requested"
 	}
 	if prState == "closed" {
-		return "gate checked, PR closed, fix running"
+		return "gate checked, PR closed"
 	}
 	if w == "merge" {
 		return "gate checked, CI green, merge ready"

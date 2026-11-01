@@ -312,7 +312,7 @@ func TestMergeGateVerdictRendersIdenticallyInEveryLane(t *testing.T) {
 			// The merge lane reports a merge as ready only when the gate
 			// allows it, so this fails when the lane loses the verdict.
 			gateOutcome := FormatGateOutcome(withGateVerdict(envelope, srv.gateVerdict(prKey)), lane.workflow, "COMPLETED")
-			if gateOutcome != "gate checked, review changes requested, fix running" {
+			if gateOutcome != "gate checked, review changes requested" {
 				t.Fatalf("%s gate outcome = %q, want the blocking gate outcome", lane.workflow, gateOutcome)
 			}
 			if strings.Contains(gateOutcome, "merge ready") {

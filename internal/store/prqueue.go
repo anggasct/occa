@@ -69,6 +69,8 @@ type PRQueueRepo interface {
 	SetResumePending(ctx context.Context, prKey, kind string, deliveryID int64) error
 	Unblock(ctx context.Context, prKey string) error
 	ListUnresolved(ctx context.Context) ([]PRRun, error)
+	// ListThreads returns every row that names a thread and a branch.
+	ListThreads(ctx context.Context) ([]PRRun, error)
 	ClearQueue(ctx context.Context, prKey string) (int, error)
 	DeleteItem(ctx context.Context, id int64) error
 	RepairInvariants(ctx context.Context, prKey string) ([]string, error)
@@ -560,6 +562,25 @@ func (r *sqlitePRQueueRepo) ListUnresolved(ctx context.Context) ([]PRRun, error)
 		run, err := scanPRRun(rows)
 		if err != nil {
 			return nil, fmt.Errorf("store: pr queue list unresolved scan: %w", err)
+		}
+		out = append(out, *run)
+	}
+	return out, rows.Err()
+}
+
+func (r *sqlitePRQueueRepo) ListThreads(ctx context.Context) ([]PRRun, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT `+prRunColumns+` FROM pr_queue WHERE thread_id != '' AND branch != '' ORDER BY updated_at ASC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: pr queue list threads: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []PRRun
+	for rows.Next() {
+		run, err := scanPRRun(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: pr queue list threads scan: %w", err)
 		}
 		out = append(out, *run)
 	}

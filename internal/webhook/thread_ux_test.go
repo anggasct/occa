@@ -96,7 +96,7 @@ func TestFormatThreadOpenerZeroComponents(t *testing.T) {
 
 func TestFormatGateOutcomeStatesOutcome(t *testing.T) {
 	red := WebhookEnvelope{"conclusion": "failure", "pr_state": "open"}
-	if got := FormatGateOutcome(red, "merge", "COMPLETED"); got != "gate checked, CI red, fix running" {
+	if got := FormatGateOutcome(red, "merge", "COMPLETED"); got != "gate checked, CI red" {
 		t.Errorf("red gate = %q, want CI red outcome", got)
 	}
 	merged := WebhookEnvelope{"pr_state": "merged", "merged": true}
@@ -104,8 +104,17 @@ func TestFormatGateOutcomeStatesOutcome(t *testing.T) {
 		t.Errorf("merged gate = %q, want merged outcome", got)
 	}
 	changes := WebhookEnvelope{"review_verdict": "REQUEST_CHANGES"}
-	if got := FormatGateOutcome(changes, "merge", "COMPLETED"); !strings.Contains(got, "fix running") {
-		t.Errorf("changes-requested gate must name fix running, got %q", got)
+	if got := FormatGateOutcome(changes, "merge", "COMPLETED"); got != "gate checked, review changes requested" {
+		t.Errorf("changes-requested gate = %q", got)
+	}
+	// IMP-117: an outcome line states what happened; it never claims a fix
+	// is running.
+	for _, env := range []WebhookEnvelope{red, changes, {"pr_state": "closed"}} {
+		for _, status := range []string{"COMPLETED", "FAILED"} {
+			if got := FormatGateOutcome(env, "review", status); strings.Contains(got, "fix running") {
+				t.Errorf("outcome %q claims a fix", got)
+			}
+		}
 	}
 	green := WebhookEnvelope{"pr_state": "open"}
 	if got := FormatGateOutcome(green, "merge", "COMPLETED"); got == "COMPLETED" || strings.Contains(got, "✅ COMPLETED") {
