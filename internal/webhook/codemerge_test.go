@@ -89,7 +89,12 @@ type codeMergeHarness struct {
 	facts      mergeFacts
 }
 
-func newCodeMergeHarness(t *testing.T, policy config.MergePolicy) *codeMergeHarness {
+func newCodeMergeHarness(t *testing.T, policy config.MergePolicy, extra ...config.EndpointConfig) *codeMergeHarness {
+	t.Helper()
+	return newCodeMergeHarnessWith(t, policy, config.RepoAutoFix{}, extra...)
+}
+
+func newCodeMergeHarnessWith(t *testing.T, policy config.MergePolicy, autoFix config.RepoAutoFix, extra ...config.EndpointConfig) *codeMergeHarness {
 	t.Helper()
 	h := &codeMergeHarness{facts: okFacts()}
 	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
@@ -98,11 +103,14 @@ func newCodeMergeHarness(t *testing.T, policy config.MergePolicy) *codeMergeHarn
 	}
 	mergeEp := prTestEndpoint("merge", "/merge", config.AutomationFull)
 	mergeEp.Merge = policy
+	mergeEp.Prompt = ""
+	mergeEp.PromptSource = config.PromptSourceCode
+	mergeEp.AutoFix = autoFix
 	cfg := config.WebhookConfig{
 		Bind:      "127.0.0.1:0",
 		Policy:    testPolicy(),
 		Runtime:   testRuntime(),
-		Endpoints: withAdmitDefaults([]config.EndpointConfig{mergeEp}),
+		Endpoints: withAdmitDefaults(append([]config.EndpointConfig{mergeEp}, extra...)),
 	}
 	st, err := store.OpenWithDefaultWorkdir(filepath.Join(t.TempDir(), "codemerge.db"), "")
 	if err != nil {
@@ -175,7 +183,7 @@ func (h *codeMergeHarness) approve(t *testing.T, delivery string) *store.Webhook
 // the head, the configured method, no agent turn — and completes through
 // the existing merge confirmation.
 func TestCodeMergeMergesWithoutAgent(t *testing.T) {
-	h := newCodeMergeHarness(t, config.MergePolicy{Code: true, Method: "rebase", DeleteBranch: true})
+	h := newCodeMergeHarness(t, config.MergePolicy{Method: "rebase", DeleteBranch: true})
 	d := h.approve(t, "del-code-merge")
 	if d.Status != store.WebhookStatusCompleted {
 		t.Fatalf("delivery = %s %q, want completed", d.Status, d.ErrorSummary)
@@ -190,7 +198,7 @@ func TestCodeMergeMergesWithoutAgent(t *testing.T) {
 
 // IMP-113 AC-02: no configured method follows the repository's allowed ones.
 func TestCodeMergeMethodFromRepository(t *testing.T) {
-	h := newCodeMergeHarness(t, config.MergePolicy{Code: true})
+	h := newCodeMergeHarness(t, config.MergePolicy{})
 	if d := h.approve(t, "del-code-method"); d.Status != store.WebhookStatusCompleted {
 		t.Fatalf("delivery = %s %q", d.Status, d.ErrorSummary)
 	}
@@ -201,7 +209,7 @@ func TestCodeMergeMethodFromRepository(t *testing.T) {
 
 // IMP-113 AC-02: a refused gate skips with its reason and merges nothing.
 func TestCodeMergeRefusalSkips(t *testing.T) {
-	h := newCodeMergeHarness(t, config.MergePolicy{Code: true})
+	h := newCodeMergeHarness(t, config.MergePolicy{})
 	h.facts.Checks = checkStatePending
 	d := h.approve(t, "del-code-pending")
 	if d.Status != store.WebhookStatusSkipped || !strings.Contains(d.ErrorSummary, "Reason: merge skipped: checks still running") {
@@ -212,15 +220,109 @@ func TestCodeMergeRefusalSkips(t *testing.T) {
 	}
 }
 
-// IMP-113 AC-06: the agent keeps the lane when code merge is off.
-func TestAgentMergeWhenCodeMergeOff(t *testing.T) {
-	h := newCodeMergeHarness(t, config.MergePolicy{Code: false})
-	h.approve(t, "del-agent-merge")
-	if got := atomic.LoadInt64(&h.agentCalls); got != 1 {
-		t.Fatalf("agent calls = %d, want 1", got)
+// IMP-114 AC-03: an approval on an older commit carries over when every
+// file changed since matches stale_approval_paths, and only then.
+func TestCodeMergeCarriesApprovalOverDocsDelta(t *testing.T) {
+	const approved = "0dd0000000000000000000000000000000000000"
+	cases := []struct {
+		name     string
+		patterns []string
+		files    []string
+		merged   bool
+	}{
+		{"docs only", []string{"*.md", ".github/**"}, []string{"README.md", ".github/workflows/ci.yml"}, true},
+		{"one code file", []string{"*.md"}, []string{"README.md", "main.go"}, false},
+		{"no patterns", nil, []string{"README.md"}, false},
+		{"empty delta", []string{"*.md"}, nil, false},
 	}
-	if len(h.merges) != 0 {
-		t.Fatalf("code merge ran with code merge off: %v", h.merges)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newCodeMergeHarness(t, config.MergePolicy{StaleApprovalPaths: tc.patterns})
+			h.facts.HeadVerdict = ""
+			h.facts.ApprovedCommit = approved
+			var compared []string
+			h.srv.compareFiles = func(ctx context.Context, repo, base, head string) ([]string, error) {
+				compared = append(compared, base+"..."+head)
+				return tc.files, nil
+			}
+			d := h.approve(t, "del-carry-"+strings.ReplaceAll(tc.name, " ", "-"))
+			if tc.merged {
+				if d.Status != store.WebhookStatusCompleted || len(h.merges) != 1 {
+					t.Fatalf("delivery = %s %q merges=%v, want one merge", d.Status, d.ErrorSummary, h.merges)
+				}
+				if len(compared) != 1 || compared[0] != approved+"..."+codeMergeHead {
+					t.Fatalf("compared = %v", compared)
+				}
+				return
+			}
+			if d.Status != store.WebhookStatusSkipped || !strings.Contains(d.ErrorSummary, refusalNoHeadApproval) || len(h.merges) != 0 {
+				t.Fatalf("delivery = %s %q merges=%v, want the no-approval skip", d.Status, d.ErrorSummary, h.merges)
+			}
+		})
+	}
+}
+
+// IMP-114 AC-03: the carried approval needs every reviewer's latest verdict
+// to be an approval.
+func TestCarriedApprovalCommit(t *testing.T) {
+	review := func(login, state, commit, at string) ghReconcileReview {
+		var r ghReconcileReview
+		r.State, r.SubmittedAt = state, at
+		r.Author.Login = login
+		r.Commit.OID = commit
+		return r
+	}
+	approvedOnly := []ghReconcileReview{
+		review("alice", "APPROVED", "aaa1111", "2026-11-01T01:00:00Z"),
+		review("bob", "APPROVED", "bbb2222", "2026-11-01T02:00:00Z"),
+	}
+	if got := carriedApprovalCommit(approvedOnly, "owner", nil); got != "bbb2222" {
+		t.Fatalf("newest approval commit = %q, want bbb2222", got)
+	}
+	blocked := append(approvedOnly, review("carol", "CHANGES_REQUESTED", "ccc3333", "2026-11-01T03:00:00Z"))
+	if got := carriedApprovalCommit(blocked, "owner", nil); got != "" {
+		t.Fatalf("a changes_requested reviewer must block the carry-over, got %q", got)
+	}
+	reconsidered := append(blocked, review("carol", "APPROVED", "ccc3333", "2026-11-01T04:00:00Z"))
+	if got := carriedApprovalCommit(reconsidered, "owner", nil); got != "ccc3333" {
+		t.Fatalf("a later approval by the same reviewer lifts the block, got %q", got)
+	}
+	if got := carriedApprovalCommit(nil, "owner", nil); got != "" {
+		t.Fatalf("no reviews = %q", got)
+	}
+}
+
+// IMP-114 AC-05: a conflicting PR on a repo with conflict auto-fix enqueues
+// one conflict fix; without it the merge only skips.
+func TestCodeMergeConflictHandsOffToFix(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		t.Run(boolWord(on), func(t *testing.T) {
+			fixEp := prTestEndpoint("fix", "/fix", config.AutomationFull)
+			fixEp.CommentTrigger = []string{"please fix ci"}
+			h := newCodeMergeHarnessWith(t, config.MergePolicy{}, config.RepoAutoFix{Conflict: on}, fixEp)
+			h.facts.MergeState = "DIRTY"
+			h.srv.SetAutoFixBodyBuilder(func(ctx context.Context, repo, number string) ([]byte, string, string, error) {
+				return []byte(`{"action":"created"}`), "issue_comment", "owner", nil
+			})
+			d := h.approve(t, "del-conflict-"+boolWord(on))
+			if d.Status != store.WebhookStatusSkipped || !strings.Contains(d.ErrorSummary, refusalConflicts) || len(h.merges) != 0 {
+				t.Fatalf("delivery = %s %q merges=%v", d.Status, d.ErrorSummary, h.merges)
+			}
+			row, err := h.st.PRQueueRepo().Get(context.Background(), "acme/widget#7")
+			if err != nil {
+				t.Fatalf("queue row: %v", err)
+			}
+			count := 0
+			if row != nil {
+				count = row.AutoFixCount
+			}
+			if on && (count != 1 || row.AutoFixSHA != codeMergeHead) {
+				t.Fatalf("conflict auto-fix not enqueued: %+v", row)
+			}
+			if !on && count != 0 {
+				t.Fatalf("auto-fix enqueued with conflict auto-fix off: %+v", row)
+			}
+		})
 	}
 }
 

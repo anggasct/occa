@@ -84,6 +84,8 @@ func parseSSEEvent(decoder *eventDecoder, eventType, data string) (Event, bool) 
 		return Event{Type: "delta", Delta: data}, true
 	case eventType == "session.idle":
 		return Event{Type: "done"}, true
+	case eventType == "session.status":
+		return parseStatusEvent(data)
 	case strings.Contains(eventType, "error"):
 		return Event{Type: "error", Delta: data}, true
 	default:
@@ -297,6 +299,8 @@ func (d *eventDecoder) parseJSON(data string) (Event, bool) {
 		return Event{}, false
 	case ev.Type == "session.idle":
 		return Event{Type: EventDone}, true
+	case ev.Type == "session.status":
+		return parseStatusEvent(data)
 	case strings.Contains(ev.Type, "error"):
 		return Event{Type: EventError, Delta: data}, true
 	default:

@@ -60,16 +60,21 @@ func (s *Server) prepareLaneContext(ctx context.Context, ep config.EndpointConfi
 			}
 			envelope["ci_failures"] = text
 		}
-		if kind == fixKindConflict {
-			return s.prepareConflict(ctx, ep, envelope, workCtx, lease)
+		// A mixed fix that carries a conflict gets the base merged too, but
+		// only a pure conflict fix can end without the agent.
+		hasConflict := kind == fixKindConflict ||
+			(kind == fixKindMixed && containsReason(decodeFixReasons(stringValue(envelope["fix_reasons"])), fixKindConflict))
+		if hasConflict && s.prepareConflict(ctx, ep, envelope, workCtx, lease) && kind == fixKindConflict {
+			workCtx.AgentReply = fmt.Sprintf(conflictPrepReplyFmt, strings.TrimSpace(stringValue(envelope["base_branch"])))
+			return true
 		}
 	}
 	return false
 }
 
-// prepareConflict merges origin/<base> into the lease before the agent turn.
-// A clean merge needs no agent; conflicts are listed for the agent to
-// resolve; a failed fetch or merge is undone and left to the agent.
+// prepareConflict merges origin/<base> into the lease before the agent turn
+// and reports a clean merge. Conflicts are listed for the agent to resolve; a
+// failed fetch or merge is undone and left to the agent.
 func (s *Server) prepareConflict(ctx context.Context, ep config.EndpointConfig, envelope WebhookEnvelope, workCtx *WebhookWorkContext, lease *WorkspaceLease) bool {
 	base := strings.TrimSpace(stringValue(envelope["base_branch"]))
 	if lease == nil || lease.manager == nil || lease.Mode != config.WorkspaceModeMutable || base == "" {
@@ -82,7 +87,6 @@ func (s *Server) prepareConflict(ctx context.Context, ep config.EndpointConfig, 
 	}
 	_, mergeErr := run.Run(ctx, lease.Path, "merge", "--no-edit", "origin/"+base)
 	if mergeErr == nil {
-		workCtx.AgentReply = fmt.Sprintf(conflictPrepReplyFmt, base)
 		slog.Info("webhook: conflict prep merged cleanly", "endpoint", ep.Name, "pr_key", workCtx.PRKey, "base", base)
 		return true
 	}

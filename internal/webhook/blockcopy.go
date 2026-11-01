@@ -16,7 +16,7 @@ type blockCopy struct {
 }
 
 var (
-	reasonKindRe    = regexp.MustCompile(`^(\S+) (?:made no change|stopped on a denied permission|could not get its worktree|exhausted after)`)
+	reasonKindRe    = regexp.MustCompile(`^(\S+) (?:made no change|stopped on a denied permission|stopped on a provider limit|could not get its worktree|exhausted after)`)
 	reasonRetriesRe = regexp.MustCompile(`exhausted after (\d+)/\d+ retries \(([^)]*)\)`)
 	reasonStormRe   = regexp.MustCompile(`\((\d+) auto-fix runs in 24h\)`)
 )
@@ -38,6 +38,8 @@ func plainFailureClass(label string) string {
 		return "opening the PR failed"
 	case "model error":
 		return "the model returned an error"
+	case "provider limit":
+		return "the model provider refused the run (limit reached)"
 	}
 	return strings.TrimSpace(label)
 }
@@ -68,6 +70,15 @@ func describeBlock(reason string) blockCopy {
 		}
 		if detail != "" {
 			c.Detail = "Agent said: " + detail
+		}
+		return c
+	case strings.Contains(reason, " stopped on a provider limit"):
+		c := blockCopy{
+			Headline: "The " + kind + " run was refused by the model provider (limit reached).",
+			Next:     "Restore the provider quota or switch the model, then press Retry.",
+		}
+		if detail != "" {
+			c.Detail = "Provider said: " + detail
 		}
 		return c
 	case strings.Contains(reason, " stopped on a denied permission"):

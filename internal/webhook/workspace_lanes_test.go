@@ -403,7 +403,6 @@ func TestRenderedEnvelopePublishesLeaseOnly(t *testing.T) {
 		{"fix custom prompt", "fix", "Workspace: {{.worktree}}", fixLease, true},
 		{"review builtin prompt", "review", config.BuiltinPrompt("review"), reviewLease, false},
 		{"fix builtin prompt", "fix", config.BuiltinPrompt("fix"), fixLease, false},
-		{"merge builtin prompt", "merge", config.BuiltinPrompt("merge"), "", false},
 		{"merged builtin prompt", "merged", config.BuiltinPrompt("merged"), "", false},
 	}
 	for _, tt := range tests {

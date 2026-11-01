@@ -234,9 +234,13 @@ type Server struct {
 	digest      *config.DigestConfig
 	digestClock func() time.Time
 	// Code merge seams; nil uses gh.
-	mergeFacts         mergeFactsFunc
-	prMerger           prMergeFunc
-	mergeMethods       mergeMethodsFunc
+	mergeFacts   mergeFactsFunc
+	prMerger     prMergeFunc
+	mergeMethods mergeMethodsFunc
+	compareFiles compareFilesFunc
+	// codeMerge replaces the whole code merge in lane tests; nil runs
+	// runCodeMerge.
+	codeMerge          func(ctx context.Context, ep config.EndpointConfig, workCtx *WebhookWorkContext) (string, error)
 	mergedSummaryFacts mergedSummaryFunc
 	priorReviews       priorReviewsFunc
 	ciFailures         ciFailuresFunc
@@ -2581,13 +2585,6 @@ func (s *Server) executeDeliveryWithFix(ep config.EndpointConfig, body []byte, i
 		return nil
 	}
 
-	if lease == nil && strings.EqualFold(strings.TrimSpace(ep.Workflow), "merge") {
-		if checkout := s.checkoutForRepo(stringValue(envelope["repository"])); checkout != "" {
-			workCtx.Worktree = checkout
-			slog.Info("webhook: merge lane workdir resolved", "endpoint", ep.Name, "delivery_id", deliveryID, "path", checkout)
-		}
-	}
-
 	rendered = strings.ReplaceAll(rendered, "</untrusted_payload>", "&lt;/untrusted_payload&gt;")
 	wrapped := fmt.Sprintf("<untrusted_payload>\n%s\n</untrusted_payload>", rendered)
 
@@ -2615,7 +2612,11 @@ func (s *Server) executeDeliveryWithFix(ep config.EndpointConfig, body []byte, i
 		// nothing to resolve); finalize pushes it.
 		err = nil
 	} else if codeMergeFor(ep) && strings.TrimSpace(workCtx.PRKey) != "" {
-		reason, merr := s.runCodeMerge(ctx, ep, workCtx)
+		merge := s.codeMerge
+		if merge == nil {
+			merge = s.runCodeMerge
+		}
+		reason, merr := merge(ctx, ep, workCtx)
 		if merr == nil && reason != "" {
 			s.markSkipped(id, ep, envelope, "merge skipped: "+reason)
 			return nil

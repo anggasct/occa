@@ -228,6 +228,7 @@ type Event struct {
 	Err          error
 	Permission   *PermissionRequest
 	Question     *QuestionRequest
+	Retry        *RetryStatus
 }
 
 type PermissionRequest struct {

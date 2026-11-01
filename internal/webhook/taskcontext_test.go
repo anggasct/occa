@@ -76,7 +76,7 @@ func TestInjectTaskContextWithoutTask(t *testing.T) {
 }
 
 func TestBuiltinPromptsRenderOnMinimalEnvelope(t *testing.T) {
-	for _, workflow := range []string{"review", "fix", "merge", "merged"} {
+	for _, workflow := range []string{"review", "fix", "merged"} {
 		prompt := config.BuiltinPrompt(workflow)
 		if strings.TrimSpace(prompt) == "" {
 			t.Fatalf("builtin %s is empty", workflow)
