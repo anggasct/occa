@@ -57,6 +57,8 @@ type Injector struct {
 	mu      sync.Mutex
 	started map[string]bool
 	noticed map[string]string
+	// warnedGlobal keeps the unreadable-global WARN to once per process.
+	warnedGlobal bool
 }
 
 // NewInjector builds an injector. options maps a run's workdir to resolver
@@ -89,7 +91,7 @@ func (in *Injector) ForNewSession(workdir string, input Input) Plan {
 		return Plan{}
 	}
 	set := in.load(workdir)
-	if len(set.Skills) == 0 {
+	if set.empty() {
 		return Plan{}
 	}
 	return in.plan(workdir, set, input)
@@ -123,7 +125,7 @@ func (in *Injector) ForSession(ctx context.Context, sessionID, workdir string, i
 	if in.isStarted(sessionID) {
 		return Plan{}
 	}
-	if len(set.Skills) == 0 {
+	if set.empty() {
 		return Plan{}
 	}
 	if isFirst != nil && !isFirst() {
@@ -160,15 +162,16 @@ func (in *Injector) load(workdir string) Set {
 }
 
 func (in *Injector) plan(workdir string, set Set, input Input) Plan {
-	// Skip and shadow lines are logged when a run actually resolves, not on
-	// every later message of a session that is only checked for changes.
+	// Skip and shadow lines are logged when a run actually resolves — also
+	// when every skill was skipped — not on every later message of a session
+	// that is only checked for changes.
 	for _, e := range set.Errors {
 		slog.Error("skill skipped", "path", e.Path, "line", e.Line, "reason", e.Reason)
 	}
 	for _, sk := range set.Shadowed {
 		slog.Info("skill shadowed", "name", sk.Name, "by", ScopeRepo)
 	}
-	if set.GlobalUnreadable != nil {
+	if set.GlobalUnreadable != nil && in.warnGlobalOnce() {
 		slog.Warn("skills: global dir unreadable", "error", set.GlobalUnreadable)
 	}
 	opts := in.Options(workdir)
@@ -241,4 +244,21 @@ func (in *Injector) hasRecords(sessionID string) bool {
 	in.mu.Lock()
 	defer in.mu.Unlock()
 	return in.started[sessionID]
+}
+
+func (in *Injector) warnGlobalOnce() bool {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	if in.warnedGlobal {
+		return false
+	}
+	in.warnedGlobal = true
+	return true
+}
+
+// empty reports a load with nothing to inject and nothing to report: no
+// valid skill, no skipped file, no unreadable global dir. A load with only
+// skipped files still resolves, so its ERROR lines are logged.
+func (s Set) empty() bool {
+	return len(s.Skills) == 0 && len(s.Errors) == 0 && s.GlobalUnreadable == nil
 }

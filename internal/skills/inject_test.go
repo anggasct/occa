@@ -1,7 +1,10 @@
 package skills
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -227,5 +230,69 @@ func TestSplitScope(t *testing.T) {
 	}
 	if len(SplitScope("")) != 0 {
 		t.Fatal("empty scope")
+	}
+}
+
+func captureSkillLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+// Domain rule 3 / F-001: a workdir whose only skill is broken still logs the
+// skip at ERROR naming the file, on a webhook run and on a chat session's
+// first prompt — once per session, not on every later message.
+func TestInjectLogsSkipsWhenNoSkillIsValid(t *testing.T) {
+	root := t.TempDir()
+	broken := writeSkill(t, root, "broken", "---\nname: broken\ndescription: d\ntrigger: sometimes\n---\nx\n")
+	logs := captureSkillLogs(t)
+	in := injectorFor(newMemLedger(), "")
+
+	plan := in.ForNewSession(root, Input{Text: "x"})
+	if plan.Prefix("p") != "p" {
+		t.Fatalf("an all-invalid workdir changed the prompt: %q", plan.Prefix("p"))
+	}
+	if got := strings.Count(logs.String(), "level=ERROR msg=\"skill skipped\" path="+broken); got != 1 {
+		t.Fatalf("webhook run skip lines = %d:\n%s", got, logs.String())
+	}
+
+	logs.Reset()
+	c := &chatSession{in: in, id: "sess-1", workdir: root}
+	c.send(t, "first")
+	c.send(t, "second")
+	c.send(t, "third")
+	if c.sent[0] != "first" || countBlocks(c.sent) != 0 {
+		t.Fatalf("prompts = %q", c.sent)
+	}
+	if got := strings.Count(logs.String(), "msg=\"skill skipped\""); got != 1 {
+		t.Fatalf("chat skip lines = %d, want 1 for the session:\n%s", got, logs.String())
+	}
+	if !strings.Contains(logs.String(), "reason=") {
+		t.Fatalf("skip line without a reason:\n%s", logs.String())
+	}
+}
+
+// An unreadable global dir is reported at WARN once, not per run.
+func TestInjectWarnsUnreadableGlobalOnce(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads unreadable dirs")
+	}
+	global := t.TempDir()
+	if err := os.Chmod(global, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(global, 0o755) })
+	logs := captureSkillLogs(t)
+	in := injectorFor(newMemLedger(), global)
+	for i := 0; i < 3; i++ {
+		if p := in.ForNewSession(t.TempDir(), Input{}); p.Block != "" {
+			t.Fatalf("block = %q", p.Block)
+		}
+	}
+	if got := strings.Count(logs.String(), "skills: global dir unreadable"); got != 1 {
+		t.Fatalf("unreadable-global WARN lines = %d:\n%s", got, logs.String())
 	}
 }
