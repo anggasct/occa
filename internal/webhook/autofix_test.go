@@ -656,3 +656,37 @@ func TestAutoFixCIFiresWhenMergePregateSkips(t *testing.T) {
 	row, _ := st.PRQueueRepo().Get(context.Background(), "acme/widget#7")
 	t.Fatalf("auto-fix never enqueued: %+v", row)
 }
+
+// AC-04: the auto path treats max-1 as full so one slot stays free for a
+// manual /retry; a dropped auto-fix writes no queue row.
+func TestAutoFixKeepsOneSlotForManualRetry(t *testing.T) {
+	rec := newPRRecorder("thread-pr", nil)
+	srv, st, _ := newPRTestServer(t, rec, autoFixTestEndpoints(config.AutomationFull,
+		config.RepoAutoFix{CI: true}, []string{"please fix ci"}))
+	srv.SetAutoFixBodyBuilder(func(ctx context.Context, repo, number string) ([]byte, string, string, error) {
+		return []byte(`{"action":"created"}`), "issue_comment", "owner", nil
+	})
+	srv.maxQueuedPerKey = 2
+	ctx := context.Background()
+	if _, err := st.PRQueueRepo().EnsurePR(ctx, "acme/widget#7", "thread-1", "root-1"); err != nil {
+		t.Fatalf("EnsurePR: %v", err)
+	}
+	// A dispatcher that is not consuming holds one queued review item.
+	d := newDispatcher(srv, "pr:acme/widget#7")
+	srv.dispatchMu.Lock()
+	srv.dispatchers["pr:acme/widget#7"] = d
+	srv.dispatchMu.Unlock()
+	d.push(dispatchItem{ep: srv.endpoints["/webhooks/github-widget-review"], prKey: "acme/widget#7", lane: laneOfWorkflow("review")})
+
+	err := srv.enqueueAutoFixCI(ctx, "acme/widget", "7", "abc1234", []string{fixKindCI})
+	if err == nil || !strings.Contains(err.Error(), "pr queue full") {
+		t.Fatalf("enqueueAutoFixCI err = %v, want pr queue full", err)
+	}
+	items, _ := st.PRQueueRepo().ListItems(ctx, "acme/widget#7")
+	if len(items) != 0 {
+		t.Fatalf("queue rows = %d, want 0 for a dropped auto-fix", len(items))
+	}
+	if d.queueLen() >= srv.maxQueuedPerKey {
+		t.Fatalf("queue len %d leaves no slot for a manual retry (max %d)", d.queueLen(), srv.maxQueuedPerKey)
+	}
+}
