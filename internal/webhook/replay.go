@@ -155,6 +155,20 @@ func (s *Server) closeSupersededReceipt(item dispatchItem, reason string) {
 	}
 }
 
+func (s *Server) releaseReceiptForRequeue(item dispatchItem, receipt *store.WebhookDelivery) {
+	if s.deliveries == nil || receipt == nil {
+		return
+	}
+	ok, err := s.deliveries.Transition(context.Background(), receipt.ID, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusReceived, "")
+	if err != nil {
+		slog.Warn("webhook: requeue receipt release failed", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "error", err)
+		return
+	}
+	if !ok {
+		slog.Warn("webhook: requeue receipt release lost race", "endpoint", item.ep.Name, "delivery_id", item.deliveryID)
+	}
+}
+
 func (s *Server) mergedReplayChecker(ctx context.Context, row store.WebhookReplay) (replayDecision, error) {
 	if !strings.EqualFold(strings.TrimSpace(row.EventType), "pull_request") || strings.TrimSpace(row.PRKey) == "" {
 		return replayUndecidable, nil

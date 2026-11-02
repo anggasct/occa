@@ -346,11 +346,18 @@ func (s *Server) runMergedDocsUpdate(ctx context.Context, ep config.EndpointConf
 	if workCtx.Worktree != "" {
 		slog.Info("webhook: merged lane workdir resolved", "endpoint", ep.Name, "delivery_id", item.deliveryID, "path", workCtx.Worktree)
 	}
+	ref, source, merr := s.laneModel(ep)
+	promptTurns := merr == nil
+	if promptTurns {
+		setLaneModel(workCtx, nil, ref, source)
+	} else {
+		slog.Warn("webhook: merged lane model unresolved, prompt turns skipped", "endpoint", ep.Name, "delivery_id", item.deliveryID, "error", merr)
+	}
 	if ep.PromptSource == "builtin" {
 		// The built-in merged prompt only summarizes the merge: occa writes
 		// that line itself instead of starting an agent session.
 		s.postMergedSummary(ctx, ep, envelope, workCtx)
-	} else if prompt := strings.TrimSpace(ep.Prompt); prompt != "" {
+	} else if prompt := strings.TrimSpace(ep.Prompt); prompt != "" && promptTurns {
 		rendered, err := renderTemplate(prompt, tmplData)
 		if err != nil {
 			slog.Error("webhook: merged prompt render failed", "endpoint", ep.Name, "error", err)
@@ -362,7 +369,7 @@ func (s *Server) runMergedDocsUpdate(ctx context.Context, ep config.EndpointConf
 			}
 		}
 	}
-	s.runMergedExtras(ep, envelope, workCtx)
+	s.runMergedExtras(ep, envelope, workCtx, promptTurns)
 }
 
 // mergedDocsEnvelope drops the branch so the post-merge work cannot resolve
@@ -381,7 +388,7 @@ func mergedDocsEnvelope(envelope WebhookEnvelope) WebhookEnvelope {
 	return out
 }
 
-func (s *Server) runMergedExtras(ep config.EndpointConfig, envelope WebhookEnvelope, workCtx *WebhookWorkContext) {
+func (s *Server) runMergedExtras(ep config.EndpointConfig, envelope WebhookEnvelope, workCtx *WebhookWorkContext, promptTurns bool) {
 	if len(ep.OnMerged) == 0 {
 		return
 	}
@@ -392,6 +399,9 @@ func (s *Server) runMergedExtras(ep config.EndpointConfig, envelope WebhookEnvel
 		command := strings.TrimSpace(action.Run)
 		switch {
 		case prompt != "" || promptFile != "":
+			if !promptTurns {
+				continue
+			}
 			content := prompt
 			if promptFile != "" {
 				loaded, err := config.LoadPromptFile(s.promptDir, promptFile)

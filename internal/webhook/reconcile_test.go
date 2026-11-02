@@ -454,3 +454,50 @@ func TestReviewVerdictObservationPicksLatestVerdictHead(t *testing.T) {
 		t.Fatalf("untrusted verdict head = %q, want empty", got)
 	}
 }
+
+func TestReconcileLeavesBlockedPRAlone(t *testing.T) {
+	srv, st, _ := newSurfaceServer(t)
+	ctx := context.Background()
+	prKey := "acme/widget#195"
+	if _, err := st.PRQueueRepo().EnsurePR(ctx, prKey, "thread-195", "root-195"); err != nil {
+		t.Fatalf("ensure pr binding: %v", err)
+	}
+	if err := st.PRQueueRepo().SetBlocked(ctx, prKey, "fix made no change"); err != nil {
+		t.Fatalf("block pr: %v", err)
+	}
+	facts := ReconcileFacts{
+		State:         "OPEN",
+		HeadSHA:       "c0ffee95",
+		HeadRef:       "feat/x",
+		BaseRef:       "main",
+		Title:         "T",
+		URL:           "https://github.com/acme/widget/pull/195",
+		Author:        "owner",
+		HeadRepo:      "acme/widget",
+		CIGreen:       true,
+		ReviewVerdict: "approved",
+	}
+	srv.SetReconcileFacts(func(context.Context, string, string) (ReconcileFacts, error) {
+		return facts, nil
+	})
+	mergePrefix := "reconcile-merge-" + normalizeRevision(facts.HeadSHA) + "-"
+	srv.reconcileOnce(ctx)
+	time.Sleep(50 * time.Millisecond)
+	if got := countReconcileDeliveries(t, st, "github-widget-merge", mergePrefix); got != 0 {
+		t.Fatalf("blocked PR merge reconcile deliveries = %d, want 0", got)
+	}
+	facts.ReviewVerdict = ""
+	srv.reconcileOnce(ctx)
+	time.Sleep(50 * time.Millisecond)
+	reviewPrefix := "reconcile-review-" + normalizeRevision(facts.HeadSHA) + "-"
+	if got := countReconcileDeliveries(t, st, "github-widget-review", reviewPrefix); got != 0 {
+		t.Fatalf("blocked PR review reconcile deliveries = %d, want 0", got)
+	}
+
+	facts.ReviewVerdict = "approved"
+	if err := st.PRQueueRepo().Unblock(ctx, prKey); err != nil {
+		t.Fatalf("unblock pr: %v", err)
+	}
+	srv.reconcileOnce(ctx)
+	waitForReconcileDelivery(t, st, "github-widget-merge", mergePrefix, 1)
+}

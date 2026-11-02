@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/anggasct/occa/internal/config"
+	"github.com/anggasct/occa/internal/relay"
 	"github.com/anggasct/occa/internal/store"
 )
 
@@ -444,5 +446,52 @@ func TestFormatPriorReviews(t *testing.T) {
 	}
 	if strings.Count(got, "x") > priorReviewRunes {
 		t.Fatalf("a review body must be clipped to %d runes", priorReviewRunes)
+	}
+}
+
+func TestMergedPromptTurnRunsOnLaneModel(t *testing.T) {
+	srv, st, _ := operatorTestServer(t, nil)
+	var models []string
+	var sources []string
+	var mu sync.Mutex
+	srv.executor = func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+		mu.Lock()
+		defer mu.Unlock()
+		model := ""
+		if workCtx.Model != nil {
+			model = relay.FormatModelRef(*workCtx.Model)
+		}
+		models = append(models, model)
+		sources = append(sources, workCtx.ModelSource)
+		return nil
+	}
+	envelope := WebhookEnvelope{"repository": "acme/widget", "pr_number": "7", "title": "T"}
+	ep := srv.endpointsByName["github-widget-merged"]
+	ep.PromptSource = "file"
+	ep.Prompt = "write the release note"
+	ep.OnMerged = []config.MergedAction{{Prompt: "update the changelog"}}
+	item := dispatchItem{ep: ep, body: []byte(mergedBody(7)), deliveryID: "del-merged-model", eventType: "pull_request"}
+
+	ep.Model = "prov/endpoint-model"
+	item.ep = ep
+	srv.runMergedDocsUpdate(context.Background(), ep, item, envelope, "thread-7", "root-7")
+
+	ep.Model = ""
+	item.ep = ep
+	if err := st.ChannelRepo().UpsertModel(context.Background(), ep.Platform, ep.ChannelID, "prov/channel-model"); err != nil {
+		t.Fatalf("upsert channel model: %v", err)
+	}
+	srv.runMergedDocsUpdate(context.Background(), ep, item, envelope, "thread-7", "root-7")
+
+	ep.Model = "no-slash"
+	item.ep = ep
+	srv.runMergedDocsUpdate(context.Background(), ep, item, envelope, "thread-7", "root-7")
+
+	mu.Lock()
+	defer mu.Unlock()
+	wantModels := []string{"prov/endpoint-model", "prov/endpoint-model", "prov/channel-model", "prov/channel-model"}
+	wantSources := []string{"endpoint", "endpoint", "channel", "channel"}
+	if !reflect.DeepEqual(models, wantModels) || !reflect.DeepEqual(sources, wantSources) {
+		t.Fatalf("merged turns models=%q sources=%q, want %q %q", models, sources, wantModels, wantSources)
 	}
 }
