@@ -71,7 +71,7 @@ func (s *Server) reconcileOnce(ctx context.Context) {
 	}
 	bound := make([]store.PRRun, 0, len(rows))
 	for _, row := range rows {
-		if strings.TrimSpace(row.PRKey) == "" {
+		if strings.TrimSpace(row.PRKey) == "" || row.Status == store.PRStatusBlocked {
 			continue
 		}
 		if strings.TrimSpace(row.ThreadID) == "" {

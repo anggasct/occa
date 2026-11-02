@@ -435,12 +435,6 @@ func TestMergeDrainRequeueThenBlocked(t *testing.T) {
 		d.lanes[3].items = d.lanes[3].items[1:]
 		return next
 	}
-	backdateReceipt := func() {
-		t.Helper()
-		if _, err := st.DB().Exec(`UPDATE webhook_delivery SET updated_at = 1 WHERE endpoint = 'github-widget-merge' AND delivery_id = 'del-drain-merge'`); err != nil {
-			t.Fatalf("backdate receipt: %v", err)
-		}
-	}
 	for i := 0; i < 3; i++ {
 		d.handle(mergeItem)
 		if len(rec.order) != 0 {
@@ -450,7 +444,10 @@ func TestMergeDrainRequeueThenBlocked(t *testing.T) {
 		if mergeItem.requeues != i+1 {
 			t.Fatalf("requeues = %d, want %d", mergeItem.requeues, i+1)
 		}
-		backdateReceipt()
+		requeued, err := st.WebhookDeliveryRepo().Get(context.Background(), "github-widget-merge", "del-drain-merge")
+		if err != nil || requeued == nil || requeued.Status != store.WebhookStatusReceived {
+			t.Fatalf("requeued merge receipt = %+v, %v; want received", requeued, err)
+		}
 	}
 	d.handle(mergeItem)
 	if len(rec.order) != 0 {
@@ -463,6 +460,82 @@ func TestMergeDrainRequeueThenBlocked(t *testing.T) {
 	d1, err := st.WebhookDeliveryRepo().Get(context.Background(), "github-widget-merge", "del-drain-merge")
 	if err != nil || d1 == nil || d1.Status != store.WebhookStatusSkipped {
 		t.Fatalf("merge receipt = %+v, %v; want skipped", d1, err)
+	}
+}
+
+func TestRequeuedMergeRunsWhenDequeued(t *testing.T) {
+	rec := newPRRecorder("thread-pr", nil)
+	srv, st, _ := newPRTestServer(t, rec, []config.EndpointConfig{
+		prTestEndpoint("review", "/review", config.AutomationFull),
+		prTestEndpoint("merge", "/merge", config.AutomationFull),
+	})
+	d := newDispatcher(srv, "pr:acme/widget#8")
+	reviewItem := dispatchItem{
+		ep:          config.EndpointConfig{Name: "github-widget-review", Workflow: "review", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "p", Admit: defaultCatchAllAdmit(), Automation: &config.RepoAutomation{Default: config.AutomationFull}},
+		body:        []byte(prReviewBody(8, "feat/x", "owner", "commented", "c0ffee9")),
+		deliveryID:  "del-requeue-review",
+		eventType:   "pull_request_review",
+		payloadHash: "h",
+		prKey:       "acme/widget#8",
+		lane:        1,
+	}
+	if !d.push(reviewItem) {
+		t.Fatal("review push failed")
+	}
+	mergeEp := config.EndpointConfig{Name: "github-widget-merge", Workflow: "merge", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "p", Admit: defaultCatchAllAdmit(), Automation: &config.RepoAutomation{Default: config.AutomationFull}}
+	mergeItem := dispatchItem{ep: mergeEp, body: []byte(prReviewBody(8, "feat/x", "owner", "approved", "c0ffeeb")), deliveryID: "del-requeue-merge", eventType: "pull_request_review", payloadHash: "h", prKey: "acme/widget#8", lane: 3}
+	d.handle(mergeItem)
+	d.lanes[3].mu.Lock()
+	if len(d.lanes[3].items) != 1 {
+		d.lanes[3].mu.Unlock()
+		t.Fatal("merge item not requeued")
+	}
+	requeued := d.lanes[3].items[0]
+	d.lanes[3].items = nil
+	d.lanes[3].mu.Unlock()
+	d.lanes[1].mu.Lock()
+	d.lanes[1].items = nil
+	d.lanes[1].mu.Unlock()
+
+	srv.dispatchMu.Lock()
+	srv.dispatchers["pr:acme/widget#8"] = d
+	srv.dispatchMu.Unlock()
+	d.handle(requeued)
+	receipt, err := st.WebhookDeliveryRepo().Get(context.Background(), "github-widget-merge", "del-requeue-merge")
+	if err != nil || receipt == nil {
+		t.Fatalf("merge receipt: %+v, %v", receipt, err)
+	}
+	if receipt.Status == store.WebhookStatusReceived || receipt.Status == store.WebhookStatusProcessing {
+		t.Fatalf("requeued merge was not claimed on dequeue: status %q", receipt.Status)
+	}
+}
+
+func TestReplacedRequeuedMergeReceiptIsSkipped(t *testing.T) {
+	rec := newPRRecorder("thread-pr", nil)
+	srv, st, _ := newPRTestServer(t, rec, []config.EndpointConfig{
+		prTestEndpoint("review", "/review", config.AutomationFull),
+		prTestEndpoint("merge", "/merge", config.AutomationFull),
+	})
+	d := newDispatcher(srv, "pr:acme/widget#9")
+	reviewItem := dispatchItem{
+		ep:          config.EndpointConfig{Name: "github-widget-review", Workflow: "review", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "p", Admit: defaultCatchAllAdmit(), Automation: &config.RepoAutomation{Default: config.AutomationFull}},
+		body:        []byte(prReviewBody(9, "feat/x", "owner", "commented", "c0ffee9")),
+		deliveryID:  "del-replace-review",
+		eventType:   "pull_request_review",
+		payloadHash: "h",
+		prKey:       "acme/widget#9",
+		lane:        1,
+	}
+	if !d.push(reviewItem) {
+		t.Fatal("review push failed")
+	}
+	mergeEp := config.EndpointConfig{Name: "github-widget-merge", Workflow: "merge", Secret: "s3cret", Platform: "telegram", ChannelID: "chat1", Prompt: "p", Admit: defaultCatchAllAdmit(), Automation: &config.RepoAutomation{Default: config.AutomationFull}}
+	mergeItem := dispatchItem{ep: mergeEp, body: []byte(prReviewBody(9, "feat/x", "owner", "approved", "c0ffeeb")), deliveryID: "del-replace-merge", eventType: "pull_request_review", payloadHash: "h", prKey: "acme/widget#9", lane: 3}
+	d.handle(mergeItem)
+	srv.closeSupersededReceipt(mergeItem, "coalesced by a newer state event")
+	receipt, err := st.WebhookDeliveryRepo().Get(context.Background(), "github-widget-merge", "del-replace-merge")
+	if err != nil || receipt == nil || receipt.Status != store.WebhookStatusSkipped {
+		t.Fatalf("replaced merge receipt = %+v, %v; want skipped", receipt, err)
 	}
 }
 

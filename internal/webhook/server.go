@@ -1674,6 +1674,7 @@ func (d *dispatcher) handle(item dispatchItem) {
 					return
 				}
 				item.requeues++
+				s.releaseReceiptForRequeue(item, receipt)
 				item.queueID = s.mirrorEnqueue(item.prKey, item.ep.Name, item.eventType, 0, lanePriority(item.lane))
 				held = false
 				s.releaseEvent()
@@ -2548,47 +2549,13 @@ func (s *Server) executeDeliveryWithFix(ep config.EndpointConfig, body []byte, i
 		}
 	}
 
-	if strings.TrimSpace(ep.Model) != "" {
-		ref, err := relay.ParseModelRef(strings.TrimSpace(ep.Model))
-		if err != nil {
-			slog.Error("webhook: malformed endpoint model", "endpoint", ep.Name, "platform", ep.Platform, "channel_id", ep.ChannelID)
-			s.failDelivery(ep, id, deliveryID, eventType, envelope, "invalid endpoint model", workCtx)
-			return nil
-		}
-		workCtx.Model = &ref
-		workCtx.ModelSource = "endpoint"
-		envelope["model"] = relay.FormatModelRef(ref)
-		envelope["model_source"] = "endpoint"
-	} else if s.channels != nil {
-		ch, err := s.channels.Get(context.Background(), ep.Platform, ep.ChannelID)
-		if err != nil {
-			slog.Error("webhook: channel repo get failed", "endpoint", ep.Name, "channel_id", ep.ChannelID, "error", err)
-			s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary("channel configuration error: "+err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
-			return nil
-		}
-		if ch != nil && strings.TrimSpace(ch.Model) != "" {
-			ref, err := relay.ParseModelRef(strings.TrimSpace(ch.Model))
-			if err != nil {
-				slog.Error("webhook: malformed channel model", "endpoint", ep.Name, "platform", ep.Platform, "channel_id", ep.ChannelID)
-				s.failDelivery(ep, id, deliveryID, eventType, envelope, "invalid channel model", workCtx)
-				return nil
-			}
-			workCtx.Model = &ref
-			workCtx.ModelSource = "channel"
-			envelope["model"] = relay.FormatModelRef(ref)
-			envelope["model_source"] = "channel"
-		} else {
-			workCtx.Model = nil
-			workCtx.ModelSource = "fallback"
-			envelope["model"] = "agent/session default"
-			envelope["model_source"] = "fallback"
-		}
-	} else {
-		workCtx.Model = nil
-		workCtx.ModelSource = "fallback"
-		envelope["model"] = "agent/session default"
-		envelope["model_source"] = "fallback"
+	ref, source, merr := s.laneModel(ep)
+	if merr != nil {
+		slog.Error("webhook: lane model unresolved", "endpoint", ep.Name, "platform", ep.Platform, "channel_id", ep.ChannelID, "error", merr)
+		s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary(merr.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
+		return nil
 	}
+	setLaneModel(workCtx, envelope, ref, source)
 
 	prepCtx, prepCancel := context.WithTimeout(context.Background(), s.processingTimeout)
 	skipAgent := s.prepareLaneContext(prepCtx, ep, envelope, workCtx, lease)
