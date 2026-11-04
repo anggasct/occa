@@ -452,7 +452,7 @@ func (s *Server) escalateBlock(ep config.EndpointConfig, prKey string, row *stor
 		slog.Warn("webhook: block mark failed", "pr_key", prKey, "error", err)
 		return false
 	}
-	s.stages.block(prKey, reason)
+	s.stages.block(context.Background(), prKey, blockedRunStage(row.ActiveKind, ep.Workflow), reason)
 	if !s.markEscalated(prKey) {
 		return false
 	}

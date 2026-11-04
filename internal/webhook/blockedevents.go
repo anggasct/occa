@@ -34,6 +34,7 @@ func (s *Server) unblockOnNewHead(item dispatchItem, row *store.PRRun, envelope 
 	}
 	s.reopenPRSurface(item.prKey)
 	s.clearEscalated(item.prKey)
+	s.supersedeWaitingInputs(context.Background(), item.prKey, "superseded: new commits")
 	headline := describeBlock(row.BlockedReason).Headline
 	slog.Info("webhook: new head unblocked PR", "pr_key", item.prKey, "endpoint", item.ep.Name, "head", shortRevision(stringValue(envelope["head_sha"])), "blocked_reason", row.BlockedReason)
 	s.postBlockedThreadLine(item, row, fmt.Sprintf("🔓 New commits on %s — unblocked (was: %s).", item.prKey, strings.TrimSuffix(headline, ".")))
@@ -48,6 +49,14 @@ func (s *Server) noteBlockedSkip(item dispatchItem, row *store.PRRun, envelope W
 	}
 	headline := describeBlock(row.BlockedReason).Headline
 	s.postBlockedThreadLine(item, row, fmt.Sprintf("⏸ %s is blocked — %s Use Retry or Cancel on the blocked notice (or /retry, /cancel here), then ask again.", item.prKey, headline))
+}
+
+func (s *Server) noteBlockedKept(item dispatchItem, row *store.PRRun, envelope WebhookEnvelope) {
+	if row == nil || strings.TrimSpace(stringValue(envelope["comment_trigger"])) == "" {
+		return
+	}
+	headline := describeBlock(row.BlockedReason).Headline
+	s.postBlockedThreadLine(item, row, fmt.Sprintf("⏸ %s is blocked — %s Your request is kept and runs when you press Retry; Cancel drops it.", item.prKey, headline))
 }
 
 func (s *Server) postBlockedThreadLine(item dispatchItem, row *store.PRRun, text string) {

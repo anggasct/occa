@@ -357,15 +357,20 @@ func (s *Server) mirrorEnqueue(prKey, endpoint, eventType string, deliveryID int
 	return id
 }
 
-func (s *Server) prMirrorBlocked(prKey, reason string) {
+func (s *Server) prMirrorBlocked(prKey, workflow, reason string) {
 	if s.prQueues == nil || strings.TrimSpace(prKey) == "" {
 		return
 	}
-	if err := s.prQueues.SetBlocked(context.Background(), prKey, reason); err != nil {
+	ctx := context.Background()
+	if err := s.prQueues.SetBlocked(ctx, prKey, reason); err != nil {
 		slog.Warn("webhook: pr blocked mark failed", "pr_key", prKey, "error", err)
 		return
 	}
-	s.stages.block(prKey, reason)
+	activeKind := ""
+	if row, err := s.prQueues.Get(ctx, prKey); err == nil && row != nil {
+		activeKind = row.ActiveKind
+	}
+	s.stages.block(ctx, prKey, blockedRunStage(activeKind, workflow), reason)
 }
 
 func (s *Server) mirrorDelete(queueID int64) {
