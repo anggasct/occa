@@ -200,7 +200,7 @@ CREATE TABLE IF NOT EXISTS stage_input (
     state        TEXT    NOT NULL CHECK (state IN ('waiting','consumed','superseded','expired')),
     received_at  INTEGER NOT NULL,
     consumed_at  INTEGER NOT NULL DEFAULT 0,
-    UNIQUE (stage_run_id, endpoint, delivery_id)
+    UNIQUE (stage_run_id, delivery_id)
 );
 
 CREATE TABLE IF NOT EXISTS action_request (

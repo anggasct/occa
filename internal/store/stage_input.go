@@ -41,39 +41,29 @@ type StageRunBlock struct {
 }
 
 func addStageInputPayload(_ *SQLiteStore, tx *sql.Tx) error {
-	have, err := tableColumns(tx, "stage_input")
-	if err != nil {
+	ddl := `
+CREATE TABLE stage_input_rebuilt (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    stage_run_id INTEGER NOT NULL,
+    delivery_id  TEXT    NOT NULL,
+    endpoint     TEXT    NOT NULL,
+    state        TEXT    NOT NULL CHECK (state IN ('waiting','consumed','superseded','expired')),
+    received_at  INTEGER NOT NULL,
+    consumed_at  INTEGER NOT NULL DEFAULT 0,
+    event_type   TEXT    NOT NULL DEFAULT '',
+    body         BLOB    NOT NULL DEFAULT x'',
+    UNIQUE (stage_run_id, endpoint, delivery_id)
+);
+INSERT INTO stage_input_rebuilt (id, stage_run_id, delivery_id, endpoint, state, received_at, consumed_at)
+    SELECT id, stage_run_id, delivery_id, endpoint, state, received_at, consumed_at FROM stage_input;
+DROP TABLE stage_input;
+ALTER TABLE stage_input_rebuilt RENAME TO stage_input;
+CREATE INDEX IF NOT EXISTS idx_stage_input_open ON stage_input (stage_run_id, state, received_at);
+`
+	if _, err := tx.Exec(ddl); err != nil {
 		return fmt.Errorf("store: migrate stage input payload: %w", err)
 	}
-	for _, col := range []struct{ name, ddl string }{
-		{"event_type", `ALTER TABLE stage_input ADD COLUMN event_type TEXT NOT NULL DEFAULT '';`},
-		{"body", `ALTER TABLE stage_input ADD COLUMN body BLOB NOT NULL DEFAULT x'';`},
-	} {
-		if have[col.name] {
-			continue
-		}
-		if _, err := tx.Exec(col.ddl); err != nil {
-			return fmt.Errorf("store: migrate stage input %s: %w", col.name, err)
-		}
-	}
 	return nil
-}
-
-func tableColumns(tx *sql.Tx, table string) (map[string]bool, error) {
-	rows, err := tx.Query(`SELECT name FROM pragma_table_info(?)`, table)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	out := map[string]bool{}
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, err
-		}
-		out[name] = true
-	}
-	return out, rows.Err()
 }
 
 func nextAttempt(ctx context.Context, tx *sql.Tx, workItemID string, stage Stage) (int, error) {

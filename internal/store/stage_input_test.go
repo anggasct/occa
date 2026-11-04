@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func TestStageInputPayloadMigrationReopen(t *testing.T) {
+func TestStageInputMigrationUpgradesLiveV26Table(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.db")
 	open := func() *SQLiteStore {
 		t.Helper()
@@ -19,22 +19,49 @@ func TestStageInputPayloadMigrationReopen(t *testing.T) {
 		return s
 	}
 	s := open()
-	assertVersion(t, s, SchemaVersion)
-	seedStageItem(t, s.StageRepo())
-	if _, _, err := s.StageRepo().AttachInput(context.Background(), blockedFallback(StageReview), StageInput{DeliveryID: "d1", Endpoint: "review", EventType: "issue_comment", Body: []byte(`{"a":1}`)}); err != nil {
-		t.Fatalf("AttachInput: %v", err)
-	}
-	if _, err := s.db.Exec("PRAGMA user_version=26"); err != nil {
-		t.Fatalf("rewind version: %v", err)
+	for _, stmt := range []string{
+		`DROP TABLE stage_input`,
+		`CREATE TABLE stage_input (
+			id           INTEGER PRIMARY KEY AUTOINCREMENT,
+			stage_run_id INTEGER NOT NULL,
+			delivery_id  TEXT    NOT NULL,
+			endpoint     TEXT    NOT NULL,
+			state        TEXT    NOT NULL CHECK (state IN ('waiting','consumed','superseded','expired')),
+			received_at  INTEGER NOT NULL,
+			consumed_at  INTEGER NOT NULL DEFAULT 0,
+			UNIQUE (stage_run_id, delivery_id)
+		)`,
+		`CREATE INDEX idx_stage_input_open ON stage_input (stage_run_id, state, received_at)`,
+		`INSERT INTO stage_input (stage_run_id, delivery_id, endpoint, state, received_at) VALUES (7, 'd1', 'review', 'waiting', 100)`,
+		`PRAGMA user_version=26`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil {
+			_ = s.Close()
+			t.Fatalf("seed v26 table: %s: %v", stmt, err)
+		}
 	}
 	_ = s.Close()
 
 	s = open()
 	defer func() { _ = s.Close() }()
 	assertVersion(t, s, SchemaVersion)
-	inputs, err := s.StageRepo().ListWaitingInputs(context.Background(), stageTestItem)
-	if err != nil || len(inputs) != 1 || string(inputs[0].Body) != `{"a":1}` || inputs[0].EventType != "issue_comment" {
-		t.Fatalf("inputs after re-migration = %+v, %v", inputs, err)
+	var deliveryID, endpoint, state, eventType string
+	var body []byte
+	if err := s.db.QueryRow(`SELECT delivery_id, endpoint, state, event_type, body FROM stage_input WHERE stage_run_id = 7`).Scan(&deliveryID, &endpoint, &state, &eventType, &body); err != nil {
+		t.Fatalf("read upgraded row: %v", err)
+	}
+	if deliveryID != "d1" || endpoint != "review" || state != "waiting" || eventType != "" || len(body) != 0 {
+		t.Fatalf("upgraded row = %q %q %q %q %q", deliveryID, endpoint, state, eventType, body)
+	}
+	if _, err := s.db.Exec(`INSERT INTO stage_input (stage_run_id, delivery_id, endpoint, state, received_at) VALUES (7, 'd1', 'fix', 'waiting', 101)`); err != nil {
+		t.Fatalf("another endpoint's copy of the same delivery: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO stage_input (stage_run_id, delivery_id, endpoint, state, received_at) VALUES (7, 'd1', 'review', 'waiting', 102)`); err == nil {
+		t.Fatal("the same endpoint and delivery must stay unique")
+	}
+	var indexes int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_stage_input_open'`).Scan(&indexes); err != nil || indexes != 1 {
+		t.Fatalf("idx_stage_input_open after rebuild = %d, %v", indexes, err)
 	}
 }
 
