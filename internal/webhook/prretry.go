@@ -452,6 +452,7 @@ func (s *Server) escalateBlock(ep config.EndpointConfig, prKey string, row *stor
 		slog.Warn("webhook: block mark failed", "pr_key", prKey, "error", err)
 		return false
 	}
+	s.stages.block(prKey, reason)
 	if !s.markEscalated(prKey) {
 		return false
 	}
@@ -684,7 +685,7 @@ func (s *Server) RecoverPRQueue() string {
 		kind := s.inferRetryKind(ctx, run)
 		if run.ActiveDelivery != 0 {
 			if rec, rerr := s.deliveries.GetByID(ctx, run.ActiveDelivery); rerr == nil && rec != nil && rec.Status == store.WebhookStatusProcessing {
-				if _, terr := s.deliveries.Transition(ctx, rec.ID, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusFailed, "interrupted by restart"); terr == nil {
+				if _, terr := s.deliveries.Transition(ctx, rec.ID, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusFailed, interruptedByRestart); terr == nil {
 					failed++
 				}
 			}

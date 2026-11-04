@@ -129,6 +129,7 @@ type Server struct {
 	pinner                Pinner
 	deliveries            DeliveryStore
 	prQueues              store.PRQueueRepo
+	stages                *stageRecorder
 	escalationMention     string
 	sessionAborter        func(ctx context.Context, sessionID, workdir string) error
 	sessionLiveness       SessionLiveness
@@ -512,6 +513,14 @@ func (s *Server) SetPRQueueRepo(r store.PRQueueRepo) {
 	s.prQueues = r
 }
 
+func (s *Server) SetStageRepo(r store.StageRepo) {
+	if r == nil {
+		s.stages = nil
+		return
+	}
+	s.stages = newStageRecorder(r)
+}
+
 func (s *Server) SetWebhookReplayRepo(r store.WebhookReplayRepo) {
 	s.replays = r
 }
@@ -728,7 +737,7 @@ func (s *Server) SetFallbackPollRepeatAfter(d time.Duration) {
 // bounds table growth at startup.
 func (s *Server) recoverStale(ctx context.Context) {
 	now := time.Now()
-	if failed, err := s.deliveries.FailStale(ctx, now.Add(-s.claimGrace).Unix(), "interrupted by restart"); err != nil {
+	if failed, err := s.deliveries.FailStale(ctx, now.Add(-s.claimGrace).Unix(), interruptedByRestart); err != nil {
 		slog.Error("webhook: restart recovery failed", "error", err)
 	} else if failed > 0 {
 		slog.Info("webhook: restart recovery", "failed_deliveries", failed)
@@ -793,6 +802,7 @@ func (s *Server) Start(ctx context.Context) error {
 	s.hydrateTaskThreads(ctx)
 	s.recoverStale(ctx)
 	slog.Info("webhook: " + s.RecoverPRQueue())
+	s.stages.recoverInterrupted(ctx, s.deliveries)
 	s.repairPRQueueInvariants(ctx, "")
 
 	mux := http.NewServeMux()
@@ -2594,6 +2604,7 @@ func (s *Server) executeDeliveryWithFix(ep config.EndpointConfig, body []byte, i
 	if isFixWorkflow(ep.Workflow) && strings.TrimSpace(workCtx.PRKey) != "" {
 		fixHeadBefore = normalizeRevision(stringValue(envelope["head_sha"]))
 	}
+	s.stages.start(context.Background(), ep, workCtx)
 	runStart := time.Now()
 	if skipAgent {
 		// The harness already did the whole job (a conflict merge that left
@@ -2626,6 +2637,7 @@ func (s *Server) executeDeliveryWithFix(ep config.EndpointConfig, body []byte, i
 			err = s.executor(ctx, ep.Platform, ep.ChannelID, wrapped, workCtx)
 		}
 	}
+	s.stages.noteAgent(context.Background(), ep.Name, workCtx)
 	if err == nil {
 		fctx, fcancel := context.WithTimeout(context.Background(), harnessFinalizeTimeout)
 		_, ferr := lease.Finalize(fctx, ep.Workflow, deliveryID)
@@ -2658,6 +2670,7 @@ func (s *Server) executeDeliveryWithFix(ep config.EndpointConfig, body []byte, i
 		if itemPRKey := strings.TrimSpace(workCtx.PRKey); itemPRKey != "" && err != nil && !errors.Is(err, relay.ErrWebhookResponseIncomplete) {
 			s.planRetry(ep, itemPRKey, id, err, workCtx, false, true)
 		}
+		s.stages.finish(context.Background(), ep.Name, deliveryID, store.StageStateFailed, "taken over by watchdog")
 		return err
 	}
 
@@ -2690,6 +2703,7 @@ func (s *Server) executeDeliveryWithFix(ep config.EndpointConfig, body []byte, i
 		timedOut := errors.Is(err, context.DeadlineExceeded) || ctx.Err() == context.DeadlineExceeded
 		if d := s.dispatcherFor(itemPRKey); d != nil {
 			if op := d.takeIntent(); op == wakeCancel {
+				s.stages.finish(context.Background(), ep.Name, deliveryID, store.StageStateCancelled, "cancelled by operator")
 				s.markSkipped(id, ep, envelope, "cancelled by operator")
 				return errOpCancelled
 			} else if op == wakeSkip {
@@ -2698,12 +2712,14 @@ func (s *Server) executeDeliveryWithFix(ep config.EndpointConfig, body []byte, i
 			}
 		}
 		if s.planRetry(ep, itemPRKey, id, err, workCtx, timedOut, false) {
+			s.stages.finish(context.Background(), ep.Name, deliveryID, store.StageStateFailed, redactSummary(err.Error(), maxErrorSummaryRunes, ep.Secret))
 			return errRetryScheduled
 		}
 	}
 
 	switch {
 	case err == nil:
+		s.stages.finish(context.Background(), ep.Name, deliveryID, store.StageStateDone, "")
 		card := s.terminalCard(ep, envelope, "COMPLETED", supersededSummary, workCtx)
 		ok, tErr := s.deliveries.Transition(context.Background(), id, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusCompleted, supersededSummary)
 		if tErr != nil {
@@ -2749,6 +2765,7 @@ func (s *Server) executeDeliveryWithFix(ep config.EndpointConfig, body []byte, i
 					"worktree", workCtx.Worktree,
 					"error_summary", summary,
 				}, sessionLogAttrs(workCtx)...)...)
+			s.stages.finish(context.Background(), ep.Name, deliveryID, store.StageStateFailed, summary)
 			return err
 		}
 		s.failDelivery(ep, id, deliveryID, eventType, envelope, redactSummary(err.Error(), maxErrorSummaryRunes, ep.Secret), workCtx)
@@ -2817,6 +2834,7 @@ func (s *Server) failUnboundRun(ep config.EndpointConfig, id int64, envelope Web
 }
 
 func (s *Server) failDelivery(ep config.EndpointConfig, id int64, deliveryID, eventType string, envelope WebhookEnvelope, summary string, workCtx *WebhookWorkContext) {
+	s.stages.finish(context.Background(), ep.Name, deliveryID, store.StageStateFailed, summary)
 	card := s.terminalCard(ep, envelope, "FAILED", summary, workCtx)
 	s.recordTaskThread(ep, envelope, workCtx, TaskFailed)
 	s.prMirrorSync(workCtx)

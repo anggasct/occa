@@ -263,6 +263,7 @@ func redactAuditSummary(summary, secret string) string {
 
 func (s *Server) markSkipped(id int64, ep config.EndpointConfig, envelope WebhookEnvelope, reason string) {
 	summary := redactAuditSummary(formatAuditSummary(envelope, ep.Workflow, "SKIP", reason), ep.Secret)
+	s.stages.finish(context.Background(), ep.Name, stringValue(envelope["delivery_id"]), store.StageStateSkipped, redactAuditSummary(reason, ep.Secret))
 	if id != 0 {
 		ok, err := s.deliveries.Transition(context.Background(), id, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusSkipped, summary)
 		if err != nil {
