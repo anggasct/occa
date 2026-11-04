@@ -25,8 +25,7 @@ var (
 const deniedScopesKept = 3
 
 type WebhookTurn struct {
-	Client Client
-	// SessionID, when set, resumes that session instead of creating one.
+	Client        Client
 	SessionID     string
 	Prompt        string
 	Model         *ModelRef

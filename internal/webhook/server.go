@@ -245,10 +245,8 @@ type Server struct {
 	queuedMarksMu sync.Mutex
 	queuedMarks   map[string]queuedMark
 	// ghLoginCached is the account occa runs gh as (review posted check).
-	ghLoginMu     sync.Mutex
-	ghLoginCached string
-	// reviewResumes: per receipt, the session of a review run that posted
-	// no review; its retry resumes that session.
+	ghLoginMu       sync.Mutex
+	ghLoginCached   string
 	reviewResumesMu sync.Mutex
 	reviewResumes   map[int64]string
 	// codeMerge replaces the whole code merge in lane tests; nil runs

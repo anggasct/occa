@@ -117,7 +117,6 @@ func (s *Server) keepReviewResume(receiptID int64, sessionID string) {
 	s.reviewResumes[receiptID] = sessionID
 }
 
-// takeReviewResume returns and forgets the session kept for a receipt.
 func (s *Server) takeReviewResume(receiptID int64) string {
 	s.reviewResumesMu.Lock()
 	defer s.reviewResumesMu.Unlock()
@@ -126,8 +125,6 @@ func (s *Server) takeReviewResume(receiptID int64) string {
 	return sessionID
 }
 
-// reviewCorrectionPrompt asks a review session whose run posted nothing to
-// submit the review it already wrote.
 func (s *Server) reviewCorrectionPrompt(ctx context.Context, prKey string) string {
 	repo, number, _ := splitPRKey(prKey)
 	account := "the account gh runs as"

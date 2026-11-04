@@ -32,12 +32,11 @@ func (k WebhookExecutionKey) IsZero() bool {
 }
 
 type WebhookWorkContext struct {
-	Key        WebhookExecutionKey
-	Worktree   string
-	DeliveryID string
-	Attempt    int
-	SessionID  string
-	// ResumeSessionID, when set, runs the prompt in that existing session.
+	Key             WebhookExecutionKey
+	Worktree        string
+	DeliveryID      string
+	Attempt         int
+	SessionID       string
 	ResumeSessionID string
 	SessionAborted  bool
 	SessionAbortOK  bool

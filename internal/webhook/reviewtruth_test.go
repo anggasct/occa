@@ -282,8 +282,6 @@ func newResumeServer(t *testing.T, rr *resumeRecorder, postedFrom int64) (*Serve
 	return srv, st, url
 }
 
-// IMP-119 AC-01: the retry of a review that posted nothing resumes the run's
-// session with a correction prompt instead of a new full run.
 func TestReviewNotPostedRetryResumesSession(t *testing.T) {
 	rr := &resumeRecorder{reply: func(int, *WebhookWorkContext) error { return nil }}
 	_, st, url := newResumeServer(t, rr, 2)
@@ -308,8 +306,6 @@ func TestReviewNotPostedRetryResumesSession(t *testing.T) {
 	}
 }
 
-// IMP-119 AC-02: a resumed session that refuses the prompt falls back to the
-// full prompt in a new session within the same attempt.
 func TestReviewResumeFallsBackToFreshRun(t *testing.T) {
 	rr := &resumeRecorder{reply: func(n int, workCtx *WebhookWorkContext) error {
 		if n == 2 {
@@ -334,7 +330,6 @@ func TestReviewResumeFallsBackToFreshRun(t *testing.T) {
 	}
 }
 
-// IMP-119 AC-04: a review retry for another failure class runs fresh.
 func TestReviewModelErrorRetryRunsFresh(t *testing.T) {
 	rr := &resumeRecorder{reply: func(n int, workCtx *WebhookWorkContext) error {
 		if n == 1 {
