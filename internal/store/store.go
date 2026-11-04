@@ -243,6 +243,9 @@ type WebhookDeliveryRepo interface {
 	// FailStale marks in-flight receipts (received/accepted/processing) whose
 	// last update predates cutoff as failed — startup recovery after a crash.
 	FailStale(ctx context.Context, cutoff int64, summary string) (int, error)
+	// ListStaleInFlight returns accepted or processing receipts last updated at
+	// or before cutoff, oldest first, capped at limit.
+	ListStaleInFlight(ctx context.Context, cutoff int64, limit int) ([]WebhookDelivery, error)
 	// SetReviewKey stamps the semantic review identity on a delivery so later
 	// duplicates can find it.
 	SetReviewKey(ctx context.Context, id int64, reviewKey string) error

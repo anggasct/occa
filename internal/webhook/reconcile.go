@@ -61,6 +61,7 @@ func (s *Server) reconcileOnce(ctx context.Context) {
 	}
 	defer s.reconcileRunning.Store(false)
 	s.drainSpool(ctx)
+	s.sweepStaleReceipts(ctx)
 	if s.prQueues == nil {
 		return
 	}
@@ -93,6 +94,89 @@ func (s *Server) reconcileOnce(ctx context.Context) {
 		}
 		s.reconcilePR(ctx, row)
 	}
+}
+
+const (
+	staleReceiptSweepLimit  = 100
+	abandonedReceiptSummary = "abandoned: no live run after claim grace"
+)
+
+type deliveryRef struct {
+	endpoint   string
+	deliveryID string
+}
+
+// sweepStaleReceipts closes in-flight receipts whose owner is gone, so a lost
+// run no longer blocks duplicate detection or shows as in flight forever.
+func (s *Server) sweepStaleReceipts(ctx context.Context) {
+	if s.deliveries == nil || s.claimGrace <= 0 {
+		return
+	}
+	now := time.Now()
+	stale, err := s.deliveries.ListStaleInFlight(ctx, now.Add(-s.claimGrace).Unix(), staleReceiptSweepLimit)
+	if err != nil {
+		slog.Warn("webhook: stale receipt sweep failed", "error", err)
+		return
+	}
+	if len(stale) == 0 {
+		return
+	}
+	live := s.liveDeliveries()
+	for _, receipt := range stale {
+		if ctx.Err() != nil {
+			return
+		}
+		if live[deliveryRef{receipt.Endpoint, receipt.DeliveryID}] || s.prQueueOwnsReceipt(ctx, receipt) {
+			continue
+		}
+		ok, err := s.deliveries.Transition(ctx, receipt.ID,
+			[]store.WebhookStatus{store.WebhookStatusAccepted, store.WebhookStatusProcessing},
+			store.WebhookStatusFailed, abandonedReceiptSummary)
+		if err != nil {
+			slog.Warn("webhook: stale receipt close failed", "id", receipt.ID, "endpoint", receipt.Endpoint, "error", err)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		slog.Warn("webhook: stale receipt closed", "id", receipt.ID, "endpoint", receipt.Endpoint, "age", now.Sub(time.Unix(receipt.UpdatedAt, 0)).Round(time.Second))
+		s.stages.abandon(ctx, receipt.Endpoint, receipt.DeliveryID)
+	}
+}
+
+func (s *Server) liveDeliveries() map[deliveryRef]bool {
+	live := map[deliveryRef]bool{}
+	s.dispatchMu.Lock()
+	defer s.dispatchMu.Unlock()
+	for _, d := range s.dispatchers {
+		d.mu.Lock()
+		if d.hasActive {
+			live[deliveryRef{d.active.ep.Name, d.active.deliveryID}] = true
+		}
+		d.mu.Unlock()
+		for _, lane := range d.lanes {
+			lane.mu.Lock()
+			for _, item := range lane.items {
+				live[deliveryRef{item.ep.Name, item.deliveryID}] = true
+			}
+			lane.mu.Unlock()
+		}
+	}
+	return live
+}
+
+// prQueueOwnsReceipt fails closed: a lookup error keeps the receipt, since a
+// receipt a live run owns must never be closed.
+func (s *Server) prQueueOwnsReceipt(ctx context.Context, receipt store.WebhookDelivery) bool {
+	if s.prQueues == nil || strings.TrimSpace(receipt.PRKey) == "" {
+		return false
+	}
+	row, err := s.prQueues.Get(ctx, receipt.PRKey)
+	if err != nil {
+		slog.Warn("webhook: stale receipt owner lookup failed", "id", receipt.ID, "pr_key", receipt.PRKey, "error", err)
+		return true
+	}
+	return row != nil && row.ActiveDelivery == receipt.ID
 }
 
 func (s *Server) reconcilePR(ctx context.Context, row store.PRRun) {

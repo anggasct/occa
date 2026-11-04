@@ -46,6 +46,7 @@ type DeliveryStore interface {
 	ClaimStale(ctx context.Context, id, cutoff int64) (bool, error)
 	Prune(ctx context.Context, cutoff int64, keep int) (int, error)
 	FailStale(ctx context.Context, cutoff int64, summary string) (int, error)
+	ListStaleInFlight(ctx context.Context, cutoff int64, limit int) ([]store.WebhookDelivery, error)
 	SetReviewKey(ctx context.Context, id int64, reviewKey string) error
 	SetPRKey(ctx context.Context, id int64, prKey string) error
 	Reopen(ctx context.Context, id int64, from []store.WebhookStatus) (bool, error)
@@ -802,7 +803,7 @@ func (s *Server) Start(ctx context.Context) error {
 	s.hydrateTaskThreads(ctx)
 	s.recoverStale(ctx)
 	slog.Info("webhook: " + s.RecoverPRQueue())
-	s.stages.recoverInterrupted(ctx, s.deliveries)
+	s.stages.recoverInterrupted(ctx)
 	s.repairPRQueueInvariants(ctx, "")
 
 	mux := http.NewServeMux()
@@ -2411,6 +2412,7 @@ func (s *Server) executeDeliveryWithFix(ep config.EndpointConfig, body []byte, i
 		workCtx.Heartbeat = func() {
 			run.noteProgress()
 			progress()
+			s.stages.heartbeat(context.Background(), ep.Name, deliveryID)
 		}
 	}
 	workCtx.ReportWorkdir = func(workdir string) {
