@@ -55,6 +55,7 @@ func (s *Server) markMergeConfirmed(ctx context.Context, ep config.EndpointConfi
 	if workCtx == nil || strings.TrimSpace(workCtx.PRKey) == "" {
 		return
 	}
+	s.stages.closeWorkItem(ctx, workCtx.PRKey, store.WorkItemDone)
 	s.syncPhaseParent(ctx, ep, workCtx.PRKey, withMergeProof(envelope), PhaseMerged)
 	if strings.TrimSpace(workCtx.ThreadID) == "" {
 		return
@@ -129,6 +130,9 @@ func (s *Server) handleMergedDelivery(item dispatchItem, receipt *store.WebhookD
 			return
 		}
 		if state != PRStateMerged {
+			if state == PRStateClosed {
+				s.stages.closeWorkItem(ctx, prKey, store.WorkItemAbandoned)
+			}
 			slog.Warn("webhook: merge not confirmed",
 				"endpoint", item.ep.Name,
 				"delivery_id", item.deliveryID,
@@ -152,6 +156,7 @@ func (s *Server) handleMergedDelivery(item dispatchItem, receipt *store.WebhookD
 	s.closeBlockedOnMerge(ctx, prKey)
 	s.prMirrorClearActive(prKey)
 	s.markMergedTerminal(item, envelope, prKey, repo, prNumber)
+	s.stages.closeWorkItem(ctx, prKey, store.WorkItemDone)
 	ok, err := s.deliveries.Transition(ctx, receipt.ID, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusCompleted, "merged — queue drained")
 	if err != nil {
 		slog.Error("webhook: merged transition failed", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "error", err)

@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	schemaVersion    = 25
+	schemaVersion    = 26
 	SchemaVersion    = schemaVersion
 	busyTimeoutMilli = 5000
 )
@@ -54,6 +54,7 @@ var migrations = []func(s *SQLiteStore, tx *sql.Tx) error{
 	addPRQueueThreadStatus,
 	addPRQueueAutoFix,
 	addSessionSkill,
+	addStageGraph,
 }
 
 func addPRQueueAutoFix(_ *SQLiteStore, tx *sql.Tx) error {
@@ -529,6 +530,7 @@ type SQLiteStore struct {
 	prQueues          *sqlitePRQueueRepo
 	webhookReplays    *sqliteWebhookReplayRepo
 	sessionSkills     *sqliteSessionSkillRepo
+	stages            *sqliteStageRepo
 	defaultWorkdir    string
 }
 
@@ -593,6 +595,7 @@ func OpenWithRetention(path, defaultWorkdir string, usage UsageRetention, recove
 	s.prQueues = &sqlitePRQueueRepo{db: db}
 	s.webhookReplays = &sqliteWebhookReplayRepo{db: db}
 	s.sessionSkills = &sqliteSessionSkillRepo{db: db}
+	s.stages = &sqliteStageRepo{db: db}
 	if repaired, err := s.prQueues.RepairInvariants(context.Background(), ""); err != nil {
 		slog.Warn("store: pr queue invariant check failed", "error", err)
 	} else {
@@ -641,6 +644,7 @@ func (s *SQLiteStore) RecoveryEventRepo() RecoveryEventRepo     { return s.recov
 func (s *SQLiteStore) PRQueueRepo() PRQueueRepo                 { return s.prQueues }
 func (s *SQLiteStore) WebhookReplayRepo() WebhookReplayRepo     { return s.webhookReplays }
 func (s *SQLiteStore) SessionSkillRepo() SessionSkillRepo       { return s.sessionSkills }
+func (s *SQLiteStore) StageRepo() StageRepo                     { return s.stages }
 
 func (s *SQLiteStore) Close() error {
 	err := s.db.Close()

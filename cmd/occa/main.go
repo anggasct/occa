@@ -463,6 +463,7 @@ func main() {
 		webhookSrv.SetTaskRegistry(taskRegistry)
 		webhookSrv.SetChannelStore(db.ChannelRepo())
 		webhookSrv.SetPRQueueRepo(db.PRQueueRepo())
+		webhookSrv.SetStageRepo(db.StageRepo())
 		webhookSrv.SetWebhookReplayRepo(db.WebhookReplayRepo())
 		webhookSrv.SetStallFreshness(cfg.Runtime.Relay.StallFreshness)
 		webhookSrv.SetNotifier(func(ctx context.Context, platform, channelID, text string) error {

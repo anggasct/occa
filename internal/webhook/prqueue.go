@@ -363,7 +363,9 @@ func (s *Server) prMirrorBlocked(prKey, reason string) {
 	}
 	if err := s.prQueues.SetBlocked(context.Background(), prKey, reason); err != nil {
 		slog.Warn("webhook: pr blocked mark failed", "pr_key", prKey, "error", err)
+		return
 	}
+	s.stages.block(prKey, reason)
 }
 
 func (s *Server) mirrorDelete(queueID int64) {
