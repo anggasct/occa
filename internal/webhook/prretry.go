@@ -571,6 +571,9 @@ func (s *Server) planRetry(ep config.EndpointConfig, prKey string, receiptID int
 	if err := s.deliveries.BumpAttempt(ctx, receiptID); err != nil {
 		slog.Warn("webhook: retry bump failed", "endpoint", ep.Name, "pr_key", prKey, "error", err)
 	}
+	if class == failureReviewNotPosted && workCtx != nil && !workCtx.SessionAborted {
+		s.keepReviewResume(receiptID, workCtx.SessionID)
+	}
 	s.reopenPRSurface(prKey)
 	slog.Info("webhook: retry scheduled",
 		"endpoint", ep.Name,

@@ -28,6 +28,7 @@ import (
 	"github.com/anggasct/occa/internal/render"
 	"github.com/anggasct/occa/internal/router"
 	"github.com/anggasct/occa/internal/scheduler"
+	"github.com/anggasct/occa/internal/skills"
 	"github.com/anggasct/occa/internal/store"
 	"github.com/anggasct/occa/internal/webhook"
 )
@@ -1203,10 +1204,14 @@ func newWebhookExecutor(channels []channel.Channel, manager agentManager, channe
 					streamer.SetNarration(false)
 				}
 
-				skillPlan := taskOpts.Skills.ForNewSession(workdir, webhookSkillInput(workCtx.Envelope))
+				var skillPlan skills.Plan
+				if workCtx.ResumeSessionID == "" {
+					skillPlan = taskOpts.Skills.ForNewSession(workdir, webhookSkillInput(workCtx.Envelope))
+				}
 
 				turn := relay.WebhookTurn{
 					Client:        inst.Client(),
+					SessionID:     workCtx.ResumeSessionID,
 					Prompt:        skillPlan.Prefix(prompt),
 					Model:         workCtx.Model,
 					Platform:      platform,
