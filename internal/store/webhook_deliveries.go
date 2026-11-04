@@ -243,6 +243,31 @@ func (r *sqliteWebhookDeliveryRepo) FailStale(ctx context.Context, cutoff int64,
 	return int(n), nil
 }
 
+func (r *sqliteWebhookDeliveryRepo) ListStaleInFlight(ctx context.Context, cutoff int64, limit int) ([]WebhookDelivery, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT `+deliveryColumns+` FROM webhook_delivery
+		 WHERE status IN (?, ?) AND updated_at <= ?
+		 ORDER BY updated_at ASC, id ASC LIMIT ?`,
+		string(WebhookStatusAccepted), string(WebhookStatusProcessing), cutoff, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: webhook delivery list stale: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []WebhookDelivery
+	for rows.Next() {
+		d, err := scanWebhookDelivery(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: webhook delivery list stale scan: %w", err)
+		}
+		out = append(out, *d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: webhook delivery list stale rows: %w", err)
+	}
+	return out, nil
+}
+
 func (r *sqliteWebhookDeliveryRepo) Reopen(ctx context.Context, id int64, from []WebhookStatus) (bool, error) {
 	if len(from) == 0 {
 		return false, fmt.Errorf("store: webhook delivery reopen: empty from set")

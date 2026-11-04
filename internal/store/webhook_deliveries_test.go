@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -515,5 +516,58 @@ func TestWebhookDeliveryCountReviewDeliveries(t *testing.T) {
 	}
 	if countOtherEndpoint != 0 {
 		t.Fatalf("count other endpoint = %d, want 0", countOtherEndpoint)
+	}
+}
+
+func TestWebhookDeliveryListStaleInFlight(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+	repo := s.WebhookDeliveryRepo()
+	mk := func(id string, status WebhookStatus, updatedAt int64) int64 {
+		t.Helper()
+		if _, err := repo.Create(ctx, webhookDelivery(func(d *WebhookDelivery) { d.DeliveryID = id })); err != nil {
+			t.Fatalf("Create %s: %v", id, err)
+		}
+		d, _ := repo.Get(ctx, "github-review", id)
+		if status != WebhookStatusReceived {
+			if ok, err := repo.Transition(ctx, d.ID, []WebhookStatus{WebhookStatusReceived}, status, ""); err != nil || !ok {
+				t.Fatalf("transition %s to %s: ok=%v err=%v", id, status, ok, err)
+			}
+		}
+		if _, err := s.db.Exec(`UPDATE webhook_delivery SET updated_at = ? WHERE id = ?`, updatedAt, d.ID); err != nil {
+			t.Fatalf("backdate %s: %v", id, err)
+		}
+		return d.ID
+	}
+	oldest := mk("processing-oldest", WebhookStatusProcessing, 100)
+	accepted := mk("accepted-old", WebhookStatusAccepted, 200)
+	atCutoff := mk("processing-at-cutoff", WebhookStatusProcessing, 500)
+	mk("processing-fresh", WebhookStatusProcessing, 501)
+	mk("received-old", WebhookStatusReceived, 100)
+	mk("completed-old", WebhookStatusCompleted, 100)
+	mk("failed-old", WebhookStatusFailed, 100)
+
+	cases := []struct {
+		name  string
+		limit int
+		want  []int64
+	}{
+		{name: "all stale in flight, oldest first", limit: 10, want: []int64{oldest, accepted, atCutoff}},
+		{name: "capped at limit", limit: 1, want: []int64{oldest}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := repo.ListStaleInFlight(ctx, 500, tc.limit)
+			if err != nil {
+				t.Fatalf("ListStaleInFlight: %v", err)
+			}
+			var ids []int64
+			for _, d := range got {
+				ids = append(ids, d.ID)
+			}
+			if !reflect.DeepEqual(ids, tc.want) {
+				t.Fatalf("stale ids = %v, want %v", ids, tc.want)
+			}
+		})
 	}
 }

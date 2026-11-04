@@ -116,6 +116,12 @@ type StageRun struct {
 	CreatedAt        int64
 }
 
+// Stalled is derived at read time and never stored, so the threshold stays a
+// reader's decision.
+func (r StageRun) Stalled(now time.Time, threshold time.Duration) bool {
+	return r.State == StageStateRunning && threshold > 0 && now.Sub(time.Unix(r.LastHeartbeatAt, 0)) > threshold
+}
+
 type StageRunStart struct {
 	WorkItemID    string
 	Stage         Stage
@@ -129,6 +135,7 @@ type StageRepo interface {
 	GetWorkItem(ctx context.Context, id string) (*WorkItem, error)
 	StartRun(ctx context.Context, start StageRunStart) (int64, error)
 	SetRunAgent(ctx context.Context, runID int64, sessionID string, pid int) error
+	Heartbeat(ctx context.Context, runID int64, at time.Time) error
 	MarkBlocked(ctx context.Context, runID int64, code BlockerCode, detail string) error
 	EndRun(ctx context.Context, runID int64, state StageState, detail string) error
 	ListRuns(ctx context.Context, workItemID string) ([]StageRun, error)
@@ -284,9 +291,9 @@ func (r *sqliteStageRepo) StartRun(ctx context.Context, start StageRunStart) (in
 	}
 	now := time.Now().Unix()
 	res, err := tx.ExecContext(ctx,
-		`INSERT INTO stage_run (work_item_id, stage, attempt, state, started_at, workspace_path, triggered_by, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		start.WorkItemID, string(start.Stage), last+1, string(StageStateRunning), now, start.WorkspacePath, start.TriggeredBy, now,
+		`INSERT INTO stage_run (work_item_id, stage, attempt, state, started_at, last_heartbeat_at, workspace_path, triggered_by, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		start.WorkItemID, string(start.Stage), last+1, string(StageStateRunning), now, now, start.WorkspacePath, start.TriggeredBy, now,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("store: stage run insert: %w", err)
@@ -303,6 +310,10 @@ func (r *sqliteStageRepo) StartRun(ctx context.Context, start StageRunStart) (in
 
 func (r *sqliteStageRepo) SetRunAgent(ctx context.Context, runID int64, sessionID string, pid int) error {
 	return r.updateRunning(ctx, "agent", runID, `agent_session_id = ?, agent_pid = ?`, sessionID, pid)
+}
+
+func (r *sqliteStageRepo) Heartbeat(ctx context.Context, runID int64, at time.Time) error {
+	return r.updateRunning(ctx, "heartbeat", runID, `last_heartbeat_at = ?`, at.Unix())
 }
 
 func (r *sqliteStageRepo) MarkBlocked(ctx context.Context, runID int64, code BlockerCode, detail string) error {

@@ -213,3 +213,74 @@ func TestWorkItemState(t *testing.T) {
 		t.Fatalf("GetWorkItem missing = %v, want ErrNotFound", err)
 	}
 }
+
+func TestStageRunHeartbeatOnlyWhileRunning(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+	repo := s.StageRepo()
+	seedStageItem(t, repo)
+
+	runID := startStage(t, repo, StageReview)
+	runs, err := repo.ListRuns(ctx, stageTestItem)
+	if err != nil || len(runs) != 1 || runs[0].LastHeartbeatAt == 0 || runs[0].LastHeartbeatAt != runs[0].StartedAt {
+		t.Fatalf("started run = %+v, %v; want last_heartbeat_at set at start", runs, err)
+	}
+	beat := time.Unix(1_800_000_000, 0)
+	if err := repo.Heartbeat(ctx, runID, beat); err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+	if runs, _ := repo.ListRuns(ctx, stageTestItem); runs[0].LastHeartbeatAt != beat.Unix() {
+		t.Fatalf("last_heartbeat_at = %d, want %d", runs[0].LastHeartbeatAt, beat.Unix())
+	}
+	if err := repo.EndRun(ctx, runID, StageStateDone, ""); err != nil {
+		t.Fatalf("EndRun: %v", err)
+	}
+	ended := rawStageRun(t, s.db, runID)
+	if err := repo.Heartbeat(ctx, runID, beat.Add(time.Minute)); !errors.Is(err, ErrStageRunNotRunning) {
+		t.Fatalf("Heartbeat on done = %v, want ErrStageRunNotRunning", err)
+	}
+	if got := rawStageRun(t, s.db, runID); !reflect.DeepEqual(got, ended) {
+		t.Fatalf("heartbeat changed a done run: %v, was %v", got, ended)
+	}
+	if err := repo.Heartbeat(ctx, 999, beat); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Heartbeat on missing = %v, want ErrNotFound", err)
+	}
+}
+
+func TestStageRunStalledIsNeverStored(t *testing.T) {
+	s := tempStore(t)
+	repo := s.StageRepo()
+	seedStageItem(t, repo)
+	runID := startStage(t, repo, StageReview)
+
+	if _, err := s.db.Exec(`INSERT INTO stage_run (work_item_id, stage, attempt, state, created_at) VALUES (?, 'fix', 1, 'stalled', 1)`, stageTestItem); err == nil {
+		t.Fatal("an insert with state stalled was accepted")
+	}
+	if _, err := s.db.Exec(`UPDATE stage_run SET state = 'stalled' WHERE id = ?`, runID); err == nil {
+		t.Fatal("an update to state stalled was accepted")
+	}
+
+	const threshold = 90 * time.Second
+	beat := time.Unix(1_800_000_000, 0)
+	cases := []struct {
+		name      string
+		state     StageState
+		now       time.Time
+		threshold time.Duration
+		want      bool
+	}{
+		{name: "running within threshold", state: StageStateRunning, now: beat.Add(threshold), threshold: threshold, want: false},
+		{name: "running past threshold", state: StageStateRunning, now: beat.Add(threshold + time.Second), threshold: threshold, want: true},
+		{name: "blocked past threshold", state: StageStateBlocked, now: beat.Add(time.Hour), threshold: threshold, want: false},
+		{name: "done past threshold", state: StageStateDone, now: beat.Add(time.Hour), threshold: threshold, want: false},
+		{name: "no threshold", state: StageStateRunning, now: beat.Add(time.Hour), threshold: 0, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			run := StageRun{State: tc.state, LastHeartbeatAt: beat.Unix()}
+			if got := run.Stalled(tc.now, tc.threshold); got != tc.want {
+				t.Fatalf("Stalled = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

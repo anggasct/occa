@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/anggasct/occa/internal/config"
 	"github.com/anggasct/occa/internal/store"
@@ -15,13 +16,18 @@ import (
 const (
 	interruptedByRestart = "interrupted by restart"
 	appRestartedDetail   = "app restarted"
+	abandonedDetail      = "abandoned"
 	stageTriggerPrefix   = "delivery:"
+	// One write per run per second: a write per streamed token would flood
+	// the single-writer store.
+	stageHeartbeatEvery = time.Second
 )
 
 // stageRecorder writes one stage run per executed lane attempt. It only
 // records: every store error is logged and the delivery goes on unchanged.
 type stageRecorder struct {
 	repo store.StageRepo
+	now  func() time.Time
 
 	mu      sync.Mutex
 	byRun   map[string]*stageAttempt
@@ -34,6 +40,7 @@ type stageAttempt struct {
 	endpoint   string
 	deliveryID string
 	block      *stageBlock
+	lastBeat   time.Time
 }
 
 type stageBlock struct {
@@ -42,7 +49,7 @@ type stageBlock struct {
 }
 
 func newStageRecorder(repo store.StageRepo) *stageRecorder {
-	return &stageRecorder{repo: repo, byRun: map[string]*stageAttempt{}, byPRKey: map[string]*stageAttempt{}}
+	return &stageRecorder{repo: repo, now: time.Now, byRun: map[string]*stageAttempt{}, byPRKey: map[string]*stageAttempt{}}
 }
 
 func stageForWorkflow(workflow string) (store.Stage, bool) {
@@ -143,6 +150,38 @@ func (r *stageRecorder) noteAgent(ctx context.Context, endpoint string, workCtx 
 	}
 }
 
+func (r *stageRecorder) heartbeat(ctx context.Context, endpoint, deliveryID string) {
+	if r == nil {
+		return
+	}
+	now := r.now()
+	r.mu.Lock()
+	a := r.byRun[stageRunKey(endpoint, deliveryID)]
+	if a == nil || (!a.lastBeat.IsZero() && now.Sub(a.lastBeat) < stageHeartbeatEvery) {
+		r.mu.Unlock()
+		return
+	}
+	a.lastBeat = now
+	r.mu.Unlock()
+	// A beat racing the end of the run finds it no longer running.
+	if err := r.repo.Heartbeat(ctx, a.runID, now); err != nil && !errors.Is(err, store.ErrStageRunNotRunning) {
+		r.warn("heartbeat", a.endpoint, a.prKey, a.deliveryID, err)
+	}
+}
+
+func (r *stageRecorder) detach(key string) *stageAttempt {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	a := r.byRun[key]
+	if a != nil {
+		delete(r.byRun, key)
+		if r.byPRKey[a.prKey] == a {
+			delete(r.byPRKey, a.prKey)
+		}
+	}
+	return a
+}
+
 // block notes the blocker of the PR's running attempt. It is written when the
 // attempt ends as a failure, so an attempt that still completes stays done.
 func (r *stageRecorder) block(prKey, reason string) {
@@ -165,16 +204,7 @@ func (r *stageRecorder) finish(ctx context.Context, endpoint, deliveryID string,
 	if r == nil {
 		return
 	}
-	key := stageRunKey(endpoint, deliveryID)
-	r.mu.Lock()
-	a := r.byRun[key]
-	if a != nil {
-		delete(r.byRun, key)
-		if r.byPRKey[a.prKey] == a {
-			delete(r.byPRKey, a.prKey)
-		}
-	}
-	r.mu.Unlock()
+	a := r.detach(stageRunKey(endpoint, deliveryID))
 	if a == nil {
 		return
 	}
@@ -198,10 +228,10 @@ func (r *stageRecorder) closeWorkItem(ctx context.Context, prKey string, state s
 	}
 }
 
-// recoverInterrupted blocks the runs whose delivery the restart recovery
-// failed: their agent died with the previous process, so nothing re-runs them.
-func (r *stageRecorder) recoverInterrupted(ctx context.Context, deliveries DeliveryStore) {
-	if r == nil || deliveries == nil {
+// recoverInterrupted runs at start: occa drives every agent turn, so a run
+// still running belongs to the previous process and nothing resumes it in place.
+func (r *stageRecorder) recoverInterrupted(ctx context.Context) {
+	if r == nil {
 		return
 	}
 	runs, err := r.repo.ListRunning(ctx)
@@ -210,21 +240,31 @@ func (r *stageRecorder) recoverInterrupted(ctx context.Context, deliveries Deliv
 		return
 	}
 	for _, run := range runs {
-		endpoint, deliveryID, ok := strings.Cut(strings.TrimPrefix(run.TriggeredBy, stageTriggerPrefix), "/")
-		if !ok {
+		if err := r.repo.MarkBlocked(ctx, run.ID, store.BlockerTimeout, appRestartedDetail); err != nil {
+			r.warn("recover", "", run.WorkItemID, "", err)
 			continue
 		}
-		receipt, err := deliveries.Get(ctx, endpoint, deliveryID)
-		if err != nil {
-			r.warn("recover", endpoint, run.WorkItemID, deliveryID, err)
+		slog.Warn("stage: run interrupted by restart", "stage_run_id", run.ID, "work_item_id", run.WorkItemID, "stage", string(run.Stage), "attempt", run.Attempt)
+	}
+}
+
+func (r *stageRecorder) abandon(ctx context.Context, endpoint, deliveryID string) {
+	if r == nil {
+		return
+	}
+	key := stageRunKey(endpoint, deliveryID)
+	r.detach(key)
+	runs, err := r.repo.ListRunning(ctx)
+	if err != nil {
+		r.warn("abandon", endpoint, "", deliveryID, err)
+		return
+	}
+	for _, run := range runs {
+		if run.TriggeredBy != stageTriggerPrefix+key {
 			continue
 		}
-		if receipt == nil || receipt.Status != store.WebhookStatusFailed || receipt.ErrorSummary != interruptedByRestart {
-			continue
-		}
-		code, _ := blockerCodeFor(interruptedByRestart)
-		if err := r.repo.MarkBlocked(ctx, run.ID, code, appRestartedDetail); err != nil {
-			r.warn("recover", endpoint, run.WorkItemID, deliveryID, err)
+		if err := r.repo.MarkBlocked(ctx, run.ID, store.BlockerTimeout, abandonedDetail); err != nil {
+			r.warn("abandon", endpoint, run.WorkItemID, deliveryID, err)
 		}
 	}
 }

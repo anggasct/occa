@@ -306,30 +306,39 @@ func TestStageWorkItemClosedByMergedDelivery(t *testing.T) {
 }
 
 func TestStageRunBlockedByRestart(t *testing.T) {
+	logs := captureServerLogs(t)
 	ep := prTestEndpoint("review", "/review", config.AutomationFull)
-	srv, st, _ := newStageServer(t, func(*Server, int, *WebhookWorkContext) error { return nil }, ep)
+	srv, st, url := newStageServer(t, func(*Server, int, *WebhookWorkContext) error { return nil }, ep)
 	ctx := context.Background()
 	repo := st.StageRepo()
 	if err := repo.UpsertWorkItem(ctx, store.WorkItem{ID: stagePR, Repo: "acme/widget", Number: 7}); err != nil {
 		t.Fatal(err)
 	}
-	interrupted := seedProcessingDelivery(t, st, ep.Name, "del-interrupted", "pull_request_review")
-	seedProcessingDelivery(t, st, ep.Name, "del-live", "pull_request_review")
-	if ok, err := st.WebhookDeliveryRepo().Transition(ctx, interrupted, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusFailed, interruptedByRestart); err != nil || !ok {
-		t.Fatalf("fail receipt: %v %v", ok, err)
+	interrupted, err := repo.StartRun(ctx, store.StageRunStart{WorkItemID: stagePR, Stage: store.StageReview, TriggeredBy: "delivery:" + ep.Name + "/del-interrupted"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, del := range []string{"del-interrupted", "del-live"} {
-		if _, err := repo.StartRun(ctx, store.StageRunStart{WorkItemID: stagePR, Stage: store.StageReview, TriggeredBy: "delivery:" + ep.Name + "/" + del}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	srv.stages.recoverInterrupted(ctx, srv.deliveries)
-	runs := assertStageRuns(t, st, stagePR, []stageRunWant{
-		{store.StageReview, 1, store.StageStateBlocked, store.BlockerTimeout},
-		{store.StageReview, 2, store.StageStateRunning, ""},
-	})
+
+	srv.stages.recoverInterrupted(ctx)
+
+	runs := assertStageRuns(t, st, stagePR, []stageRunWant{{store.StageReview, 1, store.StageStateBlocked, store.BlockerTimeout}})
 	if runs[0].BlockerDetail != "app restarted" {
 		t.Fatalf("detail = %q, want app restarted", runs[0].BlockerDetail)
+	}
+	if got := logs.all("stage: run interrupted by restart"); len(got) != 1 || got[0].attrs["stage_run_id"] != interrupted {
+		t.Fatalf("restart logs = %+v, want one carrying stage_run_id %d", got, interrupted)
+	}
+
+	if resp := post(t, url+"/review?secret=s3cret", "del-rerun", "pull_request_review", prReviewBody(7, "feat/x", "owner", "commented", "c0ffee1")); resp.StatusCode != http.StatusOK {
+		t.Fatalf("post: status %d", resp.StatusCode)
+	}
+	waitForDeliveryStatus(t, st, ep.Name, "del-rerun", store.WebhookStatusCompleted)
+	after := assertStageRuns(t, st, stagePR, []stageRunWant{
+		{store.StageReview, 1, store.StageStateBlocked, store.BlockerTimeout},
+		{store.StageReview, 2, store.StageStateDone, ""},
+	})
+	if !reflect.DeepEqual(after[0], runs[0]) {
+		t.Fatalf("interrupted attempt changed: %+v, was %+v", after[0], runs[0])
 	}
 }
 
