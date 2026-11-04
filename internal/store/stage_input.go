@@ -164,7 +164,7 @@ func (r *sqliteStageRepo) AttachInput(ctx context.Context, fallback StageRunBloc
 	res, err := tx.ExecContext(ctx,
 		`INSERT INTO stage_input (stage_run_id, delivery_id, endpoint, state, received_at, event_type, body)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT (stage_run_id, delivery_id) DO NOTHING`,
+		 ON CONFLICT (stage_run_id, endpoint, delivery_id) DO NOTHING`,
 		runID, in.DeliveryID, in.Endpoint, string(StageInputWaiting), time.Now().Unix(), in.EventType, body)
 	if err != nil {
 		return StageInput{}, false, fmt.Errorf("store: stage input insert: %w", err)
@@ -175,7 +175,7 @@ func (r *sqliteStageRepo) AttachInput(ctx context.Context, fallback StageRunBloc
 	}
 	stored, err := scanStageInputs(tx.QueryContext(ctx,
 		`SELECT `+stageInputColumns+` FROM stage_input i JOIN stage_run r ON r.id = i.stage_run_id
-		 WHERE i.stage_run_id = ? AND i.delivery_id = ?`, runID, in.DeliveryID))
+		 WHERE i.stage_run_id = ? AND i.endpoint = ? AND i.delivery_id = ?`, runID, in.Endpoint, in.DeliveryID))
 	if err != nil {
 		return StageInput{}, false, err
 	}

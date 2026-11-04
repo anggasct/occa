@@ -3,6 +3,7 @@ package webhook
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -122,15 +123,12 @@ func (h *blockedHarness) inputs(t *testing.T) []store.StageInput {
 
 func (h *blockedHarness) waitInputs(t *testing.T, n int) []store.StageInput {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if got := h.inputs(t); len(got) >= n {
-			return got
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("stage inputs never reached %d: %+v", n, h.inputs(t))
-	return nil
+	var got []store.StageInput
+	waitForCondition(t, fmt.Sprintf("%d stage inputs", n), func() bool {
+		got = h.inputs(t)
+		return len(got) >= n
+	})
+	return got
 }
 
 func (h *blockedHarness) receipt(t *testing.T, endpoint, deliveryID string) *store.WebhookDelivery {
@@ -228,10 +226,9 @@ func TestBlockedPRRedeliveryKeepsOneInput(t *testing.T) {
 	h.waitInputs(t, 1)
 	waitForDeliveryStatus(t, h.st, reviewEP, "del-again", store.WebhookStatusReceived)
 	h.review(t, "del-again")
-	deadline := time.Now().Add(10 * time.Second)
-	for len(logs.all("webhook: delivery kept while PR blocked")) < 2 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitForCondition(t, "the redelivery kept", func() bool {
+		return len(logs.all("webhook: delivery kept while PR blocked")) >= 2
+	})
 	kept := logs.all("webhook: delivery kept while PR blocked")
 	if len(kept) != 2 || kept[1].attrs["redelivery"] != true {
 		t.Fatalf("kept logs = %+v, want the redelivery recognised", kept)
@@ -561,5 +558,57 @@ func TestStageInputErrorsAreSentinels(t *testing.T) {
 	}
 	if err := repo.SetInputState(context.Background(), in.ID, store.StageInputExpired); !errors.Is(err, store.ErrStageInputNotWaiting) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestBlockedPRKeepsEachEndpointCopy(t *testing.T) {
+	h := newBlockedHarness(t, "fix", noChangeReason)
+	body := prReviewBody(7, "feat/x", "owner", "changes_requested", "c0ffee-shared")
+	h.post(t, "/review", "del-shared", "pull_request_review", body)
+	h.waitInputs(t, 1)
+	h.post(t, "/fix", "del-shared", "pull_request_review", body)
+	inputs := h.waitInputs(t, 2)
+	for _, in := range inputs {
+		waitForDeliveryStatus(t, h.st, in.Endpoint, in.DeliveryID, store.WebhookStatusReceived)
+	}
+	if inputs[0].Endpoint != reviewEP || inputs[1].Endpoint != fixEP {
+		t.Fatalf("inputs = %+v, want one per endpoint", inputs)
+	}
+
+	reply, _, err := h.srv.operatorRetry(context.Background(), operatorMsg("thread-pr", "/retry"), stagePR)
+	if err != nil || reply != "Re-running fix and review for acme/widget#7." {
+		t.Fatalf("retry = %q, %v", reply, err)
+	}
+	waitForDeliveryStatus(t, h.st, reviewEP, "del-shared", store.WebhookStatusCompleted)
+	waitForDeliveryStatus(t, h.st, fixEP, "del-shared", store.WebhookStatusCompleted)
+	if got := h.calls(); len(got) != 2 || got[0] != "del-shared" || got[1] != "del-shared" {
+		t.Fatalf("executor ran %v, want both copies", got)
+	}
+}
+
+func TestBootRecoveryKeepsWaitingInputReceipt(t *testing.T) {
+	h := newBlockedHarness(t, "review", noChangeReason)
+	h.review(t, "del-kept")
+	h.waitInputs(t, 1)
+	waitForDeliveryStatus(t, h.st, reviewEP, "del-kept", store.WebhookStatusReceived)
+	seedProcessingDelivery(t, h.st, reviewEP, "del-orphan", "pull_request_review")
+	// A negative grace puts the cutoff in the future, so every receipt counts
+	// as older than claim_grace.
+	grace := h.srv.claimGrace
+	h.srv.claimGrace = -time.Hour
+	h.srv.recoverStale(context.Background())
+	if d := h.receipt(t, reviewEP, "del-orphan"); d.Status != store.WebhookStatusFailed {
+		t.Fatalf("orphan receipt = %s, want failed by recovery", d.Status)
+	}
+	if d := h.receipt(t, reviewEP, "del-kept"); d.Status != store.WebhookStatusReceived {
+		t.Fatalf("kept receipt = %s, want received", d.Status)
+	}
+	h.srv.claimGrace = grace
+	if reply, _, err := h.srv.operatorRetry(context.Background(), operatorMsg("thread-pr", "/retry"), stagePR); err != nil || reply != "Re-running review for acme/widget#7." {
+		t.Fatalf("retry = %q, %v", reply, err)
+	}
+	waitForDeliveryStatus(t, h.st, reviewEP, "del-kept", store.WebhookStatusCompleted)
+	if got := h.calls(); len(got) != 1 || got[0] != "del-kept" {
+		t.Fatalf("executor ran %v, want the kept request", got)
 	}
 }

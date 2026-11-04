@@ -203,3 +203,65 @@ func TestListWaitingAndExpiredInputs(t *testing.T) {
 		t.Fatalf("other item = %+v, %v", other, err)
 	}
 }
+
+func TestAttachInputKeepsEachEndpointCopy(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+	repo := s.StageRepo()
+	seedStageItem(t, repo)
+	for _, endpoint := range []string{"review", "fix", "review"} {
+		if _, _, err := repo.AttachInput(ctx, blockedFallback(StageFix), StageInput{DeliveryID: "d-shared", Endpoint: endpoint}); err != nil {
+			t.Fatalf("AttachInput %s: %v", endpoint, err)
+		}
+	}
+	inputs, err := repo.ListInputs(ctx, stageTestItem)
+	if err != nil || len(inputs) != 2 || inputs[0].Endpoint != "review" || inputs[1].Endpoint != "fix" {
+		t.Fatalf("inputs = %+v, %v; want one per endpoint", inputs, err)
+	}
+}
+
+func TestFailStaleKeepsWaitingInputReceipt(t *testing.T) {
+	s := tempStore(t)
+	ctx := context.Background()
+	deliveries := s.WebhookDeliveryRepo()
+	for _, id := range []string{"d-kept", "d-lost"} {
+		if _, err := deliveries.Create(ctx, webhookDelivery(func(d *WebhookDelivery) { d.DeliveryID = id })); err != nil {
+			t.Fatalf("Create %s: %v", id, err)
+		}
+	}
+	if _, err := s.db.Exec(`UPDATE webhook_delivery SET updated_at = 1`); err != nil {
+		t.Fatal(err)
+	}
+	seedStageItem(t, s.StageRepo())
+	in, _, err := s.StageRepo().AttachInput(ctx, blockedFallback(StageReview), StageInput{DeliveryID: "d-kept", Endpoint: "github-review"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.StageRepo().AttachInput(ctx, blockedFallback(StageReview), StageInput{DeliveryID: "d-lost", Endpoint: "other-endpoint"}); err != nil {
+		t.Fatal(err)
+	}
+	failed, err := deliveries.FailStale(ctx, 500, "interrupted by restart")
+	if err != nil || failed != 1 {
+		t.Fatalf("FailStale = %d, %v; want only the receipt without a waiting input", failed, err)
+	}
+	statusOf := func(id string) WebhookStatus {
+		t.Helper()
+		d, err := deliveries.Get(ctx, "github-review", id)
+		if err != nil || d == nil {
+			t.Fatalf("Get %s: %+v, %v", id, d, err)
+		}
+		return d.Status
+	}
+	if got := statusOf("d-kept"); got != WebhookStatusReceived {
+		t.Fatalf("kept receipt = %s, want received", got)
+	}
+	if got := statusOf("d-lost"); got != WebhookStatusFailed {
+		t.Fatalf("receipt of another endpoint's input = %s, want failed", got)
+	}
+	if err := s.StageRepo().SetInputState(ctx, in.ID, StageInputSuperseded); err != nil {
+		t.Fatal(err)
+	}
+	if failed, err := deliveries.FailStale(ctx, 500, "interrupted by restart"); err != nil || failed != 1 {
+		t.Fatalf("FailStale after settling = %d, %v; want the receipt failed", failed, err)
+	}
+}

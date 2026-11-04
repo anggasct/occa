@@ -50,8 +50,8 @@ func (s *Server) attachBlockedInput(item dispatchItem, receipt *store.WebhookDel
 		slog.Warn("webhook: blocked input attach failed", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "pr_key", item.prKey, "error", err)
 		return false
 	}
-	if in.Endpoint != item.ep.Name || in.State != store.StageInputWaiting {
-		slog.Warn("webhook: blocked input not kept", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "pr_key", item.prKey, "stored_endpoint", in.Endpoint, "stored_state", string(in.State))
+	if in.State != store.StageInputWaiting {
+		slog.Warn("webhook: blocked input not kept", "endpoint", item.ep.Name, "delivery_id", item.deliveryID, "pr_key", item.prKey, "stored_state", string(in.State))
 		return false
 	}
 	ok, err := s.deliveries.Transition(ctx, receipt.ID, []store.WebhookStatus{store.WebhookStatusProcessing}, store.WebhookStatusReceived, "")
@@ -187,10 +187,8 @@ func (s *Server) skipInputReceipt(ctx context.Context, in store.StageInput, reas
 		envelope := normalizeWebhook(in.Body, in.EventType, in.DeliveryID, s.verdicts, false, "", ep.CommentTrigger)
 		summary = redactAuditSummary(formatAuditSummary(envelope, ep.Workflow, "SKIP", reason), ep.Secret)
 	}
-	// A restart in between fails every received receipt, so a kept request
-	// may be failed by now; either way it never ran.
 	if _, err := s.deliveries.Transition(ctx, receipt.ID,
-		[]store.WebhookStatus{store.WebhookStatusReceived, store.WebhookStatusFailed},
+		[]store.WebhookStatus{store.WebhookStatusReceived},
 		store.WebhookStatusSkipped, summary); err != nil {
 		slog.Warn("webhook: blocked input receipt skip failed", "endpoint", in.Endpoint, "delivery_id", in.DeliveryID, "error", err)
 	}
