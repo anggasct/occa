@@ -103,3 +103,36 @@ func (s *Server) ghLogin(ctx context.Context) (string, error) {
 	s.ghLoginCached = login
 	return login, nil
 }
+
+func (s *Server) keepReviewResume(receiptID int64, sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if receiptID == 0 || sessionID == "" {
+		return
+	}
+	s.reviewResumesMu.Lock()
+	defer s.reviewResumesMu.Unlock()
+	if s.reviewResumes == nil {
+		s.reviewResumes = map[int64]string{}
+	}
+	s.reviewResumes[receiptID] = sessionID
+}
+
+func (s *Server) takeReviewResume(receiptID int64) string {
+	s.reviewResumesMu.Lock()
+	defer s.reviewResumesMu.Unlock()
+	sessionID := s.reviewResumes[receiptID]
+	delete(s.reviewResumes, receiptID)
+	return sessionID
+}
+
+func (s *Server) reviewCorrectionPrompt(ctx context.Context, prKey string) string {
+	repo, number, _ := splitPRKey(prKey)
+	account := "the account gh runs as"
+	if login, err := s.ghLogin(ctx); err == nil {
+		account = "@" + login
+	}
+	return fmt.Sprintf("occa checked GitHub after your last reply: %s#%s has no review from %s submitted by this run, so your review was not posted.\n\n"+
+		"Submit it now: run `gh pr review %s --repo %s` with --approve, --request-changes or --comment matching your verdict, and your review as the body. "+
+		"Confirm it is listed by `gh api repos/%s/pulls/%s/reviews`, then reply with the same summary block. If you meant to skip this PR, reply SKIP instead.",
+		repo, number, account, number, repo, repo, number)
+}

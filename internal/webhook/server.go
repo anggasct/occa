@@ -245,8 +245,10 @@ type Server struct {
 	queuedMarksMu sync.Mutex
 	queuedMarks   map[string]queuedMark
 	// ghLoginCached is the account occa runs gh as (review posted check).
-	ghLoginMu     sync.Mutex
-	ghLoginCached string
+	ghLoginMu       sync.Mutex
+	ghLoginCached   string
+	reviewResumesMu sync.Mutex
+	reviewResumes   map[int64]string
 	// codeMerge replaces the whole code merge in lane tests; nil runs
 	// runCodeMerge.
 	codeMerge          func(ctx context.Context, ep config.EndpointConfig, workCtx *WebhookWorkContext) (string, error)
@@ -1582,6 +1584,7 @@ func (d *dispatcher) handle(item dispatchItem) {
 			s.releaseEvent()
 		}
 	}()
+	defer s.takeReviewResume(receipt.ID)
 	incompleteRetried := false
 	enriched := false
 	for attempt := 0; ; attempt++ {
@@ -2608,7 +2611,20 @@ func (s *Server) executeDeliveryWithFix(ep config.EndpointConfig, body []byte, i
 		}
 		err = merr
 	} else {
-		err = s.executor(ctx, ep.Platform, ep.ChannelID, wrapped, workCtx)
+		prompt := wrapped
+		if isReviewWorkflow(ep.Workflow) && strings.TrimSpace(workCtx.PRKey) != "" {
+			if sessionID := s.takeReviewResume(id); sessionID != "" {
+				workCtx.ResumeSessionID = sessionID
+				prompt = s.reviewCorrectionPrompt(ctx, workCtx.PRKey)
+				slog.Info("webhook: review retry resumes session", "endpoint", ep.Name, "pr_key", workCtx.PRKey, "delivery_id", deliveryID, "session_id", sessionID)
+			}
+		}
+		err = s.executor(ctx, ep.Platform, ep.ChannelID, prompt, workCtx)
+		if err != nil && workCtx.ResumeSessionID != "" && errors.Is(err, relay.ErrWebhookPrompt) {
+			slog.Warn("webhook: review session resume failed, running fresh", "endpoint", ep.Name, "pr_key", workCtx.PRKey, "delivery_id", deliveryID, "session_id", workCtx.ResumeSessionID, "error", err)
+			workCtx.ResumeSessionID = ""
+			err = s.executor(ctx, ep.Platform, ep.ChannelID, wrapped, workCtx)
+		}
 	}
 	if err == nil {
 		fctx, fcancel := context.WithTimeout(context.Background(), harnessFinalizeTimeout)

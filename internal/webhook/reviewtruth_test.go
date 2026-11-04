@@ -3,13 +3,16 @@ package webhook
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/anggasct/occa/internal/config"
+	"github.com/anggasct/occa/internal/relay"
 	"github.com/anggasct/occa/internal/store"
 )
 
@@ -232,5 +235,115 @@ func TestNewRunReopensFailedCard(t *testing.T) {
 		if blocked && phase != PhaseFailed {
 			t.Fatalf("blocked PR: phase = %q, want the card left frozen", phase)
 		}
+	}
+}
+
+type resumeCall struct {
+	prompt string
+	resume string
+}
+
+type resumeRecorder struct {
+	mu    sync.Mutex
+	calls []resumeCall
+	reply func(n int, workCtx *WebhookWorkContext) error
+}
+
+func (r *resumeRecorder) exec(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
+	r.mu.Lock()
+	r.calls = append(r.calls, resumeCall{prompt: prompt, resume: workCtx.ResumeSessionID})
+	n := len(r.calls)
+	r.mu.Unlock()
+	if workCtx.ResumeSessionID != "" {
+		workCtx.SessionID = workCtx.ResumeSessionID
+	} else {
+		workCtx.SessionID = fmt.Sprintf("ses-%d", n)
+	}
+	return r.reply(n, workCtx)
+}
+
+func (r *resumeRecorder) snapshot() []resumeCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]resumeCall(nil), r.calls...)
+}
+
+func newResumeServer(t *testing.T, rr *resumeRecorder, postedFrom int64) (*Server, *store.SQLiteStore, string) {
+	t.Helper()
+	reviewEp := prTestEndpoint("review", "/review", config.AutomationFull)
+	srv, st, url := newPRTestServer(t, newPRRecorder("thread-pr", nil), []config.EndpointConfig{reviewEp})
+	srv.executor = rr.exec
+	srv.ghLoginCached = "occa-bot"
+	srv.retryBackoffs = map[failureClass][]time.Duration{failureModel: {0, 0, 0}}
+	var lookups int64
+	srv.reviewPosted = func(ctx context.Context, repo, number string, since time.Time) (bool, error) {
+		return atomic.AddInt64(&lookups, 1) >= postedFrom, nil
+	}
+	return srv, st, url
+}
+
+func TestReviewNotPostedRetryResumesSession(t *testing.T) {
+	rr := &resumeRecorder{reply: func(int, *WebhookWorkContext) error { return nil }}
+	_, st, url := newResumeServer(t, rr, 2)
+	if resp := post(t, url+"/review?secret=s3cret", "del-resume", "pull_request_review", prReviewBody(7, "feat/x", "owner", "commented", "c0ffee1")); resp.StatusCode != http.StatusOK {
+		t.Fatalf("post: status %d", resp.StatusCode)
+	}
+	waitForDeliveryStatus(t, st, "github-widget-review", "del-resume", store.WebhookStatusCompleted)
+	calls := rr.snapshot()
+	if len(calls) != 2 {
+		t.Fatalf("executor calls = %d, want 2", len(calls))
+	}
+	if calls[0].resume != "" || calls[1].resume != "ses-1" {
+		t.Fatalf("resume ids = %q, %q; want fresh then ses-1", calls[0].resume, calls[1].resume)
+	}
+	for _, want := range []string{"acme/widget#7", "@occa-bot", "gh pr review 7 --repo acme/widget", "SKIP"} {
+		if !strings.Contains(calls[1].prompt, want) {
+			t.Fatalf("correction prompt misses %q:\n%s", want, calls[1].prompt)
+		}
+	}
+	if strings.Contains(calls[1].prompt, "untrusted_payload") {
+		t.Fatal("the correction prompt must not resend the delivery prompt")
+	}
+}
+
+func TestReviewResumeFallsBackToFreshRun(t *testing.T) {
+	rr := &resumeRecorder{reply: func(n int, workCtx *WebhookWorkContext) error {
+		if n == 2 {
+			return fmt.Errorf("%w: session gone", relay.ErrWebhookPrompt)
+		}
+		return nil
+	}}
+	_, st, url := newResumeServer(t, rr, 2)
+	if resp := post(t, url+"/review?secret=s3cret", "del-fallback", "pull_request_review", prReviewBody(7, "feat/x", "owner", "commented", "c0ffee1")); resp.StatusCode != http.StatusOK {
+		t.Fatalf("post: status %d", resp.StatusCode)
+	}
+	waitForDeliveryStatus(t, st, "github-widget-review", "del-fallback", store.WebhookStatusCompleted)
+	calls := rr.snapshot()
+	if len(calls) != 3 {
+		t.Fatalf("executor calls = %d, want 3", len(calls))
+	}
+	if calls[1].resume != "ses-1" || calls[2].resume != "" {
+		t.Fatalf("resume ids = %q, %q; want ses-1 then fresh", calls[1].resume, calls[2].resume)
+	}
+	if calls[2].prompt != calls[0].prompt {
+		t.Fatalf("fallback prompt differs from the full prompt:\n%s", calls[2].prompt)
+	}
+}
+
+func TestReviewModelErrorRetryRunsFresh(t *testing.T) {
+	rr := &resumeRecorder{reply: func(n int, workCtx *WebhookWorkContext) error {
+		if n == 1 {
+			return relay.ErrWebhookAgentResponse
+		}
+		return nil
+	}}
+	_, st, url := newResumeServer(t, rr, 1)
+	if resp := post(t, url+"/review?secret=s3cret", "del-model", "pull_request_review", prReviewBody(7, "feat/x", "owner", "commented", "c0ffee1")); resp.StatusCode != http.StatusOK {
+		t.Fatalf("post: status %d", resp.StatusCode)
+	}
+	waitForDeliveryStatus(t, st, "github-widget-review", "del-model", store.WebhookStatusCompleted)
+	calls := rr.snapshot()
+	if len(calls) != 2 || calls[1].resume != "" || calls[1].prompt != calls[0].prompt {
+		t.Fatalf("calls = %+v, want a fresh full retry", calls)
 	}
 }

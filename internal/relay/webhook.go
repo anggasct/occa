@@ -26,6 +26,7 @@ const deniedScopesKept = 3
 
 type WebhookTurn struct {
 	Client        Client
+	SessionID     string
 	Prompt        string
 	Model         *ModelRef
 	Platform      string
@@ -54,12 +55,18 @@ func (t WebhookTurn) Run(ctx context.Context) (res WebhookTurnResult, err error)
 		return WebhookTurnResult{}, errors.New("relay: webhook turn: nil client")
 	}
 
-	sessionID, err := t.Client.CreateSession(ctx)
-	if err != nil {
-		return WebhookTurnResult{}, fmt.Errorf("%w: %w", ErrWebhookSessionCreate, err)
+	sessionID := strings.TrimSpace(t.SessionID)
+	if sessionID != "" {
+		slog.Info("relay: webhook session resumed", t.attrs(sessionID)...)
+	} else {
+		created, err := t.Client.CreateSession(ctx)
+		if err != nil {
+			return WebhookTurnResult{}, fmt.Errorf("%w: %w", ErrWebhookSessionCreate, err)
+		}
+		sessionID = created
+		slog.Info("relay: webhook session created", t.attrs(sessionID)...)
 	}
 	res.SessionID = sessionID
-	slog.Info("relay: webhook session created", t.attrs(sessionID)...)
 	if t.OnSession != nil {
 		t.OnSession(sessionID)
 	}

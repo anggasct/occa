@@ -304,6 +304,42 @@ func TestWebhookTurnNeverResumesOrLooksUpSessions(t *testing.T) {
 	}
 }
 
+func TestWebhookTurnResumesGivenSession(t *testing.T) {
+	client := newWebhookTurnClient(eventsWith(Event{Type: "delta", Delta: "posted"}, Event{Type: "done"}))
+	var reported []string
+	turn := WebhookTurn{
+		Client:        client,
+		SessionID:     "sess-prev",
+		Prompt:        "submit the review",
+		AbortTimeout:  50 * time.Millisecond,
+		VerifyTimeout: 15 * time.Second,
+		OnSession:     func(id string) { reported = append(reported, id) },
+	}
+	res, err := turn.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(client.sessionCalls) != 0 {
+		t.Fatalf("resumed turn created a session: %v", client.sessionCalls)
+	}
+	if res.SessionID != "sess-prev" || len(client.sendCalls) != 1 || client.sendCalls[0] != "sess-prev" {
+		t.Fatalf("session=%q sends=%v, want the prompt in sess-prev", res.SessionID, client.sendCalls)
+	}
+	if len(reported) != 1 || reported[0] != "sess-prev" {
+		t.Fatalf("OnSession = %v, want [sess-prev]", reported)
+	}
+}
+
+func TestWebhookTurnResumedPromptFailure(t *testing.T) {
+	client := newWebhookTurnClient(emptyEvents())
+	client.sendErr = errors.New("session not found")
+	turn := WebhookTurn{Client: client, SessionID: "sess-gone", Prompt: "p", AbortTimeout: 50 * time.Millisecond}
+	_, err := turn.Run(context.Background())
+	if !errors.Is(err, ErrWebhookPrompt) {
+		t.Fatalf("err = %v, want ErrWebhookPrompt", err)
+	}
+}
+
 func TestWebhookTurnAbortsOnAgentError(t *testing.T) {
 	client := newWebhookTurnClient(eventsWith(
 		Event{Type: "error", Delta: "model exploded"},

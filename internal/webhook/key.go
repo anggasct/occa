@@ -32,30 +32,31 @@ func (k WebhookExecutionKey) IsZero() bool {
 }
 
 type WebhookWorkContext struct {
-	Key            WebhookExecutionKey
-	Worktree       string
-	DeliveryID     string
-	Attempt        int
-	SessionID      string
-	SessionAborted bool
-	SessionAbortOK bool
-	AgentPID       int
-	Model          *relay.ModelRef
-	ModelSource    string
-	Progress       relay.TurnProgress
-	AgentReply     string
-	Denied         []string
-	Thread         bool
-	ProgressCard   bool
-	Workflow       string
-	Envelope       WebhookEnvelope
-	RootMessageID  string
-	ThreadID       string
-	PRKey          string
-	OutcomePosted  bool
-	StartTime      time.Time
-	Heartbeat      func()
-	ReportSession  func(sessionID string)
+	Key             WebhookExecutionKey
+	Worktree        string
+	DeliveryID      string
+	Attempt         int
+	SessionID       string
+	ResumeSessionID string
+	SessionAborted  bool
+	SessionAbortOK  bool
+	AgentPID        int
+	Model           *relay.ModelRef
+	ModelSource     string
+	Progress        relay.TurnProgress
+	AgentReply      string
+	Denied          []string
+	Thread          bool
+	ProgressCard    bool
+	Workflow        string
+	Envelope        WebhookEnvelope
+	RootMessageID   string
+	ThreadID        string
+	PRKey           string
+	OutcomePosted   bool
+	StartTime       time.Time
+	Heartbeat       func()
+	ReportSession   func(sessionID string)
 	// ReportWorkdir carries the workdir the agent actually runs in. A
 	// delivery without a git workspace has no lease path, and the watchdog
 	// needs the real workdir to reach the agent session.
