@@ -337,6 +337,18 @@ func TestAutomationGateReviewOnly(t *testing.T) {
 	waitForCalls(t, rec, 1)
 }
 
+func waitForCondition(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("%s never happened", what)
+}
+
 func waitForDeliveryStatus(t *testing.T, st *store.SQLiteStore, endpoint, deliveryID string, status store.WebhookStatus) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)

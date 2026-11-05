@@ -3,9 +3,11 @@ package webhook
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -240,18 +242,30 @@ func (s *Server) operatorRetry(ctx context.Context, msg channel.IncomingMessage,
 			return "Retry count reset — a run is already queued or running.", true, nil
 		}
 	}
-	if row.Status == store.PRStatusBlocked {
+	blocked := row.Status == store.PRStatusBlocked
+	if blocked {
 		if err := s.prQueues.Unblock(ctx, prKey); err != nil {
 			return "", true, err
 		}
 		s.clearEscalated(prKey)
 	}
 	s.reopenPRSurface(prKey)
-	repo, number, _ := splitPRKey(prKey)
-	if err := s.enqueueSyntheticRetry(ctx, repo, number, kind, prKey); err != nil {
-		return "Retry reset, but re-run failed: " + err.Error(), true, nil
+	var ran []store.Stage
+	if blocked {
+		ran = s.runWaitingInputs(ctx, prKey)
 	}
-	return "Re-running " + kind + " for " + prKey + ".", true, nil
+	names := make([]string, 0, len(ran)+1)
+	if stage, ok := stageForWorkflow(kind); !ok || !slices.Contains(ran, stage) {
+		repo, number, _ := splitPRKey(prKey)
+		if err := s.enqueueSyntheticRetry(ctx, repo, number, kind, prKey); err != nil {
+			return "Retry reset, but re-run failed: " + err.Error(), true, nil
+		}
+		names = append(names, kind)
+	}
+	for _, stage := range ran {
+		names = append(names, string(stage))
+	}
+	return "Re-running " + strings.Join(names, " and ") + " for " + prKey + ".", true, nil
 }
 
 func (s *Server) inferRetryKind(ctx context.Context, row *store.PRRun) string {
@@ -337,6 +351,7 @@ func (s *Server) operatorCancel(ctx context.Context, msg channel.IncomingMessage
 			}
 			s.reopenPRSurface(prKey)
 			s.clearEscalated(prKey)
+			s.supersedeWaitingInputs(ctx, prKey, "cancelled by operator")
 		}
 	}
 	d := s.liveDispatcher(prKey)
@@ -381,17 +396,22 @@ func (s *Server) enqueueSyntheticRetry(ctx context.Context, repo, number, kind, 
 		return fmt.Errorf("no %s endpoint for repo %s", kind, repo)
 	}
 	deliveryID := fmt.Sprintf("%s%d", operatorRetryDeliveryPrefix, time.Now().UnixNano())
-	item := dispatchItem{
+	return s.pushPRItem(dispatchItem{
 		ep:         ep,
 		body:       body,
 		deliveryID: deliveryID,
 		eventType:  eventType,
 		prKey:      prKey,
 		lane:       laneOfWorkflow(kind),
-	}
+	})
+}
+
+var errPRQueueFull = errors.New("pr queue full")
+
+func (s *Server) pushPRItem(item dispatchItem) error {
 	s.dispatchMu.Lock()
 	defer s.dispatchMu.Unlock()
-	lockKey := "pr:" + prKey
+	lockKey := "pr:" + item.prKey
 	d, ok := s.dispatchers[lockKey]
 	if !ok || d.exiting {
 		d = newDispatcher(s, lockKey)
@@ -400,12 +420,12 @@ func (s *Server) enqueueSyntheticRetry(ctx context.Context, repo, number, kind, 
 		go d.run(s.shutdownCtx)
 	}
 	if d.queueLen() >= s.maxQueuedPerKey {
-		return fmt.Errorf("pr queue full")
+		return errPRQueueFull
 	}
-	item.queueID = s.mirrorEnqueue(prKey, ep.Name, eventType, 0, lanePriority(item.lane))
+	item.queueID = s.mirrorEnqueue(item.prKey, item.ep.Name, item.eventType, 0, lanePriority(item.lane))
 	if !d.push(item) {
 		s.mirrorDelete(item.queueID)
-		return fmt.Errorf("pr queue full")
+		return errPRQueueFull
 	}
 	return nil
 }

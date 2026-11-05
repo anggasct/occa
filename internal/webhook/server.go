@@ -1578,6 +1578,9 @@ func (d *dispatcher) handle(item dispatchItem) {
 		if row, _ := s.blockedQueueRow(context.Background(), item.prKey); row != nil {
 			blockedEnvelope := normalizeWebhook(item.body, item.eventType, item.deliveryID, s.verdicts, false, "", item.ep.CommentTrigger)
 			if !s.unblockOnNewHead(item, row, blockedEnvelope) {
+				if s.attachBlockedInput(item, receipt, row, blockedEnvelope) {
+					return
+				}
 				s.markSkipped(receipt.ID, item.ep, blockedEnvelope, blockedQueueSkipReason(item.prKey, row.BlockedReason, row.ActiveKind))
 				s.noteBlockedSkip(item, row, blockedEnvelope)
 				return
@@ -1683,7 +1686,7 @@ func (d *dispatcher) handle(item dispatchItem) {
 				if item.requeues >= 3 {
 					held = false
 					s.releaseEvent()
-					s.prMirrorBlocked(item.prKey, "merge starved — manual action")
+					s.prMirrorBlocked(item.prKey, item.ep.Workflow, "merge starved — manual action")
 					s.markSkipped(receipt.ID, item.ep, earlyEnvelope, "merge starved — manual action")
 					return
 				}

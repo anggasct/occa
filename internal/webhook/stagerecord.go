@@ -99,6 +99,15 @@ func (r *stageRecorder) warn(op, endpoint, prKey, deliveryID string, err error) 
 	slog.Warn("stage: record failed", "op", op, "endpoint", endpoint, "pr_key", prKey, "delivery_id", deliveryID, "error", err)
 }
 
+func (r *stageRecorder) ensureWorkItem(ctx context.Context, prKey string) error {
+	repo, number, _ := splitPRKey(prKey)
+	n, err := strconv.Atoi(number)
+	if err != nil {
+		return err
+	}
+	return r.repo.UpsertWorkItem(ctx, store.WorkItem{ID: prKey, Repo: repo, Number: n, Kind: store.WorkItemPullRequest})
+}
+
 func (r *stageRecorder) start(ctx context.Context, ep config.EndpointConfig, workCtx *WebhookWorkContext) {
 	if r == nil || workCtx == nil {
 		return
@@ -108,13 +117,7 @@ func (r *stageRecorder) start(ctx context.Context, ep config.EndpointConfig, wor
 	if !ok || prKey == "" {
 		return
 	}
-	repo, number, _ := splitPRKey(prKey)
-	n, err := strconv.Atoi(number)
-	if err != nil {
-		r.warn("start", ep.Name, prKey, workCtx.DeliveryID, err)
-		return
-	}
-	if err := r.repo.UpsertWorkItem(ctx, store.WorkItem{ID: prKey, Repo: repo, Number: n, Kind: store.WorkItemPullRequest}); err != nil {
+	if err := r.ensureWorkItem(ctx, prKey); err != nil {
 		r.warn("start", ep.Name, prKey, workCtx.DeliveryID, err)
 		return
 	}
@@ -184,20 +187,46 @@ func (r *stageRecorder) detach(key string) *stageAttempt {
 
 // block notes the blocker of the PR's running attempt. It is written when the
 // attempt ends as a failure, so an attempt that still completes stays done.
-func (r *stageRecorder) block(prKey, reason string) {
+// With no attempt running the block fired before any run started, so the
+// blocked attempt is recorded at once.
+func (r *stageRecorder) block(ctx context.Context, prKey string, stage store.Stage, reason string) {
 	if r == nil {
 		return
 	}
+	prKey = strings.TrimSpace(prKey)
 	code, ok := blockerCodeFor(reason)
 	r.mu.Lock()
-	a := r.byPRKey[strings.TrimSpace(prKey)]
+	a := r.byPRKey[prKey]
 	if a != nil {
 		a.block = &stageBlock{code: code, detail: reason}
 	}
 	r.mu.Unlock()
-	if a != nil && !ok {
-		slog.Warn("stage: block reason has no blocker code", "endpoint", a.endpoint, "pr_key", a.prKey, "delivery_id", a.deliveryID, "reason", reason)
+	if a != nil {
+		if !ok {
+			slog.Warn("stage: block reason has no blocker code", "endpoint", a.endpoint, "pr_key", a.prKey, "delivery_id", a.deliveryID, "reason", reason)
+		}
+		return
 	}
+	if stage == "" || prKey == "" {
+		return
+	}
+	if !ok {
+		slog.Warn("stage: block reason has no blocker code", "pr_key", prKey, "reason", reason)
+	}
+	if err := r.ensureWorkItem(ctx, prKey); err != nil {
+		r.warn("block", "", prKey, "", err)
+		return
+	}
+	if _, err := r.repo.StartBlockedRun(ctx, store.StageRunBlock{WorkItemID: prKey, Stage: stage, Code: code, Detail: reason}); err != nil {
+		r.warn("block", "", prKey, "", err)
+	}
+}
+
+func (r *stageRecorder) attach(ctx context.Context, fallback store.StageRunBlock, in store.StageInput) (store.StageInput, bool, error) {
+	if err := r.ensureWorkItem(ctx, fallback.WorkItemID); err != nil {
+		return store.StageInput{}, false, err
+	}
+	return r.repo.AttachInput(ctx, fallback, in)
 }
 
 func (r *stageRecorder) finish(ctx context.Context, endpoint, deliveryID string, state store.StageState, detail string) {

@@ -62,6 +62,7 @@ func (s *Server) reconcileOnce(ctx context.Context) {
 	defer s.reconcileRunning.Store(false)
 	s.drainSpool(ctx)
 	s.sweepStaleReceipts(ctx)
+	s.expireBlockedInputs(ctx, time.Now())
 	if s.prQueues == nil {
 		return
 	}

@@ -132,6 +132,7 @@ func (s *Server) handleMergedDelivery(item dispatchItem, receipt *store.WebhookD
 		if state != PRStateMerged {
 			if state == PRStateClosed {
 				s.stages.closeWorkItem(ctx, prKey, store.WorkItemAbandoned)
+				s.supersedeWaitingInputs(ctx, prKey, "PR closed")
 			}
 			slog.Warn("webhook: merge not confirmed",
 				"endpoint", item.ep.Name,
@@ -188,6 +189,7 @@ func (s *Server) closeBlockedOnMerge(ctx context.Context, prKey string) {
 		return
 	}
 	s.clearEscalated(prKey)
+	s.supersedeWaitingInputs(ctx, prKey, "PR merged")
 	slog.Info("webhook: merged PR closed its blocked row", "pr_key", prKey, "blocked_reason", row.BlockedReason)
 }
 

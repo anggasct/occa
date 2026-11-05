@@ -229,9 +229,14 @@ func (r *sqliteWebhookDeliveryRepo) FailStale(ctx context.Context, cutoff int64,
 	res, err := r.db.ExecContext(ctx,
 		`UPDATE webhook_delivery
 		 SET status = ?, error_summary = ?, completed_at = ?, updated_at = ?
-		 WHERE status IN (?, ?, ?) AND updated_at <= ?`,
+		 WHERE status IN (?, ?, ?) AND updated_at <= ?
+		   AND NOT EXISTS (SELECT 1 FROM stage_input si
+		                   WHERE si.endpoint = webhook_delivery.endpoint
+		                     AND si.delivery_id = webhook_delivery.delivery_id
+		                     AND si.state = ?)`,
 		string(WebhookStatusFailed), summary, now, now,
 		string(WebhookStatusReceived), string(WebhookStatusAccepted), string(WebhookStatusProcessing), cutoff,
+		string(StageInputWaiting),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("store: webhook delivery fail stale: %w", err)

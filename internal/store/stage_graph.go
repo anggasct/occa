@@ -140,6 +140,13 @@ type StageRepo interface {
 	EndRun(ctx context.Context, runID int64, state StageState, detail string) error
 	ListRuns(ctx context.Context, workItemID string) ([]StageRun, error)
 	ListRunning(ctx context.Context) ([]StageRun, error)
+	StartBlockedRun(ctx context.Context, block StageRunBlock) (int64, error)
+	LatestBlockedRun(ctx context.Context, workItemID string) (*StageRun, error)
+	AttachInput(ctx context.Context, fallback StageRunBlock, in StageInput) (StageInput, bool, error)
+	ListInputs(ctx context.Context, workItemID string) ([]StageInput, error)
+	ListWaitingInputs(ctx context.Context, workItemID string) ([]StageInput, error)
+	ListExpiredInputs(ctx context.Context, cutoff int64, limit int) ([]StageInput, error)
+	SetInputState(ctx context.Context, inputID int64, state StageInputState) error
 }
 
 type sqliteStageRepo struct {
@@ -282,18 +289,15 @@ func (r *sqliteStageRepo) StartRun(ctx context.Context, start StageRunStart) (in
 		return 0, fmt.Errorf("store: stage run begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	var last int
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COALESCE(MAX(attempt), 0) FROM stage_run WHERE work_item_id = ? AND stage = ?`,
-		start.WorkItemID, string(start.Stage),
-	).Scan(&last); err != nil {
-		return 0, fmt.Errorf("store: stage run attempt: %w", err)
+	attempt, err := nextAttempt(ctx, tx, start.WorkItemID, start.Stage)
+	if err != nil {
+		return 0, err
 	}
 	now := time.Now().Unix()
 	res, err := tx.ExecContext(ctx,
 		`INSERT INTO stage_run (work_item_id, stage, attempt, state, started_at, last_heartbeat_at, workspace_path, triggered_by, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		start.WorkItemID, string(start.Stage), last+1, string(StageStateRunning), now, now, start.WorkspacePath, start.TriggeredBy, now,
+		start.WorkItemID, string(start.Stage), attempt, string(StageStateRunning), now, now, start.WorkspacePath, start.TriggeredBy, now,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("store: stage run insert: %w", err)

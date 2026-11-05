@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	schemaVersion    = 26
+	schemaVersion    = 27
 	SchemaVersion    = schemaVersion
 	busyTimeoutMilli = 5000
 )
@@ -55,6 +55,7 @@ var migrations = []func(s *SQLiteStore, tx *sql.Tx) error{
 	addPRQueueAutoFix,
 	addSessionSkill,
 	addStageGraph,
+	addStageInputPayload,
 }
 
 func addPRQueueAutoFix(_ *SQLiteStore, tx *sql.Tx) error {
