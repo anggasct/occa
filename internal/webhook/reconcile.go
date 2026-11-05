@@ -62,10 +62,12 @@ func (s *Server) reconcileOnce(ctx context.Context) {
 	defer s.reconcileRunning.Store(false)
 	s.drainSpool(ctx)
 	s.sweepStaleReceipts(ctx)
+	s.sweepPendingRuns(ctx)
 	s.expireBlockedInputs(ctx, time.Now())
 	if s.prQueues == nil {
 		return
 	}
+	s.discoverUnknownPRs(ctx)
 	rows, err := s.prQueues.ListUnresolved(ctx)
 	if err != nil {
 		slog.Warn("webhook: reconcile list failed", "error", err)
@@ -99,6 +101,7 @@ func (s *Server) reconcileOnce(ctx context.Context) {
 
 const (
 	staleReceiptSweepLimit  = 100
+	pendingSweepLimit       = 100
 	abandonedReceiptSummary = "abandoned: no live run after claim grace"
 )
 

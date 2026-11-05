@@ -32,6 +32,25 @@ type stageRecorder struct {
 	mu      sync.Mutex
 	byRun   map[string]*stageAttempt
 	byPRKey map[string]*stageAttempt
+	queued  map[string]*pendingSlot
+}
+
+// pendingSlot follows one queued delivery while its admission is decided off
+// the request path. An end that arrives before the decision is kept and
+// applied once the pending run is written, so the record never depends on
+// which of the two ran first.
+type pendingSlot struct {
+	decided chan struct{}
+
+	mu      sync.Mutex
+	done    bool
+	runID   int64
+	outcome *pendingOutcome
+}
+
+type pendingOutcome struct {
+	state  store.StageState
+	detail string
 }
 
 type stageAttempt struct {
@@ -49,7 +68,7 @@ type stageBlock struct {
 }
 
 func newStageRecorder(repo store.StageRepo) *stageRecorder {
-	return &stageRecorder{repo: repo, now: time.Now, byRun: map[string]*stageAttempt{}, byPRKey: map[string]*stageAttempt{}}
+	return &stageRecorder{repo: repo, now: time.Now, byRun: map[string]*stageAttempt{}, byPRKey: map[string]*stageAttempt{}, queued: map[string]*pendingSlot{}}
 }
 
 func stageForWorkflow(workflow string) (store.Stage, bool) {
@@ -117,11 +136,12 @@ func (r *stageRecorder) start(ctx context.Context, ep config.EndpointConfig, wor
 	if !ok || prKey == "" {
 		return
 	}
+	pendingID := r.takePending(stageRunKey(ep.Name, workCtx.DeliveryID))
 	if err := r.ensureWorkItem(ctx, prKey); err != nil {
 		r.warn("start", ep.Name, prKey, workCtx.DeliveryID, err)
 		return
 	}
-	runID, err := r.repo.StartRun(ctx, store.StageRunStart{
+	runID, err := r.promoteOrStart(ctx, pendingID, store.StageRunStart{
 		WorkItemID:    prKey,
 		Stage:         stage,
 		TriggeredBy:   stageTriggerPrefix + stageRunKey(ep.Name, workCtx.DeliveryID),
@@ -235,6 +255,9 @@ func (r *stageRecorder) finish(ctx context.Context, endpoint, deliveryID string,
 	}
 	a := r.detach(stageRunKey(endpoint, deliveryID))
 	if a == nil {
+		if state == store.StageStateSkipped || state == store.StageStateCancelled {
+			r.endPending(ctx, endpoint, deliveryID, state, detail)
+		}
 		return
 	}
 	var err error

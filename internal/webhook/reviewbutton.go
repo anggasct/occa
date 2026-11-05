@@ -15,6 +15,15 @@ import (
 // dedupe and the trigger rate cap do.
 const reviewButtonDeliveryPrefix = internalReviewDeliveryPrefix + "button-"
 
+// discoverDeliveryPrefix marks a review queued for an open PR occa had no
+// record of. Like the button it is internal: the review dedupe and the
+// trigger rate cap apply, commenter gates do not.
+const discoverDeliveryPrefix = "discover-"
+
+func isDiscoverDelivery(deliveryID string) bool {
+	return strings.HasPrefix(strings.TrimSpace(deliveryID), discoverDeliveryPrefix)
+}
+
 // RequestReview handles a Review press on a PR card. It queues at most one
 // review: a review already running or queued, a head that was already
 // reviewed, a terminal PR or an unreadable PR state each refuse with one

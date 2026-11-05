@@ -24,11 +24,10 @@ func blockedRunStage(activeKind, workflow string) store.Stage {
 }
 
 func (s *Server) wouldAdmit(item dispatchItem, envelope WebhookEnvelope) bool {
-	if !s.automationAllows(item.ep, ExtractExecutionKey(item.body), envelope) {
+	if allowed, _ := admitDelivery(item.ep, s.policy, envelope); !allowed {
 		return false
 	}
-	allowed, _ := admitDelivery(item.ep, s.policy, envelope)
-	return allowed
+	return s.automationAllows(item.ep, ExtractExecutionKey(item.body), envelope)
 }
 
 // attachBlockedInput keeps a stage request that arrived while the PR is
@@ -68,6 +67,7 @@ func (s *Server) attachBlockedInput(item dispatchItem, receipt *store.WebhookDel
 		"stage_input_id", in.ID,
 		"redelivery", !added,
 	)
+	s.stages.endPending(ctx, item.ep.Name, item.deliveryID, store.StageStateSkipped, keptWhileBlockedDetail)
 	if added {
 		s.noteBlockedKept(item, row, envelope)
 	}

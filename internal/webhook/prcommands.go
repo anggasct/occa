@@ -423,6 +423,7 @@ func (s *Server) pushPRItem(item dispatchItem) error {
 		return errPRQueueFull
 	}
 	item.queueID = s.mirrorEnqueue(item.prKey, item.ep.Name, item.eventType, 0, lanePriority(item.lane))
+	s.queuePending(item)
 	if !d.push(item) {
 		s.mirrorDelete(item.queueID)
 		return errPRQueueFull
