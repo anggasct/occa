@@ -73,6 +73,7 @@ func newStageServer(t *testing.T, act func(srv *Server, n int, workCtx *WebhookW
 	srv.executor = e.exec
 	srv.SetStageRepo(st.StageRepo())
 	srv.reviewPosted = func(context.Context, string, string, time.Time) (bool, error) { return true, nil }
+	srv.openPRs = func(context.Context, string) ([]openPR, error) { return nil, nil }
 	srv.retryBackoffs = map[failureClass][]time.Duration{
 		failureModel:           {0, 0, 0},
 		failureReviewNotPosted: {0},

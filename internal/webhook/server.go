@@ -242,6 +242,7 @@ type Server struct {
 	mergeMethods mergeMethodsFunc
 	compareFiles compareFilesFunc
 	reviewPosted reviewPostedFunc
+	openPRs      openPRLister
 	// queuedMarks: which delivery moved a PR card to queued (settled when
 	// that delivery is skipped before it runs).
 	queuedMarksMu sync.Mutex
@@ -1094,6 +1095,7 @@ func (s *Server) enqueue(ep config.EndpointConfig, key WebhookExecutionKey, item
 		if decision.replaced.deliveryID != item.deliveryID {
 			s.recordSuperseded(*decision.replaced, "coalesced by a newer state event")
 			s.closeSupersededReceipt(*decision.replaced, "coalesced by a newer state event")
+			s.stages.endPending(context.Background(), decision.replaced.ep.Name, decision.replaced.deliveryID, store.StageStateSkipped, "coalesced by a newer state event")
 		}
 	}
 	if decision.evicted != nil {
@@ -1101,10 +1103,12 @@ func (s *Server) enqueue(ep config.EndpointConfig, key WebhookExecutionKey, item
 		s.mirrorDelete(decision.evicted.queueID)
 		s.recordSuperseded(*decision.evicted, "evicted for a higher-priority delivery")
 		s.closeSupersededReceipt(*decision.evicted, "evicted for a higher-priority delivery")
+		s.stages.endPending(context.Background(), decision.evicted.ep.Name, decision.evicted.deliveryID, store.StageStateSkipped, "evicted for a higher-priority delivery")
 	}
 	if item.prKey != "" {
 		item.queueID = s.mirrorEnqueue(item.prKey, ep.Name, item.eventType, 0, lanePriority(item.lane))
 	}
+	s.queuePending(item)
 	d.push(item)
 	s.dispatchMu.Unlock()
 	return d, true, ""
@@ -1661,7 +1665,7 @@ func (d *dispatcher) handle(item dispatchItem) {
 				if state := strings.TrimSpace(stringValue(earlyEnvelope["pr_state"])); state == "merged" || state == "closed" {
 					held = false
 					s.releaseEvent()
-					dropped := s.drainPRQueue(d, item.prKey)
+					dropped := s.drainPRQueue(d, item.prKey, store.StageStateSkipped, "PR already "+state)
 					slog.Info("webhook: delivery skipped, PR already terminal",
 						"endpoint", item.ep.Name,
 						"delivery_id", item.deliveryID,
@@ -1726,7 +1730,7 @@ func (d *dispatcher) handle(item dispatchItem) {
 					s.markSkipped(receipt.ID, item.ep, earlyEnvelope, "skipped by operator")
 					return
 				case wakeCancel:
-					s.drainPRQueue(d, item.prKey)
+					s.drainPRQueue(d, item.prKey, store.StageStateCancelled, operatorCancelDetail)
 					s.markSkipped(receipt.ID, item.ep, earlyEnvelope, "cancelled by operator")
 					return
 				default:
@@ -1740,7 +1744,7 @@ func (d *dispatcher) handle(item dispatchItem) {
 				return
 			}
 			if errors.Is(execErr, errOpCancelled) {
-				s.drainPRQueue(d, item.prKey)
+				s.drainPRQueue(d, item.prKey, store.StageStateCancelled, operatorCancelDetail)
 				s.markSkipped(receipt.ID, item.ep, earlyEnvelope, "cancelled by operator")
 				return
 			}
@@ -1808,7 +1812,7 @@ func (d *dispatcher) handle(item dispatchItem) {
 				s.markSkipped(receipt.ID, item.ep, earlyEnvelope, "skipped by operator")
 				return
 			case wakeCancel:
-				s.drainPRQueue(d, item.prKey)
+				s.drainPRQueue(d, item.prKey, store.StageStateCancelled, operatorCancelDetail)
 				s.markSkipped(receipt.ID, item.ep, earlyEnvelope, "cancelled by operator")
 				return
 			default:
@@ -2239,6 +2243,7 @@ func (s *Server) beginExecution(item dispatchItem) *store.WebhookDelivery {
 			return nil
 		}
 		slog.Info("webhook: delivery skipped", "endpoint", ep.Name, "delivery_id", item.deliveryID, "event_type", item.eventType)
+		s.stages.endPending(ctx, ep.Name, item.deliveryID, store.StageStateSkipped, configuredSkipDetail)
 		s.settleReplay(ctx, item.replayID, store.WebhookReplayReplayed)
 		return nil
 	}
@@ -2270,6 +2275,7 @@ func (s *Server) settleReplay(ctx context.Context, id int64, status store.Webhoo
 }
 
 func (s *Server) logDuplicate(item dispatchItem, observed store.WebhookStatus) {
+	s.stages.endPending(context.Background(), item.ep.Name, item.deliveryID, store.StageStateSkipped, duplicateDetail)
 	slog.Info("webhook: duplicate delivery",
 		"endpoint", item.ep.Name,
 		"delivery_id", item.deliveryID,

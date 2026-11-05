@@ -53,6 +53,7 @@ func serveBlocked(t *testing.T, st *store.SQLiteStore) *blockedHarness {
 	srv.SetChannelStore(st.ChannelRepo())
 	srv.SetPRQueueRepo(st.PRQueueRepo())
 	srv.SetStageRepo(st.StageRepo())
+	srv.openPRs = func(context.Context, string) ([]openPR, error) { return nil, nil }
 	setOpenPRState(srv)
 	mergeThroughExecutor(srv)
 	lines := &threadLines{}
@@ -168,8 +169,15 @@ func TestBlockedPRKeepsAdmittedRequest(t *testing.T) {
 	if in.State != store.StageInputWaiting || in.Endpoint != reviewEP || in.EventType != "issue_comment" || string(in.Body) != body {
 		t.Fatalf("input = %+v", in)
 	}
-	runs := assertStageRuns(t, h.st, stagePR, []stageRunWant{{store.StageFix, 1, store.StageStateBlocked, store.BlockerAgentNoCommit}})
-	if in.StageRunID != runs[0].ID || runs[0].BlockerDetail != noChangeReason {
+	kept := waitForStageRun(t, h.st, reviewEP, "del-ask", store.StageStateSkipped)
+	if kept.Stage != store.StageReview || kept.Attempt != 1 || kept.BlockerDetail != keptWhileBlockedDetail || kept.StartedAt != 0 {
+		t.Fatalf("kept request run = %+v, want review attempt 1 skipped as kept while blocked", kept)
+	}
+	blocked, err := h.st.StageRepo().LatestBlockedRun(context.Background(), stagePR)
+	if err != nil || blocked.Stage != store.StageFix || blocked.Attempt != 1 || blocked.BlockerCode != store.BlockerAgentNoCommit {
+		t.Fatalf("blocked run = %+v, %v", blocked, err)
+	}
+	if runs := stageRunsOf(t, h.st, stagePR); len(runs) != 2 || in.StageRunID != blocked.ID || blocked.BlockerDetail != noChangeReason {
 		t.Fatalf("input run %d, runs %+v", in.StageRunID, runs)
 	}
 	if got := h.calls(); len(got) != 0 {
@@ -320,6 +328,10 @@ func TestRetryRunsNewestWaitingInputPerStage(t *testing.T) {
 			for _, in := range h.waitInputs(t, tc.inputs) {
 				waitForDeliveryStatus(t, h.st, in.Endpoint, in.DeliveryID, store.WebhookStatusReceived)
 			}
+			waitForCondition(t, "dispatcher idle after keeping the request", func() bool {
+				d := h.srv.liveDispatcher(stagePR)
+				return d == nil || (!d.isActive() && d.queueLen() == 0)
+			})
 
 			reply, _, err := h.srv.operatorRetry(context.Background(), operatorMsg("thread-pr", "/retry"), stagePR)
 			if err != nil || reply != tc.reply {

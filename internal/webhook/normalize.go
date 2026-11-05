@@ -438,6 +438,7 @@ func isReconcileDelivery(deliveryID string) bool {
 // human comment authors.
 func isInternalDelivery(deliveryID string) bool {
 	return isInternalReviewDelivery(deliveryID) ||
+		isDiscoverDelivery(deliveryID) ||
 		isOperatorRetryDelivery(deliveryID) ||
 		isReconcileDelivery(deliveryID)
 }

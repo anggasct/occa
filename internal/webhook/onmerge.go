@@ -151,7 +151,7 @@ func (s *Server) handleMergedDelivery(item dispatchItem, receipt *store.WebhookD
 	}
 	dropped := 0
 	if d != nil {
-		dropped = s.drainPRQueue(d, prKey)
+		dropped = s.drainPRQueue(d, prKey, store.StageStateSkipped, "PR merged")
 	}
 	s.abortPRSession(ctx, prKey, repo)
 	s.closeBlockedOnMerge(ctx, prKey)

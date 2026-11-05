@@ -633,7 +633,7 @@ func (s *Server) refuseRetryForTerminalPR(ep config.EndpointConfig, prKey string
 		"pr_state", state,
 	)
 	if d := s.dispatcherFor(prKey); d != nil {
-		s.drainPRQueue(d, prKey)
+		s.drainPRQueue(d, prKey, store.StageStateSkipped, "PR already "+state)
 	}
 	s.skipDeliveryQuiet(ep, receiptID, "PR already "+state)
 }

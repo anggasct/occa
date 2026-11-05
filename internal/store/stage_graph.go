@@ -134,6 +134,11 @@ type StageRepo interface {
 	SetWorkItemState(ctx context.Context, id string, state WorkItemState) error
 	GetWorkItem(ctx context.Context, id string) (*WorkItem, error)
 	StartRun(ctx context.Context, start StageRunStart) (int64, error)
+	QueueRun(ctx context.Context, start StageRunStart) (int64, error)
+	PromotePending(ctx context.Context, runID int64, workspacePath string) error
+	EndPending(ctx context.Context, runID int64, state StageState, detail string) error
+	ListPending(ctx context.Context, limit int) ([]StageRun, error)
+	BlockPending(ctx context.Context, block StageRunBlock, runID int64) (int64, error)
 	SetRunAgent(ctx context.Context, runID int64, sessionID string, pid int) error
 	Heartbeat(ctx context.Context, runID int64, at time.Time) error
 	MarkBlocked(ctx context.Context, runID int64, code BlockerCode, detail string) error

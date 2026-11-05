@@ -383,11 +383,12 @@ func (s *Server) mirrorDelete(queueID int64) {
 // drainPRQueue drops everything still waiting for the PR without executing
 // it. Durable ACK means each queued item already owns a received receipt, so
 // the drop must settle that receipt instead of leaving it in flight.
-func (s *Server) drainPRQueue(d *dispatcher, prKey string) int {
+func (s *Server) drainPRQueue(d *dispatcher, prKey string, outcome store.StageState, detail string) int {
 	dropped := 0
 	for _, item := range d.drain() {
 		s.mirrorDelete(item.queueID)
 		s.settleDrainedReceipt(item)
+		s.stages.endPending(context.Background(), item.ep.Name, item.deliveryID, outcome, detail)
 		dropped++
 	}
 	if dropped > 0 {
