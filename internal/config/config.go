@@ -110,6 +110,7 @@ type EndpointConfig struct {
 	CommentTrigger   []string          `yaml:"comment_trigger,omitempty"`
 	CommentAuthors   []string          `yaml:"comment_authors,omitempty"`
 	IgnoreAuthors    []string          `yaml:"-"`
+	Discovery        bool              `yaml:"-"`
 	Admit            []AdmitRule       `yaml:"admit"`
 	Limits           *EndpointLimits   `yaml:"limits,omitempty"`
 	RefreshInterval  time.Duration     `yaml:"refresh_interval,omitempty"`

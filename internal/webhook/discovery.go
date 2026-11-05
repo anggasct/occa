@@ -108,7 +108,7 @@ func (s *Server) discoverUnknownPRs(ctx context.Context) {
 func (s *Server) reviewRepos() []string {
 	var repos []string
 	for _, ep := range s.endpoints {
-		if !strings.EqualFold(strings.TrimSpace(ep.Workflow), "review") {
+		if !ep.Discovery || !strings.EqualFold(strings.TrimSpace(ep.Workflow), "review") {
 			continue
 		}
 		if repo := normalizeRepoKey(ep.Repository); repo != "" && !slices.Contains(repos, repo) {

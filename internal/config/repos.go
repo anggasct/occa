@@ -35,17 +35,20 @@ type RepoAutoFix struct {
 }
 
 type RepoConfig struct {
-	Repo            string                   `yaml:"repo"`
-	Provider        string                   `yaml:"provider"`
-	Platform        string                   `yaml:"platform"`
-	ChannelID       string                   `yaml:"channel_id"`
-	ForumChannelID  string                   `yaml:"forum_channel_id,omitempty"`
-	Secret          string                   `yaml:"secret"`
-	Checkout        string                   `yaml:"checkout"`
-	Model           string                   `yaml:"model,omitempty"`
-	CommentTrigger  map[string][]string      `yaml:"comment_trigger,omitempty"`
-	CommentAuthors  []string                 `yaml:"comment_authors,omitempty"`
-	IgnoreAuthors   []string                 `yaml:"ignore_authors,omitempty"`
+	Repo           string              `yaml:"repo"`
+	Provider       string              `yaml:"provider"`
+	Platform       string              `yaml:"platform"`
+	ChannelID      string              `yaml:"channel_id"`
+	ForumChannelID string              `yaml:"forum_channel_id,omitempty"`
+	Secret         string              `yaml:"secret"`
+	Checkout       string              `yaml:"checkout"`
+	Model          string              `yaml:"model,omitempty"`
+	CommentTrigger map[string][]string `yaml:"comment_trigger,omitempty"`
+	CommentAuthors []string            `yaml:"comment_authors,omitempty"`
+	IgnoreAuthors  []string            `yaml:"ignore_authors,omitempty"`
+	// Discovery false keeps the reconcile sweep from queueing reviews for
+	// open PRs occa never saw, for a repo whose GitHub hooks are off on purpose.
+	Discovery       *bool                    `yaml:"discovery,omitempty"`
 	Limits          *EndpointLimits          `yaml:"limits,omitempty"`
 	RefreshInterval time.Duration            `yaml:"refresh_interval,omitempty"`
 	IdleAfter       time.Duration            `yaml:"idle_after,omitempty"`
@@ -464,6 +467,7 @@ func expandRepos(repos []RepoConfig, defaults WebhookDefaults) ([]EndpointConfig
 				CommentTrigger:  resolveTriggers(defaults, *repo, workflow),
 				CommentAuthors:  resolveCommentAuthors(defaults, *repo),
 				IgnoreAuthors:   resolveIgnoreAuthors(defaults, *repo),
+				Discovery:       repo.Discovery == nil || *repo.Discovery,
 				Thread:          true,
 				NotifySkip:      boolPtr(false),
 				Model:           strings.TrimSpace(repo.Model),

@@ -52,6 +52,7 @@ func discoveryReviewEndpoint(repo string) config.EndpointConfig {
 	ep.CommentTrigger = []string{"please re-review"}
 	ep.CommentAuthors = []string{"maintainer"}
 	ep.Limits = &config.EndpointLimits{MaxRunsPerPR: 6, Window: time.Hour}
+	ep.Discovery = true
 	return ep
 }
 
@@ -269,6 +270,25 @@ func TestDiscoveryListFailureDoesNotStopOtherRepos(t *testing.T) {
 	h.lister.mu.Unlock()
 	if calls["acme/widget"] != 1 || calls["acme/gadget"] != 1 {
 		t.Fatalf("list calls = %v, want one per repo", calls)
+	}
+}
+
+func TestDiscoverySkipsRepoWithDiscoveryOff(t *testing.T) {
+	widget := discoveryReviewEndpoint("acme/widget")
+	widget.Discovery = false
+	h := newDiscoveryHarness(t, widget)
+	h.lister.prs["acme/widget"] = []openPR{unknownPR(7, time.Hour)}
+
+	h.srv.reconcileOnce(context.Background())
+
+	h.lister.mu.Lock()
+	calls := h.lister.calls["acme/widget"]
+	h.lister.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("list calls = %d, want none for a repo with discovery off", calls)
+	}
+	if ids := h.discoveredReceipts(t); len(ids) != 0 {
+		t.Fatalf("discovered receipts = %v, want none", ids)
 	}
 }
 
