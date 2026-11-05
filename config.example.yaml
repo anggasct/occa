@@ -126,6 +126,7 @@ webhooks:
       # idle_after: 90s # optional per-repo idle threshold
       # comment_authors: ['owner-login'] # allowlisted commenters; required to unlock fix under review-only
       # ignore_authors: ['dependabot[bot]', 'renovate[bot]'] # per-repo override: bots that never start a run
+      # discovery: false # skip the reconcile sweep that queues reviews for open PRs occa never saw (use when this repo's GitHub hooks are off on purpose)
       # comment_trigger: # optional per-workflow phrases merged with the defaults (review and fix only)
       #   review: ['please re-review']
       # automation: # optional per-author policy (absent = review-only for everyone)
