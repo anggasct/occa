@@ -17,13 +17,14 @@ const (
 	receiptGoneDetail      = "receipt gone"
 )
 
-func (r *stageRecorder) reserve(key string) *pendingSlot {
+func (r *stageRecorder) reserve(key, prKey string, stage store.Stage) *pendingSlot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.queued[key]; ok {
 		return nil
 	}
-	slot := &pendingSlot{decided: make(chan struct{})}
+	r.seq++
+	slot := &pendingSlot{decided: make(chan struct{}), prKey: prKey, stage: stage, seq: r.seq}
 	r.queued[key] = slot
 	return slot
 }
@@ -48,11 +49,19 @@ func (r *stageRecorder) settleQueued(ctx context.Context, key string, slot *pend
 	slot.mu.Lock()
 	defer slot.mu.Unlock()
 	slot.done = true
-	if !admitted {
+	blocked := slot.outcome != nil && slot.outcome.state == store.StageStateBlocked
+	if !admitted && !blocked {
 		return
 	}
 	if err := r.ensureWorkItem(ctx, start.WorkItemID); err != nil {
 		r.warn("queue", endpoint, start.WorkItemID, deliveryID, err)
+		return
+	}
+	if !admitted {
+		block := store.StageRunBlock{WorkItemID: start.WorkItemID, Stage: start.Stage, Code: slot.outcome.code, Detail: slot.outcome.detail}
+		if _, err := r.repo.StartBlockedRun(ctx, block); err != nil {
+			r.warn("block", endpoint, start.WorkItemID, deliveryID, err)
+		}
 		return
 	}
 	id, err := r.repo.QueueRun(ctx, start)
@@ -60,13 +69,19 @@ func (r *stageRecorder) settleQueued(ctx context.Context, key string, slot *pend
 		r.warn("queue", endpoint, start.WorkItemID, deliveryID, err)
 		return
 	}
-	if slot.outcome != nil {
+	switch {
+	case blocked:
+		block := store.StageRunBlock{WorkItemID: start.WorkItemID, Stage: start.Stage, Code: slot.outcome.code, Detail: slot.outcome.detail}
+		if _, err := r.repo.BlockPending(ctx, block, id); err != nil {
+			r.warn("block", endpoint, start.WorkItemID, deliveryID, err)
+		}
+	case slot.outcome != nil:
 		if err := r.repo.EndPending(ctx, id, slot.outcome.state, slot.outcome.detail); err != nil && !errors.Is(err, store.ErrStageRunNotPending) {
 			r.warn("end pending", endpoint, start.WorkItemID, deliveryID, err)
 		}
-		return
+	default:
+		slot.runID = id
 	}
-	slot.runID = id
 }
 
 // takePending hands the delivery's pending run to its start. The start waits
@@ -124,6 +139,57 @@ func (r *stageRecorder) endPending(ctx context.Context, endpoint, deliveryID str
 	}
 }
 
+// blockPending puts a block raised before any run started on the stage's
+// newest queued request, so the stage keeps one attempt instead of opening a
+// second, blocked one. It reports false when the stage has nothing pending.
+func (r *stageRecorder) blockPending(ctx context.Context, block store.StageRunBlock) bool {
+	slot := r.newestQueued(block.WorkItemID, block.Stage)
+	if slot != nil {
+		slot.mu.Lock()
+		if !slot.done {
+			slot.outcome = &pendingOutcome{state: store.StageStateBlocked, code: block.Code, detail: block.Detail}
+			slot.mu.Unlock()
+			return true
+		}
+		id := slot.runID
+		slot.runID = 0
+		slot.mu.Unlock()
+		if id != 0 {
+			_, err := r.repo.BlockPending(ctx, block, id)
+			if err == nil {
+				return true
+			}
+			if !errors.Is(err, store.ErrStageRunNotPending) && !errors.Is(err, store.ErrTerminalAlreadySet) {
+				r.warn("block", "", block.WorkItemID, "", err)
+				return false
+			}
+		}
+	}
+	if _, err := r.repo.BlockPending(ctx, block, 0); err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			r.warn("block", "", block.WorkItemID, "", err)
+		}
+		return false
+	}
+	return true
+}
+
+func (r *stageRecorder) newestQueued(prKey string, stage store.Stage) *pendingSlot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var newest *pendingSlot
+	newestKey := ""
+	for key, slot := range r.queued {
+		if slot.prKey == prKey && slot.stage == stage && (newest == nil || slot.seq > newest.seq) {
+			newest, newestKey = slot, key
+		}
+	}
+	if newest != nil {
+		delete(r.queued, newestKey)
+	}
+	return newest
+}
+
 func (r *stageRecorder) closePending(ctx context.Context, run store.StageRun, detail string) bool {
 	if endpoint, deliveryID, ok := parseStageTrigger(run.TriggeredBy); ok {
 		r.unqueue(stageRunKey(endpoint, deliveryID))
@@ -163,7 +229,7 @@ func (s *Server) queuePending(item dispatchItem) {
 		return
 	}
 	key := stageRunKey(item.ep.Name, item.deliveryID)
-	slot := rec.reserve(key)
+	slot := rec.reserve(key, item.prKey, stage)
 	if slot == nil {
 		return
 	}

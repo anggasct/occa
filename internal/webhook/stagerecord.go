@@ -33,6 +33,7 @@ type stageRecorder struct {
 	byRun   map[string]*stageAttempt
 	byPRKey map[string]*stageAttempt
 	queued  map[string]*pendingSlot
+	seq     int64
 }
 
 // pendingSlot follows one queued delivery while its admission is decided off
@@ -41,6 +42,9 @@ type stageRecorder struct {
 // which of the two ran first.
 type pendingSlot struct {
 	decided chan struct{}
+	prKey   string
+	stage   store.Stage
+	seq     int64
 
 	mu      sync.Mutex
 	done    bool
@@ -50,6 +54,7 @@ type pendingSlot struct {
 
 type pendingOutcome struct {
 	state  store.StageState
+	code   store.BlockerCode
 	detail string
 }
 
@@ -235,6 +240,9 @@ func (r *stageRecorder) block(ctx context.Context, prKey string, stage store.Sta
 	}
 	if err := r.ensureWorkItem(ctx, prKey); err != nil {
 		r.warn("block", "", prKey, "", err)
+		return
+	}
+	if r.blockPending(ctx, store.StageRunBlock{WorkItemID: prKey, Stage: stage, Code: code, Detail: reason}) {
 		return
 	}
 	if _, err := r.repo.StartBlockedRun(ctx, store.StageRunBlock{WorkItemID: prKey, Stage: stage, Code: code, Detail: reason}); err != nil {

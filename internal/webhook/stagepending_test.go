@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -319,6 +320,12 @@ func TestStageRunPendingTransitions(t *testing.T) {
 	if err := repo.EndPending(ctx, id, store.StageStateSkipped, "late"); !errors.Is(err, store.ErrStageRunNotPending) {
 		t.Fatalf("end of a running run = %v, want not pending", err)
 	}
+	if _, err := repo.BlockPending(ctx, store.StageRunBlock{WorkItemID: stagePR, Stage: store.StageReview, Code: store.BlockerTimeout}, id); !errors.Is(err, store.ErrStageRunNotPending) {
+		t.Fatalf("pending block of a running run = %v, want not pending", err)
+	}
+	if _, err := repo.BlockPending(ctx, store.StageRunBlock{WorkItemID: stagePR, Stage: store.StageReview, Code: store.BlockerTimeout}, 0); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("pending block with nothing pending = %v, want not found", err)
+	}
 	if err := repo.EndRun(ctx, id, store.StageStateDone, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -330,5 +337,113 @@ func TestStageRunPendingTransitions(t *testing.T) {
 	}
 	if runs := assertStageRuns(t, st, stagePR, []stageRunWant{{store.StageReview, 1, store.StageStateDone, ""}}); runs[0].WorkspacePath != "/ws" {
 		t.Fatalf("run = %+v, want the workspace recorded on promote", runs[0])
+	}
+}
+
+func TestBlockBeforeStartReusesThePendingRun(t *testing.T) {
+	const worktree = "fix could not get its worktree — operator action required: dirty"
+	cases := []struct {
+		name  string
+		queue func(t *testing.T, srv *Server, eps map[string]config.EndpointConfig)
+		block func(t *testing.T, srv *Server, st *store.SQLiteStore, eps map[string]config.EndpointConfig)
+		want  []stageRunWant
+		reuse bool
+	}{
+		{
+			name: "merge starved with a queued merge",
+			queue: func(t *testing.T, srv *Server, eps map[string]config.EndpointConfig) {
+				enqueueStage(t, srv, eps["merge"], "del-pending", "pull_request", prSyncBody("bead0001"))
+			},
+			block: func(_ *testing.T, srv *Server, _ *store.SQLiteStore, _ map[string]config.EndpointConfig) {
+				srv.prMirrorBlocked(stagePR, "merge", "merge starved — manual action")
+			},
+			want:  []stageRunWant{{store.StageMerge, 1, store.StageStateBlocked, store.BlockerMergeStarved}},
+			reuse: true,
+		},
+		{
+			name: "worktree failure with a queued fix",
+			queue: func(t *testing.T, srv *Server, eps map[string]config.EndpointConfig) {
+				enqueueStage(t, srv, eps["fix"], "del-pending", "pull_request_review", prReviewBody(7, "feat/x", "owner", "changes_requested", "c0ffee1"))
+			},
+			block: func(t *testing.T, srv *Server, st *store.SQLiteStore, eps map[string]config.EndpointConfig) {
+				row, err := st.PRQueueRepo().Get(context.Background(), stagePR)
+				if err != nil || row == nil {
+					t.Fatalf("row = %+v, %v", row, err)
+				}
+				srv.escalateBlock(eps["fix"], stagePR, row, worktree, "fix run could not start", "dirty")
+			},
+			want:  []stageRunWant{{store.StageFix, 1, store.StageStateBlocked, store.BlockerWorkspaceDirty}},
+			reuse: true,
+		},
+		{
+			name: "pending run left by a previous process",
+			queue: func(t *testing.T, srv *Server, eps map[string]config.EndpointConfig) {
+				ctx := context.Background()
+				if _, err := srv.prQueues.EnsurePR(ctx, stagePR, "", ""); err != nil {
+					t.Fatal(err)
+				}
+				if err := srv.stages.ensureWorkItem(ctx, stagePR); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := srv.stages.repo.QueueRun(ctx, store.StageRunStart{WorkItemID: stagePR, Stage: store.StageMerge, TriggeredBy: stageTriggerPrefix + stageRunKey(eps["merge"].Name, "del-pending")}); err != nil {
+					t.Fatal(err)
+				}
+			},
+			block: func(_ *testing.T, srv *Server, _ *store.SQLiteStore, _ map[string]config.EndpointConfig) {
+				srv.prMirrorBlocked(stagePR, "merge", "merge starved — manual action")
+			},
+			want:  []stageRunWant{{store.StageMerge, 1, store.StageStateBlocked, store.BlockerMergeStarved}},
+			reuse: true,
+		},
+		{
+			name: "pending run of another stage",
+			queue: func(t *testing.T, srv *Server, eps map[string]config.EndpointConfig) {
+				enqueueStage(t, srv, eps["review"], "del-pending", "pull_request_review", prReviewBody(7, "feat/x", "owner", "commented", "c0ffee1"))
+			},
+			block: func(_ *testing.T, srv *Server, _ *store.SQLiteStore, _ map[string]config.EndpointConfig) {
+				srv.prMirrorBlocked(stagePR, "merge", "merge starved — manual action")
+			},
+			want: []stageRunWant{
+				{store.StageReview, 1, store.StageStatePending, ""},
+				{store.StageMerge, 1, store.StageStateBlocked, store.BlockerMergeStarved},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			eps := map[string]config.EndpointConfig{}
+			var list []config.EndpointConfig
+			for _, wf := range []string{"merge", "fix", "review"} {
+				eps[wf] = prTestEndpoint(wf, "/"+wf, config.AutomationFull)
+				list = append(list, eps[wf])
+			}
+			srv, st, _ := newStageServer(t, func(*Server, int, *WebhookWorkContext) error { return nil }, list...)
+			d := parkPR(srv, stagePR)
+			tc.queue(t, srv, eps)
+			first := tc.want[0]
+			var pendingEP string
+			for _, ep := range eps {
+				if s, _ := stageForWorkflow(ep.Workflow); s == first.stage {
+					pendingEP = ep.Name
+				}
+			}
+			pending := waitForStageRun(t, st, pendingEP, "del-pending", store.StageStatePending)
+
+			tc.block(t, srv, st, eps)
+			runs := assertStageRuns(t, st, stagePR, tc.want)
+			if tc.reuse && (runs[0].ID != pending.ID || runs[0].StartedAt != 0 || runs[0].BlockerDetail == "") {
+				t.Fatalf("blocked run = %+v, want pending run %d blocked in place", runs[0], pending.ID)
+			}
+
+			srv.drainPRQueue(d, stagePR, store.StageStateSkipped, "PR merged")
+			srv.reconcileOnce(ctx)
+			after := stageRunsOf(t, st, stagePR)
+			for i, want := range tc.want {
+				if want.state == store.StageStateBlocked && !reflect.DeepEqual(after[i], runs[i]) {
+					t.Fatalf("blocked run changed after drain and sweep: %+v, was %+v", after[i], runs[i])
+				}
+			}
+		})
 	}
 }

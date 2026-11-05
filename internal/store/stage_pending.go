@@ -101,6 +101,52 @@ func (r *sqliteStageRepo) updatePending(ctx context.Context, op string, runID in
 	return nil
 }
 
+// BlockPending records a block raised before the run started on the pending
+// run it hit, so the stage keeps one attempt. With runID 0 it takes the newest
+// pending run of the stage; ErrNotFound means there is none.
+func (r *sqliteStageRepo) BlockPending(ctx context.Context, block StageRunBlock, runID int64) (int64, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("store: pending stage run block begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if runID == 0 {
+		err := tx.QueryRowContext(ctx,
+			`SELECT id FROM stage_run WHERE work_item_id = ? AND stage = ? AND state = ? ORDER BY id DESC LIMIT 1`,
+			block.WorkItemID, string(block.Stage), string(StageStatePending)).Scan(&runID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, fmt.Errorf("store: pending stage run block %s: %w", block.WorkItemID, ErrNotFound)
+		}
+		if err != nil {
+			return 0, fmt.Errorf("store: pending stage run block lookup: %w", err)
+		}
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE stage_run SET state = ?, blocker_code = ?, blocker_detail = ? WHERE id = ? AND state = ?`,
+		string(StageStateBlocked), string(block.Code), block.Detail, runID, string(StageStatePending))
+	if err != nil {
+		return 0, fmt.Errorf("store: pending stage run block: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("store: pending stage run block rows: %w", err)
+	}
+	if n == 0 {
+		current, err := stageRunState(ctx, tx, runID)
+		if err != nil {
+			return 0, fmt.Errorf("store: pending stage run block %d: %w", runID, err)
+		}
+		if current.Terminal() {
+			return 0, fmt.Errorf("store: pending stage run block %d: %w", runID, ErrTerminalAlreadySet)
+		}
+		return 0, fmt.Errorf("store: pending stage run block %d: %w", runID, ErrStageRunNotPending)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("store: pending stage run block commit: %w", err)
+	}
+	return runID, nil
+}
+
 func (r *sqliteStageRepo) ListPending(ctx context.Context, limit int) ([]StageRun, error) {
 	return r.listRuns(ctx, `SELECT `+stageRunColumns+` FROM stage_run WHERE state = ? ORDER BY id LIMIT ?`,
 		string(StageStatePending), limit)
