@@ -328,6 +328,10 @@ func TestRetryRunsNewestWaitingInputPerStage(t *testing.T) {
 			for _, in := range h.waitInputs(t, tc.inputs) {
 				waitForDeliveryStatus(t, h.st, in.Endpoint, in.DeliveryID, store.WebhookStatusReceived)
 			}
+			waitForCondition(t, "dispatcher idle after keeping the request", func() bool {
+				d := h.srv.liveDispatcher(stagePR)
+				return d == nil || (!d.isActive() && d.queueLen() == 0)
+			})
 
 			reply, _, err := h.srv.operatorRetry(context.Background(), operatorMsg("thread-pr", "/retry"), stagePR)
 			if err != nil || reply != tc.reply {
