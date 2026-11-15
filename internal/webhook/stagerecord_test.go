@@ -354,6 +354,9 @@ func (failingStageRepo) StartRun(context.Context, store.StageRunStart) (int64, e
 func (failingStageRepo) SetWorkItemState(context.Context, string, store.WorkItemState) error {
 	return errStageDown
 }
+func (failingStageRepo) ListInputs(context.Context, string) ([]store.StageInput, error) {
+	return nil, errStageDown
+}
 
 func TestStageRecordErrorLeavesDeliveryUnchanged(t *testing.T) {
 	for _, recording := range []string{"off", "failing"} {
