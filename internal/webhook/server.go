@@ -2532,7 +2532,7 @@ func (s *Server) executeDeliveryWithFix(ep config.EndpointConfig, body []byte, i
 	if stringValue(envelope["event_type"]) == "issue_comment" && stringValue(envelope["comment_trigger"]) != "" {
 		triggerPrefix = reviewDedupePrefix(envelope)
 	}
-	if reviewKey != "" && id != 0 {
+	if reviewKey != "" && id != 0 && !s.releasedFromBlock(workCtx.PRKey, ep.Name, deliveryID) {
 		prior, err := s.deliveries.FindReviewDuplicate(context.Background(), ep.Name, reviewKey, id, s.reviewDedupeCutoff())
 		if err != nil {
 			slog.Warn("webhook: review duplicate lookup failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)

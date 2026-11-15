@@ -932,3 +932,75 @@ func TestReviewDedupePlainOpenedUnchanged(t *testing.T) {
 		t.Fatalf("plain pull_request admissions spawned %d turns, want 2 unchanged", exec.callCount())
 	}
 }
+
+func TestReleasedReviewRunsOnReviewedHead(t *testing.T) {
+	const (
+		head = "5932515abc"
+		pr   = "o/r#7"
+	)
+	ep := reviewGuardEndpoint()
+	ep.CommentTrigger = []string{"please re-review"}
+	ep.Automation = &config.RepoAutomation{Default: config.AutomationFull}
+	ep.Limits = &config.EndpointLimits{MaxRunsPerPR: 3, Window: time.Hour}
+	srv, exec, st := newTestServerFull(t, []config.EndpointConfig{ep})
+	srv.SetStageRepo(st.StageRepo())
+	body := issueCommentEventBodyWithHead(t, 7, "please re-review", head)
+
+	run := func(deliveryID string) *store.WebhookDelivery {
+		t.Helper()
+		receipt := seedDeliveryForEvent(t, st.WebhookDeliveryRepo(), ep.Name, deliveryID, "issue_comment")
+		if err := srv.executeDelivery(ep, body, receipt, deliveryID, "issue_comment", 1, nil, nil, nil); err != nil {
+			t.Fatalf("executeDelivery %s: %v", deliveryID, err)
+		}
+		got, err := st.WebhookDeliveryRepo().Get(context.Background(), ep.Name, deliveryID)
+		if err != nil || got == nil {
+			t.Fatalf("receipt %s: %+v, %v", deliveryID, got, err)
+		}
+		return got
+	}
+	release := func(deliveryID string) {
+		t.Helper()
+		ctx := context.Background()
+		in, _, err := st.StageRepo().AttachInput(ctx,
+			store.StageRunBlock{WorkItemID: pr, Stage: store.StageFix, Code: store.BlockerHeadUnchanged, Detail: "fix made no change"},
+			store.StageInput{DeliveryID: deliveryID, Endpoint: ep.Name, EventType: "issue_comment", Body: body})
+		if err != nil {
+			t.Fatalf("attach input %s: %v", deliveryID, err)
+		}
+		if err := st.StageRepo().SetInputState(ctx, in.ID, store.StageInputConsumed); err != nil {
+			t.Fatalf("consume input %s: %v", deliveryID, err)
+		}
+	}
+
+	if got := run("del-first"); got.Status != store.WebhookStatusCompleted {
+		t.Fatalf("first review = %s, want completed", got.Status)
+	}
+
+	if got := run("del-plain"); got.Status != store.WebhookStatusSkipped || !strings.Contains(got.ErrorSummary, "same head") {
+		t.Fatalf("repeat on a reviewed head = %s %q, want skipped as same head", got.Status, got.ErrorSummary)
+	}
+	if count := exec.callCount(); count != 1 {
+		t.Fatalf("repeat spawned a turn, count = %d, want 1", count)
+	}
+
+	release("del-released")
+	if got := run("del-released"); got.Status != store.WebhookStatusCompleted {
+		t.Fatalf("released review = %s %q, want completed", got.Status, got.ErrorSummary)
+	}
+	if count := exec.callCount(); count != 2 {
+		t.Fatalf("released review count = %d, want 2", count)
+	}
+
+	release("del-released-2")
+	if got := run("del-released-2"); got.Status != store.WebhookStatusCompleted {
+		t.Fatalf("second released review = %s, want completed", got.Status)
+	}
+
+	release("del-released-3")
+	if got := run("del-released-3"); got.Status != store.WebhookStatusSkipped || !strings.Contains(got.ErrorSummary, "trigger rate cap") {
+		t.Fatalf("released review past the cap = %s %q, want skipped by the rate cap", got.Status, got.ErrorSummary)
+	}
+	if count := exec.callCount(); count != 3 {
+		t.Fatalf("count after the cap = %d, want 3", count)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/anggasct/occa/internal/store"
@@ -122,6 +123,20 @@ func (s *Server) runWaitingInputs(ctx context.Context, prKey string) []store.Sta
 		ran = append(ran, stage)
 	}
 	return ran
+}
+
+func (s *Server) releasedFromBlock(prKey, endpoint, deliveryID string) bool {
+	if s.stages == nil || prKey == "" {
+		return false
+	}
+	inputs, err := s.stages.repo.ListInputs(context.Background(), prKey)
+	if err != nil {
+		slog.Warn("webhook: released input lookup failed", "endpoint", endpoint, "delivery_id", deliveryID, "pr_key", prKey, "error", err)
+		return false
+	}
+	return slices.ContainsFunc(inputs, func(in store.StageInput) bool {
+		return in.State == store.StageInputConsumed && in.Endpoint == endpoint && in.DeliveryID == deliveryID
+	})
 }
 
 func (s *Server) supersedeWaitingInputs(ctx context.Context, prKey, reason string) {
