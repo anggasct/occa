@@ -233,7 +233,7 @@ func (s *Server) queuePending(item dispatchItem) {
 	if slot == nil {
 		return
 	}
-	start := store.StageRunStart{WorkItemID: item.prKey, Stage: stage, TriggeredBy: stageTriggerPrefix + key}
+	start := store.StageRunStart{WorkItemID: item.prKey, Stage: stage, TriggeredBy: stageTriggerPrefix + key, DeliveryID: item.deliveryID, ManualTrigger: isManualTriggerDelivery(item.deliveryID)}
 	s.dispatchWG.Add(1)
 	go func() {
 		defer s.dispatchWG.Done()

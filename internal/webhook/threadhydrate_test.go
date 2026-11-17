@@ -142,22 +142,22 @@ func TestNewHeadUnblocksBlockedPR(t *testing.T) {
 	if resp := post(t, url2+"/review?secret=s3cret", "del-sync-cap", "pull_request", syncBody); resp.StatusCode != http.StatusOK {
 		t.Fatalf("post: %d", resp.StatusCode)
 	}
-	waitForDeliveryStatus(t, st2, "github-widget-review", "del-sync-cap", store.WebhookStatusSkipped)
+	waitForDeliveryStatus(t, st2, "github-widget-review", "del-sync-cap", store.WebhookStatusReceived)
 	if row, _ := st2.PRQueueRepo().Get(context.Background(), "acme/widget#7"); row == nil || row.Status != store.PRStatusBlocked {
 		t.Fatalf("storm cap row = %+v, want still blocked", row)
 	}
 }
 
-// IMP-117 AC-03: a re-review request on a blocked PR is skipped with one
-// line in the thread saying why and what to press.
+// IMP-117 AC-03: a re-review request on a blocked PR is kept as a blocked
+// input with one line in the thread saying why and what to press.
 func TestBlockedPRAnswersReReviewRequest(t *testing.T) {
 	_, st, url, lines := blockedPRServer(t, "fix made no change — operator action required: nothing to do")
 	if resp := post(t, url+"/review?secret=s3cret", "del-ask", "issue_comment", string(issueCommentEventBodyForRepo(t, "acme/widget", 7, "please re-review", ""))); resp.StatusCode != http.StatusOK {
 		t.Fatalf("post: %d", resp.StatusCode)
 	}
-	waitForDeliveryStatus(t, st, "github-widget-review", "del-ask", store.WebhookStatusSkipped)
+	waitForDeliveryStatus(t, st, "github-widget-review", "del-ask", store.WebhookStatusReceived)
 	got := waitForLines(t, lines, 1)
-	if len(got) != 1 || !strings.HasPrefix(got[0], "⏸ acme/widget#7 is blocked — The fix run finished without changing anything. Use Retry or Cancel") {
+	if len(got) != 1 || !strings.HasPrefix(got[0], "⏸ acme/widget#7 is blocked — The fix run finished without changing anything. Your request is kept") {
 		t.Fatalf("thread lines = %q", got)
 	}
 }

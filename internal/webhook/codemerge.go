@@ -79,6 +79,16 @@ func (s *Server) runCodeMerge(ctx context.Context, ep config.EndpointConfig, wor
 		facts.HeadVerdict = "approved"
 		reason = mergeGateRefusal(facts)
 	}
+	override, hasOverride := s.mergeOverrideReason(workCtx.DeliveryID)
+	if hasOverride && reason != "" {
+		slog.Warn("webhook: merge gate overridden by operator",
+			"endpoint", ep.Name,
+			"pr_key", workCtx.PRKey,
+			"gate", reason,
+			"override_reason", override,
+			"head", shortRevision(facts.HeadSHA))
+		reason = ""
+	}
 	if reason != "" {
 		slog.Info("webhook: code merge refused", "endpoint", ep.Name, "pr_key", workCtx.PRKey, "reason", reason, "head", shortRevision(facts.HeadSHA))
 		if reason == refusalConflicts && ep.AutoFix.Conflict {
@@ -102,7 +112,11 @@ func (s *Server) runCodeMerge(ctx context.Context, ep config.EndpointConfig, wor
 	if err := merge(ctx, repo, number, method, facts.HeadSHA, ep.Merge.DeleteBranch); err != nil {
 		return "", fmt.Errorf("code merge: %w", err)
 	}
-	workCtx.AgentReply = fmt.Sprintf("merged by occa (%s) at %s", method, shortRevision(facts.HeadSHA))
+	if hasOverride {
+		workCtx.AgentReply = fmt.Sprintf("merged by occa (%s) at %s — operator override: %s", method, shortRevision(facts.HeadSHA), override)
+	} else {
+		workCtx.AgentReply = fmt.Sprintf("merged by occa (%s) at %s", method, shortRevision(facts.HeadSHA))
+	}
 	slog.Info("webhook: code merge done", "endpoint", ep.Name, "pr_key", workCtx.PRKey, "method", method, "head", shortRevision(facts.HeadSHA))
 	return "", nil
 }
@@ -383,6 +397,17 @@ func ghRepoMergeMethods(ctx context.Context, repo string) ([]string, error) {
 		methods = append(methods, "rebase")
 	}
 	return methods, nil
+}
+
+// mergeOverrideReason returns and clears the operator's merge_now reason for
+// a delivery — the delivery id is one-shot so a replay needs a fresh action.
+func (s *Server) mergeOverrideReason(deliveryID string) (string, bool) {
+	raw, ok := s.mergeOverrides.LoadAndDelete(deliveryID)
+	if !ok {
+		return "", false
+	}
+	reason, _ := raw.(string)
+	return reason, true
 }
 
 func ghMergePR(ctx context.Context, repo, number, method, head string, deleteBranch bool) error {

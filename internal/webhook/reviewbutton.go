@@ -5,15 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"time"
 
 	"github.com/anggasct/occa/internal/channel"
 )
-
-// reviewButtonDeliveryPrefix marks a review queued by the Review button. It
-// is an internal review delivery: commenter gates do not apply, the review
-// dedupe and the trigger rate cap do.
-const reviewButtonDeliveryPrefix = internalReviewDeliveryPrefix + "button-"
 
 // discoverDeliveryPrefix marks a review queued for an open PR occa had no
 // record of. Like the button it is internal: the review dedupe and the
@@ -53,64 +47,20 @@ func (s *Server) requestReview(ctx context.Context, msg channel.IncomingMessage,
 	if !known || strings.TrimSpace(prKey) == "" {
 		return "no_pr", fmt.Sprintf("No open PR for %s#%s yet.", repo, branch)
 	}
-	state, err := s.newPRStateDecision(prKey).resolve(ctx)
-	if err != nil || state == "" {
-		return "state_unknown", fmt.Sprintf("⚠️ Could not read the live state of %s — try again.", prKey)
-	}
-	if state == PRStateMerged || state == PRStateClosed {
-		return "terminal", fmt.Sprintf("⛔ %s is %s — nothing to review.", prKey, state)
-	}
-	ep, ok := s.reviewEndpointForPR(prKey)
-	if !ok {
-		return "refused", fmt.Sprintf("⚠️ Review not queued for %s: no review endpoint for this repository.", prKey)
-	}
-
-	// Check and enqueue under one lock, so two presses cannot both queue.
 	s.reviewButtonMu.Lock()
 	defer s.reviewButtonMu.Unlock()
-
-	busy := s.prDispatchState(prKey)
-	if busy.reviewActive {
-		return "running", fmt.Sprintf("👀 A review of %s is already running.", prKey)
+	out, err := s.FireAction(ctx, msg.Platform+":"+msg.UserID, FireActionRequest{
+		WorkItemID: prKey,
+		Action:     ActionReReview,
+	})
+	if err != nil {
+		slog.Warn("webhook: review action failed", "pr_key", prKey, "error", err)
+		return "failed", fmt.Sprintf("⚠️ Review not queued for %s.", prKey)
 	}
-	if busy.reviewQueued {
-		return "already_queued", fmt.Sprintf("👀 A review of %s is already queued.", prKey)
+	if !out.Accepted {
+		return out.Code, "⚠️ " + out.Error()
 	}
-	if !busy.fixActive && !busy.fixQueued {
-		if head := s.livePRHeadSHA(ctx, prKey); head != "" && s.headAlreadyReviewed(ctx, ep.Name, prKey, head) {
-			return "already_reviewed", fmt.Sprintf("✅ %s@%s was already reviewed — push a commit, or use /retry in the thread to force a review.", prKey, shortRevision(head))
-		}
-	}
-
-	trigger := s.reviewTrigger(ep)
-	if trigger == "" {
-		return "refused", fmt.Sprintf("⚠️ Review not queued for %s: the review endpoint has no comment trigger.", prKey)
-	}
-	prRepo, number, _ := splitPRKey(prKey)
-	prBranch := s.branchForPR(prKey)
-	if prBranch == "" {
-		prBranch = strings.TrimSpace(branch)
-	}
-	body := internalReviewCommentBody(prRepo, number, trigger, s.prURLForPR(prKey), prBranch, "")
-	item := dispatchItem{
-		ep:          ep,
-		body:        body,
-		deliveryID:  fmt.Sprintf("%s%d", reviewButtonDeliveryPrefix, time.Now().UnixNano()),
-		eventType:   "issue_comment",
-		payloadHash: payloadHashOf(body),
-	}
-	key := WebhookExecutionKey{Repository: prRepo, Branch: prBranch}
-	if _, admitted, why := s.enqueue(ep, key, item); !admitted {
-		return "refused", fmt.Sprintf("⚠️ Review not queued for %s: %s.", prKey, why)
-	}
-	text := fmt.Sprintf("⏳ Review queued for %s.", prKey)
-	switch {
-	case busy.activeKind != "":
-		text += fmt.Sprintf(" It runs after the current %s run.", busy.activeKind)
-	case busy.queued > 0:
-		text += " It runs after the queued work."
-	}
-	return "queued", text
+	return "queued", "⏳ " + out.Sentence
 }
 
 // prDispatchBusy is what the PR's dispatcher is doing at the moment of a press.
@@ -150,24 +100,4 @@ func (s *Server) prDispatchState(prKey string) prDispatchBusy {
 	busy.fixQueued = d.laneLen(fixLane) > 0
 	busy.queued = snap.queueLen
 	return busy
-}
-
-// headAlreadyReviewed reports a review delivery that already ran, or is
-// running, on this head inside the dedupe window — the same lookup the
-// review lane uses to skip a duplicate.
-func (s *Server) headAlreadyReviewed(ctx context.Context, endpoint, prKey, head string) bool {
-	if s.deliveries == nil {
-		return false
-	}
-	repo, number, ok := splitPRKey(prKey)
-	if !ok {
-		return false
-	}
-	reviewKey := normalizeRepoKey(repo) + "#" + strings.TrimSpace(number) + "@" + normalizeRevision(head)
-	prior, err := s.deliveries.FindReviewDuplicate(ctx, endpoint, reviewKey, 0, s.reviewDedupeCutoff())
-	if err != nil {
-		slog.Warn("webhook: review button duplicate lookup failed", "pr_key", prKey, "error", err)
-		return false
-	}
-	return prior != nil
 }

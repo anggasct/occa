@@ -9,12 +9,12 @@ import (
 
 func TestMissingRevisionRetryClass(t *testing.T) {
 	err := fmt.Errorf("%w: revision deadbeef not in /repo after fetch", ErrRevisionMissing)
-	if got := classifyFailure(err, nil, 2*time.Minute, false); got != failureBuild {
-		t.Fatalf("missing revision = %v, want failureBuild", got)
+	if got := classifyFailure(err, nil, 2*time.Minute, false); got != failureTransport {
+		t.Fatalf("missing revision = %v, want failureTransport", got)
 	}
-	max, backoffs := retryPolicyFor(failureBuild)
-	if max != 2 || len(backoffs) != 2 || backoffs[0] != 60*time.Second || backoffs[1] != 5*time.Minute {
-		t.Fatalf("build policy = %d %v, want 2 retries at 60s and 5m", max, backoffs)
+	max, backoffs := retryPolicyFor(failureTransport)
+	if max != 2 || len(backoffs) != 3 || backoffs[0] != 30*time.Second || backoffs[1] != 2*time.Minute || backoffs[2] != 10*time.Minute {
+		t.Fatalf("transport policy = %d %v, want 2 retries at 30s, 2m and 10m", max, backoffs)
 	}
 }
 

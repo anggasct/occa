@@ -45,7 +45,7 @@ func TestReviewButtonBodyIsEnrichedWithHead(t *testing.T) {
 	srv.SetPRHeadResolver(fake)
 
 	body := internalReviewCommentBody("o/r", "7", "please re-review", "https://github.com/o/r/pull/7", "feat/x", "")
-	enriched, err := srv.enrichCommentBody(dispatchItem{ep: ep, body: body, deliveryID: reviewButtonDeliveryPrefix + "1", eventType: "issue_comment"})
+	enriched, err := srv.enrichCommentBody(dispatchItem{ep: ep, body: body, deliveryID: internalReviewDeliveryPrefix + "button-1", eventType: "issue_comment"})
 	if err != nil {
 		t.Fatalf("enrichCommentBody: %v", err)
 	}
@@ -126,12 +126,13 @@ func TestReviewedSince(t *testing.T) {
 	}
 }
 
-// IMP-116 AC-02/AC-03: a review lane run that posts nothing is retried once,
+// IMP-116 AC-02/AC-03: a review lane run that posts nothing is retried twice,
 // then blocks with the plain copy; the failed delivery is no dedupe hit.
 func TestReviewNotPostedRetriesThenBlocks(t *testing.T) {
 	rec := newPRRecorder("thread-pr", nil)
 	reviewEp := prTestEndpoint("review", "/review", config.AutomationFull)
 	srv, st, url := newPRTestServer(t, rec, []config.EndpointConfig{reviewEp})
+	srv.retryBackoffs = map[failureClass][]time.Duration{failureReviewNotPosted: {0, 0}}
 	var lookups int64
 	srv.reviewPosted = func(ctx context.Context, repo, number string, since time.Time) (bool, error) {
 		atomic.AddInt64(&lookups, 1)
@@ -141,15 +142,15 @@ func TestReviewNotPostedRetriesThenBlocks(t *testing.T) {
 		t.Fatalf("post: status %d", resp.StatusCode)
 	}
 	waitForDeliveryStatus(t, st, "github-widget-review", "del-silent", store.WebhookStatusFailed)
-	if calls := len(rec.order); calls != 2 {
-		t.Fatalf("review runs = %d, want 2 (one retry)", calls)
+	if calls := len(rec.order); calls != 3 {
+		t.Fatalf("review runs = %d, want 3 (two retries)", calls)
 	}
 	row, err := st.PRQueueRepo().Get(context.Background(), "acme/widget#7")
 	if err != nil || row == nil || row.Status != store.PRStatusBlocked || !strings.Contains(row.BlockedReason, "review not posted") {
 		t.Fatalf("pr row = %+v %v, want blocked on review not posted", row, err)
 	}
 	copyText := describeBlock(row.BlockedReason)
-	if copyText.Headline != "The review run failed 1 time in a row: the review was not posted on GitHub." {
+	if copyText.Headline != "The review run failed 2 times in a row: the review was not posted on GitHub." {
 		t.Fatalf("block copy = %+v", copyText)
 	}
 	receipt, _ := st.WebhookDeliveryRepo().Get(context.Background(), "github-widget-review", "del-silent")
@@ -274,7 +275,7 @@ func newResumeServer(t *testing.T, rr *resumeRecorder, postedFrom int64) (*Serve
 	srv, st, url := newPRTestServer(t, newPRRecorder("thread-pr", nil), []config.EndpointConfig{reviewEp})
 	srv.executor = rr.exec
 	srv.ghLoginCached = "occa-bot"
-	srv.retryBackoffs = map[failureClass][]time.Duration{failureModel: {0, 0, 0}}
+	srv.retryBackoffs = map[failureClass][]time.Duration{failureModel: {0, 0, 0}, failureReviewNotPosted: {0, 0}}
 	var lookups int64
 	srv.reviewPosted = func(ctx context.Context, repo, number string, since time.Time) (bool, error) {
 		return atomic.AddInt64(&lookups, 1) >= postedFrom, nil

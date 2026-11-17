@@ -151,6 +151,8 @@ func (r *stageRecorder) start(ctx context.Context, ep config.EndpointConfig, wor
 		Stage:         stage,
 		TriggeredBy:   stageTriggerPrefix + stageRunKey(ep.Name, workCtx.DeliveryID),
 		WorkspacePath: workCtx.Worktree,
+		DeliveryID:    workCtx.DeliveryID,
+		ManualTrigger: isManualTriggerDelivery(workCtx.DeliveryID),
 	})
 	if err != nil {
 		r.warn("start", ep.Name, prKey, workCtx.DeliveryID, err)

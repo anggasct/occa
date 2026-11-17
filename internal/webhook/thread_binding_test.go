@@ -31,6 +31,7 @@ func newThreadBindingServer(t *testing.T, exec Executor) (*Server, *store.SQLite
 	srv.SetChannelStore(st.ChannelRepo())
 	srv.SetPRQueueRepo(st.PRQueueRepo())
 	srv.SetSessionStore(st.SessionRepo())
+	srv.SetStageRepo(st.StageRepo())
 	srv.SetThreadStarter(func(context.Context, string, string, string, string) (string, error) {
 		return "thread-new", nil
 	})
@@ -121,6 +122,7 @@ func TestRestartRetryResumesWithSameThread(t *testing.T) {
 		srv.SetChannelStore(st.ChannelRepo())
 		srv.SetPRQueueRepo(st.PRQueueRepo())
 		srv.SetSessionStore(st.SessionRepo())
+		srv.SetStageRepo(st.StageRepo())
 		srv.SetThreadStarter(func(context.Context, string, string, string, string) (string, error) {
 			return "thread-new", nil
 		})

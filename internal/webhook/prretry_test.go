@@ -19,17 +19,22 @@ import (
 )
 
 func TestRetryPolicyBudgets(t *testing.T) {
-	max, waits := retryPolicyFor(failureModel)
-	if max != 3 || len(waits) != 3 || waits[0] != 30*time.Second || waits[1] != 2*time.Minute || waits[2] != 5*time.Minute {
-		t.Fatalf("model policy = %d %v", max, waits)
+	wantBackoffs := []time.Duration{30 * time.Second, 2 * time.Minute, 10 * time.Minute}
+	for _, class := range []failureClass{failureStall, failureTimeout, failureNoWork, failureModel, failureTransport, failurePush, failurePRCreate, failureReviewNotPosted} {
+		max, waits := retryPolicyFor(class)
+		if max != 2 || len(waits) != len(wantBackoffs) {
+			t.Fatalf("%v policy = %d %v, want 2 retries with %v", class, max, waits, wantBackoffs)
+		}
+		for i := range wantBackoffs {
+			if waits[i] != wantBackoffs[i] {
+				t.Fatalf("%v backoff[%d] = %v, want %v", class, i, waits[i], wantBackoffs[i])
+			}
+		}
 	}
-	max, waits = retryPolicyFor(failureStall)
-	if max != 1 || len(waits) != 1 || waits[0] != 0 {
-		t.Fatalf("stall policy = %d %v", max, waits)
-	}
-	max, waits = retryPolicyFor(failureBuild)
-	if max != 2 || len(waits) != 2 || waits[0] != 60*time.Second || waits[1] != 5*time.Minute {
-		t.Fatalf("build policy = %d %v", max, waits)
+	for _, class := range []failureClass{failureBuild, failurePermission, failureProviderLimit} {
+		if max, _ := retryPolicyFor(class); max != 0 {
+			t.Fatalf("%v is not auto-retryable, got budget %d", class, max)
+		}
 	}
 }
 
@@ -50,8 +55,8 @@ func TestClassifyFailure(t *testing.T) {
 		t.Fatalf("timeout with stale deltas = %v, want stall", got)
 	}
 	fresh := &WebhookWorkContext{Progress: relay.TurnProgress{DeltaCount: 50, FirstDeltaAt: time.Now().Add(-time.Minute), LastDeltaAt: time.Now()}}
-	if got := classifyFailure(context.DeadlineExceeded, fresh, 2*time.Minute, true); got != failureBuild {
-		t.Fatalf("timeout with fresh deltas = %v, want build (long generation)", got)
+	if got := classifyFailure(context.DeadlineExceeded, fresh, 2*time.Minute, true); got != failureTimeout {
+		t.Fatalf("timeout with fresh deltas = %v, want timeout", got)
 	}
 	if got := classifyFailure(errors.New("boom"), &WebhookWorkContext{}, 2*time.Minute, false); got != failureBuild {
 		t.Fatalf("generic error = %v, want build", got)
@@ -129,12 +134,12 @@ func TestRetryModelErrorThreeTimesThenBlocked(t *testing.T) {
 		t.Fatalf("post: status %d", resp.StatusCode)
 	}
 	waitForDeliveryStatus(t, st, "github-widget-review", "del-retry-1", store.WebhookStatusFailed)
-	if got := atomic.LoadInt64(&calls); got != 4 {
-		t.Fatalf("executor calls = %d, want 1 + 3 retries", got)
+	if got := atomic.LoadInt64(&calls); got != 3 {
+		t.Fatalf("executor calls = %d, want 1 + 2 retries", got)
 	}
 	run, err := st.PRQueueRepo().Get(context.Background(), "acme/widget#7")
-	if err != nil || run == nil || run.Status != store.PRStatusBlocked || run.RetryCount != 3 {
-		t.Fatalf("pr row = %+v, %v; want blocked with retry_count 3", run, err)
+	if err != nil || run == nil || run.Status != store.PRStatusBlocked || run.RetryCount != 2 {
+		t.Fatalf("pr row = %+v, %v; want blocked with retry_count 2", run, err)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -182,7 +187,8 @@ func TestStallImmediateResumeSameSession(t *testing.T) {
 		}
 		return nil
 	}
-	_, st, url := newRetryHarness(t, exec)
+	srv, st, url := newRetryHarness(t, exec)
+	srv.retryBackoffs = map[failureClass][]time.Duration{failureStall: {0}}
 	body := prReviewBody(7, "feat/x", "owner", "commented", "c0ffee-stall-1")
 	if resp := post(t, url+"/review?secret=s3cret", "del-stall-1", "pull_request_review", body); resp.StatusCode != http.StatusOK {
 		t.Fatalf("post: status %d", resp.StatusCode)

@@ -30,6 +30,7 @@ import (
 	"github.com/anggasct/occa/internal/scheduler"
 	"github.com/anggasct/occa/internal/skills"
 	"github.com/anggasct/occa/internal/store"
+	"github.com/anggasct/occa/internal/web"
 	"github.com/anggasct/occa/internal/webhook"
 )
 
@@ -672,6 +673,22 @@ func main() {
 				slog.Warn("webhook: shutdown failed", "error", err)
 			}
 		}()
+	}
+
+	if cfg.Web.Enabled() && webhookSrv != nil {
+		webSrv := web.New(cfg.Web.Bind, cfg.Web.Token, webhookSrv)
+		if err := webSrv.Start(ctx); err != nil {
+			slog.Error("failed to start web control server", "error", err)
+		} else {
+			slog.Info("web control server listening", "bind", cfg.Web.Bind)
+			defer func() {
+				stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if err := webSrv.Stop(stopCtx); err != nil {
+					slog.Warn("web: shutdown failed", "error", err)
+				}
+			}()
+		}
 	}
 
 	var channelProbes []health.Channel

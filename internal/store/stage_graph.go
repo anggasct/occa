@@ -127,6 +127,8 @@ type StageRunStart struct {
 	Stage         Stage
 	TriggeredBy   string
 	WorkspacePath string
+	DeliveryID    string
+	ManualTrigger bool
 }
 
 type StageRepo interface {
@@ -142,6 +144,7 @@ type StageRepo interface {
 	SetRunAgent(ctx context.Context, runID int64, sessionID string, pid int) error
 	Heartbeat(ctx context.Context, runID int64, at time.Time) error
 	MarkBlocked(ctx context.Context, runID int64, code BlockerCode, detail string) error
+	SetGateResult(ctx context.Context, runID int64, result string) error
 	EndRun(ctx context.Context, runID int64, state StageState, detail string) error
 	ListRuns(ctx context.Context, workItemID string) ([]StageRun, error)
 	ListRunning(ctx context.Context) ([]StageRun, error)
@@ -152,6 +155,13 @@ type StageRepo interface {
 	ListWaitingInputs(ctx context.Context, workItemID string) ([]StageInput, error)
 	ListExpiredInputs(ctx context.Context, cutoff int64, limit int) ([]StageInput, error)
 	SetInputState(ctx context.Context, inputID int64, state StageInputState) error
+	ListOpenWorkItems(ctx context.Context, repo string, limit int) ([]WorkItem, error)
+	ListLatestRuns(ctx context.Context, workItemIDs []string) (map[string][]StageRun, error)
+	CountWaitingInputs(ctx context.Context, workItemIDs []string) (map[string]int, error)
+	RecordAction(ctx context.Context, req ActionRequest) (ActionRequest, bool, error)
+	GetAction(ctx context.Context, id int64) (*ActionRequest, error)
+	ListActions(ctx context.Context, workItemID string) ([]ActionRequest, error)
+	SetActionResult(ctx context.Context, id int64, result, code, sentence, detail string) error
 }
 
 type sqliteStageRepo struct {
@@ -298,11 +308,15 @@ func (r *sqliteStageRepo) StartRun(ctx context.Context, start StageRunStart) (in
 	if err != nil {
 		return 0, err
 	}
+	auto, manual, err := attemptCounters(ctx, tx, start)
+	if err != nil {
+		return 0, err
+	}
 	now := time.Now().Unix()
 	res, err := tx.ExecContext(ctx,
-		`INSERT INTO stage_run (work_item_id, stage, attempt, state, started_at, last_heartbeat_at, workspace_path, triggered_by, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		start.WorkItemID, string(start.Stage), attempt, string(StageStateRunning), now, now, start.WorkspacePath, start.TriggeredBy, now,
+		`INSERT INTO stage_run (work_item_id, stage, attempt, state, started_at, last_heartbeat_at, workspace_path, triggered_by, auto_retry_used, manual_retry_count, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		start.WorkItemID, string(start.Stage), attempt, string(StageStateRunning), now, now, start.WorkspacePath, start.TriggeredBy, auto, manual, now,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("store: stage run insert: %w", err)
@@ -353,6 +367,18 @@ func (r *sqliteStageRepo) updateRunning(ctx context.Context, op string, runID in
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("store: stage run %s commit: %w", op, err)
+	}
+	return nil
+}
+
+func (r *sqliteStageRepo) SetGateResult(ctx context.Context, runID int64, result string) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE stage_run SET gate_result = ? WHERE id = ?`, result, runID)
+	if err != nil {
+		return fmt.Errorf("store: stage run gate result: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("store: stage run %d: %w", runID, ErrNotFound)
 	}
 	return nil
 }

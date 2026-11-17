@@ -76,7 +76,8 @@ func newStageServer(t *testing.T, act func(srv *Server, n int, workCtx *WebhookW
 	srv.openPRs = func(context.Context, string) ([]openPR, error) { return nil, nil }
 	srv.retryBackoffs = map[failureClass][]time.Duration{
 		failureModel:           {0, 0, 0},
-		failureReviewNotPosted: {0},
+		failureReviewNotPosted: {0, 0},
+		failureNoWork:          {0, 0},
 	}
 	return srv, st, url
 }
@@ -114,14 +115,19 @@ func TestStageRunsFromLaneOutcomes(t *testing.T) {
 			receipt: store.WebhookStatusFailed,
 			want: []stageRunWant{
 				{store.StageReview, 1, store.StageStateFailed, ""},
-				{store.StageReview, 2, store.StageStateBlocked, store.BlockerRetriesExhausted},
+				{store.StageReview, 2, store.StageStateFailed, ""},
+				{store.StageReview, 3, store.StageStateBlocked, store.BlockerRetriesExhausted},
 			},
 		},
 		{
 			name: "fix changes nothing", workflow: "fix", event: "changes_requested",
 			act:     func(*Server, int, *WebhookWorkContext) error { return errNoWorkInLease },
 			receipt: store.WebhookStatusFailed,
-			want:    []stageRunWant{{store.StageFix, 1, store.StageStateBlocked, store.BlockerAgentNoCommit}},
+			want: []stageRunWant{
+				{store.StageFix, 1, store.StageStateFailed, ""},
+				{store.StageFix, 2, store.StageStateFailed, ""},
+				{store.StageFix, 3, store.StageStateBlocked, store.BlockerAgentNoCommit},
+			},
 		},
 		{
 			name: "fix model errors exhaust retries", workflow: "fix", event: "changes_requested",
@@ -130,8 +136,7 @@ func TestStageRunsFromLaneOutcomes(t *testing.T) {
 			want: []stageRunWant{
 				{store.StageFix, 1, store.StageStateFailed, ""},
 				{store.StageFix, 2, store.StageStateFailed, ""},
-				{store.StageFix, 3, store.StageStateFailed, ""},
-				{store.StageFix, 4, store.StageStateBlocked, store.BlockerRetriesExhausted},
+				{store.StageFix, 3, store.StageStateBlocked, store.BlockerRetriesExhausted},
 			},
 		},
 		{

@@ -57,6 +57,7 @@ func newReviewButtonHarness(t *testing.T) *reviewButtonHarness {
 	h.st = st
 	srv := New(cfg, exec, st.WebhookDeliveryRepo())
 	srv.SetPRQueueRepo(st.PRQueueRepo())
+	srv.SetStageRepo(st.StageRepo())
 	srv.SetSender(func(_ context.Context, _, _, _ string) (string, error) { return "msg-1", nil })
 	srv.SetEditor(func(_ context.Context, _, _, _, _ string) error { return nil })
 	srv.SetNotifier(func(_ context.Context, _, target, text string) error {
@@ -121,9 +122,10 @@ func wantNote(t *testing.T, h *reviewButtonHarness, want string) {
 	}
 }
 
-// AC-04 end to end, then AC-07: the review runs once, posts in the PR thread,
-// and a press on the same head afterwards is refused as already reviewed.
-func TestReviewButtonQueuesOneReviewThenRefusesSameHead(t *testing.T) {
+// AC-04 end to end, then AC-21: the review runs once, posts in the PR thread,
+// and a press on the same head afterwards queues a fresh operator re-review —
+// same-head dedupe applies to GitHub events, not to the operator.
+func TestReviewButtonQueuesAgainOnSameHead(t *testing.T) {
 	h := newReviewButtonHarness(t)
 	h.press(t, "op")
 	wantNote(t, h, "⏳ Review queued for acme/widget#7.")
@@ -145,11 +147,13 @@ func TestReviewButtonQueuesOneReviewThenRefusesSameHead(t *testing.T) {
 	waitForPRIdle(t, h.srv, reviewButtonPR)
 
 	h.press(t, "op")
-	wantNote(t, h, "✅ acme/widget#7@"+shortRevision(reviewButtonHead)+" was already reviewed")
-	wantNote(t, h, "/retry")
-	time.Sleep(200 * time.Millisecond)
-	if got := atomic.LoadInt64(&h.reviewRuns); got != 1 {
-		t.Fatalf("review runs after the refused press = %d, want 1", got)
+	wantNote(t, h, "⏳ Review queued for acme/widget#7.")
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && atomic.LoadInt64(&h.reviewRuns) < 2 {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := atomic.LoadInt64(&h.reviewRuns); got != 2 {
+		t.Fatalf("review runs after the same-head press = %d, want 2", got)
 	}
 }
 
@@ -170,8 +174,8 @@ func waitForReviewKey(t *testing.T, h *reviewButtonHarness, key string) {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if prior, err := h.st.WebhookDeliveryRepo().FindReviewDuplicate(context.Background(), h.reviewEp.Name, key, 0, 0); err == nil && prior != nil && prior.Status == store.WebhookStatusCompleted {
-			if !strings.HasPrefix(prior.DeliveryID, reviewButtonDeliveryPrefix) {
-				t.Fatalf("review delivery id = %q, want the button prefix", prior.DeliveryID)
+			if !isActionDelivery(prior.DeliveryID) {
+				t.Fatalf("review delivery id = %q, want the action prefix", prior.DeliveryID)
 			}
 			return
 		}
@@ -188,13 +192,13 @@ func TestReviewButtonSecondPressFindsItQueued(t *testing.T) {
 	h.press(t, "op")
 	wantNote(t, h, "⏳ Review queued for acme/widget#7.")
 	h.press(t, "op")
-	wantNote(t, h, "👀 A review of acme/widget#7 is already queued.")
+	wantNote(t, h, "⚠️ A review of acme/widget#7 is already queued.")
 	items := queuedReviews(d)
 	if len(items) != 1 {
 		t.Fatalf("queued reviews = %d, want 1", len(items))
 	}
 	item := items[0]
-	if !strings.HasPrefix(item.deliveryID, reviewButtonDeliveryPrefix) || item.eventType != "issue_comment" || item.ep.Name != h.reviewEp.Name {
+	if !isActionDelivery(item.deliveryID) || item.eventType != "issue_comment" || item.ep.Name != h.reviewEp.Name {
 		t.Fatalf("queued item = %+v", item)
 	}
 	if strings.Contains(string(item.body), reviewButtonHead) || !strings.Contains(string(item.body), `"head_revision":""`) {
@@ -207,7 +211,7 @@ func TestReviewButtonReviewRunning(t *testing.T) {
 	h := newReviewButtonHarness(t)
 	d := h.park("review")
 	h.press(t, "op")
-	wantNote(t, h, "👀 A review of acme/widget#7 is already running.")
+	wantNote(t, h, "⚠️ A review of acme/widget#7 is already running.")
 	if n := len(queuedReviews(d)); n != 0 {
 		t.Fatalf("queued reviews = %d, want 0", n)
 	}
@@ -225,15 +229,16 @@ func TestReviewButtonQueuesBehindFix(t *testing.T) {
 	}
 }
 
-// AC-07 with a parked dispatcher: a reviewed head and no fix refuses.
-func TestReviewButtonRefusesReviewedHead(t *testing.T) {
+// AC-21 with a parked dispatcher: a reviewed head no longer refuses — the
+// operator press is the escape hatch and queues a fresh review.
+func TestReviewButtonQueuesOnReviewedHead(t *testing.T) {
 	h := newReviewButtonHarness(t)
 	seedReviewedHead(t, h)
 	d := h.park("")
 	h.press(t, "op")
-	wantNote(t, h, "was already reviewed")
-	if n := len(queuedReviews(d)); n != 0 {
-		t.Fatalf("queued reviews = %d, want 0", n)
+	wantNote(t, h, "⏳ Review queued for acme/widget#7.")
+	if n := len(queuedReviews(d)); n != 1 {
+		t.Fatalf("queued reviews = %d, want 1", n)
 	}
 }
 
@@ -253,7 +258,7 @@ func TestReviewButtonRefusals(t *testing.T) {
 		user  string
 		want  string
 	}{
-		{"merged", func(h *reviewButtonHarness) { setPRState(h.srv, PRStateMerged, nil) }, "op", "⛔ acme/widget#7 is merged — nothing to review."},
+		{"merged", func(h *reviewButtonHarness) { setPRState(h.srv, PRStateMerged, nil) }, "op", "⚠️ acme/widget#7 is merged — nothing to review."},
 		{"state unknown", func(h *reviewButtonHarness) { setPRState(h.srv, "", context.DeadlineExceeded) }, "op", "⚠️ Could not read the live state of acme/widget#7"},
 		{"not operator", func(h *reviewButtonHarness) {}, "stranger", "⛔ Not allowed."},
 		{"no pr", func(h *reviewButtonHarness) {
