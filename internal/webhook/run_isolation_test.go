@@ -15,6 +15,7 @@ import (
 
 	"github.com/anggasct/occa/internal/channel"
 	"github.com/anggasct/occa/internal/config"
+	"github.com/anggasct/occa/internal/relay"
 	"github.com/anggasct/occa/internal/store"
 )
 
@@ -851,7 +852,7 @@ func TestRetryExecutionRefusedWhenPRMergedAfterScheduling(t *testing.T) {
 	var calls int64
 	exec := func(ctx context.Context, platform, channelID, prompt string, workCtx *WebhookWorkContext) error {
 		atomic.AddInt64(&calls, 1)
-		return errors.New("agent exploded")
+		return relay.ErrWebhookAgentResponse
 	}
 	srv, st, _, url := newIsolationServer(t, exec)
 	var state atomic.Value
@@ -860,7 +861,7 @@ func TestRetryExecutionRefusedWhenPRMergedAfterScheduling(t *testing.T) {
 		return state.Load().(string), nil
 	})
 	srv.retryBackoffs = map[failureClass][]time.Duration{
-		failureBuild: {2 * time.Second},
+		failureModel: {2 * time.Second},
 	}
 
 	if resp := post(t, url+"/fix?secret=s3cret", "del-retry-merged", "pull_request_review", prReviewBody(7, "feat/x", "owner", "changes_requested", "c0ffeea")); resp.StatusCode != http.StatusOK {

@@ -74,6 +74,7 @@ func operatorTestServer(t *testing.T, authorizer func(platform, userID string) b
 	srv := New(cfg, exec, st.WebhookDeliveryRepo())
 	srv.SetChannelStore(st.ChannelRepo())
 	srv.SetPRQueueRepo(st.PRQueueRepo())
+	srv.SetStageRepo(st.StageRepo())
 	setOpenPRState(srv)
 	if authorizer != nil {
 		srv.SetOperatorAuthorizer(authorizer)
@@ -545,7 +546,11 @@ func TestOperatorSkipNoActive(t *testing.T) {
 	srv, _, _ := operatorTestServer(t, allow)
 	linkPRThread(t, srv, "acme/widget#7", "thread-pr")
 	reply, handled, err := srv.HandleOperatorCommand(context.Background(), operatorMsg("thread-pr", "/skip"), "skip", "")
-	if err != nil || !handled || !strings.Contains(reply, "No live run") {
+	if err != nil || !handled || !strings.Contains(reply, "needs a reason") {
+		t.Fatalf("skip without reason = %q %v %v", reply, handled, err)
+	}
+	reply, handled, err = srv.HandleOperatorCommand(context.Background(), operatorMsg("thread-pr", "/skip stale gate"), "skip", "stale gate")
+	if err != nil || !handled || !strings.Contains(reply, "needs a live or decided stage") {
 		t.Fatalf("skip idle = %q %v %v", reply, handled, err)
 	}
 }
@@ -577,6 +582,7 @@ func backoffHarness(t *testing.T, failFirst bool) (*Server, *store.SQLiteStore, 
 	srv := New(cfg, exec, st.WebhookDeliveryRepo())
 	srv.SetChannelStore(st.ChannelRepo())
 	srv.SetPRQueueRepo(st.PRQueueRepo())
+	srv.SetStageRepo(st.StageRepo())
 	setOpenPRState(srv)
 	srv.SetOperatorAuthorizer(func(platform, userID string) bool { return true })
 	srv.retryBackoffs = map[failureClass][]time.Duration{
@@ -618,8 +624,8 @@ func TestOperatorSkipDuringBackoff(t *testing.T) {
 	srv.tasks.LinkPRThread("acme/widget#7", rec)
 	postFix(t, url, "del-skip-1")
 	waitForRetryScheduled(t, st, "acme/widget#7")
-	reply, handled, err := srv.HandleOperatorCommand(ctx, operatorMsg("thread-pr", "/skip"), "skip", "")
-	if err != nil || !handled || !strings.Contains(reply, "equeuing next") {
+	reply, handled, err := srv.HandleOperatorCommand(ctx, operatorMsg("thread-pr", "/skip stale gate"), "skip", "stale gate")
+	if err != nil || !handled || !strings.Contains(reply, "skipped") {
 		t.Fatalf("skip = %q %v %v", reply, handled, err)
 	}
 	waitForDeliveryStatus(t, st, "github-widget-fix", "del-skip-1", store.WebhookStatusSkipped)
@@ -637,7 +643,7 @@ func TestOperatorCancelDuringBackoff(t *testing.T) {
 	postFix(t, url, "del-cancel-1")
 	waitForRetryScheduled(t, st, "acme/widget#7")
 	reply, handled, err := srv.HandleOperatorCommand(ctx, operatorMsg("thread-pr", "/cancel"), "cancel", "")
-	if err != nil || !handled || !strings.Contains(reply, "Cancelled") {
+	if err != nil || !handled || !strings.Contains(reply, "Stopping") {
 		t.Fatalf("cancel = %q %v %v", reply, handled, err)
 	}
 	waitForDeliveryStatus(t, st, "github-widget-fix", "del-cancel-1", store.WebhookStatusSkipped)

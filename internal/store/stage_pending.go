@@ -34,10 +34,14 @@ func (r *sqliteStageRepo) QueueRun(ctx context.Context, start StageRunStart) (in
 	if err != nil {
 		return 0, err
 	}
+	auto, manual, err := attemptCounters(ctx, tx, start)
+	if err != nil {
+		return 0, err
+	}
 	res, err := tx.ExecContext(ctx,
-		`INSERT INTO stage_run (work_item_id, stage, attempt, state, triggered_by, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		start.WorkItemID, string(start.Stage), attempt, string(StageStatePending), start.TriggeredBy, time.Now().Unix(),
+		`INSERT INTO stage_run (work_item_id, stage, attempt, state, triggered_by, auto_retry_used, manual_retry_count, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		start.WorkItemID, string(start.Stage), attempt, string(StageStatePending), start.TriggeredBy, auto, manual, time.Now().Unix(),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("store: pending stage run insert: %w", err)

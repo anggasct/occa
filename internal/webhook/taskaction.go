@@ -124,23 +124,28 @@ func (s *Server) taskAction(ctx context.Context, msg channel.IncomingMessage, ac
 	if !known || strings.TrimSpace(prKey) == "" {
 		return "no_pr", fmt.Sprintf("No open PR for %s#%s yet.", repo, branch)
 	}
-	var (
-		reply string
-		err   error
-	)
+	var catalogAction string
 	switch action {
 	case TaskActionRetry:
-		reply, _, err = s.operatorRetry(ctx, msg, prKey)
+		catalogAction = ActionRetry
 	case TaskActionCancel:
-		reply, _, err = s.operatorCancel(ctx, msg, prKey)
+		catalogAction = ActionStop
 	default:
 		return "unknown", fmt.Sprintf("⚠️ Unknown action %q.", action)
 	}
+	out, err := s.FireAction(ctx, msg.Platform+":"+msg.UserID, FireActionRequest{
+		WorkItemID: prKey,
+		Action:     catalogAction,
+		Surface:    "chat",
+	})
 	if err != nil {
 		slog.Warn("webhook: task action failed", "action", action, "pr_key", prKey, "error", err)
 		return "failed", fmt.Sprintf("⚠️ %s failed for %s: %v", action, prKey, err)
 	}
-	return action, reply
+	if !out.Accepted {
+		return out.Code, "⚠️ " + out.Error()
+	}
+	return action, "⚙️ " + out.Sentence
 }
 
 // replyTaskAction posts a button outcome in the PR thread; without a known

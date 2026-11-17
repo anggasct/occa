@@ -241,3 +241,6 @@ skills: # optional — per-repo SKILL.md packs injected once per session; absent
   global_dir: ~/.occa/skills # cross-repo skills; "" disables the global scope
   context_max_runes: 8000 # cap on the whole injected block
   skill_max_runes: 4000 # cap on one skill body; must not exceed context_max_runes
+web: # optional operator control API — absent block = disabled
+  bind: 127.0.0.1:8790 # loopback-only listen address (must stay loopback)
+  token: "" # bearer token for API clients (or OCCA_WEB_TOKEN); required when the block is present

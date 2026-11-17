@@ -14,6 +14,7 @@ const (
 	modelSourceEndpoint = "endpoint"
 	modelSourceChannel  = "channel"
 	modelSourceFallback = "fallback"
+	modelSourceAction   = "action"
 )
 
 var (

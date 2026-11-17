@@ -26,6 +26,7 @@ type Config struct {
 	Logging  LoggingConfig  `yaml:"logging"`
 	Runtime  RuntimeConfig  `yaml:"runtime"`
 	Webhooks WebhookConfig  `yaml:"webhooks"`
+	Web      WebConfig      `yaml:"web"`
 	Skills   SkillsConfig   `yaml:"-"`
 }
 
@@ -72,6 +73,15 @@ type WebhookConfig struct {
 func DefaultFallbackPollRepeatAfter() time.Duration {
 	d, _ := time.ParseDuration("30m")
 	return d
+}
+
+type WebConfig struct {
+	Bind  string `yaml:"bind"`
+	Token string `yaml:"token,omitempty"`
+}
+
+func (w WebConfig) Enabled() bool {
+	return strings.TrimSpace(w.Token) != ""
 }
 
 type DispatchConfig struct {
@@ -293,6 +303,7 @@ type fileConfig struct {
 	} `yaml:"logging"`
 	Runtime  RuntimeConfig `yaml:"runtime"`
 	Webhooks WebhookConfig `yaml:"webhooks"`
+	Web      WebConfig     `yaml:"web"`
 	Skills   fileSkills    `yaml:"skills"`
 }
 
@@ -508,6 +519,9 @@ func applyEnv(fc *fileConfig) error {
 	if v := os.Getenv("OCCA_DISPATCH_TOKEN"); v != "" {
 		fc.Webhooks.Dispatch.Token = v
 	}
+	if v := os.Getenv("OCCA_WEB_TOKEN"); v != "" {
+		fc.Web.Token = v
+	}
 	return nil
 }
 
@@ -570,6 +584,15 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 		return Config{}, err
 	}
 	fc.Webhooks.StatusIcons = mergeStatusIcons(fc.Webhooks.StatusIcons, fc.Webhooks.Defaults.StatusIcons)
+
+	if fc.Web.Enabled() {
+		if fc.Web.Bind == "" {
+			fc.Web.Bind = "127.0.0.1:8790"
+		}
+		if !isLoopbackBind(fc.Web.Bind) {
+			return Config{}, fmt.Errorf("config: web.bind must be a loopback host:port (127.0.0.1, localhost, or ::1), got %q", fc.Web.Bind)
+		}
+	}
 
 	if len(fc.Webhooks.Endpoints) > 0 || len(fc.Webhooks.Repos) > 0 {
 		if fc.Webhooks.Bind == "" {
@@ -732,6 +755,7 @@ func build(fc fileConfig, adminID, configDir string) (Config, error) {
 		Logging:  LoggingConfig{Format: fc.Logging.Format},
 		Runtime:  fc.Runtime,
 		Webhooks: fc.Webhooks,
+		Web:      fc.Web,
 		Skills:   skillsCfg,
 	}, nil
 }

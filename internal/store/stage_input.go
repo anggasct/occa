@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -64,6 +65,39 @@ CREATE INDEX IF NOT EXISTS idx_stage_input_open ON stage_input (stage_run_id, st
 		return fmt.Errorf("store: migrate stage input payload: %w", err)
 	}
 	return nil
+}
+
+// attemptCounters derives the retry counters of a new attempt from the
+// previous one: a re-execution of the same delivery is an automatic retry;
+// an operator-triggered delivery resets the automatic budget and counts a
+// manual retry; a fresh external trigger keeps the manual count so the
+// reason-required cap still binds.
+func attemptCounters(ctx context.Context, tx *sql.Tx, start StageRunStart) (int, int, error) {
+	var prevTrigger string
+	var prevAuto, prevManual int
+	err := tx.QueryRowContext(ctx,
+		`SELECT triggered_by, auto_retry_used, manual_retry_count FROM stage_run
+		 WHERE work_item_id = ? AND stage = ? ORDER BY attempt DESC LIMIT 1`,
+		start.WorkItemID, string(start.Stage),
+	).Scan(&prevTrigger, &prevAuto, &prevManual)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, 0, nil
+	}
+	if err != nil {
+		return 0, 0, fmt.Errorf("store: stage run counters: %w", err)
+	}
+	prevDelivery := prevTrigger
+	if i := strings.LastIndexByte(prevTrigger, '/'); i >= 0 {
+		prevDelivery = prevTrigger[i+1:]
+	}
+	switch {
+	case start.DeliveryID != "" && prevDelivery == start.DeliveryID:
+		return prevAuto + 1, prevManual, nil
+	case start.ManualTrigger:
+		return 0, prevManual + 1, nil
+	default:
+		return 0, prevManual, nil
+	}
 }
 
 func nextAttempt(ctx context.Context, tx *sql.Tx, workItemID string, stage Stage) (int, error) {

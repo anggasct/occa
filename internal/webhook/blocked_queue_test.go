@@ -112,8 +112,8 @@ func TestBlockedQueueSkipNamesPRAndBlockReason(t *testing.T) {
 	}
 	waitForDeliveryStatus(t, st, "github-widget-review", "del-blocked-2", store.WebhookStatusSkipped)
 
-	if got := atomic.LoadInt64(&calls); got != 4 {
-		t.Fatalf("executor calls = %d, want 1 + 3 retries, the blocked queue must not run again", got)
+	if got := atomic.LoadInt64(&calls); got != 3 {
+		t.Fatalf("executor calls = %d, want 1 + 2 retries, the blocked queue must not run again", got)
 	}
 
 	if skips := notices.find("REVIEW skipped"); len(skips) != 0 {

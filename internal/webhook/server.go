@@ -233,6 +233,10 @@ type Server struct {
 	escalationMu          sync.Mutex
 	// reviewButtonMu serializes Review presses from check to enqueue.
 	reviewButtonMu sync.Mutex
+	// modelOverrides and mergeOverrides carry one-shot action payload from a
+	// control-plane action to the dispatched delivery keyed by delivery id.
+	modelOverrides sync.Map
+	mergeOverrides sync.Map
 	// digest is the optional daily digest; digestClock overrides now in tests.
 	digest      *config.DigestConfig
 	digestClock func() time.Time
@@ -2524,7 +2528,7 @@ func (s *Server) executeDeliveryWithFix(ep config.EndpointConfig, body []byte, i
 	}
 
 	reviewKey := ""
-	if isReviewWorkflow(ep.Workflow) && !isOperatorRetryDelivery(deliveryID) {
+	if isReviewWorkflow(ep.Workflow) {
 		s.ensureReviewDedupeHead(envelope)
 		reviewKey = reviewDedupeKey(envelope)
 	}
@@ -2532,7 +2536,10 @@ func (s *Server) executeDeliveryWithFix(ep config.EndpointConfig, body []byte, i
 	if stringValue(envelope["event_type"]) == "issue_comment" && stringValue(envelope["comment_trigger"]) != "" {
 		triggerPrefix = reviewDedupePrefix(envelope)
 	}
-	if reviewKey != "" && id != 0 && !s.releasedFromBlock(workCtx.PRKey, ep.Name, deliveryID) {
+	// Operator-fired reviews (op-retry, control-plane actions) still record
+	// the head key so later GitHub events dedupe against them, but are never
+	// refused as duplicates themselves (AC-21).
+	if reviewKey != "" && id != 0 && !isOperatorRetryDelivery(deliveryID) && !isActionDelivery(deliveryID) && !s.releasedFromBlock(workCtx.PRKey, ep.Name, deliveryID) {
 		prior, err := s.deliveries.FindReviewDuplicate(context.Background(), ep.Name, reviewKey, id, s.reviewDedupeCutoff())
 		if err != nil {
 			slog.Warn("webhook: review duplicate lookup failed", "endpoint", ep.Name, "delivery_id", deliveryID, "error", err)
@@ -2580,6 +2587,15 @@ func (s *Server) executeDeliveryWithFix(ep config.EndpointConfig, body []byte, i
 		return nil
 	}
 	setLaneModel(workCtx, envelope, ref, source)
+	if raw, ok := s.modelOverrides.LoadAndDelete(deliveryID); ok {
+		if profile, isStr := raw.(string); isStr {
+			if oref, oerr := relay.ParseModelRef(profile); oerr == nil {
+				setLaneModel(workCtx, envelope, &oref, modelSourceAction)
+			} else {
+				slog.Warn("webhook: action model override invalid", "endpoint", ep.Name, "delivery_id", deliveryID, "profile", profile)
+			}
+		}
+	}
 
 	prepCtx, prepCancel := context.WithTimeout(context.Background(), s.processingTimeout)
 	skipAgent := s.prepareLaneContext(prepCtx, ep, envelope, workCtx, lease)

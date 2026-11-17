@@ -433,6 +433,13 @@ func isReconcileDelivery(deliveryID string) bool {
 	return strings.HasPrefix(strings.TrimSpace(deliveryID), reconcileDeliveryPrefix)
 }
 
+// isManualTriggerDelivery reports deliveries fired by an operator — /retry,
+// control-plane actions — so their stage attempts count as manual retries
+// and reset the automatic retry budget.
+func isManualTriggerDelivery(deliveryID string) bool {
+	return isOperatorRetryDelivery(deliveryID) || isActionDelivery(deliveryID)
+}
+
 // isInternalDelivery reports deliveries the server synthesizes itself. Their
 // delivery id is not supplied by a commenter, so they bypass gates meant for
 // human comment authors.
@@ -440,7 +447,8 @@ func isInternalDelivery(deliveryID string) bool {
 	return isInternalReviewDelivery(deliveryID) ||
 		isDiscoverDelivery(deliveryID) ||
 		isOperatorRetryDelivery(deliveryID) ||
-		isReconcileDelivery(deliveryID)
+		isReconcileDelivery(deliveryID) ||
+		isActionDelivery(deliveryID)
 }
 
 func isReviewWorkflow(workflow string) bool {

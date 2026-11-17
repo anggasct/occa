@@ -364,7 +364,7 @@ func TestFinalizeNoWorkFailsWithNoWorkClass(t *testing.T) {
 		}
 	}
 	max, waits := retryPolicyFor(failureNoWork)
-	if max != 2 || len(waits) != 2 || waits[0] != 60*time.Second || waits[1] != 5*time.Minute {
+	if max != 2 || len(waits) != 3 || waits[0] != 30*time.Second || waits[1] != 2*time.Minute || waits[2] != 10*time.Minute {
 		t.Fatalf("no-work policy = %d %v", max, waits)
 	}
 }
@@ -579,15 +579,15 @@ func (r *noWorkLaneRun) row(t *testing.T) *store.PRRun {
 	return row
 }
 
-func TestNoWorkLeaseHandsOffWithoutRetry(t *testing.T) {
+func TestNoWorkLeaseHandsOffAfterRetries(t *testing.T) {
 	reply := "F-003 asks for a vault contract change;\n nothing in this branch to edit.\n\nDetails follow."
 	run := runNoWorkFixLane(t, reply, false)
-	if calls := run.callCount(); calls != 1 {
-		t.Fatalf("executor calls = %d, want 1 (no retry for a no-change run)", calls)
+	if calls := run.callCount(); calls != 3 {
+		t.Fatalf("executor calls = %d, want 1 + 2 retries for a no-change run", calls)
 	}
 	row := run.row(t)
-	if row.Status != store.PRStatusBlocked || row.RetryCount != 0 {
-		t.Fatalf("pr row = %+v, want blocked with no retry spent", row)
+	if row.Status != store.PRStatusBlocked || row.RetryCount != 2 {
+		t.Fatalf("pr row = %+v, want blocked with the retry budget spent", row)
 	}
 	excerpt := "F-003 asks for a vault contract change; nothing in this branch to edit."
 	if want := "fix made no change — operator action required: " + excerpt; row.BlockedReason != want {
@@ -597,8 +597,8 @@ func TestNoWorkLeaseHandsOffWithoutRetry(t *testing.T) {
 	if !strings.Contains(logs, "PR handed off, run made no change") || !strings.Contains(logs, "level=WARN") {
 		t.Fatalf("hand-off not logged at WARN: %s", logs)
 	}
-	if strings.Contains(logs, "retry exhaustion") || strings.Contains(logs, "retry scheduled") {
-		t.Fatalf("no-change run went through the retry budget: %s", logs)
+	if !strings.Contains(logs, "retry scheduled") {
+		t.Fatalf("no-change run did not use the retry budget: %s", logs)
 	}
 }
 

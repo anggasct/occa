@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -18,11 +17,23 @@ import (
 )
 
 var operatorCommandNames = map[string]bool{
-	"queue":  true,
-	"retry":  true,
-	"skip":   true,
-	"cancel": true,
-	"status": true,
+	"queue":      true,
+	"retry":      true,
+	"retry-with": true,
+	"unblock":    true,
+	"skip":       true,
+	"cancel":     true,
+	"stop":       true,
+	"recheck":    true,
+	"re-review":  true,
+	"fix-ci":     true,
+	"fix-review": true,
+	"rebind":     true,
+	"merge-now":  true,
+	"approve":    true,
+	"reject":     true,
+	"clean":      true,
+	"status":     true,
 }
 
 func parseOperatorCommand(text string) (name, arg string, ok bool) {
@@ -66,25 +77,65 @@ func (s *Server) HandleOperatorCommand(ctx context.Context, msg channel.Incoming
 	if !inThread {
 		return "Run this inside the PR thread — I can't tell which PR you mean from here.", true, nil
 	}
-	if arg != "" {
-		number := strings.TrimSpace(arg)
-		if _, want, found := splitPRKey(prKey); !found || number != want {
+	if name == "queue" || name == "status" {
+		if arg != "" {
+			number := strings.TrimSpace(arg)
+			if _, want, found := splitPRKey(prKey); !found || number != want {
+				return fmt.Sprintf("This thread tracks %s — run the command there without arguments, or from that PR's thread.", prKey), true, nil
+			}
+		}
+		if name == "queue" {
+			return s.operatorQueue(ctx, prKey), true, nil
+		}
+		return s.operatorStatus(ctx, prKey), true, nil
+	}
+	action, mapped := actionChatCommands[name]
+	if !mapped {
+		return "", false, nil
+	}
+	return s.fireChatAction(ctx, msg, prKey, action, arg)
+}
+
+// fireChatAction is the chat front of the shared action layer: the command's
+// arguments become the action's reason, params and confirmation, and the
+// outcome is the same sentence the web API would render.
+func (s *Server) fireChatAction(ctx context.Context, msg channel.IncomingMessage, prKey, action, arg string) (string, bool, error) {
+	arg = strings.TrimSpace(arg)
+	fields := strings.Fields(arg)
+	_, want, _ := splitPRKey(prKey)
+	if len(fields) > 0 && action != ActionMergeNow {
+		if first := strings.TrimPrefix(fields[0], "#"); first == want {
+			fields = fields[1:]
+			arg = strings.Join(fields, " ")
+		} else if _, err := strconv.Atoi(first); err == nil {
 			return fmt.Sprintf("This thread tracks %s — run the command there without arguments, or from that PR's thread.", prKey), true, nil
 		}
 	}
-	switch name {
-	case "queue":
-		return s.operatorQueue(ctx, prKey), true, nil
-	case "status":
-		return s.operatorStatus(ctx, prKey), true, nil
-	case "retry":
-		return s.operatorRetry(ctx, msg, prKey)
-	case "skip":
-		return s.operatorSkip(ctx, msg, prKey)
-	case "cancel":
-		return s.operatorCancel(ctx, msg, prKey)
+	req := FireActionRequest{WorkItemID: prKey, Action: action, Surface: "chat"}
+	switch action {
+	case ActionRetryWith:
+		req.Params = map[string]string{"profile": arg}
+	case ActionMergeNow:
+		if len(fields) > 0 {
+			req.Confirm = fields[0]
+			req.Reason = strings.Join(fields[1:], " ")
+		}
+	case ActionCleanWorkspace:
+		if len(fields) > 0 {
+			req.Params = map[string]string{"mode": fields[0]}
+			req.Reason = strings.Join(fields[1:], " ")
+		}
+	default:
+		req.Reason = arg
 	}
-	return "", false, nil
+	out, err := s.FireAction(ctx, msg.Platform+":"+msg.UserID, req)
+	if err != nil {
+		return "", true, err
+	}
+	if !out.Accepted {
+		return "⚠️ " + out.Error(), true, nil
+	}
+	return "⚙️ " + out.Sentence, true, nil
 }
 
 func (s *Server) operatorRow(ctx context.Context, prKey string) (*store.PRRun, error) {
@@ -222,50 +273,8 @@ func (s *Server) abortActiveSession(ctx context.Context, prKey, repo string) {
 }
 
 func (s *Server) operatorRetry(ctx context.Context, msg channel.IncomingMessage, prKey string) (string, bool, error) {
-	row, err := s.operatorRow(ctx, prKey)
-	if err != nil || row == nil {
-		return "Nothing to retry for " + prKey + " — no queue state.", true, nil
-	}
-	kind := s.inferRetryKind(ctx, row)
-	if kind == "" || kind == "dispatch" || kind == "merged" {
-		return "Nothing to retry for " + prKey + ".", true, nil
-	}
-	if err := s.prQueues.SetRetryState(ctx, prKey, 0, 0); err != nil {
-		return "", true, err
-	}
-	if d := s.liveDispatcher(prKey); d != nil {
-		if d.isBackingOff() {
-			d.requestRetryNow()
-			return "Retry count reset — firing now.", true, nil
-		}
-		if d.isActive() || d.queueLen() > 0 {
-			return "Retry count reset — a run is already queued or running.", true, nil
-		}
-	}
-	blocked := row.Status == store.PRStatusBlocked
-	if blocked {
-		if err := s.prQueues.Unblock(ctx, prKey); err != nil {
-			return "", true, err
-		}
-		s.clearEscalated(prKey)
-	}
-	s.reopenPRSurface(prKey)
-	var ran []store.Stage
-	if blocked {
-		ran = s.runWaitingInputs(ctx, prKey)
-	}
-	names := make([]string, 0, len(ran)+1)
-	if stage, ok := stageForWorkflow(kind); !ok || !slices.Contains(ran, stage) {
-		repo, number, _ := splitPRKey(prKey)
-		if err := s.enqueueSyntheticRetry(ctx, repo, number, kind, prKey); err != nil {
-			return "Retry reset, but re-run failed: " + err.Error(), true, nil
-		}
-		names = append(names, kind)
-	}
-	for _, stage := range ran {
-		names = append(names, string(stage))
-	}
-	return "Re-running " + strings.Join(names, " and ") + " for " + prKey + ".", true, nil
+	text, err := s.retryLane(ctx, prKey, "", operatorRetryDeliveryPrefix)
+	return text, true, err
 }
 
 func (s *Server) inferRetryKind(ctx context.Context, row *store.PRRun) string {
@@ -327,46 +336,10 @@ func (s *Server) retryKindForDelivery(rec *store.WebhookDelivery) string {
 	return ""
 }
 
-func (s *Server) operatorSkip(ctx context.Context, msg channel.IncomingMessage, prKey string) (string, bool, error) {
-	if s.prQueues != nil {
-		if row, err := s.prQueues.Get(ctx, prKey); err == nil && row != nil && row.Status == store.PRStatusBlocked {
-			return "Queue is blocked — use /retry to re-run or /cancel to clear it.", true, nil
-		}
-	}
-	d := s.liveDispatcher(prKey)
-	if d == nil {
-		return "No live run for " + prKey + " — nothing to skip.", true, nil
-	}
-	repo, _, _ := splitPRKey(prKey)
-	s.abortActiveSession(ctx, prKey, repo)
-	d.requestSkip()
-	return "Skipping after the current step — dequeuing next.", true, nil
-}
-
 func (s *Server) operatorCancel(ctx context.Context, msg channel.IncomingMessage, prKey string) (string, bool, error) {
-	if s.prQueues != nil {
-		if row, err := s.prQueues.Get(ctx, prKey); err == nil && row != nil && row.Status == store.PRStatusBlocked {
-			if uerr := s.prQueues.Unblock(ctx, prKey); uerr != nil {
-				return "", true, uerr
-			}
-			s.reopenPRSurface(prKey)
-			s.clearEscalated(prKey)
-			s.supersedeWaitingInputs(ctx, prKey, "cancelled by operator")
-		}
-	}
-	d := s.liveDispatcher(prKey)
-	repo, _, _ := splitPRKey(prKey)
-	s.abortActiveSession(ctx, prKey, repo)
-	dropped := 0
-	if d != nil {
-		d.requestCancel()
-	} else if s.prQueues != nil {
-		if n, err := s.prQueues.ClearQueue(ctx, prKey); err == nil {
-			dropped = n
-		}
-		if err := s.prQueues.ClearActive(ctx, prKey); err != nil {
-			return "", true, err
-		}
+	dropped, err := s.cancelLane(ctx, prKey)
+	if err != nil {
+		return "", true, err
 	}
 	rest := ""
 	if dropped > 0 {
@@ -375,10 +348,10 @@ func (s *Server) operatorCancel(ctx context.Context, msg channel.IncomingMessage
 	return "Cancelled active work for " + prKey + rest + ".", true, nil
 }
 
-func (s *Server) enqueueSyntheticRetry(ctx context.Context, repo, number, kind, prKey string) error {
+func (s *Server) enqueueSyntheticRetryKind(ctx context.Context, repo, number, kind, prKey, prefix string) (string, error) {
 	body, eventType, err := s.buildRetryBody(ctx, repo, number, kind)
 	if err != nil {
-		return err
+		return "", err
 	}
 	var ep config.EndpointConfig
 	found := false
@@ -393,10 +366,10 @@ func (s *Server) enqueueSyntheticRetry(ctx context.Context, repo, number, kind, 
 		}
 	}
 	if !found {
-		return fmt.Errorf("no %s endpoint for repo %s", kind, repo)
+		return "", fmt.Errorf("no %s endpoint for repo %s", kind, repo)
 	}
-	deliveryID := fmt.Sprintf("%s%d", operatorRetryDeliveryPrefix, time.Now().UnixNano())
-	return s.pushPRItem(dispatchItem{
+	deliveryID := fmt.Sprintf("%s%d", prefix, time.Now().UnixNano())
+	return deliveryID, s.pushPRItem(dispatchItem{
 		ep:         ep,
 		body:       body,
 		deliveryID: deliveryID,

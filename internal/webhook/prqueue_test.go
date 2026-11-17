@@ -164,6 +164,9 @@ func newPRTestServer(t *testing.T, rec *prRecorder, endpoints []config.EndpointC
 	srv := New(cfg, rec.exec, st.WebhookDeliveryRepo())
 	srv.SetChannelStore(st.ChannelRepo())
 	srv.SetPRQueueRepo(st.PRQueueRepo())
+	srv.SetStageRepo(st.StageRepo())
+	srv.priorReviews = func(context.Context, string, string) (string, error) { return "", nil }
+	srv.ciFailures = func(context.Context, string, string) (string, error) { return "", nil }
 	setOpenPRState(srv)
 	mergeThroughExecutor(srv)
 	mux := http.NewServeMux()

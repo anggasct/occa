@@ -18,6 +18,8 @@ type failureClass int
 const (
 	failureModel failureClass = iota
 	failureStall
+	failureTimeout
+	failureTransport
 	failureBuild
 	failureNoWork
 	failurePermission
@@ -31,6 +33,10 @@ func (c failureClass) label() string {
 	switch c {
 	case failureStall:
 		return "provider stall"
+	case failureTimeout:
+		return "timeout"
+	case failureTransport:
+		return "transport error"
 	case failureBuild:
 		return "build/test failure"
 	case failureNoWork:
@@ -50,14 +56,16 @@ func (c failureClass) label() string {
 	}
 }
 
+// retryPolicyFor is the stage-model auto-retry whitelist: only timeout,
+// agent_no_commit and transport-level failures may re-run on their own —
+// budget 2 per run chain, backoff 30 s → 2 m → 10 m capped. Everything else
+// ends blocked for an operator decision.
 func retryPolicyFor(class failureClass) (int, []time.Duration) {
 	switch class {
-	case failureStall, failureReviewNotPosted:
-		return 1, []time.Duration{0}
-	case failureBuild, failureNoWork, failurePermission, failurePush, failurePRCreate:
-		return 2, []time.Duration{60 * time.Second, 5 * time.Minute}
+	case failureStall, failureTimeout, failureNoWork, failureModel, failureTransport, failurePush, failurePRCreate, failureReviewNotPosted:
+		return 2, []time.Duration{30 * time.Second, 2 * time.Minute, 10 * time.Minute}
 	default:
-		return 3, []time.Duration{30 * time.Second, 2 * time.Minute, 5 * time.Minute}
+		return 0, nil
 	}
 }
 
@@ -95,7 +103,7 @@ func classifyFailure(execErr error, workCtx *WebhookWorkContext, stallFreshness 
 		return failureReviewNotPosted
 	}
 	if errors.Is(execErr, ErrRevisionMissing) {
-		return failureBuild
+		return failureTransport
 	}
 	if timedOut {
 		var progress relay.TurnProgress
@@ -105,7 +113,7 @@ func classifyFailure(execErr error, workCtx *WebhookWorkContext, stallFreshness 
 		if isStallProgress(progress, stallFreshness) {
 			return failureStall
 		}
-		return failureBuild
+		return failureTimeout
 	}
 	if errors.Is(execErr, relay.ErrStreamFailed) ||
 		errors.Is(execErr, relay.ErrStreamRead) ||
@@ -544,10 +552,6 @@ func (s *Server) planRetry(ep config.EndpointConfig, prKey string, receiptID int
 		)
 		return false
 	}
-	if class == failureNoWork {
-		s.handOffNoChange(ep, prKey, row, workCtx)
-		return false
-	}
 	if class == failurePermission {
 		s.handOffPermissionDenied(ep, prKey, row, workCtx)
 		return false
@@ -557,6 +561,15 @@ func (s *Server) planRetry(ep config.EndpointConfig, prKey string, receiptID int
 		return false
 	}
 	if row.RetryCount >= max {
+		if class == failureNoWork {
+			s.handOffNoChange(ep, prKey, row, workCtx)
+			return false
+		}
+		if max == 0 {
+			s.escalateBlockedReason(ep, prKey, row, class, row.RetryCount, max,
+				class.label()+" — not auto-retryable", "operator action required")
+			return false
+		}
 		s.escalateBlocked(ep, prKey, row, class, row.RetryCount, max)
 		return false
 	}
